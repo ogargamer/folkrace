@@ -1,0 +1,30 @@
+{
+  "profile_name": "Child 05 (Sprint - 300 Sub-Iterations)",
+  "description": "Real-time high-efficiency genetic offspring combining fast 1.14s solve time with maximum 2.85-2.94 m/s apex cornering velocity",
+  "parameters": {
+    "weight_curvature": 3.20,
+    "weight_path_smoothness": 0.055,
+    "weight_jerk_regularization": 0.38,
+    "robot_safety_margin": 0.10,
+    "track_width_nominal": 1.00,
+    "max_boundary_slope": 0.0,
+    "num_progression_stages": 7,
+    "max_solver_sub_iters": 300,
+    "solver_ftol": 1e-8,
+    "solver_gtol": 1e-5,
+    "spline_s": 0.015,
+    "macro_sigma": 4.0,
+    "friction_coeff": 0.90,
+    "max_speed": 4.00,
+    "max_accel": 2.00,
+    "max_brake": 3.00
+  },
+  "benchmarks": {
+    "average_solve_ms": 1143.1,
+    "speedup_vs_baseline": "2.31x",
+    "apex_speed_nominal_mps": 2.94,
+    "lap_time_nominal_s": 4.80,
+    "apex_speed_dusty_mps": 2.12,
+    "lap_time_dusty_s": 6.36
+  }
+}

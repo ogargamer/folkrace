@@ -1,0 +1,163 @@
+[
+  {
+    "id": "WERLING_DYNAMIC_MODERATE",
+    "title": "Tier 1 (FrenetQP) + Werling-13 (Dynamic Margin, Moderate Gap)",
+    "pathfinder": "WERLING_LATTICE",
+    "wall_time_s": 13.47,
+    "steps_simulated": 499,
+    "est_distance_m": 15.38,
+    "mean_v_mps": 1.03,
+    "max_v_mps": 2.8,
+    "mean_dev_cm": 12.8,
+    "max_dev_cm": 54.3,
+    "mean_steer_deg": 14.0,
+    "min_front_cm": 8.0,
+    "normal_grip_pct": 77.6,
+    "understeer_events": 62,
+    "oversteer_events": 50,
+    "crash_count": 0,
+    "recovery_events": 34,
+    "last_pos": [
+      1.02,
+      0.15
+    ]
+  },
+  {
+    "id": "WERLING_DYNAMIC_TIGHT",
+    "title": "Tier 1 (FrenetQP) + Werling-13 (Dynamic Margin, Tight Gap)",
+    "pathfinder": "WERLING_LATTICE",
+    "wall_time_s": 5.18,
+    "steps_simulated": 499,
+    "est_distance_m": -5.25,
+    "mean_v_mps": -0.35,
+    "max_v_mps": 2.8,
+    "mean_dev_cm": 38.2,
+    "max_dev_cm": 45.9,
+    "mean_steer_deg": 23.3,
+    "min_front_cm": 9.0,
+    "normal_grip_pct": 41.1,
+    "understeer_events": 238,
+    "oversteer_events": 56,
+    "crash_count": 0,
+    "recovery_events": 303,
+    "last_pos": [
+      3.15,
+      1.15
+    ]
+  },
+  {
+    "id": "MPPI_DYNAMIC_MODERATE",
+    "title": "Tier 1 (FrenetQP) + MPPI-14 (Dynamic Sigma, Moderate Gap)",
+    "pathfinder": "MPPI",
+    "wall_time_s": 5.49,
+    "steps_simulated": 499,
+    "est_distance_m": 4.73,
+    "mean_v_mps": 0.32,
+    "max_v_mps": 2.8,
+    "mean_dev_cm": 45.0,
+    "max_dev_cm": 68.6,
+    "mean_steer_deg": 21.4,
+    "min_front_cm": 21.0,
+    "normal_grip_pct": 41.5,
+    "understeer_events": 252,
+    "oversteer_events": 40,
+    "crash_count": 1,
+    "recovery_events": 216,
+    "last_pos": [
+      -0.56,
+      3.82
+    ]
+  },
+  {
+    "id": "MPPI_DYNAMIC_TIGHT",
+    "title": "Tier 1 (FrenetQP) + MPPI-14 (Dynamic Sigma, Tight Gap)",
+    "pathfinder": "MPPI",
+    "wall_time_s": 6.37,
+    "steps_simulated": 499,
+    "est_distance_m": 18.54,
+    "mean_v_mps": 1.24,
+    "max_v_mps": 2.8,
+    "mean_dev_cm": 15.9,
+    "max_dev_cm": 54.3,
+    "mean_steer_deg": 16.5,
+    "min_front_cm": 12.0,
+    "normal_grip_pct": 76.0,
+    "understeer_events": 80,
+    "oversteer_events": 40,
+    "crash_count": 0,
+    "recovery_events": 32,
+    "last_pos": [
+      3.34,
+      2.1
+    ]
+  },
+  {
+    "id": "MPCC_DYNAMIC_MODERATE",
+    "title": "Tier 1 (FrenetQP) + MPCC-02 (Dynamic Shift, Moderate Gap)",
+    "pathfinder": "MPCC",
+    "wall_time_s": 4.11,
+    "steps_simulated": 499,
+    "est_distance_m": -5.58,
+    "mean_v_mps": -0.37,
+    "max_v_mps": 2.8,
+    "mean_dev_cm": 30.3,
+    "max_dev_cm": 42.8,
+    "mean_steer_deg": 25.3,
+    "min_front_cm": 11.0,
+    "normal_grip_pct": 35.9,
+    "understeer_events": 289,
+    "oversteer_events": 31,
+    "crash_count": 1,
+    "recovery_events": 295,
+    "last_pos": [
+      3.36,
+      1.62
+    ]
+  },
+  {
+    "id": "MPCC_DYNAMIC_TIGHT",
+    "title": "Tier 1 (FrenetQP) + MPCC-02 (Dynamic Shift, Tight Gap)",
+    "pathfinder": "MPCC",
+    "wall_time_s": 4.25,
+    "steps_simulated": 499,
+    "est_distance_m": -6.6,
+    "mean_v_mps": -0.44,
+    "max_v_mps": 2.8,
+    "mean_dev_cm": 31.2,
+    "max_dev_cm": 44.7,
+    "mean_steer_deg": 25.4,
+    "min_front_cm": 12.0,
+    "normal_grip_pct": 33.5,
+    "understeer_events": 289,
+    "oversteer_events": 43,
+    "crash_count": 1,
+    "recovery_events": 308,
+    "last_pos": [
+      3.38,
+      1.61
+    ]
+  },
+  {
+    "id": "FRENETQP_BASELINE",
+    "title": "Tier 1 (FrenetQP Baseline)",
+    "pathfinder": "FRENETQP",
+    "wall_time_s": 4.38,
+    "steps_simulated": 499,
+    "est_distance_m": 10.25,
+    "mean_v_mps": 0.68,
+    "max_v_mps": 2.8,
+    "mean_dev_cm": 13.8,
+    "max_dev_cm": 61.4,
+    "mean_steer_deg": 16.6,
+    "min_front_cm": 9.0,
+    "normal_grip_pct": 67.3,
+    "understeer_events": 91,
+    "oversteer_events": 72,
+    "crash_count": 1,
+    "recovery_events": 137,
+    "last_pos": [
+      -1.23,
+      2.46
+    ]
+  }
+]

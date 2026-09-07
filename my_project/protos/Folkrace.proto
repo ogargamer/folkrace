@@ -1,0 +1,505 @@
+#VRML_SIM R2025a utf8
+# license: Copyright (c) 2026. All rights reserved.
+# description: Folkrace Autonomous 4WD Racing Car Robot
+
+PROTO Folkrace [
+  field SFVec3f    translation     0 0 0.0275
+  field SFRotation rotation        0 0 1 -1.5707953071795862
+  field SFString   name            "Folkrace"
+  field SFString   controller      "tof_path_planner"
+  field MFString   controllerArgs  []
+  field SFString   customData      ""
+  field SFBool     supervisor      TRUE
+  field SFBool     synchronization TRUE
+]
+{
+  Robot {
+    translation IS translation
+    rotation IS rotation
+    name IS name
+    controller IS controller
+    controllerArgs IS controllerArgs
+    customData IS customData
+    supervisor IS supervisor
+    synchronization IS synchronization
+    children [
+      HingeJoint {
+        jointParameters HingeJointParameters {
+          anchor -0.05 -0.07 0
+        }
+        device [
+          RotationalMotor {
+            name "motor RL"
+            maxVelocity 205
+            maxTorque 0.18
+          }
+          PositionSensor {
+            name "encoder RL"
+          }
+        ]
+        endPoint Solid {
+          translation -0.05 -0.07 0
+          rotation -2.0221621509013514e-12 -1 2.0220883794014218e-12 1.5707963000003338
+          children [
+            Pose {
+              translation 0 0 -0.0125
+              rotation 0 1 0 -1.5707963
+              children [
+                CadShape {
+                  url [
+                    "meshes/Wheel.obj"
+                  ]
+                }
+              ]
+            }
+          ]
+          name "RL"
+          contactMaterial "tire"
+          boundingObject Cylinder {
+            height 0.025
+            radius 0.0275
+            subdivision 32
+          }
+          physics Physics {
+            density -1
+            mass 0.1
+          }
+        }
+      }
+      HingeJoint {
+        jointParameters HingeJointParameters {
+          anchor 0.05 -0.07 0
+        }
+        device [
+          RotationalMotor {
+            name "motor RR"
+            maxVelocity 205
+            maxTorque 0.18
+          }
+          PositionSensor {
+            name "encoder RR"
+          }
+        ]
+        endPoint Solid {
+          translation 0.05 -0.07 0
+          rotation 0 1 0 1.5708
+          children [
+            Pose {
+              translation 0 0 -0.0125
+              rotation 0 1 0 -1.5707963
+              children [
+                CadShape {
+                  url [
+                    "meshes/Wheel.obj"
+                  ]
+                }
+              ]
+            }
+          ]
+          name "RR"
+          contactMaterial "tire"
+          boundingObject Cylinder {
+            height 0.025
+            radius 0.0275
+            subdivision 32
+          }
+          physics Physics {
+            density -1
+            mass 0.1
+          }
+        }
+      }
+      Hinge2Joint {
+        jointParameters HingeJointParameters {
+          axis 0 0 1
+          anchor 0.031 0.0625 0
+          minStop -0.698132
+          maxStop 0.698132
+        }
+        jointParameters2 JointParameters {
+          axis 1 0 0
+        }
+        device [
+          RotationalMotor {
+            name "servo right"
+            controlPID 80 0 0
+            maxVelocity 10.5
+            minPosition -0.698132
+            maxPosition 0.698132
+            maxTorque 5
+          }
+          PositionSensor {
+            name "servo right sensor"
+          }
+        ]
+        device2 [
+          RotationalMotor {
+            name "motor FR"
+            maxVelocity 205
+            maxTorque 0.18
+          }
+          PositionSensor {
+            name "encoder FR"
+          }
+        ]
+        endPoint Solid {
+          translation 0.0411 0.0625 0
+          rotation 0 -1 0 1.5707963000000003
+          children [
+            Pose {
+              translation 0 0 0.0125
+              rotation 0 1 0 1.5707963
+              children [
+                CadShape {
+                  url [
+                    "meshes/Wheel.obj"
+                  ]
+                }
+              ]
+            }
+          ]
+          name "FR"
+          contactMaterial "tire"
+          boundingObject Cylinder {
+            height 0.025
+            radius 0.0275
+            subdivision 32
+          }
+          physics Physics {
+            density -1
+            mass 0.1
+          }
+        }
+      }
+      Hinge2Joint {
+        jointParameters HingeJointParameters {
+          axis 0 0 1
+          anchor -0.031 0.0625 0
+          minStop -0.698132
+          maxStop 0.698132
+        }
+        jointParameters2 JointParameters {
+          axis 1 0 0
+        }
+        device [
+          RotationalMotor {
+            name "servo left"
+            controlPID 80 0 0
+            maxVelocity 10.5
+            minPosition -0.698132
+            maxPosition 0.698132
+            maxTorque 5
+          }
+          PositionSensor {
+            name "servo left sensor"
+          }
+        ]
+        device2 [
+          RotationalMotor {
+            name "motor FL"
+            maxVelocity 205
+            maxTorque 0.18
+          }
+          PositionSensor {
+            name "encoder FL"
+          }
+        ]
+        endPoint Solid {
+          translation -0.0411 0.0625 0
+          rotation 0 1 0 1.5708
+          children [
+            Pose {
+              translation 0 0 0.0125
+              rotation 0 1 0 1.5707963
+              children [
+                CadShape {
+                  url [
+                    "meshes/Wheel.obj"
+                  ]
+                }
+              ]
+              rotationStep 0
+            }
+          ]
+          name "FL"
+          contactMaterial "tire"
+          boundingObject Cylinder {
+            height 0.025
+            radius 0.0275
+            subdivision 32
+          }
+          physics Physics {
+            density -1
+            mass 0.1
+          }
+        }
+      }
+      Pose {
+        translation 0.05 -0.07 0
+        rotation 0 0 1 3.14159265
+        children [
+          CadShape {
+            url [
+              "meshes/Wheel joint.obj"
+            ]
+          }
+        ]
+      }
+      Pose {
+        translation -0.05 -0.07 0
+        children [
+          CadShape {
+            url [
+              "meshes/Wheel joint.obj"
+            ]
+          }
+        ]
+      }
+      Pose {
+        children [
+          CadShape {
+            url [
+              "meshes/Frame.obj"
+            ]
+          }
+        ]
+        rotationStep 0
+      }
+      Lidar {
+        translation -0.07 0.095 0.0275
+        rotation 0 0 1 0.9097
+        name "tof_fl_0"
+        horizontalResolution 2
+        fieldOfView 0.1963
+        numberOfLayers 1
+        near 0.001
+        minRange 0.001
+        maxRange 1.8
+      }
+      Lidar {
+        translation -0.07 0.095 0.0275
+        rotation 0 0 1 1.106
+        name "tof_fl_1"
+        horizontalResolution 2
+        fieldOfView 0.1963
+        numberOfLayers 1
+        near 0.001
+        minRange 0.001
+        maxRange 1.8
+      }
+      Lidar {
+        translation -0.07 0.095 0.0275
+        rotation 0 0 1 1.3024
+        name "tof_fl_2"
+        horizontalResolution 2
+        fieldOfView 0.1963
+        numberOfLayers 1
+        near 0.001
+        minRange 0.001
+        maxRange 1.8
+      }
+      Lidar {
+        translation -0.07 0.095 0.0275
+        rotation 0 0 1 1.4987
+        name "tof_fl_3"
+        horizontalResolution 2
+        fieldOfView 0.1963
+        numberOfLayers 1
+        near 0.001
+        minRange 0.001
+        maxRange 1.8
+      }
+      Lidar {
+        translation 0.07 0.095 0.0275
+        rotation 0 0 1 2.2318
+        name "tof_fr_0"
+        horizontalResolution 2
+        fieldOfView 0.1963
+        numberOfLayers 1
+        near 0.001
+        minRange 0.001
+        maxRange 1.8
+      }
+      Lidar {
+        translation 0.07 0.095 0.0275
+        rotation 0 0 1 2.0356
+        name "tof_fr_1"
+        horizontalResolution 2
+        fieldOfView 0.1963
+        numberOfLayers 1
+        near 0.001
+        minRange 0.001
+        maxRange 1.8
+      }
+      Lidar {
+        translation 0.07 0.095 0.0275
+        rotation 0 0 1 1.8391
+        name "tof_fr_2"
+        horizontalResolution 2
+        fieldOfView 0.1963
+        numberOfLayers 1
+        near 0.001
+        minRange 0.001
+        maxRange 1.8
+      }
+      Lidar {
+        translation 0.07 0.095 0.0275
+        rotation 0 0 1 1.6428
+        name "tof_fr_3"
+        horizontalResolution 2
+        fieldOfView 0.1963
+        numberOfLayers 1
+        near 0.001
+        minRange 0.001
+        maxRange 1.8
+      }
+      Lidar {
+        translation -0.07 -0.095 0.0275
+        rotation 0 0 1 1.6957
+        name "tof_bl_0"
+        horizontalResolution 2
+        fieldOfView 0.1963
+        numberOfLayers 1
+        near 0.001
+        minRange 0.001
+        maxRange 1.8
+      }
+      Lidar {
+        translation -0.07 -0.095 0.0275
+        rotation 0 0 1 1.892
+        name "tof_bl_1"
+        horizontalResolution 2
+        fieldOfView 0.1963
+        numberOfLayers 1
+        near 0.001
+        minRange 0.001
+        maxRange 1.8
+      }
+      Lidar {
+        translation -0.07 -0.095 0.0275
+        rotation 0 0 1 2.0883
+        name "tof_bl_2"
+        horizontalResolution 2
+        fieldOfView 0.1963
+        numberOfLayers 1
+        near 0.001
+        minRange 0.001
+        maxRange 1.8
+      }
+      Lidar {
+        translation -0.07 -0.095 0.0275
+        rotation 0 0 1 2.2847
+        name "tof_bl_3"
+        horizontalResolution 2
+        fieldOfView 0.1963
+        numberOfLayers 1
+        near 0.001
+        minRange 0.001
+        maxRange 1.8
+      }
+      Lidar {
+        translation 0.07 -0.095 0.0275
+        rotation 0 0 1 1.4462
+        name "tof_br_0"
+        horizontalResolution 2
+        fieldOfView 0.1963
+        numberOfLayers 1
+        near 0.001
+        minRange 0.001
+        maxRange 1.8
+      }
+      Lidar {
+        translation 0.07 -0.095 0.0275
+        rotation 0 0 1 1.2499
+        name "tof_br_1"
+        horizontalResolution 2
+        fieldOfView 0.1963
+        numberOfLayers 1
+        near 0.001
+        minRange 0.001
+        maxRange 1.8
+      }
+      Lidar {
+        translation 0.07 -0.095 0.0275
+        rotation 0 0 1 1.0536
+        name "tof_br_2"
+        horizontalResolution 2
+        fieldOfView 0.1963
+        numberOfLayers 1
+        near 0.001
+        minRange 0.001
+        maxRange 1.8
+      }
+      Lidar {
+        translation 0.07 -0.095 0.0275
+        rotation 0 0 1 0.8573
+        name "tof_br_3"
+        horizontalResolution 2
+        fieldOfView 0.1963
+        numberOfLayers 1
+        near 0.001
+        minRange 0.001
+        maxRange 1.8
+      }
+      InertialUnit {
+        translation 0 -0.01 0.015
+        name "bno08x_imu"
+        noise 0.001
+      }
+      Accelerometer {
+        translation 0 -0.01 0.015
+      }
+      Gyro {
+        translation 0 -0.01 0.015
+      }
+    ]
+    contactMaterial "chassis"
+    boundingObject Group {
+      children [
+        Pose {
+          translation 0 0.099 0.02
+          children [
+            Box {
+              size 0.15 0.002 0.035
+            }
+          ]
+        }
+        Pose {
+          translation 0 -0.099 0.02
+          children [
+            Box {
+              size 0.15 0.002 0.035
+            }
+          ]
+        }
+        Pose {
+          translation -0.074 0 0.02
+          children [
+            Box {
+              size 0.002 0.198 0.035
+            }
+          ]
+        }
+        Pose {
+          translation 0.074 0 0.02
+          children [
+            Box {
+              size 0.002 0.198 0.035
+            }
+          ]
+        }
+      ]
+    }
+    physics Physics {
+      density -1
+      mass 0.6
+      centerOfMass [
+        0 0 -0.005
+      ]
+      damping Damping {
+        linear 0.05
+        angular 0.35
+      }
+    }
+  }
+}

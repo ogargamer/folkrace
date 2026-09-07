@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Da Winna - Modular Race Track Studio & Map Exporter</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="./track_builder.css">
+</head>
+<body>
+
+    <!-- Top Navigation Header -->
+    <header>
+        <div class="logo-group">
+            <span class="logo-badge">DA WINNA</span>
+            <div class="title">MODULAR TRACK STUDIO <span>• 1200mm TILES</span></div>
+        </div>
+        <div class="header-actions">
+            <button class="btn-secondary" id="btn-clear" title="Reset Entire Track Layout">
+                <span>🗑️</span> Clear Track
+            </button>
+            <button class="btn-secondary" id="btn-load-json" title="Load Layout from JSON File">
+                <span>📂</span> Load JSON
+            </button>
+            <input type="file" id="input-load-json" accept=".json" style="display: none;">
+            <button class="btn-secondary" id="btn-export-png" title="Download High-Res 2D Map PNG">
+                <span>🖼️</span> Export PNG
+            </button>
+            <button class="btn-secondary" id="btn-export-yaml" title="Download ROS 2 map.yaml">
+                <span>📄</span> ROS map.yaml
+            </button>
+            <button class="btn-secondary" id="btn-export-webots" title="Download Webots .wbt 3D Simulation World (ENU Z-Up)" style="border-color: rgba(0, 240, 255, 0.4); color: var(--accent-cyan);">
+                <span>🌐</span> Webots (.wbt)
+            </button>
+            <button class="btn-primary" id="btn-save-json" title="Save Layout to File">
+                <span>💾</span> Save JSON
+            </button>
+        </div>
+    </header>
+
+    <div class="app-container">
+        
+        <!-- Left Control Sidebar -->
+        <aside class="sidebar">
+
+            <!-- Section 0: Geometry Parameters -->
+            <div class="panel-section">
+                <div class="section-title">
+                    <span>0. Parameters</span>
+                    <span class="badge" id="badge-tile-size">1200mm</span>
+                </div>
+
+                <div style="display: flex; flex-direction: column; gap: 10px; margin-bottom: 4px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <label style="font-size: 11px; color: var(--text-muted); font-weight: 600;">Block Size (mm)</label>
+                        <input type="number" id="input-tile-size" value="1200" step="50" min="300" max="5000" style="width: 85px; background: var(--bg-card); border: 1px solid var(--border-color); color: var(--accent-cyan); padding: 5px 8px; border-radius: 5px; font-family: 'JetBrains Mono', monospace; font-weight: 700; font-size: 12px; text-align: right;">
+                    </div>
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <label style="font-size: 11px; color: var(--text-muted); font-weight: 600;">Track Width (mm)</label>
+                        <input type="number" id="input-track-width" value="1000" step="50" min="100" max="4800" style="width: 85px; background: var(--bg-card); border: 1px solid var(--border-color); color: var(--accent-cyan); padding: 5px 8px; border-radius: 5px; font-family: 'JetBrains Mono', monospace; font-weight: 700; font-size: 12px; text-align: right;">
+                    </div>
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <label style="font-size: 11px; color: var(--text-muted); font-weight: 600;">Wall Height (mm)</label>
+                        <input type="number" id="input-wall-height" value="300" step="50" min="50" max="2000" style="width: 85px; background: var(--bg-card); border: 1px solid var(--border-color); color: var(--accent-amber); padding: 5px 8px; border-radius: 5px; font-family: 'JetBrains Mono', monospace; font-weight: 700; font-size: 12px; text-align: right;" title="3D Wall Height for Webots Simulation">
+                    </div>
+                    <div style="display: flex; justify-content: space-between; align-items: center; padding-top: 4px; border-top: 1px dashed rgba(255,255,255,0.08);">
+                        <label style="font-size: 11px; color: var(--text-muted); font-weight: 600;">Wall Margin</label>
+                        <span id="val-wall-margin" style="font-size: 12px; font-family: 'JetBrains Mono', monospace; font-weight: 700; color: var(--accent-magenta);">100 mm (10cm)</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Section 1: Modular Tile Assembly -->
+            <div class="panel-section">
+                <div class="section-title">
+                    <span>1. Modular Tile Placer</span>
+                    <span class="badge">Assembly</span>
+                </div>
+
+                <div class="block-buttons">
+                    <button class="btn-block btn-straight" id="btn-add-straight" title="Add Straight Track (Hotkey: W or Up)">
+                        <span class="icon">⬆️</span>
+                        <span id="label-straight">Straight (1.2m)</span>
+                        <span class="hotkey">W / ↑</span>
+                    </button>
+                    <button class="btn-block" id="btn-add-left" title="Add 90° Turn Left (Hotkey: A or Left)">
+                        <span class="icon">↰</span>
+                        <span>Turn Left (90°)</span>
+                        <span class="hotkey">A / ←</span>
+                    </button>
+                    <button class="btn-block" id="btn-add-right" title="Add 90° Turn Right (Hotkey: D or Right)">
+                        <span class="icon">↱</span>
+                        <span>Turn Right (90°)</span>
+                        <span class="hotkey">D / →</span>
+                    </button>
+                </div>
+
+                <button class="btn-undo" id="btn-undo-block" title="Undo / Delete Previous Block (Hotkey: Backspace or Down Arrow)">
+                    <span>⬅️</span> Back Arrow (Delete / ↓)
+                </button>
+            </div>
+
+            <!-- Section 2: Custom Obstacles & Extras -->
+            <div class="panel-section">
+                <div class="section-title">
+                    <span>2. Draw Custom Extras</span>
+                    <span class="badge">Obstacles</span>
+                </div>
+
+                <div class="tool-grid">
+                    <button class="btn-tool active" id="tool-select" data-tool="select">
+                        <span>✋</span> Pan / Inspect
+                    </button>
+                    <button class="btn-tool tool-move" id="tool-move" data-tool="move" style="border-color: rgba(0, 240, 255, 0.35); color: var(--accent-cyan);">
+                        <span>🖐️</span> Move Item
+                    </button>
+                    <button class="btn-tool" id="tool-robot" data-tool="robot" style="background: rgba(0, 240, 255, 0.12); color: var(--accent-cyan); border-color: rgba(0, 240, 255, 0.3);">
+                        <span>🤖</span> Robot Pose
+                    </button>
+                    <button class="btn-tool" id="tool-rect" data-tool="rect">
+                        <span>⬛</span> Rectangle
+                    </button>
+                    <button class="btn-tool" id="tool-circle" data-tool="circle">
+                        <span>⚪</span> Circle Pillar
+                    </button>
+                    <button class="btn-tool tool-sf" id="tool-startline" data-tool="startline">
+                        <span>🏁</span> Start Line
+                    </button>
+                    <button class="btn-tool tool-eraser" id="tool-eraser" data-tool="eraser">
+                        <span>🧹</span> Eraser
+                    </button>
+                </div>
+                <div style="font-size: 10px; color: var(--text-muted); margin-top: 6px; text-align: center;">
+                    💡 <b>Tip:</b> Right-click any obstacle to type exact dimensions!
+                </div>
+            </div>
+
+            <!-- Section 3: Robot Initial Pose Controls -->
+            <div class="panel-section">
+                <div class="section-title">
+                    <span>3. Robot Initial Pose</span>
+                    <span class="badge" style="background: rgba(0, 240, 255, 0.1); color: var(--accent-cyan); border-color: rgba(0, 240, 255, 0.3);">Spawn (X,Y,θ)</span>
+                </div>
+                <div style="display: flex; flex-direction: column; gap: 8px;">
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
+                        <div>
+                            <label style="font-size: 10px; color: var(--text-muted); font-weight: 600;">X (m)</label>
+                            <input type="number" id="input-robot-x" value="0.60" step="0.05" style="width: 100%; background: var(--bg-card); border: 1px solid var(--border-color); color: var(--text-main); padding: 5px 8px; border-radius: 5px; font-family: 'JetBrains Mono', monospace; font-weight: 700; font-size: 12px;">
+                        </div>
+                        <div>
+                            <label style="font-size: 10px; color: var(--text-muted); font-weight: 600;">Y (m)</label>
+                            <input type="number" id="input-robot-y" value="0.00" step="0.05" style="width: 100%; background: var(--bg-card); border: 1px solid var(--border-color); color: var(--text-main); padding: 5px 8px; border-radius: 5px; font-family: 'JetBrains Mono', monospace; font-weight: 700; font-size: 12px;">
+                        </div>
+                    </div>
+                    <div>
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 2px;">
+                            <label style="font-size: 10px; color: var(--text-muted); font-weight: 600;">Heading (Yaw)</label>
+                            <span id="label-robot-yaw" style="font-size: 11px; font-family: 'JetBrains Mono', monospace; font-weight: 700; color: var(--accent-cyan);">0.0°</span>
+                        </div>
+                        <input type="range" id="input-robot-yaw" min="-180" max="180" value="0" step="1" style="width: 100%; accent-color: var(--accent-cyan); cursor: pointer;">
+                    </div>
+                    <button class="btn-secondary" id="btn-snap-robot" style="justify-content: center; padding: 6px; font-size: 11px;">
+                        <span>🎯</span> Snap to Start Line
+                    </button>
+                </div>
+            </div>
+
+            <!-- Section 4: Track Metrics -->
+            <div class="panel-section">
+                <div class="section-title">
+                    <span>4. Track Geometry</span>
+                </div>
+                <div class="stats-box">
+                    <div class="stat-item">
+                        <span class="stat-label">Tile Count</span>
+                        <span class="stat-value" id="stat-blocks">0</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">Track Length</span>
+                        <span class="stat-value" id="stat-length">0.0 m</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">Track Width</span>
+                        <span class="stat-value">1.0 m</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">Wall Margin</span>
+                        <span class="stat-value">10 cm</span>
+                    </div>
+                    <div class="stat-item" style="grid-column: span 2;">
+                        <span class="stat-label">Loop Closure</span>
+                        <span class="stat-value" id="stat-closure" style="color: var(--text-muted);">Open Track</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Section 4: Export directly to Pi Cartographer -->
+            <div class="panel-section" style="margin-top: auto; border-top: 1px solid var(--border-color); border-bottom: none;">
+                <div class="section-title">
+                    <span>4. Pi 5 Integration</span>
+                    <span class="badge" style="background: rgba(0, 255, 136, 0.15); color: var(--accent-green); border-color: rgba(0, 255, 136, 0.3);">Cartographer 2D</span>
+                </div>
+                <button class="btn-deploy" id="btn-deploy-pi">
+                    <span>🚀</span> Deploy Map to Pi 5 Cartographer
+                </button>
+                <div style="font-size: 11px; color: var(--text-muted); margin-top: 8px; text-align: center;">
+                    Uploads directly to /home/admin/cartographer/maps/
+                </div>
+            </div>
+
+            <!-- Section 5: Webots 3D World Simulation Export -->
+            <div class="panel-section" style="border-top: 1px solid var(--border-color); border-bottom: none; padding-top: 10px;">
+                <div class="section-title">
+                    <span>5. Webots 3D Simulation</span>
+                    <span class="badge" style="background: rgba(0, 240, 255, 0.12); color: var(--accent-cyan); border-color: rgba(0, 240, 255, 0.3);">ENU Z-Up (.wbt)</span>
+                </div>
+                <button class="btn-block" id="btn-export-webots-side" style="background: linear-gradient(135deg, rgba(0, 240, 255, 0.15), rgba(255, 0, 122, 0.15)); border: 1px solid rgba(0, 240, 255, 0.4); color: var(--text-main); font-weight: 700; height: 38px; display: flex; align-items: center; justify-content: center; gap: 8px; border-radius: 6px; cursor: pointer;">
+                    <span>🌐</span> Export Webots World (.wbt)
+                </button>
+                <div style="font-size: 11px; color: var(--text-muted); margin-top: 6px; text-align: center;">
+                    Watertight IndexedFaceSet Walls & 2D MS200k LiDAR
+                </div>
+            </div>
+
+        </aside>
+
+        <!-- Center Workspace Canvas -->
+        <main class="canvas-wrapper">
+            <canvas id="track-canvas"></canvas>
+
+            <!-- Floating Quick Actions -->
+            <div class="floating-overlay">
+                <button class="btn-floating" id="btn-zoom-in" title="Zoom In">+</button>
+                <button class="btn-floating" id="btn-zoom-out" title="Zoom Out">-</button>
+                <button class="btn-floating" id="btn-recenter" title="Center View">🎯</button>
+            </div>
+
+            <!-- Notification Toast -->
+            <div class="toast" id="toast">
+                <span id="toast-icon">✨</span>
+                <span id="toast-message">Action Complete</span>
+            </div>
+        </main>
+
+    </div>
+
+    <!-- Modal Dialog: Edit Obstacle Dimensions -->
+    <div id="obstacle-modal" class="modal-backdrop" style="display:none;">
+        <div class="modal-card">
+            <div class="modal-header">
+                <h3 id="modal-title"><span>📐</span> Edit Dimensions</h3>
+                <button class="modal-close" id="modal-btn-close">&times;</button>
+            </div>
+            <div class="modal-body" id="modal-body">
+                <!-- Dynamically populated -->
+            </div>
+            <div class="modal-footer">
+                <button class="btn-danger" id="modal-btn-delete">Delete</button>
+                <button class="btn-secondary" id="modal-btn-cancel">Cancel</button>
+                <button class="btn-primary" id="modal-btn-save">Apply (Enter)</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Script Engine -->
+    <script src="./track_builder.js"></script>
+</body>
+</html>

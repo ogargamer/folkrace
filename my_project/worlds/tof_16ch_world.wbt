@@ -1,0 +1,80 @@
+#VRML_SIM R2025a utf8
+
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/backgrounds/protos/TexturedBackground.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/backgrounds/protos/TexturedBackgroundLight.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/floors/protos/RectangleArena.proto"
+
+WorldInfo {
+  coordinateSystem "ENU"
+  basicTimeStep 10
+}
+
+Viewpoint {
+  orientation -0.32 0.28 0.90 2.22
+  position 2.5 -2.2 2.8
+}
+
+TexturedBackground {}
+TexturedBackgroundLight {}
+
+RectangleArena {
+  translation 0 1.0 0
+  floorSize 4 4
+}
+
+Robot {
+  translation 0 0 0
+  rotation 0 0 1 0
+  children [
+    Shape {
+      appearance PBRAppearance { baseColor 0.2 0.2 0.8 roughness 0.5 }
+      geometry Box { size 0.14 0.19 0.04 }
+    }
+    near 0.001
+    Lidar { translation -0.070 0.095 0.0275 rotation 0 0 1 0.9097 name "tof_fl_0" fieldOfView 0.1963 horizontalResolution 10 numberOfLayers 1 minRange 0.001 maxRange 1.8 }
+    near 0.001
+    Lidar { translation -0.070 0.095 0.0275 rotation 0 0 1 1.1060 name "tof_fl_1" fieldOfView 0.1963 horizontalResolution 10 numberOfLayers 1 minRange 0.001 maxRange 1.8 }
+    near 0.001
+    Lidar { translation -0.070 0.095 0.0275 rotation 0 0 1 1.3024 name "tof_fl_2" fieldOfView 0.1963 horizontalResolution 10 numberOfLayers 1 minRange 0.001 maxRange 1.8 }
+    near 0.001
+    Lidar { translation -0.070 0.095 0.0275 rotation 0 0 1 1.4987 name "tof_fl_3" fieldOfView 0.1963 horizontalResolution 10 numberOfLayers 1 minRange 0.001 maxRange 1.8 }
+    near 0.001
+    Lidar { translation 0.070 0.095 0.0275 rotation 0 0 1 2.2318 name "tof_fr_0" fieldOfView 0.1963 horizontalResolution 10 numberOfLayers 1 minRange 0.001 maxRange 1.8 }
+    near 0.001
+    Lidar { translation 0.070 0.095 0.0275 rotation 0 0 1 2.0356 name "tof_fr_1" fieldOfView 0.1963 horizontalResolution 10 numberOfLayers 1 minRange 0.001 maxRange 1.8 }
+    near 0.001
+    Lidar { translation 0.070 0.095 0.0275 rotation 0 0 1 1.8391 name "tof_fr_2" fieldOfView 0.1963 horizontalResolution 10 numberOfLayers 1 minRange 0.001 maxRange 1.8 }
+    near 0.001
+    Lidar { translation 0.070 0.095 0.0275 rotation 0 0 1 1.6428 name "tof_fr_3" fieldOfView 0.1963 horizontalResolution 10 numberOfLayers 1 minRange 0.001 maxRange 1.8 }
+    near 0.001
+    Lidar { translation -0.070 -0.095 0.0275 rotation 0 0 1 1.6957 name "tof_bl_0" fieldOfView 0.1963 horizontalResolution 10 numberOfLayers 1 minRange 0.001 maxRange 1.8 }
+    near 0.001
+    Lidar { translation -0.070 -0.095 0.0275 rotation 0 0 1 1.8920 name "tof_bl_1" fieldOfView 0.1963 horizontalResolution 10 numberOfLayers 1 minRange 0.001 maxRange 1.8 }
+    near 0.001
+    Lidar { translation -0.070 -0.095 0.0275 rotation 0 0 1 2.0883 name "tof_bl_2" fieldOfView 0.1963 horizontalResolution 10 numberOfLayers 1 minRange 0.001 maxRange 1.8 }
+    near 0.001
+    Lidar { translation -0.070 -0.095 0.0275 rotation 0 0 1 2.2847 name "tof_bl_3" fieldOfView 0.1963 horizontalResolution 10 numberOfLayers 1 minRange 0.001 maxRange 1.8 }
+    near 0.001
+    Lidar { translation 0.070 -0.095 0.0275 rotation 0 0 1 1.4462 name "tof_br_0" fieldOfView 0.1963 horizontalResolution 10 numberOfLayers 1 minRange 0.001 maxRange 1.8 }
+    near 0.001
+    Lidar { translation 0.070 -0.095 0.0275 rotation 0 0 1 1.2499 name "tof_br_1" fieldOfView 0.1963 horizontalResolution 10 numberOfLayers 1 minRange 0.001 maxRange 1.8 }
+    near 0.001
+    Lidar { translation 0.070 -0.095 0.0275 rotation 0 0 1 1.0536 name "tof_br_2" fieldOfView 0.1963 horizontalResolution 10 numberOfLayers 1 minRange 0.001 maxRange 1.8 }
+    near 0.001
+    Lidar { translation 0.070 -0.095 0.0275 rotation 0 0 1 0.8573 name "tof_br_3" fieldOfView 0.1963 horizontalResolution 10 numberOfLayers 1 minRange 0.001 maxRange 1.8 }
+  ]
+  name "stationary_tof_array"
+  controller "tof_16ch_grid_scanner"
+  supervisor TRUE
+}
+
+DEF OBSTACLE Solid {
+  translation 0 0.15 0.06
+  children [
+    Shape {
+      appearance PBRAppearance { baseColor 0.85 0.15 0.15 roughness 0.4 }
+      geometry Cylinder { height 0.12 radius 0.025 }
+    }
+  ]
+  name "grid_obstacle"
+}

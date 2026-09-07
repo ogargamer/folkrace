@@ -1,0 +1,51 @@
+Header_or_Connector,Physical_Pin,Signal_Name,GPIO_Number,Type,Primary_Function,ALT0,ALT1,ALT2,ALT3,ALT4,Notes
+40-Pin Header,1,3V3,N/A,Power,3.3V DC Power,N/A,N/A,N/A,N/A,N/A,Max 50mA total draw recommended across 3.3V pins
+40-Pin Header,2,5V,N/A,Power,5V DC Power,N/A,N/A,N/A,N/A,N/A,Direct 5V power rail supplied from USB-C PSU
+40-Pin Header,3,GPIO2,GPIO2,I/O,I2C1_SDA,SDA1,I2C2_SDA,UART3_CTS,SPI3_MISO,DPI_D2,Fixed 1.8k onboard pull-up resistor to 3.3V
+40-Pin Header,4,5V,N/A,Power,5V DC Power,N/A,N/A,N/A,N/A,N/A,Direct 5V power rail supplied from USB-C PSU
+40-Pin Header,5,GPIO3,GPIO3,I/O,I2C1_SCL,SCL1,I2C2_SCL,UART3_RTS,SPI3_SCLK,DPI_D3,Fixed 1.8k onboard pull-up resistor to 3.3V
+40-Pin Header,6,GND,N/A,Ground,0V Ground,N/A,N/A,N/A,N/A,N/A,System Ground
+40-Pin Header,7,GPIO4,GPIO4,I/O,GPCLK0,GPCLK0,SPI3_CE0,UART3_TX,I2C3_SDA,DPI_D4,General Purpose Clock 0 / PWM0_0 channel
+40-Pin Header,8,GPIO14,GPIO14,I/O,UART0_TX,TXD0,SPI4_MISO,I2C4_SDA,DPI_D14,PWM1_2,Default primary Linux serial UART Transmit
+40-Pin Header,9,GND,N/A,Ground,0V Ground,N/A,N/A,N/A,N/A,N/A,System Ground
+40-Pin Header,10,GPIO15,GPIO15,I/O,UART0_RX,RXD0,SPI4_SCLK,I2C4_SCL,DPI_D15,PWM1_3,Default primary Linux serial UART Receive
+40-Pin Header,11,GPIO17,GPIO17,I/O,GPIO,SPI0_SCK,UART1_RTS,SPI4_CE0,I2C5_SDA,DPI_D17,General Purpose I/O / PWM0_1
+40-Pin Header,12,GPIO18,GPIO18,I/O,PCM_CLK / PWM0,PCM_CLK,SPI4_CE1,UART1_CTS,I2C5_SCL,DPI_D18,Hardware PWM0_0 Output / I2S Clock
+40-Pin Header,13,GPIO27,GPIO27,I/O,GPIO,SPI5_CE1,UART2_RTS,I2C6_SCL,DPI_D23,PWM1_3,General Purpose I/O
+40-Pin Header,14,GND,N/A,Ground,0V Ground,N/A,N/A,N/A,N/A,N/A,System Ground
+40-Pin Header,15,GPIO22,GPIO22,I/O,GPIO,SD1_CLK,ARM_TRACECTL,DPI_D18,SPI0_CE1,PWM1_0,General Purpose I/O
+40-Pin Header,16,GPIO23,GPIO23,I/O,GPIO,SD1_CMD,ARM_TRACECLK,DPI_D19,SPI0_MISO,PWM1_1,General Purpose I/O
+40-Pin Header,17,3V3,N/A,Power,3.3V DC Power,N/A,N/A,N/A,N/A,N/A,3.3V Power Rail
+40-Pin Header,18,GPIO24,GPIO24,I/O,GPIO,SD1_DAT0,ARM_TRACED0,DPI_D20,SPI0_SCLK,PWM1_2,General Purpose I/O
+40-Pin Header,19,GPIO10,GPIO10,I/O,SPI0_MOSI,SPI0_MOSI,I2C3_SDA,UART4_TX,SPI2_SCLK,DPI_D10,SPI0 Controller Output / PWM0_2
+40-Pin Header,20,GND,N/A,Ground,0V Ground,N/A,N/A,N/A,N/A,N/A,System Ground
+40-Pin Header,21,GPIO9,GPIO9,I/O,SPI0_MISO,SPI0_MISO,I2C3_SCL,UART4_RX,SPI2_CE0,DPI_D9,SPI0 Controller Input / PWM0_1
+40-Pin Header,22,GPIO25,GPIO25,I/O,GPIO,SD1_DAT1,ARM_TRACED1,DPI_D21,SPI0_CE0,PWM1_3,General Purpose I/O
+40-Pin Header,23,GPIO11,GPIO11,I/O,SPI0_SCLK,SPI0_SCLK,I2C4_SDA,UART4_RTS,SPI2_CE1,DPI_D11,SPI0 Clock / PWM0_3
+40-Pin Header,24,GPIO8,GPIO8,I/O,SPI0_CE0_N,SPI0_CE0_N,I2C4_SCL,UART4_CTS,SPI2_MISO,DPI_D8,SPI0 Chip Select 0 / PWM0_0
+40-Pin Header,25,GND,N/A,Ground,0V Ground,N/A,N/A,N/A,N/A,N/A,System Ground
+40-Pin Header,26,GPIO7,GPIO7,I/O,SPI0_CE1_N,SPI0_CE1_N,SPI3_MISO,UART3_RX,I2C3_SCL,DPI_D7,SPI0 Chip Select 1 / PWM0_3
+40-Pin Header,27,GPIO0,GPIO0,I/O,ID_SD,I2C0_SDA,I2C1_SDA,UART2_TX,SPI3_CE1,DPI_D0,Reserved for HAT ID EEPROM auto-configuration
+40-Pin Header,28,GPIO1,GPIO1,I/O,ID_SC,I2C0_SCL,I2C1_SCL,UART2_RX,SPI3_MOSI,DPI_D1,Reserved for HAT ID EEPROM auto-configuration
+40-Pin Header,29,GPIO5,GPIO5,I/O,GPCLK1,GPCLK1,SPI3_MOSI,UART3_CTS,I2C4_SDA,DPI_D5,General Purpose Clock 1 / PWM0_1
+40-Pin Header,30,GND,N/A,Ground,0V Ground,N/A,N/A,N/A,N/A,N/A,System Ground
+40-Pin Header,31,GPIO6,GPIO6,I/O,GPCLK2,GPCLK2,SPI3_SCLK,UART3_RTS,I2C4_SCL,DPI_D6,General Purpose Clock 2 / PWM0_2
+40-Pin Header,32,GPIO12,GPIO12,I/O,PWM0_0,PWM0_0,I2C5_SDA,UART5_TX,SPI4_MOSI,DPI_D12,Hardware PWM0 Channel 0 / PWM1_0
+40-Pin Header,33,GPIO13,GPIO13,I/O,PWM0_1,PWM0_1,I2C5_SCL,UART5_RX,SPI4_MISO,DPI_D13,Hardware PWM0 Channel 1 / PWM1_1
+40-Pin Header,34,GND,N/A,Ground,0V Ground,N/A,N/A,N/A,N/A,N/A,System Ground
+40-Pin Header,35,GPIO19,GPIO19,I/O,PCM_FS / PWM1,PCM_FS,SPI4_MOSI,UART1_TX,I2C6_SDA,DPI_D19,Hardware PWM1_1 Output / I2S Frame Sync
+40-Pin Header,36,GPIO16,GPIO16,I/O,GPIO,SPI4_MISO,UART1_RX,I2C5_SCL,DPI_D16,PWM0_0,General Purpose I/O
+40-Pin Header,37,GPIO26,GPIO26,I/O,GPIO,SPI5_CE0,UART2_TX,I2C6_SDA,DPI_D22,PWM1_2,General Purpose I/O
+40-Pin Header,38,GPIO20,GPIO20,I/O,PCM_DIN,PCM_DIN,SPI4_MOSI,UART2_RX,I2C6_SDA,DPI_D20,I2S Audio Data Input / GPCLK0
+40-Pin Header,39,GND,N/A,Ground,0V Ground,N/A,N/A,N/A,N/A,N/A,System Ground
+40-Pin Header,40,GPIO21,GPIO21,I/O,PCM_DOUT,PCM_DOUT,SPI4_SCLK,UART2_TX,I2C6_SCL,DPI_D21,I2S Audio Data Output / GPCLK1
+Onboard Button,POWER_BTN,PWR_BTN,N/A,Input,Power Switch,N/A,N/A,N/A,N/A,N/A,Onboard tactile power switch for power state, wake, and soft shutdown
+Debug Header (J2),1,DEBUG_TX,N/A,Output,UART_TX,N/A,N/A,N/A,N/A,N/A,3-pin dedicated UART debug port Transmit signal
+Debug Header (J2),2,DEBUG_GND,N/A,Ground,0V Ground,N/A,N/A,N/A,N/A,N/A,3-pin dedicated UART debug port Ground
+Debug Header (J2),3,DEBUG_RX,N/A,Input,UART_RX,N/A,N/A,N/A,N/A,N/A,3-pin dedicated UART debug port Receive signal
+RTC Connector (J5),1,RTC_BAT+,N/A,Power,RTC_BAT,N/A,N/A,N/A,N/A,N/A,Dedicated 2-pin Real-Time Clock battery power input
+RTC Connector (J5),2,RTC_GND,N/A,Ground,0V Ground,N/A,N/A,N/A,N/A,N/A,Dedicated Real-Time Clock battery Ground
+Fan Connector (J1),1,FAN_GND,N/A,Ground,0V Ground,N/A,N/A,N/A,N/A,N/A,4-pin PWM active cooling fan Ground
+Fan Connector (J1),2,FAN_5V,N/A,Power,5V DC Power,N/A,N/A,N/A,N/A,N/A,4-pin PWM active cooling fan 5V supply
+Fan Connector (J1),3,FAN_TACH,N/A,Input,Fan Tachometer,N/A,N/A,N/A,N/A,N/A,Speed feedback tachometer signal from fan
+Fan Connector (J1),4,FAN_PWM,N/A,Output,Fan PWM Control,N/A,N/A,N/A,N/A,N/A,Hardware PWM control signal for dynamic fan speed adjustment

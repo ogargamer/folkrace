@@ -1,0 +1,195 @@
+import paramiko
+import sys
+
+sys.stdout.reconfigure(encoding='utf-8')
+
+PI_IP = "192.168.0.13"
+PI_USER = "admin"
+PI_PASS = "l"
+
+def check_firmware_crc():
+    ssh = paramiko.SSHClient()
+    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    ssh.connect(PI_IP, port=22, username=PI_USER, password=PI_PASS, timeout=10)
+
+    print("======================================================================")
+    print("  TRACING 84KB FIRMWARE UPLOAD & CRC CHECKSUM")
+    print("======================================================================")
+
+    script = r"""#!/bin/bash
+set -e
+cd /home/admin/STSW-IMG042/VL53L8CX_Linux_driver_2.1.0/user/test
+
+cat << 'EOF' > test_crc.c
+#include <stdio.h>
+#include <stdint.h>
+#include <string.h>
+#include <unistd.h>
+#include "vl53l8cx_api.h"
+
+extern const uint8_t VL53L8CX_FIRMWARE[];
+
+int main() {
+    VL53L8CX_Configuration Dev;
+    memset(&Dev, 0, sizeof(Dev));
+    Dev.platform.spi_num = 0;
+    Dev.platform.spi_cs = 0;
+
+    vl53l8cx_comms_init(&Dev.platform);
+
+    uint8_t tmp = 0;
+    uint8_t status = 0;
+
+    printf("1. Soft reset...\n");
+    VL53L8CX_WrByte(&Dev.platform, 0x7fff, 0x00);
+    VL53L8CX_WrByte(&Dev.platform, 0x0009, 0x04);
+    VL53L8CX_WrByte(&Dev.platform, 0x000F, 0x40);
+    VL53L8CX_WrByte(&Dev.platform, 0x000A, 0x03);
+    VL53L8CX_RdByte(&Dev.platform, 0x7FFF, &tmp);
+    VL53L8CX_WrByte(&Dev.platform, 0x000C, 0x01);
+    VL53L8CX_WrByte(&Dev.platform, 0x0101, 0x00);
+    VL53L8CX_WrByte(&Dev.platform, 0x0102, 0x00);
+    VL53L8CX_WrByte(&Dev.platform, 0x010A, 0x01);
+    VL53L8CX_WrByte(&Dev.platform, 0x4002, 0x01);
+    VL53L8CX_WrByte(&Dev.platform, 0x4002, 0x00);
+    VL53L8CX_WrByte(&Dev.platform, 0x010A, 0x03);
+    VL53L8CX_WrByte(&Dev.platform, 0x0103, 0x01);
+    VL53L8CX_WrByte(&Dev.platform, 0x000C, 0x00);
+    VL53L8CX_WrByte(&Dev.platform, 0x000F, 0x43);
+    VL53L8CX_WaitMs(&Dev.platform, 1);
+    VL53L8CX_WrByte(&Dev.platform, 0x000F, 0x40);
+    VL53L8CX_WrByte(&Dev.platform, 0x000A, 0x01);
+    VL53L8CX_WaitMs(&Dev.platform, 100);
+
+    VL53L8CX_WrByte(&Dev.platform, 0x7fff, 0x00);
+    uint8_t boot_ready = 0;
+    for (int i = 0; i < 50; i++) {
+        VL53L8CX_RdByte(&Dev.platform, 0x06, &boot_ready);
+        if (boot_ready == 1) break;
+        VL53L8CX_WaitMs(&Dev.platform, 5);
+    }
+    printf("   Bootloader ready = %d\n", boot_ready);
+
+    printf("2. Enable FW access...\n");
+    VL53L8CX_WrByte(&Dev.platform, 0x000E, 0x01);
+    VL53L8CX_WrByte(&Dev.platform, 0x7fff, 0x02);
+    VL53L8CX_WrByte(&Dev.platform, 0x7fff, 0x01);
+    VL53L8CX_WrByte(&Dev.platform, 0x06, 0x01);
+
+    uint8_t fw_ready = 0;
+    for (int i = 0; i < 50; i++) {
+        VL53L8CX_RdByte(&Dev.platform, 0x21, &fw_ready);
+        if (fw_ready == 0x04) break;
+        VL53L8CX_WaitMs(&Dev.platform, 5);
+    }
+    printf("   FW access ready = 0x%02X\n", fw_ready);
+
+    printf("3. Writing 84KB Firmware in chunks...\n");
+    VL53L8CX_WrByte(&Dev.platform, 0x7fff, 0x00);
+    VL53L8CX_RdByte(&Dev.platform, 0x7fff, &tmp);
+    VL53L8CX_WrByte(&Dev.platform, 0x0C, 0x01);
+    VL53L8CX_WrByte(&Dev.platform, 0x7fff, 0x00);
+    VL53L8CX_WrByte(&Dev.platform, 0x101, 0x00);
+    VL53L8CX_WrByte(&Dev.platform, 0x102, 0x00);
+    VL53L8CX_WrByte(&Dev.platform, 0x010A, 0x01);
+    VL53L8CX_WrByte(&Dev.platform, 0x4002, 0x01);
+    VL53L8CX_WrByte(&Dev.platform, 0x4002, 0x00);
+    VL53L8CX_WrByte(&Dev.platform, 0x010A, 0x03);
+    VL53L8CX_WrByte(&Dev.platform, 0x103, 0x01);
+    VL53L8CX_WrByte(&Dev.platform, 0x400F, 0x00);
+    VL53L8CX_WrByte(&Dev.platform, 0x21A, 0x43);
+    VL53L8CX_WrByte(&Dev.platform, 0x21A, 0x03);
+    VL53L8CX_WrByte(&Dev.platform, 0x21A, 0x01);
+    VL53L8CX_WrByte(&Dev.platform, 0x21A, 0x00);
+    VL53L8CX_WrByte(&Dev.platform, 0x219, 0x00);
+    VL53L8CX_WrByte(&Dev.platform, 0x21B, 0x00);
+    VL53L8CX_WrByte(&Dev.platform, 0x7fff, 0x00);
+    VL53L8CX_RdByte(&Dev.platform, 0x7fff, &tmp);
+    VL53L8CX_WrByte(&Dev.platform, 0x7fff, 0x01);
+
+    VL53L8CX_WrByte(&Dev.platform, 0x7fff, 0x09);
+    VL53L8CX_WrMulti(&Dev.platform, 0, (uint8_t*)&VL53L8CX_FIRMWARE[0], 0x8000);
+    VL53L8CX_WrByte(&Dev.platform, 0x7fff, 0x0a);
+    VL53L8CX_WrMulti(&Dev.platform, 0, (uint8_t*)&VL53L8CX_FIRMWARE[0x8000], 0x8000);
+    VL53L8CX_WrByte(&Dev.platform, 0x7fff, 0x0b);
+    VL53L8CX_WrMulti(&Dev.platform, 0, (uint8_t*)&VL53L8CX_FIRMWARE[0x10000], 0x5000);
+    VL53L8CX_WrByte(&Dev.platform, 0x7fff, 0x01);
+
+    printf("4. Check FW download & Boot MCU...\n");
+    VL53L8CX_WrByte(&Dev.platform, 0x7fff, 0x01);
+    VL53L8CX_WrByte(&Dev.platform, 0x06, 0x03);
+    VL53L8CX_WaitMs(&Dev.platform, 5);
+    VL53L8CX_WrByte(&Dev.platform, 0x7fff, 0x00);
+    VL53L8CX_RdByte(&Dev.platform, 0x7fff, &tmp);
+    VL53L8CX_WrByte(&Dev.platform, 0x0C, 0x01);
+
+    VL53L8CX_WrByte(&Dev.platform, 0x7FFF, 0x00);
+    VL53L8CX_WrByte(&Dev.platform, 0x114, 0x00);
+    VL53L8CX_WrByte(&Dev.platform, 0x115, 0x00);
+    VL53L8CX_WrByte(&Dev.platform, 0x116, 0x42);
+    VL53L8CX_WrByte(&Dev.platform, 0x117, 0x00);
+    VL53L8CX_WrByte(&Dev.platform, 0x0B, 0x00);
+    VL53L8CX_RdByte(&Dev.platform, 0x7fff, &tmp);
+    VL53L8CX_WrByte(&Dev.platform, 0x0C, 0x00);
+    VL53L8CX_WrByte(&Dev.platform, 0x0B, 0x01);
+
+    uint8_t mcu_boot0 = 0, mcu_boot1 = 0;
+    for (int i = 0; i < 500; i++) {
+        VL53L8CX_RdByte(&Dev.platform, 0x06, &mcu_boot0);
+        if (mcu_boot0 & 0x80) {
+            VL53L8CX_RdByte(&Dev.platform, 0x07, &mcu_boot1);
+            if (mcu_boot1 & 0x01) {
+                printf("   MCU BOOTED (poll %d, boot1 = 0x%02X)!\n", i, mcu_boot1);
+                break;
+            }
+        }
+        if (mcu_boot0 & 0x01) {
+            printf("   MCU BOOTED (status0 = 0x%02X)!\n", mcu_boot0);
+            break;
+        }
+        VL53L8CX_WaitMs(&Dev.platform, 1);
+    }
+    printf("   mcu_boot0 = 0x%02X, mcu_boot1 = 0x%02X\n", mcu_boot0, mcu_boot1);
+
+    printf("5. Reading Firmware Checksum on Page 2 @ 0x2FFC...\n");
+    VL53L8CX_WrByte(&Dev.platform, 0x7fff, 0x02);
+    uint8_t buf[4] = {0};
+    VL53L8CX_RdMulti(&Dev.platform, 0x2FFC, buf, 4);
+    printf("   Raw bytes: [0]=0x%02X [1]=0x%02X [2]=0x%02X [3]=0x%02X\n", buf[0], buf[1], buf[2], buf[3]);
+    VL53L8CX_SwapBuffer(buf, 4);
+    uint32_t crc = 0;
+    memcpy(&crc, buf, 4);
+    printf("   Calculated CRC: 0x%08X (Expected: 0xCADF7CAF)\n", crc);
+
+    vl53l8cx_comms_close(&Dev.platform);
+    return 0;
+}
+EOF
+
+gcc -Wall -Wno-missing-braces -Os -g0 -DSPI -I../uld-driver/inc -I../platform -I../examples \
+    -o test_crc test_crc.c \
+    ../uld-driver/src/vl53l8cx_api.c \
+    ../uld-driver/src/vl53l8cx_plugin_detection_thresholds.c \
+    ../uld-driver/src/vl53l8cx_plugin_motion_indicator.c \
+    ../uld-driver/src/vl53l8cx_plugin_xtalk.c \
+    ../platform/platform.c
+
+./test_crc
+"""
+
+    sftp = ssh.open_sftp()
+    with sftp.file('/tmp/run_crc.sh', 'w') as f:
+        f.write(script)
+    sftp.close()
+
+    stdin, stdout, stderr = ssh.exec_command("chmod +x /tmp/run_crc.sh && /tmp/run_crc.sh", get_pty=True)
+
+    for line in iter(stdout.readline, ""):
+        print(line, end="")
+
+    exit_code = stdout.channel.recv_exit_status()
+    print(f"\nExit Code: {exit_code}")
+    ssh.close()
+
+if __name__ == "__main__":
+    check_firmware_crc()

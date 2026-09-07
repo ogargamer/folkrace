@@ -1,0 +1,23 @@
+{
+  "master_line": {
+    "file": "master_cyan_champion_optimal.csv",
+    "min_clearance_cm": 11.624317216200856,
+    "lap_time_s": 4.455103665751029,
+    "friction_mu": 0.6,
+    "safety_margin_cm": 12.0,
+    "track_length_m": 14.122945339833274
+  },
+  "wall_offsets": {
+    "nominal_wall_offset_cm": 25.0,
+    "obstacle_safety_margin_cm": 10.0,
+    "left_wall_min_obstacle_clearance_cm": 10.464362197470916,
+    "right_wall_min_obstacle_clearance_cm": 10.586007523863872,
+    "left_offset_csv": "wall_offset_left_25cm.csv",
+    "right_offset_csv": "wall_offset_right_25cm.csv"
+  },
+  "pipeline_timing_ms": {
+    "voronoi_compute_ms": 105.88,
+    "master_solve_ms": 94.39,
+    "total_execution_ms": 270.01
+  }
+}

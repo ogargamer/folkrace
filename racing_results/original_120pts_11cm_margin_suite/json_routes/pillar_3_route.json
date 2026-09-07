@@ -1,0 +1,14 @@
+{
+  "pillar_id": "Pillar_3",
+  "pillar_name": "Pillar #3 (r=2cm)",
+  "master_side": "Left/Outer",
+  "alternative_side": "Right/Inner",
+  "min_clearance_cm": 11.68,
+  "avg_clearance_cm": 29.76,
+  "passes_9cm_threshold": true,
+  "corridor_gap_cm": 23.36,
+  "lap_time_s": 5.203,
+  "track_len_m": 14.87,
+  "compute_time_ms": 90.51,
+  "csv_file": "alt_route_pillar_3.csv"
+}

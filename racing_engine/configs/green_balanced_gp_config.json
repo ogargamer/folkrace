@@ -1,0 +1,23 @@
+{
+  "profile_name": "Green (Balanced Grand Prix)",
+  "description": "High-efficiency 9-stage balanced racing line with fast convergence and high corner exit speed",
+  "parameters": {
+    "weight_curvature": 2.80,
+    "weight_path_smoothness": 0.060,
+    "weight_jerk_regularization": 0.40,
+    "robot_safety_margin": 0.10,
+    "track_width_nominal": 1.00,
+    "max_boundary_slope": 0.0,
+    "num_progression_stages": 9,
+    "max_solver_sub_iters": 700,
+    "solver_ftol": 1e-8,
+    "solver_gtol": 1e-5,
+    "spline_s": 0.015,
+    "macro_sigma": 4.0
+  },
+  "benchmarks": {
+    "average_solve_ms_10tracks": 2137.8,
+    "average_apex_speed_mps": 2.30,
+    "relative_speedup_vs_baseline": "1.22x"
+  }
+}

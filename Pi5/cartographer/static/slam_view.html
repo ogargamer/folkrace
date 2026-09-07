@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Google Cartographer 2D SLAM Real-Time Visualizer</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/slam_view.css">
+</head>
+<body>
+    <div class="app-layout">
+        <!-- Header -->
+        <header class="header">
+            <div class="brand">
+                <div class="logo-pulse"></div>
+                <div>
+                    <h1>GOOGLE CARTOGRAPHER <span class="badge">2D REAL-TIME SLAM</span></h1>
+                    <p class="subtitle">MS200 LiDAR + BNO08X IMU Real-Time Fusion</p>
+                </div>
+            </div>
+            
+            <div class="metrics-bar">
+                <div class="metric">
+                    <span class="m-label">MAP CELLS</span>
+                    <span class="m-val" id="val-cells">0</span>
+                </div>
+                <div class="metric">
+                    <span class="m-label">MAP SIZE</span>
+                    <span class="m-val" id="val-size">0.0m × 0.0m</span>
+                </div>
+                <div class="metric">
+                    <span class="m-label">ROBOT POSE</span>
+                    <span class="m-val" id="val-pose">X: 0.00m | Y: 0.00m | Yaw: 0.0°</span>
+                </div>
+                <a href="/track_builder" target="_blank" class="btn btn-outline" style="text-decoration: none; padding: 6px 12px; font-size: 11px; border-color: rgba(0, 240, 255, 0.4); color: var(--accent-cyan);">
+                    🏁 Track Studio
+                </a>
+                <div class="status-tag" id="status-tag">
+                    <span class="dot"></span>
+                    <span id="status-text">CONNECTING</span>
+                </div>
+            </div>
+        </header>
+
+        <!-- Canvas Workspace -->
+        <div class="workspace">
+            <canvas id="slam-canvas"></canvas>
+
+            <!-- Floating Control Toolbar -->
+            <div class="toolbar">
+                <button class="tool-btn" id="btn-toggle-debug" title="Toggle Sensor Health & Debug Panel">🔬 Sensor Diagnostics</button>
+                <div class="toolbar-sep"></div>
+                <button class="tool-btn" id="btn-recenter" title="Re-center view on robot">🎯 Center</button>
+                <button class="tool-btn" id="btn-zoom-in" title="Zoom in">🔍 +</button>
+                <button class="tool-btn" id="btn-zoom-out" title="Zoom out">🔍 −</button>
+                <button class="tool-btn" id="btn-reset-view" title="Reset Zoom">🔄 Reset Zoom</button>
+                <div class="toolbar-sep"></div>
+                <button class="tool-btn btn-save" id="btn-save-map" title="Export Current 2D Map PNG">💾 Save Map</button>
+                <button class="tool-btn btn-danger" id="btn-reset-map" title="Clear map and restart SLAM">🗑️ Reset Map</button>
+            </div>
+
+            <!-- Live Sensor Diagnostics Overlay Panel -->
+            <div class="debug-panel" id="debug-panel">
+                <div class="debug-header">
+                    <h3>LIVE SENSOR TELEMETRY & HEALTH</h3>
+                    <button class="debug-close" id="btn-close-debug">✕</button>
+                </div>
+                <div class="debug-grid">
+                    <!-- LiDAR Diagnostics Card -->
+                    <div class="sensor-card" id="card-lidar">
+                        <div class="sensor-card-head">
+                            <div class="sensor-title">
+                                <span class="sensor-icon">📡</span>
+                                <div>
+                                    <h4>MS200 LiDAR (UART4)</h4>
+                                    <span class="sensor-topic">/scan @ 230400 baud</span>
+                                </div>
+                            </div>
+                            <span class="sensor-badge" id="lidar-status-badge">ONLINE</span>
+                        </div>
+                        <div class="sensor-stats">
+                            <div class="stat-box">
+                                <span class="stat-lbl">RATE</span>
+                                <span class="stat-val" id="lidar-hz">-- Hz</span>
+                            </div>
+                            <div class="stat-box">
+                                <span class="stat-lbl">POINTS</span>
+                                <span class="stat-val" id="lidar-pts">-- pts</span>
+                            </div>
+                            <div class="stat-box">
+                                <span class="stat-lbl">MIN DIST</span>
+                                <span class="stat-val" id="lidar-min">-- m</span>
+                            </div>
+                            <div class="stat-box">
+                                <span class="stat-lbl">MAX DIST</span>
+                                <span class="stat-val" id="lidar-max">-- m</span>
+                            </div>
+                        </div>
+                        <div class="sensor-footer">
+                            <span class="health-indicator" id="lidar-health-bar"></span>
+                            <span class="health-text" id="lidar-health-text">Streaming 360° laser sweep</span>
+                        </div>
+                    </div>
+
+                    <!-- BNO08X IMU Diagnostics Card -->
+                    <div class="sensor-card" id="card-imu">
+                        <div class="sensor-card-head">
+                            <div class="sensor-title">
+                                <span class="sensor-icon">🧭</span>
+                                <div>
+                                    <h4>BNO08X 9-DOF IMU</h4>
+                                    <span class="sensor-topic">/imu @ ESP32 UART2 (200Hz)</span>
+                                </div>
+                            </div>
+                            <span class="sensor-badge" id="imu-status-badge">ONLINE</span>
+                        </div>
+                        <div class="sensor-stats imu-stats">
+                            <div class="stat-box wide">
+                                <span class="stat-lbl">FUSED ATTITUDE (RPY)</span>
+                                <span class="stat-val" id="imu-rpy">R: 0.0° | P: 0.0° | Y: 0.0°</span>
+                            </div>
+                            <div class="stat-box">
+                                <span class="stat-lbl">RATE</span>
+                                <span class="stat-val" id="imu-hz">-- Hz</span>
+                            </div>
+                            <div class="stat-box wide">
+                                <span class="stat-lbl">ACCEL (X, Y, Z)</span>
+                                <span class="stat-val" id="imu-accel">0.0, 0.0, 9.8 m/s²</span>
+                            </div>
+                            <div class="stat-box wide">
+                                <span class="stat-lbl">GYRO RATE (X, Y, Z)</span>
+                                <span class="stat-val" id="imu-gyro">0.0, 0.0, 0.0 °/s</span>
+                            </div>
+                        </div>
+                        <div class="sensor-footer">
+                            <span class="health-indicator" id="imu-health-bar"></span>
+                            <span class="health-text" id="imu-health-text">100Hz Hardware Fusion Active</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Legend Overlay -->
+            <div class="legend-overlay">
+                <div class="legend-item"><span class="legend-box occ"></span> Wall / Obstacle</div>
+                <div class="legend-item"><span class="legend-box free"></span> Free Space</div>
+                <div class="legend-item"><span class="legend-box unk"></span> Unknown</div>
+                <div class="legend-item"><span class="legend-box scan-pt"></span> Live Laser Scan</div>
+                <div class="legend-item"><span class="legend-box trail"></span> Trajectory Path</div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/slam_view.js"></script>
+</body>
+</html>

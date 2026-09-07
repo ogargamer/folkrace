@@ -1,0 +1,14 @@
+{
+  "pillar_id": "Pillar_6",
+  "pillar_name": "Pillar #6 (r=5cm)",
+  "master_side": "Right/Inner",
+  "alternative_side": "Left/Outer",
+  "min_clearance_cm": 11.7,
+  "avg_clearance_cm": 30.86,
+  "passes_9cm_threshold": true,
+  "corridor_gap_cm": 23.41,
+  "lap_time_s": 5.561,
+  "track_len_m": 14.68,
+  "compute_time_ms": 91.42,
+  "csv_file": "alt_route_pillar_6.csv"
+}

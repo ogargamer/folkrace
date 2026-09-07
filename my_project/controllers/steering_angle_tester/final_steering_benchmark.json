@@ -1,0 +1,392 @@
+{
+  "static_sweep": [
+    {
+      "virtual_deg": -40.0,
+      "cmd_l_deg": -35.05,
+      "meas_l_deg": -34.01,
+      "cmd_r_deg": -40.0,
+      "meas_r_deg": -38.58,
+      "err_l_deg": 1.03,
+      "err_r_deg": 1.42,
+      "trq_l_Nm": -0.0794,
+      "trq_r_Nm": -0.0835
+    },
+    {
+      "virtual_deg": -35.0,
+      "cmd_l_deg": -31.03,
+      "meas_l_deg": -31.08,
+      "cmd_r_deg": -39.94,
+      "meas_r_deg": -39.92,
+      "err_l_deg": -0.05,
+      "err_r_deg": 0.03,
+      "trq_l_Nm": 0.0692,
+      "trq_r_Nm": -0.0685
+    },
+    {
+      "virtual_deg": -30.0,
+      "cmd_l_deg": -26.96,
+      "meas_l_deg": -27.03,
+      "cmd_r_deg": -33.72,
+      "meas_r_deg": -33.83,
+      "err_l_deg": -0.07,
+      "err_r_deg": -0.11,
+      "trq_l_Nm": 0.0686,
+      "trq_r_Nm": 0.07
+    },
+    {
+      "virtual_deg": -25.0,
+      "cmd_l_deg": -22.8,
+      "meas_l_deg": -22.88,
+      "cmd_r_deg": -27.63,
+      "meas_r_deg": -27.73,
+      "err_l_deg": -0.07,
+      "err_r_deg": -0.11,
+      "trq_l_Nm": 0.0674,
+      "trq_r_Nm": 0.0688
+    },
+    {
+      "virtual_deg": -20.0,
+      "cmd_l_deg": -18.54,
+      "meas_l_deg": -18.62,
+      "cmd_r_deg": -21.7,
+      "meas_r_deg": -21.8,
+      "err_l_deg": -0.07,
+      "err_r_deg": -0.1,
+      "trq_l_Nm": 0.0661,
+      "trq_r_Nm": 0.0671
+    },
+    {
+      "virtual_deg": -15.0,
+      "cmd_l_deg": -14.15,
+      "meas_l_deg": -14.23,
+      "cmd_r_deg": -15.95,
+      "meas_r_deg": -16.05,
+      "err_l_deg": -0.08,
+      "err_r_deg": -0.1,
+      "trq_l_Nm": 0.0645,
+      "trq_r_Nm": 0.0652
+    },
+    {
+      "virtual_deg": -10.0,
+      "cmd_l_deg": -9.61,
+      "meas_l_deg": -9.69,
+      "cmd_r_deg": -10.42,
+      "meas_r_deg": -10.52,
+      "err_l_deg": -0.08,
+      "err_r_deg": -0.1,
+      "trq_l_Nm": 0.0626,
+      "trq_r_Nm": 0.063
+    },
+    {
+      "virtual_deg": -5.0,
+      "cmd_l_deg": -4.9,
+      "meas_l_deg": -4.98,
+      "cmd_r_deg": -5.1,
+      "meas_r_deg": -5.2,
+      "err_l_deg": -0.08,
+      "err_r_deg": -0.09,
+      "trq_l_Nm": 0.0604,
+      "trq_r_Nm": 0.0605
+    },
+    {
+      "virtual_deg": 0.0,
+      "cmd_l_deg": 0.0,
+      "meas_l_deg": -0.09,
+      "cmd_r_deg": 0.0,
+      "meas_r_deg": -0.09,
+      "err_l_deg": -0.09,
+      "err_r_deg": -0.09,
+      "trq_l_Nm": 0.0579,
+      "trq_r_Nm": 0.058
+    },
+    {
+      "virtual_deg": 5.0,
+      "cmd_l_deg": 5.1,
+      "meas_l_deg": 5.01,
+      "cmd_r_deg": 4.9,
+      "meas_r_deg": 4.81,
+      "err_l_deg": -0.09,
+      "err_r_deg": -0.09,
+      "trq_l_Nm": 0.0604,
+      "trq_r_Nm": 0.0603
+    },
+    {
+      "virtual_deg": 10.0,
+      "cmd_l_deg": 10.42,
+      "meas_l_deg": 10.33,
+      "cmd_r_deg": 9.61,
+      "meas_r_deg": 9.53,
+      "err_l_deg": -0.09,
+      "err_r_deg": -0.08,
+      "trq_l_Nm": 0.0628,
+      "trq_r_Nm": 0.0625
+    },
+    {
+      "virtual_deg": 15.0,
+      "cmd_l_deg": 15.95,
+      "meas_l_deg": 15.86,
+      "cmd_r_deg": 14.15,
+      "meas_r_deg": 14.07,
+      "err_l_deg": -0.1,
+      "err_r_deg": -0.08,
+      "trq_l_Nm": 0.065,
+      "trq_r_Nm": 0.0644
+    },
+    {
+      "virtual_deg": 20.0,
+      "cmd_l_deg": 21.7,
+      "meas_l_deg": 21.59,
+      "cmd_r_deg": 18.54,
+      "meas_r_deg": 18.47,
+      "err_l_deg": -0.1,
+      "err_r_deg": -0.08,
+      "trq_l_Nm": 0.067,
+      "trq_r_Nm": 0.066
+    },
+    {
+      "virtual_deg": 25.0,
+      "cmd_l_deg": 27.63,
+      "meas_l_deg": 27.52,
+      "cmd_r_deg": 22.8,
+      "meas_r_deg": 22.73,
+      "err_l_deg": -0.1,
+      "err_r_deg": -0.07,
+      "trq_l_Nm": 0.0687,
+      "trq_r_Nm": 0.0674
+    },
+    {
+      "virtual_deg": 30.0,
+      "cmd_l_deg": 33.72,
+      "meas_l_deg": 33.62,
+      "cmd_r_deg": 26.96,
+      "meas_r_deg": 26.89,
+      "err_l_deg": -0.11,
+      "err_r_deg": -0.07,
+      "trq_l_Nm": 0.07,
+      "trq_r_Nm": 0.0685
+    },
+    {
+      "virtual_deg": 35.0,
+      "cmd_l_deg": 39.94,
+      "meas_l_deg": 39.83,
+      "cmd_r_deg": 31.03,
+      "meas_r_deg": 30.96,
+      "err_l_deg": -0.11,
+      "err_r_deg": -0.07,
+      "trq_l_Nm": 0.0708,
+      "trq_r_Nm": 0.0694
+    },
+    {
+      "virtual_deg": 40.0,
+      "cmd_l_deg": 40.0,
+      "meas_l_deg": 40.0,
+      "cmd_r_deg": 35.05,
+      "meas_r_deg": 34.98,
+      "err_l_deg": -0.0,
+      "err_r_deg": -0.07,
+      "trq_l_Nm": 0.0286,
+      "trq_r_Nm": 0.0701
+    }
+  ],
+  "dynamic_low_speed": [
+    {
+      "virtual_deg": -30.0,
+      "cmd_l_deg": -26.96,
+      "meas_l_deg": -2.9,
+      "cmd_r_deg": -33.72,
+      "meas_r_deg": -16.31,
+      "err_l_deg": 24.06,
+      "err_r_deg": 17.42,
+      "yaw_rate": -2.11
+    },
+    {
+      "virtual_deg": -20.0,
+      "cmd_l_deg": -18.54,
+      "meas_l_deg": -3.73,
+      "cmd_r_deg": -21.7,
+      "meas_r_deg": -10.8,
+      "err_l_deg": 14.81,
+      "err_r_deg": 10.9,
+      "yaw_rate": -1.596
+    },
+    {
+      "virtual_deg": -10.0,
+      "cmd_l_deg": -9.61,
+      "meas_l_deg": -3.44,
+      "cmd_r_deg": -10.42,
+      "meas_r_deg": -5.29,
+      "err_l_deg": 6.18,
+      "err_r_deg": 5.13,
+      "yaw_rate": -0.74
+    },
+    {
+      "virtual_deg": 0.0,
+      "cmd_l_deg": 0.0,
+      "meas_l_deg": 0.0,
+      "cmd_r_deg": 0.0,
+      "meas_r_deg": -0.0,
+      "err_l_deg": 0.0,
+      "err_r_deg": -0.0,
+      "yaw_rate": -0.0
+    },
+    {
+      "virtual_deg": 10.0,
+      "cmd_l_deg": 10.42,
+      "meas_l_deg": 5.28,
+      "cmd_r_deg": 9.61,
+      "meas_r_deg": 3.45,
+      "err_l_deg": -5.14,
+      "err_r_deg": -6.16,
+      "yaw_rate": 0.711
+    },
+    {
+      "virtual_deg": 20.0,
+      "cmd_l_deg": 21.7,
+      "meas_l_deg": 11.18,
+      "cmd_r_deg": 18.54,
+      "meas_r_deg": 4.05,
+      "err_l_deg": -10.52,
+      "err_r_deg": -14.49,
+      "yaw_rate": 1.548
+    },
+    {
+      "virtual_deg": 30.0,
+      "cmd_l_deg": 33.72,
+      "meas_l_deg": 16.32,
+      "cmd_r_deg": 26.96,
+      "meas_r_deg": 2.44,
+      "err_l_deg": -17.41,
+      "err_r_deg": -24.52,
+      "yaw_rate": 2.354
+    }
+  ],
+  "dynamic_high_speed": [
+    {
+      "virtual_deg": -30.0,
+      "cmd_l_deg": -26.96,
+      "meas_l_deg": 2.97,
+      "cmd_r_deg": -33.72,
+      "meas_r_deg": -2.86,
+      "err_l_deg": 29.93,
+      "err_r_deg": 30.86,
+      "yaw_rate": -1.833
+    },
+    {
+      "virtual_deg": -20.0,
+      "cmd_l_deg": -18.54,
+      "meas_l_deg": 5.08,
+      "cmd_r_deg": -21.7,
+      "meas_r_deg": -2.14,
+      "err_l_deg": 23.62,
+      "err_r_deg": 19.55,
+      "yaw_rate": -0.622
+    },
+    {
+      "virtual_deg": -10.0,
+      "cmd_l_deg": -9.61,
+      "meas_l_deg": 0.98,
+      "cmd_r_deg": -10.42,
+      "meas_r_deg": -0.93,
+      "err_l_deg": 10.6,
+      "err_r_deg": 9.49,
+      "yaw_rate": -0.258
+    },
+    {
+      "virtual_deg": 0.0,
+      "cmd_l_deg": 0.0,
+      "meas_l_deg": 0.0,
+      "cmd_r_deg": 0.0,
+      "meas_r_deg": -0.0,
+      "err_l_deg": 0.0,
+      "err_r_deg": -0.0,
+      "yaw_rate": 0.0
+    },
+    {
+      "virtual_deg": 10.0,
+      "cmd_l_deg": 10.42,
+      "meas_l_deg": 0.93,
+      "cmd_r_deg": 9.61,
+      "meas_r_deg": -0.96,
+      "err_l_deg": -9.49,
+      "err_r_deg": -10.57,
+      "yaw_rate": 0.259
+    },
+    {
+      "virtual_deg": 20.0,
+      "cmd_l_deg": 21.7,
+      "meas_l_deg": 2.14,
+      "cmd_r_deg": 18.54,
+      "meas_r_deg": -5.06,
+      "err_l_deg": -19.55,
+      "err_r_deg": -23.6,
+      "yaw_rate": 0.622
+    },
+    {
+      "virtual_deg": 30.0,
+      "cmd_l_deg": 33.72,
+      "meas_l_deg": 2.86,
+      "cmd_r_deg": 26.96,
+      "meas_r_deg": -2.94,
+      "err_l_deg": -30.87,
+      "err_r_deg": -29.9,
+      "yaw_rate": 1.832
+    }
+  ],
+  "cpp_planner_scenarios": [
+    {
+      "scenario": "TARGET SHARP LEFT",
+      "target": "(-0.80, 1.20)",
+      "plan_steer_deg": 40.0,
+      "plan_speed_mps": 0.92,
+      "ediff_l_deg": 40.0,
+      "meas_l_deg": 18.66,
+      "ediff_r_deg": 35.05,
+      "meas_r_deg": 7.45,
+      "yaw_rate": 2.165
+    },
+    {
+      "scenario": "TARGET MILD LEFT",
+      "target": "(-0.40, 1.50)",
+      "plan_steer_deg": 40.0,
+      "plan_speed_mps": 1.03,
+      "ediff_l_deg": 40.0,
+      "meas_l_deg": 14.02,
+      "ediff_r_deg": 35.05,
+      "meas_r_deg": 5.32,
+      "yaw_rate": 1.058
+    },
+    {
+      "scenario": "TARGET STRAIGHT",
+      "target": "(0.00, 1.60)",
+      "plan_steer_deg": 0.0,
+      "plan_speed_mps": 1.68,
+      "ediff_l_deg": 0.0,
+      "meas_l_deg": 0.03,
+      "ediff_r_deg": 0.0,
+      "meas_r_deg": -0.0,
+      "yaw_rate": 0.0
+    },
+    {
+      "scenario": "TARGET MILD RIGHT",
+      "target": "(0.40, 1.50)",
+      "plan_steer_deg": -40.0,
+      "plan_speed_mps": 1.03,
+      "ediff_l_deg": -35.05,
+      "meas_l_deg": -5.36,
+      "ediff_r_deg": -40.0,
+      "meas_r_deg": -13.99,
+      "yaw_rate": -1.055
+    },
+    {
+      "scenario": "TARGET SHARP RIGHT",
+      "target": "(0.80, 1.20)",
+      "plan_steer_deg": -40.0,
+      "plan_speed_mps": 0.92,
+      "ediff_l_deg": -35.05,
+      "meas_l_deg": -7.43,
+      "ediff_r_deg": -40.0,
+      "meas_r_deg": -18.68,
+      "yaw_rate": -2.166
+    }
+  ]
+}

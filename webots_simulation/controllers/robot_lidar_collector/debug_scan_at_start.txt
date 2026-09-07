@@ -1,0 +1,18 @@
+Robot Position in Webots: [0.0911 0.05   0.0888]
+Robot Orientation Matrix:
+[[ 0.81457511  0.         -0.58005809]
+ [ 0.          1.          0.        ]
+ [ 0.58005809  0.          0.81457511]]
+Total cloud points: 450
+Total range entries: 450
+
+Ray   0 (Range 0.156m): Local=(-0.156, 0.001, 0.000) | Global=(-0.036, -0.002)
+Ray  45 (Range 0.193m): Local=(-0.155, 0.115, 0.000) | Global=(-0.035, -0.001)
+Ray  90 (Range 0.513m): Local=(-0.155, 0.489, 0.000) | Global=(-0.035, -0.001)
+Ray 135 (Range infm): Local=(inf, inf, nan) | Global=(nan, nan)
+Ray 180 (Range infm): Local=(inf, inf, nan) | Global=(nan, nan)
+Ray 225 (Range 0.712m): Local=(0.712, -0.005, 0.000) | Global=(0.671, 0.502)
+Ray 270 (Range infm): Local=(inf, -inf, nan) | Global=(nan, nan)
+Ray 315 (Range infm): Local=(inf, -inf, nan) | Global=(nan, nan)
+Ray 360 (Range infm): Local=(-inf, -inf, nan) | Global=(nan, nan)
+Ray 405 (Range infm): Local=(-inf, -inf, nan) | Global=(nan, nan)

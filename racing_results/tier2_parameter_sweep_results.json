@@ -1,0 +1,442 @@
+{
+  "FTG": [
+    {
+      "dist_m": 36.73,
+      "mean_v_mps": 2.45,
+      "max_v_mps": 2.5,
+      "min_clearance_m": 0.02,
+      "mean_steer_rate_rad_s": 1.04,
+      "collisions": 27,
+      "config": "FTG-1 (Ultra-Short Lfw 0.30m, Grip 1.05)"
+    },
+    {
+      "dist_m": 32.01,
+      "mean_v_mps": 2.13,
+      "max_v_mps": 2.2,
+      "min_clearance_m": 0.02,
+      "mean_steer_rate_rad_s": 0.81,
+      "collisions": 17,
+      "config": "FTG-2 (Short Lfw 0.35m, High Safety 0.70)"
+    },
+    {
+      "dist_m": 36.36,
+      "mean_v_mps": 2.42,
+      "max_v_mps": 2.5,
+      "min_clearance_m": 0.02,
+      "mean_steer_rate_rad_s": 0.9,
+      "collisions": 23,
+      "config": "FTG-3 (Medium Lfw 0.45m, Wide Disparity)"
+    },
+    {
+      "dist_m": 40.88,
+      "mean_v_mps": 2.73,
+      "max_v_mps": 2.8,
+      "min_clearance_m": 0.02,
+      "mean_steer_rate_rad_s": 0.39,
+      "collisions": 33,
+      "config": "FTG-4 (Long Lfw 0.70m Highway Sweep)"
+    },
+    {
+      "dist_m": 38.41,
+      "mean_v_mps": 2.56,
+      "max_v_mps": 2.6,
+      "min_clearance_m": 0.02,
+      "mean_steer_rate_rad_s": 0.23,
+      "collisions": 30,
+      "config": "FTG-5 (Ultra-Long Lfw 0.85m High Preview)"
+    },
+    {
+      "dist_m": 29.46,
+      "mean_v_mps": 1.96,
+      "max_v_mps": 2.0,
+      "min_clearance_m": 0.02,
+      "mean_steer_rate_rad_s": 1.05,
+      "collisions": 25,
+      "config": "FTG-6 (Low Mu 0.60 Slick Track)"
+    },
+    {
+      "dist_m": 44.28,
+      "mean_v_mps": 2.95,
+      "max_v_mps": 3.0,
+      "min_clearance_m": 0.02,
+      "mean_steer_rate_rad_s": 0.59,
+      "collisions": 10,
+      "config": "FTG-7 (High Mu 1.15 High Grip Slicks)"
+    },
+    {
+      "dist_m": 35.03,
+      "mean_v_mps": 2.34,
+      "max_v_mps": 2.4,
+      "min_clearance_m": 0.02,
+      "mean_steer_rate_rad_s": 0.98,
+      "collisions": 26,
+      "config": "FTG-8 (Hyper-Sensitive Disparity 0.15m)"
+    },
+    {
+      "dist_m": 38.28,
+      "mean_v_mps": 2.55,
+      "max_v_mps": 2.6,
+      "min_clearance_m": 0.02,
+      "mean_steer_rate_rad_s": 0.51,
+      "collisions": 11,
+      "config": "FTG-9 (Coarse Disparity 0.45m)"
+    },
+    {
+      "dist_m": 32.44,
+      "mean_v_mps": 2.16,
+      "max_v_mps": 2.2,
+      "min_clearance_m": 0.02,
+      "mean_steer_rate_rad_s": 0.35,
+      "collisions": 12,
+      "config": "FTG-10 (High Safety Margin Eta 0.65)"
+    },
+    {
+      "dist_m": 40.52,
+      "mean_v_mps": 2.7,
+      "max_v_mps": 2.8,
+      "min_clearance_m": 0.02,
+      "mean_steer_rate_rad_s": 1.46,
+      "collisions": 11,
+      "config": "FTG-11 (Aggressive Pace 2.80m/s)"
+    },
+    {
+      "dist_m": 36.73,
+      "mean_v_mps": 2.45,
+      "max_v_mps": 2.5,
+      "min_clearance_m": 0.02,
+      "mean_steer_rate_rad_s": 0.71,
+      "collisions": 13,
+      "config": "FTG-12 (Balanced Agile Overtaker)"
+    }
+  ],
+  "WERLING": [
+    {
+      "dist_m": 35.94,
+      "mean_v_mps": 2.4,
+      "max_v_mps": 2.5,
+      "min_clearance_m": 0.073,
+      "mean_steer_rate_rad_s": 0.37,
+      "collisions": 0,
+      "config": "Werling-1 (Narrow Lateral Mesh +-0.25m)"
+    },
+    {
+      "dist_m": 34.87,
+      "mean_v_mps": 2.32,
+      "max_v_mps": 2.5,
+      "min_clearance_m": 0.156,
+      "mean_steer_rate_rad_s": 0.39,
+      "collisions": 0,
+      "config": "Werling-2 (Wide Lateral Mesh +-0.55m)"
+    },
+    {
+      "dist_m": 28.78,
+      "mean_v_mps": 1.92,
+      "max_v_mps": 2.4,
+      "min_clearance_m": 0.02,
+      "mean_steer_rate_rad_s": 0.61,
+      "collisions": 52,
+      "config": "Werling-3 (Fast Reactive 0.20-0.40s)"
+    },
+    {
+      "dist_m": 36.01,
+      "mean_v_mps": 2.4,
+      "max_v_mps": 2.6,
+      "min_clearance_m": 0.115,
+      "mean_steer_rate_rad_s": 0.43,
+      "collisions": 0,
+      "config": "Werling-4 (Extended Preview 0.40-0.80s)"
+    },
+    {
+      "dist_m": 32.44,
+      "mean_v_mps": 2.16,
+      "max_v_mps": 2.5,
+      "min_clearance_m": 0.159,
+      "mean_steer_rate_rad_s": 0.66,
+      "collisions": 0,
+      "config": "Werling-5 (Dense 9-Beam Lateral Grid)"
+    },
+    {
+      "dist_m": 27.57,
+      "mean_v_mps": 1.84,
+      "max_v_mps": 2.1,
+      "min_clearance_m": 0.147,
+      "mean_steer_rate_rad_s": 0.4,
+      "collisions": 0,
+      "config": "Werling-6 (Conservative Grip Mu 0.65)"
+    },
+    {
+      "dist_m": 40.51,
+      "mean_v_mps": 2.7,
+      "max_v_mps": 2.9,
+      "min_clearance_m": 0.076,
+      "mean_steer_rate_rad_s": 0.4,
+      "collisions": 0,
+      "config": "Werling-7 (High Grip Mu 1.10)"
+    },
+    {
+      "dist_m": 34.7,
+      "mean_v_mps": 2.31,
+      "max_v_mps": 2.5,
+      "min_clearance_m": 0.144,
+      "mean_steer_rate_rad_s": 0.35,
+      "collisions": 0,
+      "config": "Werling-8 (Fine Step dt=0.03s)"
+    },
+    {
+      "dist_m": 35.37,
+      "mean_v_mps": 2.36,
+      "max_v_mps": 2.5,
+      "min_clearance_m": 0.125,
+      "mean_steer_rate_rad_s": 0.43,
+      "collisions": 0,
+      "config": "Werling-9 (Coarse Step dt=0.08s)"
+    },
+    {
+      "dist_m": 33.84,
+      "mean_v_mps": 2.26,
+      "max_v_mps": 2.5,
+      "min_clearance_m": 0.02,
+      "mean_steer_rate_rad_s": 0.4,
+      "collisions": 10,
+      "config": "Werling-10 (Asymmetric Left Bias)"
+    },
+    {
+      "dist_m": 35.27,
+      "mean_v_mps": 2.35,
+      "max_v_mps": 2.5,
+      "min_clearance_m": 0.128,
+      "mean_steer_rate_rad_s": 0.4,
+      "collisions": 0,
+      "config": "Werling-11 (Asymmetric Right Bias)"
+    },
+    {
+      "dist_m": 36.96,
+      "mean_v_mps": 2.46,
+      "max_v_mps": 2.6,
+      "min_clearance_m": 0.138,
+      "mean_steer_rate_rad_s": 0.4,
+      "collisions": 0,
+      "config": "Werling-12 (Optimal Balanced Sprint)"
+    }
+  ],
+  "MPPI": [
+    {
+      "dist_m": 35.73,
+      "mean_v_mps": 2.38,
+      "max_v_mps": 2.4,
+      "min_clearance_m": 0.903,
+      "mean_steer_rate_rad_s": 4.3,
+      "collisions": 0,
+      "config": "MPPI-1 (Light Rollout K=200, N=10)"
+    },
+    {
+      "dist_m": 37.38,
+      "mean_v_mps": 2.49,
+      "max_v_mps": 2.5,
+      "min_clearance_m": 0.968,
+      "mean_steer_rate_rad_s": 3.09,
+      "collisions": 0,
+      "config": "MPPI-2 (Dense Rollout K=800, N=20)"
+    },
+    {
+      "dist_m": 37.33,
+      "mean_v_mps": 2.49,
+      "max_v_mps": 2.5,
+      "min_clearance_m": 0.78,
+      "mean_steer_rate_rad_s": 1.82,
+      "collisions": 0,
+      "config": "MPPI-3 (Tight Steer Noise sigma=0.08)"
+    },
+    {
+      "dist_m": 37.38,
+      "mean_v_mps": 2.49,
+      "max_v_mps": 2.5,
+      "min_clearance_m": 1.184,
+      "mean_steer_rate_rad_s": 4.75,
+      "collisions": 0,
+      "config": "MPPI-4 (Wide Steer Exploration sigma=0.32)"
+    },
+    {
+      "dist_m": 34.1,
+      "mean_v_mps": 2.27,
+      "max_v_mps": 2.3,
+      "min_clearance_m": 0.967,
+      "mean_steer_rate_rad_s": 3.83,
+      "collisions": 0,
+      "config": "MPPI-5 (Low Accel Noise sigma_a=1.0)"
+    },
+    {
+      "dist_m": 40.36,
+      "mean_v_mps": 2.69,
+      "max_v_mps": 2.7,
+      "min_clearance_m": 1.019,
+      "mean_steer_rate_rad_s": 3.88,
+      "collisions": 0,
+      "config": "MPPI-6 (High Accel Noise sigma_a=4.5)"
+    },
+    {
+      "dist_m": 37.39,
+      "mean_v_mps": 2.49,
+      "max_v_mps": 2.5,
+      "min_clearance_m": 1.047,
+      "mean_steer_rate_rad_s": 4.03,
+      "collisions": 0,
+      "config": "MPPI-7 (Sharp Temperature lambda=2.5)"
+    },
+    {
+      "dist_m": 37.27,
+      "mean_v_mps": 2.48,
+      "max_v_mps": 2.5,
+      "min_clearance_m": 0.963,
+      "mean_steer_rate_rad_s": 3.47,
+      "collisions": 0,
+      "config": "MPPI-8 (Smooth Temperature lambda=22.0)"
+    },
+    {
+      "dist_m": 38.84,
+      "mean_v_mps": 2.59,
+      "max_v_mps": 2.6,
+      "min_clearance_m": 0.951,
+      "mean_steer_rate_rad_s": 4.53,
+      "collisions": 0,
+      "config": "MPPI-9 (Deep Horizon N=25, dt=0.04s)"
+    },
+    {
+      "dist_m": 35.79,
+      "mean_v_mps": 2.39,
+      "max_v_mps": 2.4,
+      "min_clearance_m": 1.024,
+      "mean_steer_rate_rad_s": 4.39,
+      "collisions": 0,
+      "config": "MPPI-10 (Fast Step dt=0.03s, N=15)"
+    },
+    {
+      "dist_m": 29.86,
+      "mean_v_mps": 1.99,
+      "max_v_mps": 2.0,
+      "min_clearance_m": 0.848,
+      "mean_steer_rate_rad_s": 3.18,
+      "collisions": 0,
+      "config": "MPPI-11 (Conservative Pace 2.0m/s)"
+    },
+    {
+      "dist_m": 38.12,
+      "mean_v_mps": 2.54,
+      "max_v_mps": 2.55,
+      "min_clearance_m": 0.96,
+      "mean_steer_rate_rad_s": 3.64,
+      "collisions": 0,
+      "config": "MPPI-12 (Optimal High-Res K=600, N=18)"
+    }
+  ],
+  "MPCC": [
+    {
+      "dist_m": 20.45,
+      "mean_v_mps": 1.36,
+      "max_v_mps": 2.4,
+      "min_clearance_m": 0.02,
+      "mean_steer_rate_rad_s": 9.61,
+      "collisions": 32,
+      "config": "MPCC-1 (Short Horizon N=8, dt=0.035s)"
+    },
+    {
+      "dist_m": 19.76,
+      "mean_v_mps": 1.32,
+      "max_v_mps": 2.6,
+      "min_clearance_m": 0.02,
+      "mean_steer_rate_rad_s": 9.64,
+      "collisions": 36,
+      "config": "MPCC-2 (Extended Horizon N=16, dt=0.045s)"
+    },
+    {
+      "dist_m": 20.45,
+      "mean_v_mps": 1.36,
+      "max_v_mps": 2.4,
+      "min_clearance_m": 0.02,
+      "mean_steer_rate_rad_s": 9.61,
+      "collisions": 32,
+      "config": "MPCC-3 (High Frequency dt=0.025s, N=12)"
+    },
+    {
+      "dist_m": 19.76,
+      "mean_v_mps": 1.32,
+      "max_v_mps": 2.6,
+      "min_clearance_m": 0.02,
+      "mean_steer_rate_rad_s": 9.64,
+      "collisions": 36,
+      "config": "MPCC-4 (Long Step dt=0.060s, N=10)"
+    },
+    {
+      "dist_m": 21.32,
+      "mean_v_mps": 1.42,
+      "max_v_mps": 2.1,
+      "min_clearance_m": 0.02,
+      "mean_steer_rate_rad_s": 9.53,
+      "collisions": 25,
+      "config": "MPCC-5 (Conservative Grip Mu 0.65)"
+    },
+    {
+      "dist_m": 19.04,
+      "mean_v_mps": 1.27,
+      "max_v_mps": 2.9,
+      "min_clearance_m": 0.124,
+      "mean_steer_rate_rad_s": 9.76,
+      "collisions": 0,
+      "config": "MPCC-6 (High Grip Mu 1.10)"
+    },
+    {
+      "dist_m": 12.99,
+      "mean_v_mps": 0.87,
+      "max_v_mps": 1.8,
+      "min_clearance_m": 0.02,
+      "mean_steer_rate_rad_s": 8.93,
+      "collisions": 13,
+      "config": "MPCC-7 (Ultra-Safe Pace 1.8m/s)"
+    },
+    {
+      "dist_m": 19.66,
+      "mean_v_mps": 1.31,
+      "max_v_mps": 2.8,
+      "min_clearance_m": 0.029,
+      "mean_steer_rate_rad_s": 9.67,
+      "collisions": 6,
+      "config": "MPCC-8 (Aggressive Sprint 2.8m/s)"
+    },
+    {
+      "dist_m": 22.2,
+      "mean_v_mps": 1.48,
+      "max_v_mps": 2.3,
+      "min_clearance_m": 0.02,
+      "mean_steer_rate_rad_s": 9.56,
+      "collisions": 20,
+      "config": "MPCC-9 (Compact Horizon N=10, dt=0.030s)"
+    },
+    {
+      "dist_m": 19.76,
+      "mean_v_mps": 1.32,
+      "max_v_mps": 2.6,
+      "min_clearance_m": 0.02,
+      "mean_steer_rate_rad_s": 9.64,
+      "collisions": 36,
+      "config": "MPCC-10 (Deep Lookahead N=15, dt=0.050s)"
+    },
+    {
+      "dist_m": 22.28,
+      "mean_v_mps": 1.49,
+      "max_v_mps": 2.25,
+      "min_clearance_m": 0.02,
+      "mean_steer_rate_rad_s": 9.62,
+      "collisions": 18,
+      "config": "MPCC-11 (Grip Buffer Mu 0.75)"
+    },
+    {
+      "dist_m": 19.76,
+      "mean_v_mps": 1.32,
+      "max_v_mps": 2.5,
+      "min_clearance_m": 0.02,
+      "mean_steer_rate_rad_s": 9.65,
+      "collisions": 16,
+      "config": "MPCC-12 (Optimal Balance N=12, dt=0.040s)"
+    }
+  ]
+}

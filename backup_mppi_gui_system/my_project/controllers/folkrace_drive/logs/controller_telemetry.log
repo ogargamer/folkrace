@@ -1,0 +1,11 @@
+=== FOLKRACE CONTROLLER INITIALIZED: Folkrace ===
+[FRENETQP] idx=  5 pos=(+0.70,+0.02,0.027) v=1.80m/s ( 6.5km/h) | Steer=+14.9° | ToF[12]: [150,150,150,150 | 150,150,150,150 | 150,150,150,150]cm | Dev= -7.8cm | [NORMAL]
+[FRENETQP] idx=  7 pos=(+0.99,+0.14,0.027) v=2.31m/s ( 8.3km/h) | Steer= -0.1° | ToF[12]: [150,150,150,150 | 150,150,150,150 | 150,150,150,150]cm | Dev= -1.9cm | [NORMAL]
+[FRENETQP] idx= 10 pos=(+1.31,+0.29,0.027) v=2.44m/s ( 8.8km/h) | Steer= +1.8° | ToF[12]: [150,150,150,150 | 150,150,150,150 | 150,150,150,150]cm | Dev= +1.4cm | [NORMAL]
+[FRENETQP] idx= 13 pos=(+1.65,+0.45,0.027) v=2.54m/s ( 9.1km/h) | Steer= +6.0° | ToF[12]: [150,150,150,150 | 150,150,150,150 | 150,150,150,150]cm | Dev= +1.4cm | [NORMAL]
+[FRENETQP] idx= 16 pos=(+1.99,+0.66,0.027) v=2.74m/s ( 9.9km/h) | Steer= +6.8° | ToF[12]: [150,150,150,150 | 150,150,150,150 | 150,150,150,150]cm | Dev= -0.1cm | [NORMAL]
+[FRENETQP] idx= 20 pos=(+2.31,+0.89,0.027) v=2.50m/s ( 9.0km/h) | Steer= +7.9° | ToF[12]: [150,150,150,150 | 150,150,150,150 | 150,150,150,150]cm | Dev= -2.0cm | [NORMAL]
+
+*** [CRASH DETECTED #1] High-G Impact (182.4 m/s^2) at idx=20, pos=(+2.35,+0.93), v=2.50m/s ***
+[FRENETQP] idx= 21 pos=(+2.44,+0.99,0.030) v=1.98m/s ( 7.1km/h) | Steer=+30.0° | ToF[12]: [150,150,150,150 | 150,150,150,150 | 150,150,150,150]cm | Dev= -4.0cm | [OVERSTEER]
+[CONTROLLER TERMINATION] robot.step() returned -1 at step=106, sim_time=1.06s, last_idx=21

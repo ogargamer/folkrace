@@ -1,0 +1,14 @@
+{
+  "status": "COMPLETED",
+  "distance_m": 17.151,
+  "mean_speed_mps": 0.258,
+  "max_speed_mps": 2.604,
+  "laps_completed": 0,
+  "lap_times": [],
+  "best_lap_time_s": 999.0,
+  "collision_count": 158,
+  "mean_wall_proximity_cost": 13643.98,
+  "steering_variance": 0.14744,
+  "stuck_abort": false,
+  "sim_duration_s": 18.75
+}

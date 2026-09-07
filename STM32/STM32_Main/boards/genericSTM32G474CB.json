@@ -1,0 +1,48 @@
+{
+  "build": {
+    "arduino": {
+      "variant_h": "variant_generic.h"
+    },
+    "core": "stm32",
+    "cpu": "cortex-m4",
+    "extra_flags": "-DSTM32G4xx -DSTM32G474xx",
+    "f_cpu": "170000000L",
+    "mcu": "stm32g474cbt6",
+    "product_line": "STM32G474xx",
+    "variant": "STM32G4xx/G473C(B-C-E)T_G474C(B-C-E)T_G483CET_G484CET"
+  },
+  "connectivity": [
+    "can"
+  ],
+  "debug": {
+    "default_tools": [
+      "stlink"
+    ],
+    "jlink_device": "STM32G474CB",
+    "onboard_tools": [
+      "stlink"
+    ],
+    "openocd_target": "stm32g4x",
+    "svd_path": "STM32G474xx.svd"
+  },
+  "frameworks": [
+    "arduino",
+    "stm32cube",
+    "cmsis"
+  ],
+  "name": "Generic STM32G474CB",
+  "url": "https://www.st.com/en/microcontrollers-microprocessors/stm32g474cb.html",
+  "vendor": "STMicroelectronics",
+  "upload": {
+    "maximum_ram_size": 131072,
+    "maximum_size": 131072,
+    "protocol": "stlink",
+    "protocols": [
+      "stlink",
+      "jlink",
+      "cmsis-dap",
+      "blackmagic",
+      "dfu"
+    ]
+  }
+}

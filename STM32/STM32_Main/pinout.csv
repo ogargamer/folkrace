@@ -1,0 +1,34 @@
+Pin,Role,Peripheral,Channel/Type,Alternate Function,Description
+PA0,M2_IN1,TIM2,CH1,AF1,Motor 2 Driver Phase A PWM
+PA1,M2_IN2,TIM2,CH2,AF1,Motor 2 Driver Phase B PWM
+PA2,M2_IN3,TIM2,CH3,AF1,Motor 2 Driver Phase C PWM
+PA3,ENC4_A,GPIO,EXTI3,-,Encoder 4 Channel A Input
+PA4,M2_EN,GPIO,Digital Output,-,Motor 2 Driver Enable (Active High)
+PA5,M1_EN,GPIO,Digital Output,-,Motor 1 Driver Enable (Active High)
+PA6,ENC3_B,GPIO,EXTI6,-,Encoder 3 Channel B Input
+PA7,ENC3_A,GPIO,EXTI7,-,Encoder 3 Channel A Input
+PA8,M1_IN1,TIM1,CH1,AF6,Motor 1 Driver Phase A PWM
+PA9,M1_IN2,TIM1,CH2,AF6,Motor 1 Driver Phase B PWM
+PA10,M1_IN3,TIM1,CH3,AF6,Motor 1 Driver Phase C PWM
+PA11,M4_IN1,TIM4,CH1,AF10,Motor 4 Driver Phase A PWM
+PA12,M4_IN2,TIM4,CH2,AF10,Motor 4 Driver Phase B PWM
+PA13,SWDIO,SYS,SWDIO,AF0,Serial Wire Debug Data
+PA14,SWCLK,SYS,SWCLK,AF0,Serial Wire Debug Clock
+PA15,ENC4_B,GPIO,EXTI15,-,Encoder 4 Channel B Input (Reclaimed JTDI)
+PB0,M3_IN3,TIM3,CH3,AF2,Motor 3 Driver Phase C PWM
+PB1,M4_EN,GPIO,Digital Output,-,Motor 4 Driver Enable (Active High)
+PB2,ENC1_A,GPIO,EXTI2,-,Encoder 1 Channel A Input
+PB3,-,GPIO,-,-,Free GPIO pin (Reclaimed JTDO - Unused)
+PB4,M3_IN1,TIM3,CH1,AF2,Motor 3 Driver Phase A PWM (Reclaimed JTRST)
+PB5,M3_IN2,TIM3,CH2,AF2,Motor 3 Driver Phase B PWM
+PB6,UART_TX,USART1,TX,AF7,ESP32 Communications UART TX
+PB7,UART_RX,USART1,RX,AF7,ESP32 Communications UART RX
+PB8,M4_IN3,TIM4,CH3,AF2,Motor 4 Driver Phase C PWM
+PB9,M3_EN,GPIO,Digital Output,-,Motor 3 Driver Enable (Active High)
+PB10,ENC1_B,GPIO,EXTI10,-,Encoder 1 Channel B Input
+PB11,ENC2_B,GPIO,EXTI11,-,Encoder 2 Channel B Input
+PB12,USER_BUTTON,GPIO,Digital Input,-,User Interface Button (Active Low)
+PC13,LED,GPIO,Digital Output,-,Status Heartbeat LED (Active Low)
+PC14,ENC2_A,GPIO,EXTI14,-,Encoder 2 Channel A Input (Reclaimed OSC32_IN)
+PC15,-,GPIO,-,-,Free GPIO pin (Reclaimed OSC32_OUT - Unused)
+

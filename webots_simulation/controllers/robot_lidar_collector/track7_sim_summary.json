@@ -1,0 +1,8 @@
+{
+  "track": "Track 7 (Multi-Bottleneck Slalom)",
+  "total_points": 105642,
+  "lidar_scans": 250,
+  "lap_distance_m": 2.1984018973644965,
+  "lap_duration_s": 2.5,
+  "zero_noise": true
+}

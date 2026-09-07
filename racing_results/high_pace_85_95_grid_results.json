@@ -1,0 +1,86 @@
+[
+  {
+    "cfg": {
+      "name": "Baseline (No Kug, 35ms Lead)",
+      "lead_time_s": 0.035,
+      "k_ug": 0.0,
+      "front_proj_m": 0.0,
+      "k_cte": 2.2
+    },
+    "best_pace": 95.0,
+    "best_lap": 5.25,
+    "best_dev": 10.0
+  },
+  {
+    "cfg": {
+      "name": "Cfg 1: Kug=0.035, 35ms Lead",
+      "lead_time_s": 0.035,
+      "k_ug": 0.035,
+      "front_proj_m": 0.0,
+      "k_cte": 2.2
+    },
+    "best_pace": 95.0,
+    "best_lap": 5.25,
+    "best_dev": 9.4
+  },
+  {
+    "cfg": {
+      "name": "Cfg 2: Kug=0.050, 50ms Lead",
+      "lead_time_s": 0.05,
+      "k_ug": 0.05,
+      "front_proj_m": 0.0,
+      "k_cte": 2.2
+    },
+    "best_pace": 95.0,
+    "best_lap": 5.25,
+    "best_dev": 9.2
+  },
+  {
+    "cfg": {
+      "name": "Cfg 3: Kug=0.060, 65ms Lead",
+      "lead_time_s": 0.065,
+      "k_ug": 0.06,
+      "front_proj_m": 0.0,
+      "k_cte": 2.2
+    },
+    "best_pace": 95.0,
+    "best_lap": 5.25,
+    "best_dev": 9.2
+  },
+  {
+    "cfg": {
+      "name": "Cfg 4: Kug=0.045, 50ms, FrontProj=8cm",
+      "lead_time_s": 0.05,
+      "k_ug": 0.045,
+      "front_proj_m": 0.08,
+      "k_cte": 2.0
+    },
+    "best_pace": 95.0,
+    "best_lap": 5.25,
+    "best_dev": 10.0
+  },
+  {
+    "cfg": {
+      "name": "Cfg 5: Kug=0.060, 55ms, FrontProj=8cm",
+      "lead_time_s": 0.055,
+      "k_ug": 0.06,
+      "front_proj_m": 0.08,
+      "k_cte": 2.2
+    },
+    "best_pace": 95.0,
+    "best_lap": 5.25,
+    "best_dev": 9.5
+  },
+  {
+    "cfg": {
+      "name": "Cfg 6: Kug=0.075, 65ms, FrontProj=10cm",
+      "lead_time_s": 0.065,
+      "k_ug": 0.075,
+      "front_proj_m": 0.1,
+      "k_cte": 2.4
+    },
+    "best_pace": 95.0,
+    "best_lap": 5.25,
+    "best_dev": 9.3
+  }
+]
