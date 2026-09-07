@@ -4,8 +4,10 @@ This project contains the firmware for a dual-MCU BLDC control system driving 4 
 
 ## Folder Organization
 
-*   **[STM32_Controller/](file:///C:/Users/nurmi/Documents/Da%20Winna/STM32_Controller)**: Low-level C++ motor controller firmware written in PlatformIO/Arduino. Runs the unconstrained FOC commutation loops (>10kHz) and a throttled 1kHz kinematic loop on an STM32G474CBT6.
-*   **[ESP32_Master/](file:///C:/Users/nurmi/Documents/Da%20Winna/ESP32_Master)**: Master kinematics and high-level control firmware running on an ESP32. Communicates with the STM32 at 400Hz using a high-speed duplex UART link at 921600 baud.
+*   **[stm32/](stm32)**: Low-level C++ motor controller firmware and STM32 test projects.
+*   **[esp32/](esp32)**: Master kinematics, high-level control, sensor, and actuator firmware.
+*   **[pi4/](pi4)**: Raspberry Pi 4 hardware integration, sensor, and Cartographer tooling.
+*   **[webots/](webots)**: Webots simulation, optimization, robotics tooling, maps, validation, results, documentation, and historical backups.
 
 ## System Pin Mapping (STM32G474CBT6 LQFP48)
 
