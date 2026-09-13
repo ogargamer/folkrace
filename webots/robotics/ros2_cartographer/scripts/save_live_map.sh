@@ -4,7 +4,7 @@
 # ==============================================================================
 source /opt/ros/humble/setup.bash
 
-OUT_DIR="/mnt/c/Users/nurmi/Documents/Da Winna/maps/cyan_champion_clean_static"
+OUT_DIR="${1:-${HOME}/folkrace_cartographer_ws/maps}"
 mkdir -p "${OUT_DIR}"
 
 echo "[MAP SAVER] Requesting Cartographer map from /map topic..."
