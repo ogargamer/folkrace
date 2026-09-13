@@ -1,21 +1,22 @@
 ---
 trigger: always_on
-description: Mandatory rule strictly banning dollar signs ($) and LaTeX notation across all output.
+description: Chat formatting rules: strictly ban LaTeX and dollar sign math delimiters in chat text.
 ---
 
-# Output & Formatting Rules
+# Chat Formatting Rules
 
-## Absolute Zero Dollar Sign Policy (STRICTLY ENFORCED)
+## Ban on LaTeX Math Delimiters in Chat Responses
 
-- **NEVER use the dollar sign character (`$`) anywhere in responses.**
-- The chat markdown client does not support LaTeX rendering.
+1. **CHAT TEXT ONLY**:
+   - In all conversational text, explanations, and markdown lists, NEVER use dollar signs (`$`) for LaTeX math delimiters (no `$...$` or `$$...$$`).
+   - The chat UI cannot parse LaTeX and displays it as broken raw code.
+   - NEVER use LaTeX commands: no `\rightarrow`, `\approx`, `\text{...}`, `\le`, `\ge`, `\times`, `\mathcal{...}`.
+   - Use plain text equivalents:
+     - Use `->` (NEVER `$\rightarrow$`).
+     - Use `~` or `approx` (NEVER `\approx`).
+     - Use `1.0 ms`, `2.5 m/s` (NEVER `$1.0\text{ ms}$`).
+     - Use `O(N)` (NEVER `$\mathcal{O}(N)$`).
+     - Use `<=`, `>=` (NEVER `\le`, `\ge`).
 
-### Formatting Guide:
-- **Numbers, Ranges & Units**:
-  - Write: `30 to 50 ms`, `3.5 to 4.0 m/s`, `100%`, `15 cm`, `0.05 to 0.10 s`, `1000 points`, `0.25 m`, `2.4 m/s^2`, `5.04 s`.
-  - Do NOT wrap numbers or units in dollar signs.
-- **Big-O & Math**:
-  - Write: `O(N)`, `sqrt(mu * g / kappa)`, `L_lookahead = 0.25 m`, `2 * Wheelbase`.
-  - Do NOT write: `\mathcal{O}(N)`, `\text{...}`, `\sqrt{...}`, `\approx`.
-- **Symbols**:
-  - Use plain text: `<=`, `>=`, `~`, `x`, `->`, `mu`, `kappa`.
+2. **CODE EXCEPTION**:
+   - In programming code blocks and shell commands, dollar signs ARE permitted when required by the language syntax (e.g. PowerShell `$env:PATH`, bash `$VAR`, regex `^pattern$`).
