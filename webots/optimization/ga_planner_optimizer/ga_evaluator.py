@@ -20,35 +20,27 @@ import numpy as np
 
 CURR_DIR = os.path.dirname(os.path.abspath(__file__))
 
-def _find_optimizer_dir(start_dir: str) -> str:
-    if os.path.exists(os.path.join(start_dir, "worlds", "Cyan_Champion_GA.wbt")):
-        return start_dir
+def _find_world_path(start_dir: str) -> str:
     p = start_dir
     for _ in range(6):
-        cand = os.path.join(p, "webots", "optimization", "ga_planner_optimizer")
-        if os.path.exists(os.path.join(cand, "worlds", "Cyan_Champion_GA.wbt")):
+        cand = os.path.join(p, "webots", "simulation", "my_project", "worlds", "track_ga_eval.wbt")
+        if os.path.exists(cand):
             return cand
-        cand2 = os.path.join(p, "optimization", "ga_planner_optimizer")
-        if os.path.exists(os.path.join(cand2, "worlds", "Cyan_Champion_GA.wbt")):
+        cand2 = os.path.join(p, "simulation", "my_project", "worlds", "track_ga_eval.wbt")
+        if os.path.exists(cand2):
             return cand2
         parent = os.path.dirname(p)
         if parent == p:
             break
         p = parent
-    return start_dir
+    return os.path.join(start_dir, "track_ga_eval.wbt")
 
-OPTIMIZER_PROJECT_DIR = _find_optimizer_dir(CURR_DIR)
-GA_OPTIMIZER_DIR = OPTIMIZER_PROJECT_DIR
+DEFAULT_WORLD_PATH = _find_world_path(CURR_DIR)
+OPTIMIZER_PROJECT_DIR = os.path.dirname(os.path.dirname(DEFAULT_WORLD_PATH)) if os.path.exists(DEFAULT_WORLD_PATH) else CURR_DIR
+
 WORKSPACE_ROOT = os.path.dirname(OPTIMIZER_PROJECT_DIR)
 
-for p in [
-    CURR_DIR,
-    OPTIMIZER_PROJECT_DIR,
-    os.path.join(OPTIMIZER_PROJECT_DIR, "planners"),
-    os.path.join(OPTIMIZER_PROJECT_DIR, "controllers", "ga_supervisor_worker"),
-    os.path.join(OPTIMIZER_PROJECT_DIR, "data"),
-    WORKSPACE_ROOT,
-]:
+for p in [OPTIMIZER_PROJECT_DIR, CURR_DIR]:
     if p not in sys.path and os.path.exists(p):
         sys.path.insert(0, p)
 
@@ -56,6 +48,8 @@ from ga_planner_config import (
     NUM_CPU_CORES,
     WEBOTS_BINARY,
     BASE_WORKER_PORT,
+    POPULATION_SIZE,
+    NUM_GENERATIONS,
     EVALUATION_DURATION_S,
     TIMEOUT_PER_TRIAL_WALL_S,
     ACTIVE_PLANNER,
@@ -63,8 +57,6 @@ from ga_planner_config import (
     get_genome_class,
     BasePlannerGenome,
 )
-
-DEFAULT_WORLD_PATH = os.path.join(OPTIMIZER_PROJECT_DIR, "worlds", "Cyan_Champion_GA.wbt")
 
 
 class HeadlessWebotsWorker:

@@ -97,9 +97,7 @@ from planner_config import (
 )
 from imu_encoder_fusion import IMUEncoderFusion
 from tof_gap_scout import ToFGapScout
-from planner_option1_bvp import BVPDynamicStateLattice
 from planner_option2_sl_mpc import CurvilinearSLMPC
-from planner_option3_septic import SepticSplineTractionProfiler
 from stuck_recovery_manager import StuckRecoveryManager, StuckRecoveryState
 
 
@@ -285,16 +283,9 @@ def run_autonomous_controller(forced_planner_type: Optional[str] = None):
         v_max=V_MAX_WHEEL,
     )
 
-    # Instantiate selected planner
-    if active_planner_name == "OPTION1_BVP":
-        planner = BVPDynamicStateLattice(costmap)
-    elif active_planner_name == "OPTION2_SL_MPC":
-        planner = CurvilinearSLMPC(costmap)
-    elif active_planner_name == "OPTION3_SEPTIC":
-        planner = SepticSplineTractionProfiler(costmap)
-    else:
-        print(f"[Warning] Unknown PLANNER_TYPE '{active_planner_name}', defaulting to OPTION1_BVP.", flush=True)
-        planner = BVPDynamicStateLattice(costmap)
+    # Instantiate C++ Curvilinear S-L MPC planner
+    active_planner_name = "OPTION2_SL_MPC"
+    planner = CurvilinearSLMPC(costmap)
 
     # 7. Non-Blocking Stuck & Reverse Recovery Manager
     recovery_manager = StuckRecoveryManager(
@@ -389,21 +380,9 @@ def run_autonomous_controller(forced_planner_type: Optional[str] = None):
                 cmd_pkt = json.loads(cmd_data.decode("utf-8"))
                 c = cmd_pkt.get("cmd", "")
                 if c == "switch_planner":
-                    new_p = cmd_pkt.get("planner", active_planner_name)
-                    if new_p in ["OPTION1_BVP", "OPTION2_SL_MPC", "OPTION3_SEPTIC"] and new_p != active_planner_name:
-                        active_planner_name = new_p
-                        if active_planner_name == "OPTION1_BVP":
-                            planner = BVPDynamicStateLattice(costmap)
-                        elif active_planner_name == "OPTION2_SL_MPC":
-                            planner = CurvilinearSLMPC(costmap)
-                        elif active_planner_name == "OPTION3_SEPTIC":
-                            planner = SepticSplineTractionProfiler(costmap)
-                        print(f"[ToF Controller] Live switched active planner to: {active_planner_name}", flush=True)
-                        try:
-                            with open(planner_state_file, "w", encoding="utf-8") as f:
-                                json.dump({"planner": active_planner_name}, f)
-                        except Exception as e:
-                            print(f"[ToF Controller] Warning: Failed to save active planner: {e}", flush=True)
+                    planner = CurvilinearSLMPC(costmap)
+                    active_planner_name = "OPTION2_SL_MPC"
+                    print(f"[ToF Controller] Active planner: {active_planner_name} (C++ S-L MPC)", flush=True)
                 elif c == "pause":
                     sim_paused = True
                 elif c == "play":

@@ -43,13 +43,17 @@ def _find_optimizer_dir(start_dir: str) -> str:
 OPTIMIZER_PROJECT_DIR = _find_optimizer_dir(CURR_DIR)
 GA_OPTIMIZER_DIR = OPTIMIZER_PROJECT_DIR
 PLANNERS_DIR = os.path.join(OPTIMIZER_PROJECT_DIR, "planners")
-WORKSPACE_ROOT = os.path.dirname(OPTIMIZER_PROJECT_DIR)
+WEBOTS_DIR = os.path.dirname(os.path.dirname(OPTIMIZER_PROJECT_DIR))
+MY_PROJECT_DIR = os.path.join(WEBOTS_DIR, "simulation", "my_project")
+WORKSPACE_ROOT = os.path.dirname(WEBOTS_DIR)
 
 for p in [
     CURR_DIR,
     OPTIMIZER_PROJECT_DIR,
     PLANNERS_DIR,
-    os.path.join(OPTIMIZER_PROJECT_DIR, "controllers", "ga_supervisor_worker"),
+    os.path.join(MY_PROJECT_DIR, "controllers", "ga_supervisor_worker"),
+    os.path.join(MY_PROJECT_DIR, "controllers", "champion_live_preview"),
+    os.path.join(MY_PROJECT_DIR, "controllers", "tof_path_planners"),
     os.path.join(OPTIMIZER_PROJECT_DIR, "data"),
     WORKSPACE_ROOT,
 ]:
@@ -797,9 +801,9 @@ class GADashboardGUI(QMainWindow):
             with open(active_path, "w", encoding="utf-8") as f:
                 json.dump(active_cfg, f, indent=2)
 
-            world_path = os.path.join(CURR_DIR, "worlds", "Cyan_Champion_Live_Preview.wbt")
+            world_path = os.path.join(MY_PROJECT_DIR, "worlds", "track_preview.wbt")
             if not os.path.exists(world_path):
-                world_path = os.path.join(CURR_DIR, "worlds", "Cyan_Champion_GA.wbt")
+                world_path = os.path.join(MY_PROJECT_DIR, "worlds", "track_ga_eval.wbt")
 
             webots_bin = WEBOTS_BINARY
             env = os.environ.copy()
@@ -813,7 +817,8 @@ class GADashboardGUI(QMainWindow):
             env["PYTHONPATH"] = os.pathsep.join([
                 CURR_DIR,
                 os.path.join(CURR_DIR, "planners"),
-                os.path.join(CURR_DIR, "controllers", "champion_live_preview"),
+                os.path.join(MY_PROJECT_DIR, "controllers", "champion_live_preview"),
+                os.path.join(MY_PROJECT_DIR, "controllers", "tof_path_planners"),
                 os.path.join(CURR_DIR, "data"),
                 WORKSPACE_ROOT,
             ])

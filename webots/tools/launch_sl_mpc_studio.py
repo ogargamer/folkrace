@@ -21,7 +21,7 @@ import atexit
 TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
 WEBOTS_DIR = os.path.dirname(TOOLS_DIR)
 MY_PROJECT_DIR = os.path.join(WEBOTS_DIR, "simulation", "my_project")
-WORLD_PATH = os.path.join(MY_PROJECT_DIR, "worlds", "Cyan_Champion_ToF_Track.wbt")
+WORLD_PATH = os.path.join(MY_PROJECT_DIR, "worlds", "track_racing.wbt")
 PLANNERS_DIR = os.path.join(MY_PROJECT_DIR, "controllers", "tof_path_planners")
 CONTROLLER_DIR = os.path.join(MY_PROJECT_DIR, "controllers", "tof_path_planner")
 ACTIVE_PLANNER_JSON = os.path.join(CONTROLLER_DIR, "active_planner.json")
