@@ -149,8 +149,7 @@ class HeadlessWebotsWorker:
         env["PYTHONPATH"] = os.pathsep.join([
             CURR_DIR,
             OPTIMIZER_PROJECT_DIR,
-            os.path.join(OPTIMIZER_PROJECT_DIR, "controllers", "tof_path_planners"),
-            os.path.join(OPTIMIZER_PROJECT_DIR, "controllers", "tof_costmap_front_only"),
+            os.path.join(OPTIMIZER_PROJECT_DIR, "controllers", "tof_path_planner"),
             os.path.join(OPTIMIZER_PROJECT_DIR, "controllers", "ga_supervisor_worker"),
             os.path.join(CURR_DIR, "data"),
             WORKSPACE_ROOT,

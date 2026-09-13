@@ -16,28 +16,15 @@ import math
 from typing import Dict, Optional, Tuple, Any
 import numpy as np
 
-# Ensure all controller paths are discoverable
+# Ensure controller directory is on sys.path
 CURR_DIR = os.path.dirname(os.path.abspath(__file__))
 CONTROLLERS_DIR = os.path.dirname(CURR_DIR)
 MY_PROJECT_DIR = os.path.dirname(CONTROLLERS_DIR)
 WORKSPACE_ROOT = os.path.dirname(MY_PROJECT_DIR)
-FRONT_COSTMAP_DIR = os.path.join(CONTROLLERS_DIR, "tof_costmap_front_only")
-SCANNER_DIR = os.path.join(CONTROLLERS_DIR, "tof_16ch_grid_scanner")
-MPPI_DIR = os.path.join(CONTROLLERS_DIR, "mppi_controller")
-PLANNERS_DIR = os.path.join(CONTROLLERS_DIR, "tof_path_planners")
 
-# Remove any previous entries to avoid ordering conflicts
-for p in [SCANNER_DIR, FRONT_COSTMAP_DIR]:
-    while p in sys.path:
-        sys.path.remove(p)
-
-for p in [WORKSPACE_ROOT, MY_PROJECT_DIR, CONTROLLERS_DIR, MPPI_DIR, PLANNERS_DIR, CURR_DIR]:
+for p in [CURR_DIR, CONTROLLERS_DIR, MY_PROJECT_DIR, WORKSPACE_ROOT]:
     if p not in sys.path and os.path.exists(p):
-        sys.path.append(p)
-
-# FRONT_COSTMAP_DIR MUST ALWAYS BE AT INDEX 0 so it takes precedence over scanner dir
-if os.path.exists(FRONT_COSTMAP_DIR):
-    sys.path.insert(0, FRONT_COSTMAP_DIR)
+        sys.path.insert(0, p)
 
 try:
     from controller import Robot, Supervisor

@@ -55,9 +55,8 @@ WORKSPACE_ROOT = os.path.dirname(WEBOTS_DIR)
 for p in [
     CURR_DIR,
     OPTIMIZER_PROJECT_DIR,
-    os.path.join(OPTIMIZER_PROJECT_DIR, "planners"),
     os.path.join(MY_PROJECT_DIR, "controllers", "ga_supervisor_worker"),
-    os.path.join(MY_PROJECT_DIR, "controllers", "tof_path_planners"),
+    os.path.join(MY_PROJECT_DIR, "controllers", "tof_path_planner"),
     os.path.join(OPTIMIZER_PROJECT_DIR, "data"),
     WORKSPACE_ROOT,
 ]:

@@ -30,12 +30,11 @@ MY_PROJECT_DIR = os.path.dirname(CONTROLLERS_DIR)
 WEBOTS_DIR = os.path.dirname(os.path.dirname(MY_PROJECT_DIR))
 WORKSPACE_ROOT = os.path.dirname(WEBOTS_DIR)
 
-PLANNERS_DIR = os.path.join(CONTROLLERS_DIR, "tof_path_planners")
-FRONT_COSTMAP_DIR = os.path.join(CONTROLLERS_DIR, "tof_costmap_front_only")
+PLANNER_DIR = os.path.join(CONTROLLERS_DIR, "tof_path_planner")
 GA_OPTIMIZER_DIR = os.path.join(WEBOTS_DIR, "optimization", "ga_planner_optimizer")
 DATA_DIR = os.path.join(GA_OPTIMIZER_DIR, "data")
 
-for p in [FRONT_COSTMAP_DIR, PLANNERS_DIR, CONTROLLERS_DIR, MY_PROJECT_DIR, GA_OPTIMIZER_DIR, DATA_DIR, WORKSPACE_ROOT, CURR_DIR]:
+for p in [PLANNER_DIR, CONTROLLERS_DIR, MY_PROJECT_DIR, GA_OPTIMIZER_DIR, DATA_DIR, WORKSPACE_ROOT, CURR_DIR]:
     if p not in sys.path and os.path.exists(p):
         sys.path.insert(0, p)
 

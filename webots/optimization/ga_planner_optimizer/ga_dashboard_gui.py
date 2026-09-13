@@ -44,7 +44,7 @@ OPTIMIZER_PROJECT_DIR = _find_optimizer_dir(CURR_DIR)
 GA_OPTIMIZER_DIR = OPTIMIZER_PROJECT_DIR
 WEBOTS_DIR = os.path.dirname(os.path.dirname(OPTIMIZER_PROJECT_DIR))
 MY_PROJECT_DIR = os.path.join(WEBOTS_DIR, "simulation", "my_project")
-PLANNERS_DIR = os.path.join(MY_PROJECT_DIR, "controllers", "tof_path_planners")
+PLANNERS_DIR = os.path.join(MY_PROJECT_DIR, "controllers", "tof_path_planner")
 WORKSPACE_ROOT = os.path.dirname(WEBOTS_DIR)
 
 for p in [
@@ -53,7 +53,6 @@ for p in [
     PLANNERS_DIR,
     os.path.join(MY_PROJECT_DIR, "controllers", "ga_supervisor_worker"),
     os.path.join(MY_PROJECT_DIR, "controllers", "champion_live_preview"),
-    os.path.join(MY_PROJECT_DIR, "controllers", "tof_costmap_front_only"),
     os.path.join(OPTIMIZER_PROJECT_DIR, "data"),
     WORKSPACE_ROOT,
 ]:
@@ -817,8 +816,7 @@ class GADashboardGUI(QMainWindow):
             env["PYTHONPATH"] = os.pathsep.join([
                 CURR_DIR,
                 os.path.join(MY_PROJECT_DIR, "controllers", "champion_live_preview"),
-                os.path.join(MY_PROJECT_DIR, "controllers", "tof_path_planners"),
-                os.path.join(MY_PROJECT_DIR, "controllers", "tof_costmap_front_only"),
+                os.path.join(MY_PROJECT_DIR, "controllers", "tof_path_planner"),
                 os.path.join(CURR_DIR, "data"),
                 WORKSPACE_ROOT,
             ])

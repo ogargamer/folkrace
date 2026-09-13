@@ -15,10 +15,9 @@ import sys
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MY_PROJECT_DIR = os.path.join(ROOT_DIR, "webots", "simulation", "my_project")
-PLANNERS_DIR = os.path.join(MY_PROJECT_DIR, "controllers", "tof_path_planners")
-SCANNER_DIR = os.path.join(MY_PROJECT_DIR, "controllers", "tof_16ch_grid_scanner")
+PLANNERS_DIR = os.path.join(MY_PROJECT_DIR, "controllers", "tof_path_planner")
 
-for p in [ROOT_DIR, MY_PROJECT_DIR, PLANNERS_DIR, SCANNER_DIR]:
+for p in [ROOT_DIR, MY_PROJECT_DIR, PLANNERS_DIR]:
     if p not in sys.path and os.path.exists(p):
         sys.path.insert(0, p)
 

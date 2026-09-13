@@ -7,17 +7,22 @@ def compile_dll():
     source_file = os.path.join(curr_dir, "smart_hybrid_costmap_front.cpp")
     dll_output = os.path.join(curr_dir, "smart_hybrid_costmap_front.dll")
 
-    # Locate w64devkit bin directory
+    # Locate g++ compiler (w64devkit or system PATH)
     webots_dir = os.path.abspath(os.path.join(curr_dir, *[".."] * 4))
-    w64devkit_bin = os.path.join(webots_dir, "optimization", "ga_optimizer", "w64devkit", "bin")
-    w64devkit_gpp = os.path.join(w64devkit_bin, "g++.exe")
-
+    candidates = [
+        os.path.join(webots_dir, "optimization", "ga_planner_optimizer", "w64devkit", "bin"),
+        os.path.join(webots_dir, "optimization", "ga_optimizer", "w64devkit", "bin"),
+        r"C:\Users\nurmi\Documents\Folkrace\ga_optimizer\w64devkit\bin",
+        r"C:\Users\nurmi\Documents\Folkrace\tools\w64devkit\bin",
+    ]
+    compiler = "g++"
     env = os.environ.copy()
-    if os.path.exists(w64devkit_bin):
-        env["PATH"] = w64devkit_bin + os.pathsep + env.get("PATH", "")
-        compiler = w64devkit_gpp
-    else:
-        compiler = "g++"
+    for cand in candidates:
+        gpp = os.path.join(cand, "g++.exe")
+        if os.path.exists(gpp):
+            env["PATH"] = cand + os.pathsep + env.get("PATH", "")
+            compiler = gpp
+            break
 
     cmd = [
         compiler,

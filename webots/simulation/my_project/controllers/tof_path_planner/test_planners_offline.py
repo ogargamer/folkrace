@@ -16,23 +16,14 @@ import sys
 import time
 import numpy as np
 
-PLANNERS_DIR = os.path.dirname(os.path.abspath(__file__))
-CONTROLLERS_DIR = os.path.dirname(PLANNERS_DIR)
+CURR_DIR = os.path.dirname(os.path.abspath(__file__))
+CONTROLLERS_DIR = os.path.dirname(CURR_DIR)
 PROJECT_DIR = os.path.dirname(CONTROLLERS_DIR)
 WORKSPACE_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(PROJECT_DIR)))
-FRONT_COSTMAP_DIR = os.path.join(CONTROLLERS_DIR, "tof_costmap_front_only")
-SCANNER_DIR = os.path.join(CONTROLLERS_DIR, "tof_16ch_grid_scanner")
 
-for p in [SCANNER_DIR, FRONT_COSTMAP_DIR]:
-    while p in sys.path:
-        sys.path.remove(p)
-
-for p in [WORKSPACE_ROOT, PROJECT_DIR, CONTROLLERS_DIR, PLANNERS_DIR]:
+for p in [CURR_DIR, CONTROLLERS_DIR, PROJECT_DIR, WORKSPACE_ROOT]:
     if p not in sys.path and os.path.exists(p):
-        sys.path.append(p)
-
-if os.path.exists(FRONT_COSTMAP_DIR):
-    sys.path.insert(0, FRONT_COSTMAP_DIR)
+        sys.path.insert(0, p)
 
 from cpp_smart_hybrid_costmap import CppSmartHybridCostmap
 from planner_option2_sl_mpc import CurvilinearSLMPC

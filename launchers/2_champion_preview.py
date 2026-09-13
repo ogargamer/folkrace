@@ -25,7 +25,7 @@ WORLD_PATH = os.path.join(MY_PROJECT_DIR, "worlds", "track_preview.wbt")
 GA_OPTIMIZER_DIR = os.path.join(WEBOTS_DIR, "optimization", "ga_planner_optimizer")
 CHAMPION_DIR = os.path.join(MY_PROJECT_DIR, "controllers", "champion_live_preview")
 ACTIVE_CONFIG_PATH = os.path.join(CHAMPION_DIR, "active_preview_config.json")
-PLANNERS_DIR = os.path.join(MY_PROJECT_DIR, "controllers", "tof_path_planners")
+PLANNERS_DIR = os.path.join(MY_PROJECT_DIR, "controllers", "tof_path_planner")
 WEBOTS_BIN = r"C:\Program Files\Webots\msys64\mingw64\bin\webots.exe"
 
 CHAMPION_CONFIG = {

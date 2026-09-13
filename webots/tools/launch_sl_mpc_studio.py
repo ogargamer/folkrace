@@ -22,12 +22,12 @@ TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
 WEBOTS_DIR = os.path.dirname(TOOLS_DIR)
 MY_PROJECT_DIR = os.path.join(WEBOTS_DIR, "simulation", "my_project")
 WORLD_PATH = os.path.join(MY_PROJECT_DIR, "worlds", "track_racing.wbt")
-PLANNERS_DIR = os.path.join(MY_PROJECT_DIR, "controllers", "tof_path_planners")
 CONTROLLER_DIR = os.path.join(MY_PROJECT_DIR, "controllers", "tof_path_planner")
+PLANNERS_DIR = CONTROLLER_DIR
 ACTIVE_PLANNER_JSON = os.path.join(CONTROLLER_DIR, "active_planner.json")
-GUI_SCRIPT = os.path.join(PLANNERS_DIR, "planner_gui.py")
+GUI_SCRIPT = os.path.join(CONTROLLER_DIR, "planner_gui.py")
 WEBOTS_BIN = r"C:\Program Files\Webots\msys64\mingw64\bin\webots.exe"
-SL_MPC_DLL = os.path.join(PLANNERS_DIR, "curvilinear_sl_mpc.dll")
+SL_MPC_DLL = os.path.join(CONTROLLER_DIR, "curvilinear_sl_mpc.dll")
 
 
 def ensure_c_plus_plus_sl_mpc():

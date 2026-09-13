@@ -39,7 +39,7 @@ This document serves as the authoritative architectural specification and codeba
 | **MPPI Controller Suite** | `webots/simulation/my_project/controllers/folkrace_drive/mppi_folkrace_controller.py` | Contains `MPPIGenome` (23 genes), `MPPIController`, and `to_array()` / `from_array()`. |
 | **JIT SIMD Rollout Engine** | `webots/simulation/my_project/controllers/mppi_controller/fast_mppi_core.py` | Native AVX2/NEON machine-code kernel (`evaluate_mppi_rollouts_jit`) executing 12,800 rollouts in 0.47 ms. |
 | **Active Webots Controller** | `webots/simulation/my_project/controllers/mppi_controller/mppi_controller.py` | Webots Supervisor controller connecting motors, servos, IMU, 16 ToFs, and LiDAR. |
-| **Costmap Pipeline** | `webots/simulation/my_project/controllers/tof_16ch_grid_scanner/fast_tof_carto_costmap.py` | Fuses 15 Hz Cartographer OccupancyGrid and 50 Hz 16 ToFs into 20mm rolling log-odds grid. |
+| **Costmap Pipeline** | `webots/simulation/my_project/controllers/tof_path_planner/cpp_smart_hybrid_costmap.py` | AVX2 C++ Smart Hybrid Costmap processing 16 front-only ToFs at 60 Hz (<0.1 ms). |
 | **GUI & WSL SLAM Launcher** | `launch_costmap_gui.py` | 1-click launcher starting WSL2 ROS 2 Cartographer daemon and PyQt6 30 FPS visualizer. |
 | **Cartographer 2D Config** | `webots/robotics/ros2_cartographer/config/folkrace_2d.lua` | Google Cartographer SLAM tuning parameters for 6x6m indoor arena. |
 | **Optimal Racing Lines** | `racing_results/tum_qp_obstacle_aware_25cm_offsets/` | Contains `master_cyan_champion_optimal.csv`, `wall_offset_left_25cm.csv`, `wall_offset_right_25cm.csv`. |
