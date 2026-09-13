@@ -1,3 +1,0 @@
-BAD PRINTS:
-  line 1148: U+2500
-  line 1160: U+2500

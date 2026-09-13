@@ -1,4 +1,0 @@
-RANGE_ARRAY_LENGTH: 450
-POINT_CLOUD_LENGTH: 450
-Beam 0: local x=-0.1561, y=0.0011, z=0.0000 -> atan2(z, x) = 180.0 deg | atan2(x, z) = -90.0 deg
-Beam 225 (Mid): local x=0.7119, y=-0.0050, z=0.0000 -> atan2(z, x) = 0.0 deg | atan2(x, z) = 90.0 deg

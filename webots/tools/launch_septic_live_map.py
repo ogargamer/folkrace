@@ -28,11 +28,13 @@ import base64
 from typing import Dict, List, Optional, Tuple, Any
 import numpy as np
 
-WORKSPACE_ROOT = os.path.dirname(os.path.abspath(__file__))
-GA_OPTIMIZER_DIR = os.path.join(WORKSPACE_ROOT, "webots/optimization/ga_planner_optimizer")
+CURR_DIR = os.path.dirname(os.path.abspath(__file__))
+WEBOTS_DIR = os.path.dirname(CURR_DIR)
+WORKSPACE_ROOT = os.path.dirname(WEBOTS_DIR)
+GA_OPTIMIZER_DIR = os.path.join(WEBOTS_DIR, "optimization", "ga_planner_optimizer")
 PLANNERS_DIR = os.path.join(GA_OPTIMIZER_DIR, "planners")
 
-for p in [WORKSPACE_ROOT, GA_OPTIMIZER_DIR, PLANNERS_DIR]:
+for p in [WORKSPACE_ROOT, WEBOTS_DIR, GA_OPTIMIZER_DIR, PLANNERS_DIR]:
     if p not in sys.path and os.path.exists(p):
         sys.path.insert(0, p)
 
