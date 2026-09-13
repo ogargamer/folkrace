@@ -56,9 +56,9 @@ class SepticCostmapCanvas(QtWidgets.QWidget):
         self.setMouseTracking(True)
 
         # Costmap metric grid boundaries
-        self.map_x_min = -1.00
-        self.map_x_max = 1.00
-        self.map_y_min = -0.50
+        self.map_x_min = -1.25
+        self.map_x_max = 1.25
+        self.map_y_min = -0.10
         self.map_y_max = 2.00
 
         # Viewport display range (vehicle centered near bottom)
@@ -95,6 +95,7 @@ class SepticCostmapCanvas(QtWidgets.QWidget):
         gap: Optional[List[float]],
         targets: Optional[List[List[float]]] = None,
         grid_bounds: Optional[List[float]] = None,
+        steer_deg: float = 0.0,
     ):
         self.prob_map = prob_map
         self.hazard_mask = hazard_mask
@@ -103,6 +104,7 @@ class SepticCostmapCanvas(QtWidgets.QWidget):
         self.candidate_lines = candidate_lines
         self.gap_info = gap
         self.targets = targets
+        self.steer_deg = float(steer_deg)
         if grid_bounds and len(grid_bounds) == 4:
             self.map_x_min, self.map_x_max, self.map_y_min, self.map_y_max = grid_bounds
         self.update()
@@ -218,18 +220,57 @@ class SepticCostmapCanvas(QtWidgets.QWidget):
             p_right = self.world_to_screen(xg + width * 0.5, yg)
             painter.drawLine(p_left, p_right)
 
-        # 6. Chassis Footprint & Origin Anchor
+        # 6. Chassis Footprint & Origin Anchor (Accurate 150x200mm Robot Geometry)
         if self.show_chassis:
-            c_tl = self.world_to_screen(-0.065, 0.12)
-            c_br = self.world_to_screen(0.065, -0.06)
-            painter.setPen(QPen(QColor(255, 255, 255, 210), 1.8))
-            painter.setBrush(QBrush(QColor(255, 255, 255, 30)))
-            painter.drawRect(QRectF(c_tl.x(), c_tl.y(), c_br.x() - c_tl.x(), c_br.y() - c_tl.y()))
+            car_w = 0.150  # 150 mm width from only_front_tofs.proto
+            car_l = 0.200  # 200 mm length from only_front_tofs.proto (y from -0.100 to +0.100)
 
+            # Chassis outer boundary
+            c_tl = self.world_to_screen(-car_w / 2.0, car_l / 2.0)
+            c_br = self.world_to_screen(car_w / 2.0, -car_l / 2.0)
+            body_rect = QRectF(c_tl.x(), c_tl.y(), c_br.x() - c_tl.x(), c_br.y() - c_tl.y())
+            painter.setPen(QPen(QColor(0, 229, 255, 220), 1.8))
+            painter.setBrush(QBrush(QColor(18, 30, 45, 200)))
+            painter.drawRoundedRect(body_rect, 4, 4)
+
+            # Steered front wheels and fixed rear wheels
+            steer_rad = math.radians(getattr(self, "steer_deg", 0.0))
+            wheel_pos = [
+                (-0.0411, +0.0625, steer_rad),   # FL (steered)
+                (+0.0411, +0.0625, steer_rad),   # FR (steered)
+                (-0.0500, -0.0700, 0.0),         # RL (fixed)
+                (+0.0500, -0.0700, 0.0),         # RR (fixed)
+            ]
+            wheel_pen = QPen(QColor(255, 215, 64, 240), 1.5)
+            wheel_brush = QBrush(QColor(40, 40, 40, 240))
+            painter.setPen(wheel_pen)
+            painter.setBrush(wheel_brush)
+
+            for wx, wy, w_steer in wheel_pos:
+                wp = self.world_to_screen(wx, wy)
+                painter.save()
+                painter.translate(wp)
+                painter.rotate(-math.degrees(w_steer))
+                painter.drawRoundedRect(QRectF(-4, -8, 8, 16), 2, 2)
+                painter.restore()
+
+            # Front bumper highlight line (y = +0.100 m)
+            p_fl = self.world_to_screen(-car_w / 2.0, 0.100)
+            p_fr = self.world_to_screen(car_w / 2.0, 0.100)
+            painter.setPen(QPen(QColor(0, 255, 180, 250), 2.5))
+            painter.drawLine(p_fl, p_fr)
+
+            # Front bumper raycast origin dot (x = 0.0, y = +0.095)
+            p_bmp = self.world_to_screen(0.0, 0.095)
+            painter.setPen(QPen(QColor(0, 255, 180), 1.5))
+            painter.setBrush(QBrush(QColor(0, 255, 180)))
+            painter.drawEllipse(p_bmp, 2.5, 2.5)
+
+            # Origin center marker (0.0, 0.0)
             p0 = self.world_to_screen(0.0, 0.0)
             painter.setPen(QPen(QColor(255, 50, 50), 2))
             painter.setBrush(QBrush(QColor(255, 50, 50)))
-            painter.drawEllipse(p0, 4, 4)
+            painter.drawEllipse(p0, 3.5, 3.5)
 
 
 # ==============================================================================
@@ -632,17 +673,6 @@ class SepticLivePreviewGUI(QMainWindow):
             grid_bounds = pkt.get("grid_bounds", None)
             tof = pkt.get("tof", {})
 
-            self.canvas.set_data(
-                prob_map,
-                hazard_mask,
-                tof,
-                best_line,
-                cand_lines,
-                gap,
-                targets=targets,
-                grid_bounds=grid_bounds,
-            )
-
             # Update Labels
             mode = pkt.get("mode", "PLANNER")
             v_est = pkt.get("v_est", 0.0)
@@ -655,6 +685,18 @@ class SepticLivePreviewGUI(QMainWindow):
             status = pkt.get("status", "OK")
             surviving = pkt.get("surviving", 0)
             cands = pkt.get("candidates", len(cand_lines))
+
+            self.canvas.set_data(
+                prob_map,
+                hazard_mask,
+                tof,
+                best_line,
+                cand_lines,
+                gap,
+                targets=targets,
+                grid_bounds=grid_bounds,
+                steer_deg=steer,
+            )
 
             self.lbl_mode.setText(f"Mode: {mode}")
             self.lbl_dyn.setText(f"Speed: {v_est:.2f} m/s (cmd: {v_cmd:.2f}) | Steer: {steer:+5.1f}°")

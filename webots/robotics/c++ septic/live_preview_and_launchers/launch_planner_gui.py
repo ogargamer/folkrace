@@ -3,7 +3,7 @@
   LAUNCHER FOR TOF PATH PLANNERS INTERACTIVE STUDIO & TUNER GUI
 ================================================================================
 Usage:
-    python "c++ septic/live_preview_and_webots/tools/launchers/launch_planner_gui.py"
+    python "c++ septic/live_preview_and_launchers/launch_planner_gui.py"
 """
 
 import os
@@ -20,7 +20,7 @@ WORKSPACE_ROOT = os.path.dirname(DIR_C_SEPTIC) if DIR_C_SEPTIC else os.path.dirn
 
 for p in [
     os.path.join(DIR_C_SEPTIC, "planners"),
-    os.path.join(DIR_C_SEPTIC, "live_preview_and_webots/tools/launchers"),
+    os.path.join(DIR_C_SEPTIC, "live_preview_and_launchers"),
     DIR_C_SEPTIC,
     WORKSPACE_ROOT,
     os.path.join(WORKSPACE_ROOT, "webots/simulation/my_project", "controllers", "tof_path_planners"),

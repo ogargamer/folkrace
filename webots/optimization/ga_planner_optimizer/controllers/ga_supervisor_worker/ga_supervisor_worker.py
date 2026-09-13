@@ -32,6 +32,42 @@ for p in [GA_OPTIMIZER_DIR, PLANNERS_DIR, DATA_DIR, WORKSPACE_ROOT, CURR_DIR]:
     if p not in sys.path and os.path.exists(p):
         sys.path.insert(0, p)
 
+# Redirect controller stdout/stderr to disk for headless validation
+try:
+    log_dir = os.path.join(GA_OPTIMIZER_DIR, "logs")
+    os.makedirs(log_dir, exist_ok=True)
+    worker_id = os.environ.get("GA_WORKER_ID", "0")
+    _ctrl_log_path = os.path.join(log_dir, f"controller_worker_{worker_id}.log")
+    _log_f = open(_ctrl_log_path, "w", encoding="utf-8", buffering=1)
+    class _TeeOut:
+        def __init__(self, f, orig):
+            self.f = f
+            self.orig = orig
+        def write(self, s):
+            try:
+                self.f.write(s)
+            except Exception:
+                pass
+            if self.orig:
+                try:
+                    self.orig.write(s)
+                except Exception:
+                    pass
+        def flush(self):
+            try:
+                self.f.flush()
+            except Exception:
+                pass
+            if self.orig:
+                try:
+                    self.orig.flush()
+                except Exception:
+                    pass
+    sys.stdout = _TeeOut(_log_f, sys.stdout)
+    sys.stderr = _TeeOut(_log_f, sys.stderr)
+except Exception:
+    pass
+
 try:
     from controller import Robot, Supervisor
     WEBOTS_AVAILABLE = True
@@ -386,7 +422,7 @@ def run_supervisor_worker():
     for name in TOF_SENSOR_NAMES:
         dev = robot.getDevice(name)
         if dev:
-            dev.enable(TIME_STEP_MS)
+            dev.enable(TOF_TIME_STEP_MS)
             tofs[name] = dev
 
     # 3. Moving Obstacle Solid Fields
@@ -474,7 +510,7 @@ def run_supervisor_worker():
         r_infl = float(gene_dict.get("r_inflation_m", R_INFLATION_M))
         target_lookahead_m = float(gene_dict.get("target_lookahead_m", 1.35))
 
-        fusion = IMUEncoderFusion(wheel_radius=WHEEL_RADIUS, dt=DT)
+        fusion = IMUEncoderFusion(wheel_radius=WHEEL_RADIUS, dt=DT_PLANNER)
         fusion.attach_devices(encoders=encoders, imu_dev=imu_dev, gyro_dev=gyro, accel_dev=accel)
 
         costmap = CppSmartHybridCostmap(
@@ -483,11 +519,22 @@ def run_supervisor_worker():
             r_inflation_m=r_infl,
         )
 
-        gap_scout = ToFGapScout()
+        gap_scout = ToFGapScout(
+            w_gap_distance=float(gene_dict.get("w_gap_distance", 3.50)),
+            w_gap_width=float(gene_dict.get("w_gap_width", 2.00)),
+            w_align_steer=float(gene_dict.get("w_gap_steer", 1.20)),
+            w_align_straight=float(gene_dict.get("w_gap_straight", 0.50)),
+            w_side_clearance=float(gene_dict.get("w_side_clearance", 2.50)),
+            gap_dist_exp_k=float(gene_dict.get("gap_dist_exp_k", 0.50)),
+            gap_progress_margin_m=float(gene_dict.get("gap_progress_margin_m", 0.10)),
+            alt_min_separation_m=float(gene_dict.get("alt_min_separation_m", 0.25)),
+            alt_aperture_bias=float(gene_dict.get("alt_aperture_bias", 1.80)),
+        )
         recovery_manager = StuckRecoveryManager(
-            reverse_speed_m_s=1.30,
-            forward_speed_m_s=1.30,
-            steer_angle_rad=0.4538,
+            reverse_speed_m_s=float(gene_dict.get("recovery_reverse_speed", 1.30)),
+            steer_angle_rad=float(gene_dict.get("recovery_steer_angle_rad", 0.60)),
+            emergency_backup_dist_m=float(gene_dict.get("emergency_backup_dist_m", 0.09)),
+            clearance_exit_m=float(gene_dict.get("recovery_clearance_exit_m", 0.28)),
         )
 
         # Instantiate Planner
@@ -497,9 +544,34 @@ def run_supervisor_worker():
         aggr_min_scale = float(gene_dict.get("aggr_min_scale", 0.90))
         steer_deadband = float(gene_dict.get("steer_deadband_rad", 0.002))
         straight_lock_dist = float(gene_dict.get("straight_lock_dist", 1.70))
+        straight_lock_speed = float(gene_dict.get("straight_lock_speed", 5.50))
 
         p_up = planner_name.upper()
-        if "OPTION_1" in p_up or "BVP" in p_up:
+        if "OPTION_2" in p_up or "MPC" in p_up:
+            planner = CurvilinearSLMPC(
+                costmap_engine=costmap,
+                horizon_N=int(gene_dict.get("horizon_N", 30)),
+                dt=float(gene_dict.get("dt", DT_PLANNER)),
+                q_progress=float(gene_dict.get("q_progress", 8.00)),
+                q_cte=float(gene_dict.get("q_cte", 18.00)),
+                q_heading=float(gene_dict.get("q_heading", 8.00)),
+                r_steer=float(gene_dict.get("r_steer", 5.00)),
+                r_accel=float(gene_dict.get("r_accel", 2.00)),
+                r_steer_rate=float(gene_dict.get("r_steer_rate", 10.00)),
+                mu_friction=mu_val,
+                v_corner_factor=float(gene_dict.get("v_corner_factor", 0.95)),
+                pure_pursuit_blend_gain=float(gene_dict.get("pp_blend_gain", 0.35)),
+                lookahead_blend_m=float(gene_dict.get("lookahead_blend_m", 0.45)),
+                v_cruise_max=float(gene_dict.get("v_cruise_max", 5.50)),
+                v_cruise_min=float(gene_dict.get("v_cruise_min", 0.60)),
+                straight_lock_dist_m=straight_lock_dist,
+                straight_lock_speed_mps=straight_lock_speed,
+                alt_switch_hysteresis=float(gene_dict.get("alt_switch_hysteresis", 15.00)),
+                alt_min_separation_m=float(gene_dict.get("alt_min_separation_m", 0.25)),
+                alt_aperture_bias=float(gene_dict.get("alt_aperture_bias", 1.80)),
+            )
+
+        elif "OPTION_1" in p_up or "BVP" in p_up:
             planner = BVPDynamicStateLattice(
                 v_cruise_max=float(gene_dict.get("v_cruise_max", 3.50)),
                 v_cruise_min=float(gene_dict.get("v_cruise_min", 1.20)),
@@ -510,21 +582,6 @@ def run_supervisor_worker():
                 w_side_bias=float(gene_dict.get("w_side_bias", 1.00)),
                 w_smoothness=float(gene_dict.get("w_smoothness", 2.50)),
                 slew_rate_limit_deg=float(gene_dict.get("slew_rate_limit_deg", 10.0)),
-            )
-        elif "OPTION_2" in p_up or "MPC" in p_up:
-            planner = CurvilinearSLMPC(
-                horizon_N=int(gene_dict.get("horizon_N", 16)),
-                dt=float(gene_dict.get("dt", 0.050)),
-                q_progress=float(gene_dict.get("q_progress", 8.00)),
-                q_cte=float(gene_dict.get("q_cte", 18.00)),
-                q_heading=float(gene_dict.get("q_heading", 8.00)),
-                r_steer=float(gene_dict.get("r_steer", 5.00)),
-                r_accel=float(gene_dict.get("r_accel", 2.00)),
-                r_steer_rate=float(gene_dict.get("r_steer_rate", 10.00)),
-                mu_friction=mu_val,
-                v_corner_factor=float(gene_dict.get("v_corner_factor", 0.82)),
-                pure_pursuit_blend_gain=float(gene_dict.get("pp_blend_gain", 0.35)),
-                lookahead_blend_m=float(gene_dict.get("lookahead_blend_m", 0.45)),
             )
         elif "OPTION_3" in p_up or "SEPTIC" in p_up:
             blend_w0 = float(gene_dict.get("blend_w0", 0.08))
@@ -599,13 +656,23 @@ def run_supervisor_worker():
         # Trial execution variables
         max_steps = int(duration_s / DT)
         active_steer = 0.0
+        v_est = 0.0
+        yaw_rate = 0.0
+        cached_yaw_rate = 0.0
         cached_target_steer = 0.0
         cached_target_speed = float(gene_dict.get("v_cruise_min", V_MIN_CRUISE))
+        rate_limited_speed = 0.0
         cached_theta_g = 0.0
         cached_d_straight = TOF_MAX_RANGE_M
         cached_front_min_m = TOF_MAX_RANGE_M
         cached_tofs = {k: TOF_MAX_RANGE_M for k in TOF_SENSOR_NAMES}
-        front_tof_keys = ["tof_fl_3", "tof_fr_3", "tof_fl_2", "tof_fr_2"]
+        if "tof_front_left_4.1deg" in cached_tofs:
+            front_tof_keys = [
+                "tof_front_left_4.1deg", "tof_front_right_4.1deg",
+                "tof_front_left_15.4deg", "tof_front_right_15.4deg",
+            ]
+        else:
+            front_tof_keys = ["tof_fl_3", "tof_fr_3", "tof_fl_2", "tof_fr_2"]
 
         step_count = 0
         crashed = False
@@ -631,10 +698,6 @@ def run_supervisor_worker():
                         ox, oy = obs_engine.get_position_at_s(obs_s)
                         field.setSFVec3f([float(ox), float(oy), 0.075])
 
-                # --- B. UPDATE SENSOR FUSION AT 120 Hz ---
-                v_est, yaw_rate, yaw = fusion.update(DT)
-                v_est = max(0.0, v_est) if not math.isnan(v_est) else 0.0
-
                 # --- C. WEBOTS REAL GROUND-TRUTH METRICS (No Sensors) ---
                 car_pos = robot_node.getPosition() if robot_node else (car_trans_field.getSFVec3f() if car_trans_field else [0.0, 0.0, 0.028])
                 cx, cy, cz = float(car_pos[0]), float(car_pos[1]), float(car_pos[2])
@@ -655,8 +718,8 @@ def run_supervisor_worker():
                         flush=True,
                     )
 
-                # Initial physics warmup pause (0.35 s)
-                if sim_time < 0.35:
+                # Initial physics warmup pause (0.50 s)
+                if sim_time < 0.50:
                     for m in motors.values():
                         if m:
                             m.setVelocity(0.0)
@@ -665,9 +728,16 @@ def run_supervisor_worker():
                             s.setPosition(0.0)
                     continue
 
-                # --- D. RUN 16-CH TOF, COSTMAP & PATH PLANNER AT 60 Hz (Decimation = 2) ---
+                # --- D. 60 Hz CONTROL TICK (Decimation = 2) ---
+                # Fusion, 16-CH ToF, Costmap, Path Planner, Recovery, Straight-Lock & Quieting
                 run_planner_step = (step_count % PLANNER_DECIMATION == 0)
                 if run_planner_step:
+                    # Update sensor fusion at 60 Hz (Zero Cheating)
+                    v_est, yaw_rate, yaw = fusion.update(dt=DT_PLANNER)
+                    v_est = max(0.0, v_est) if not math.isnan(v_est) else 0.0
+                    cached_yaw_rate = yaw_rate
+
+                    # Read 16 ToF sensors at 60 Hz
                     for name in TOF_SENSOR_NAMES:
                         dev = tofs.get(name)
                         if dev:
@@ -695,55 +765,91 @@ def run_supervisor_worker():
                         extra_targets=gap_scout.last_targets,
                     )
 
-                    cached_target_steer = float(plan_res.get("cmd_steer_rad", 0.0))
-                    cached_target_speed = float(plan_res.get("cmd_speed_mps", gene_dict.get("v_cruise_min", V_MIN_CRUISE)))
+                    raw_target_steer = float(plan_res.get("cmd_steer_rad", 0.0))
+                    raw_target_speed = float(plan_res.get("cmd_speed_mps", gene_dict.get("v_cruise_min", V_MIN_CRUISE)))
                     cached_theta_g = float(theta_g)
-                    d_fl3 = cached_tofs.get("tof_fl_3", TOF_MAX_RANGE_M)
-                    d_fr3 = cached_tofs.get("tof_fr_3", TOF_MAX_RANGE_M)
+                    if "tof_front_left_4.1deg" in cached_tofs:
+                        d_fl3 = cached_tofs.get("tof_front_left_4.1deg", TOF_MAX_RANGE_M)
+                        d_fr3 = cached_tofs.get("tof_front_right_4.1deg", TOF_MAX_RANGE_M)
+                        d_fl_lock = cached_tofs.get("tof_front_left_4.1deg", 0.0)
+                        d_fr_lock = cached_tofs.get("tof_front_right_4.1deg", 0.0)
+                    else:
+                        d_fl3 = cached_tofs.get("tof_fl_3", TOF_MAX_RANGE_M)
+                        d_fr3 = cached_tofs.get("tof_fr_3", TOF_MAX_RANGE_M)
+                        d_fl_lock = cached_tofs.get("tof_fl_3", 0.0)
+                        d_fr_lock = cached_tofs.get("tof_fr_3", 0.0)
                     cached_d_straight = min(d_fl3, d_fr3)
                     cached_front_min_m = min([cached_tofs.get(k, TOF_MAX_RANGE_M) for k in front_tof_keys])
 
-                # --- E. RECOVERY MANAGER & STEERING AGGRESSIVENESS AT 120 Hz ---
-                is_recovering, rec_v, rec_steer = recovery_manager.update(
-                    dt=DT,
-                    current_v=v_est,
-                    commanded_v=cached_target_speed,
-                    cached_tofs=cached_tofs,
-                    heading_err=cached_theta_g,
-                )
+                    # Recovery Manager (60 Hz)
+                    is_recovering, rec_v, rec_steer = recovery_manager.update(
+                        dt=DT_PLANNER,
+                        current_v=v_est,
+                        commanded_v=raw_target_speed,
+                        cached_tofs=cached_tofs,
+                        heading_err=cached_theta_g,
+                        active_steer=active_steer,
+                    )
 
-                if is_recovering:
-                    target_speed = rec_v
-                    target_steer = rec_steer
-                    active_steer = rec_steer
+                    if is_recovering:
+                        target_speed = rec_v
+                        target_steer = rec_steer
+                        active_steer = rec_steer
+                    else:
+                        # Fast Straight-Line Lock (60 Hz, guarded by turn intent)
+                        is_straight_locked = (
+                            d_fl_lock >= straight_lock_dist and
+                            d_fr_lock >= straight_lock_dist and
+                            abs(cached_theta_g) < 0.08 and
+                            abs(raw_target_steer) < 0.08
+                        )
+                        if is_straight_locked:
+                            target_speed = straight_lock_speed
+                            target_steer = 0.0
+                            active_steer = 0.0
+                        else:
+                            target_speed = raw_target_speed
+                            target_steer = raw_target_steer
+                            steer_delta = target_steer - active_steer
+
+                            # Progressive distance and small-offset steering aggressiveness
+                            if cached_d_straight >= aggr_dist_far:
+                                dist_scale = aggr_min_scale
+                            elif cached_d_straight <= aggr_dist_close:
+                                dist_scale = 1.0
+                            else:
+                                frac = (aggr_dist_far - cached_d_straight) / max(0.001, (aggr_dist_far - aggr_dist_close))
+                                dist_scale = float(aggr_min_scale + (frac ** 1.5) * (1.0 - aggr_min_scale))
+
+                            err_mag = abs(steer_delta)
+                            if err_mag <= steer_deadband:
+                                err_scale = 0.90
+                            elif err_mag >= 0.05:
+                                err_scale = 1.0
+                            else:
+                                err_frac = (err_mag - steer_deadband) / max(0.001, (0.05 - steer_deadband))
+                                err_scale = float(0.90 + err_frac * (1.0 - 0.90))
+
+                            steer_aggressiveness = float(max(0.85, min(1.0, dist_scale * err_scale)))
+                            active_steer = active_steer + steer_aggressiveness * steer_delta
+
+                    cached_target_speed = target_speed
+                    cached_target_steer = active_steer
+
+                # --- E. 4WD ELECTRONIC DIFFERENTIAL & ACTUATORS AT 120 Hz ---
+                speed_err = cached_target_speed - rate_limited_speed
+                if (rate_limited_speed >= 0.0 and speed_err > 0.0) or (rate_limited_speed <= 0.0 and speed_err < 0.0):
+                    max_dv = (0.85 * mu_val * 9.81) * DT
                 else:
-                    target_speed = cached_target_speed
-                    target_steer = cached_target_steer
-                    steer_delta = target_steer - active_steer
+                    max_dv = (1.00 * mu_val * 9.81) * DT
 
-                    # Progressive distance and small-offset steering aggressiveness
-                    if cached_d_straight >= aggr_dist_far:
-                        dist_scale = aggr_min_scale
-                    elif cached_d_straight <= aggr_dist_close:
-                        dist_scale = 1.0
-                    else:
-                        frac = (aggr_dist_far - cached_d_straight) / max(0.001, (aggr_dist_far - aggr_dist_close))
-                        dist_scale = float(aggr_min_scale + (frac ** 1.5) * (1.0 - aggr_min_scale))
+                if abs(speed_err) <= max_dv:
+                    rate_limited_speed = cached_target_speed
+                else:
+                    rate_limited_speed += math.copysign(max_dv, speed_err)
 
-                    err_mag = abs(steer_delta)
-                    if err_mag <= steer_deadband:
-                        err_scale = 0.90
-                    elif err_mag >= 0.05:
-                        err_scale = 1.0
-                    else:
-                        err_frac = (err_mag - steer_deadband) / max(0.001, (0.05 - steer_deadband))
-                        err_scale = float(0.90 + err_frac * (1.0 - 0.90))
-
-                    steer_aggressiveness = float(max(0.85, min(1.0, dist_scale * err_scale)))
-                    active_steer = active_steer + steer_aggressiveness * steer_delta
-
-                # --- F. ELECTRONIC DIFFERENTIAL & MOTOR COMMANDS AT 120 Hz ---
-                actuators = ediff.update(target_v=target_speed, target_steer_rad=active_steer, gyro_z_rad_s=yaw_rate)
+                live_gyro_z = float(gyro.getValues()[2]) if gyro else cached_yaw_rate
+                actuators = ediff.update(target_v=rate_limited_speed, target_steer_rad=cached_target_steer, gyro_z_rad_s=live_gyro_z)
 
                 if servos["left"]:
                     servos["left"].setPosition(actuators["steer_left"])
@@ -768,7 +874,7 @@ def run_supervisor_worker():
                             for cp in contacts:
                                 pt = cp.getPoint()
                                 if pt[2] > 0.038:
-                                    print(f"[GA Worker] Crash: Webots physical contact joint at t={sim_time:.2f}s (z={pt[2]:.3f}m)!", flush=True)
+                                    print(f"[GA Worker] Crash: Webots physical contact joint at t={sim_time:.2f}s (pt=({pt[0]:.3f}, {pt[1]:.3f}, {pt[2]:.3f}m), car=({cx:.3f}, {cy:.3f}))!", flush=True)
                                     crashed = True
                                     crash_reason = f"physical_contact_z_{pt[2]:.3f}"
                                     break

@@ -6,7 +6,7 @@ THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 GA_DIR = os.path.join(THIS_DIR, "..")
 sys.path.insert(0, GA_DIR)
 
-from webots/optimization/ga_optimizer import GAController
+from ga_optimizer import GAController
 from ga_evaluator import HeadlessWebotsWorker, ParallelWorkerPool
 from ga_planner_config import get_genome_class
 

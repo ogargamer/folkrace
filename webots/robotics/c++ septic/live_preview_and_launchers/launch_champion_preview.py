@@ -22,8 +22,20 @@ import json
 import argparse
 import subprocess
 
-WORKSPACE_ROOT = os.path.dirname(os.path.abspath(__file__))
-GA_OPTIMIZER_DIR = os.path.join(WORKSPACE_ROOT, "webots/optimization/ga_planner_optimizer")
+# Determine directory paths robustly
+CURRENT_FILE_DIR = os.path.dirname(os.path.abspath(__file__))
+# Check if inside webots/tools or webots/robotics/c++ septic/live_preview_and_launchers
+if os.path.exists(os.path.join(CURRENT_FILE_DIR, "..", "optimization", "ga_planner_optimizer")):
+    WEBOTS_DIR = os.path.abspath(os.path.join(CURRENT_FILE_DIR, ".."))
+elif os.path.exists(os.path.join(CURRENT_FILE_DIR, "..", "..", "optimization", "ga_planner_optimizer")):
+    WEBOTS_DIR = os.path.abspath(os.path.join(CURRENT_FILE_DIR, "..", ".."))
+elif os.path.exists(os.path.join(CURRENT_FILE_DIR, "..", "..", "..", "optimization", "ga_planner_optimizer")):
+    WEBOTS_DIR = os.path.abspath(os.path.join(CURRENT_FILE_DIR, "..", "..", ".."))
+else:
+    WEBOTS_DIR = os.path.abspath(os.path.join(CURRENT_FILE_DIR, ".."))
+
+WORKSPACE_ROOT = os.path.dirname(WEBOTS_DIR)
+GA_OPTIMIZER_DIR = os.path.join(WEBOTS_DIR, "optimization", "ga_planner_optimizer")
 WORLD_PATH = os.path.join(GA_OPTIMIZER_DIR, "worlds", "Cyan_Champion_Live_Preview.wbt")
 ACTIVE_CONFIG_PATH = os.path.join(GA_OPTIMIZER_DIR, "active_preview_config.json")
 WEBOTS_BIN = r"C:\Program Files\Webots\msys64\mingw64\bin\webots.exe"
@@ -31,13 +43,13 @@ WEBOTS_BIN = r"C:\Program Files\Webots\msys64\mingw64\bin\webots.exe"
 CONFIGS_REGISTRY = [
     {
         "id": "sl_mpc",
-        "aliases": ["1", "mpc", "sl_mpc", "option2"],
-        "title": "OPTION 2: Curvilinear SL-MPC Champion (Rank #1 Fastest)",
+        "aliases": ["1", "mpc", "sl_mpc", "option2", "opt2"],
+        "title": "OPTION 2: Curvilinear SL-MPC Champion (CMA-ES Gen 194, Fitness 7170.03)",
         "file": os.path.join(GA_OPTIMIZER_DIR, "best_genome_option_2_sl_mpc.json"),
-        "speed": "7.10 m/s",
-        "dist": "142.1 m",
-        "laps": "10 laps in 20.0s",
-        "status": "Solves convex quadratic MPC over curvilinear Frenet lattice.",
+        "speed": "2.61 m/s",
+        "dist": "48.87 m",
+        "laps": "3 laps in 20.0s",
+        "status": "Convex quadratic SL-MPC over Frenet lattice with optimized weights from ga_checkpoint.json.",
     },
     {
         "id": "septic_cpp",
@@ -108,7 +120,7 @@ def activate_config(cfg_item: dict) -> bool:
         return False
 
 
-def launch_webots():
+def launch_webots(launch_gui: bool = False):
     if not os.path.exists(WEBOTS_BIN):
         print(f"Error: Webots executable not found at {WEBOTS_BIN}")
         return
@@ -116,6 +128,13 @@ def launch_webots():
     if not os.path.exists(WORLD_PATH):
         print(f"Error: World file not found at {WORLD_PATH}")
         return
+
+    gui_proc = None
+    if launch_gui:
+        gui_script = os.path.join(GA_OPTIMIZER_DIR, "planners", "planner_gui.py")
+        if os.path.exists(gui_script):
+            print("[Launcher] Spawning Live Telemetry Map GUI (Port 9876)...", flush=True)
+            gui_proc = subprocess.Popen([sys.executable, gui_script], cwd=os.path.join(GA_OPTIMIZER_DIR, "planners"))
 
     env = os.environ.copy()
     webots_home = r"C:\Program Files\Webots"
@@ -129,6 +148,7 @@ def launch_webots():
         GA_OPTIMIZER_DIR,
         os.path.join(GA_OPTIMIZER_DIR, "planners"),
         os.path.join(GA_OPTIMIZER_DIR, "controllers", "champion_live_preview"),
+        os.path.join(GA_OPTIMIZER_DIR, "data"),
         WORKSPACE_ROOT,
     ])
     env["PYTHONUNBUFFERED"] = "1"
@@ -144,7 +164,11 @@ def launch_webots():
     print(f"  World: {WORLD_PATH}")
     print("=" * 80)
 
-    subprocess.run(cmd, env=env, cwd=GA_OPTIMIZER_DIR)
+    try:
+        subprocess.run(cmd, env=env, cwd=GA_OPTIMIZER_DIR)
+    finally:
+        if gui_proc is not None and gui_proc.poll() is None:
+            gui_proc.terminate()
 
 
 def find_config(query: str):
@@ -159,6 +183,7 @@ def main():
     parser = argparse.ArgumentParser(description="Launch Webots Real-Time Preview with Selected Champion Config")
     parser.add_argument("--config", "-c", type=str, default=None, help="Config ID or number (1=SL-MPC, 2=Septic, 3=Septic Base, 4=BVP)")
     parser.add_argument("--list", "-l", action="store_true", help="List all available fastest configs")
+    parser.add_argument("--gui", "-g", action="store_true", help="Launch live 2D telemetry map GUI alongside Webots")
     parser.add_argument("--no-launch", action="store_true", help="Only set active config without launching Webots")
 
     args = parser.parse_args()
@@ -196,7 +221,7 @@ def main():
         return
 
     if not args.no_launch:
-        launch_webots()
+        launch_webots(launch_gui=args.gui)
 
 
 if __name__ == "__main__":

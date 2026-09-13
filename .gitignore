@@ -4,3 +4,15 @@
 .vscode/launch.json
 .vscode/ipch
 webots/tools/vendor/w64devkit/
+webots/optimization/ga_optimizer/w64devkit/
+**/w64devkit/
+**/eigen/
+**/eigen-*/
+**/Eigen/
+**/LBFGSpp-master/
+.codegraph/
+__pycache__/
+*.py[cod]
+*.log
+*.dll.old
+*.jsonl

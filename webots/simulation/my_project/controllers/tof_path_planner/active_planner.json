@@ -1,1 +1,3 @@
-{"planner": "OPTION3_SEPTIC"}
+{
+  "planner": "OPTION2_SL_MPC"
+}

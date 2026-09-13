@@ -24,7 +24,7 @@ This directory contains a dedicated standalone backup of the C++ Septic trajecto
   - `ga_planner_config.py`: Parameter bounds, weights, and genetic hyperparameters.
   - `webots/optimization/ga_optimizer.py`, `ga_evaluator.py`, `ga_dashboard_gui.py`: Genetic optimizer and evaluation pipeline.
 
-- **`live_preview_and_webots/tools/launchers/`**:
+- **`live_preview_and_launchers/`**:
   - `champion_live_preview.py`: Webots robot controller for previewing the champion genome in real time.
   - `ga_supervisor_worker.py`: Webots supervisor worker for automated chromosome evaluation.
   - `launch_septic_live_map.py`: Real-time 2D canvas live preview GUI with UDP telemetry.

@@ -3,7 +3,7 @@
 EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/backgrounds/protos/TexturedBackground.proto"
 EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/backgrounds/protos/TexturedBackgroundLight.proto"
 EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/floors/protos/RectangleArena.proto"
-EXTERNPROTO "../protos/Folkrace.proto"
+EXTERNPROTO "../protos/only_front_tofs.proto"
 
 WorldInfo {
   info [
@@ -303,7 +303,7 @@ Pose {
     }
   ]
 }
-Folkrace {
+only_front_tofs {
 }
 DEF MOVING_OBSTACLE Solid {
   translation 2.5 1 0.07474422176814798

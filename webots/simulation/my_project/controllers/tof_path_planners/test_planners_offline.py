@@ -3,15 +3,23 @@ import sys
 import time
 import numpy as np
 
-WORKSPACE_ROOT = r"c:\Users\nurmi\Documents\Da Winna"
-PROJECT_DIR = os.path.join(WORKSPACE_ROOT, "webots/simulation/my_project")
-CONTROLLERS_DIR = os.path.join(PROJECT_DIR, "controllers")
+PLANNERS_DIR = os.path.dirname(os.path.abspath(__file__))
+CONTROLLERS_DIR = os.path.dirname(PLANNERS_DIR)
+PROJECT_DIR = os.path.dirname(CONTROLLERS_DIR)
+WORKSPACE_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(PROJECT_DIR)))
+FRONT_COSTMAP_DIR = os.path.join(CONTROLLERS_DIR, "tof_costmap_front_only")
 SCANNER_DIR = os.path.join(CONTROLLERS_DIR, "tof_16ch_grid_scanner")
-PLANNERS_DIR = os.path.join(CONTROLLERS_DIR, "tof_path_planners")
 
-for p in [WORKSPACE_ROOT, PROJECT_DIR, CONTROLLERS_DIR, SCANNER_DIR, PLANNERS_DIR]:
+for p in [SCANNER_DIR, FRONT_COSTMAP_DIR]:
+    while p in sys.path:
+        sys.path.remove(p)
+
+for p in [WORKSPACE_ROOT, PROJECT_DIR, CONTROLLERS_DIR, PLANNERS_DIR]:
     if p not in sys.path:
-        sys.path.insert(0, p)
+        sys.path.append(p)
+
+if os.path.exists(FRONT_COSTMAP_DIR):
+    sys.path.insert(0, FRONT_COSTMAP_DIR)
 
 from cpp_smart_hybrid_costmap import CppSmartHybridCostmap
 from tof_gap_scout import ToFGapScout

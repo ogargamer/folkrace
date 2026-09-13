@@ -11,7 +11,7 @@ import sys
 import subprocess
 
 CURR_DIR = os.path.dirname(os.path.abspath(__file__))
-GA_DIR = os.path.join(CURR_DIR, "webots/optimization/ga_planner_optimizer")
+GA_DIR = os.path.join(os.path.dirname(CURR_DIR), "optimization", "ga_planner_optimizer")
 LAUNCHER_SCRIPT = os.path.join(GA_DIR, "launch_ga_optimization.py")
 
 if __name__ == "__main__":

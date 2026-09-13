@@ -23,45 +23,17 @@ import base64
 from typing import Dict, List, Optional, Tuple, Any
 import numpy as np
 
-# Discover controller and c++ septic paths
+# Discover controller paths
 CURR_DIR = os.path.dirname(os.path.abspath(__file__))
-DIR_C_SEPTIC = CURR_DIR
-while DIR_C_SEPTIC and os.path.basename(DIR_C_SEPTIC) != "c++ septic":
-    parent = os.path.dirname(DIR_C_SEPTIC)
-    if parent == DIR_C_SEPTIC:
-        break
-    DIR_C_SEPTIC = parent
-
-WORKSPACE_ROOT = os.path.dirname(DIR_C_SEPTIC) if DIR_C_SEPTIC else os.path.dirname(CURR_DIR)
-GA_OPTIMIZER_DIR = os.path.join(WORKSPACE_ROOT, "webots/optimization/ga_planner_optimizer")
+CONTROLLERS_DIR = os.path.dirname(CURR_DIR)
+GA_OPTIMIZER_DIR = os.path.dirname(CONTROLLERS_DIR)
+PLANNERS_DIR = os.path.join(GA_OPTIMIZER_DIR, "planners")
 DATA_DIR = os.path.join(GA_OPTIMIZER_DIR, "data")
+WORKSPACE_ROOT = os.path.dirname(GA_OPTIMIZER_DIR)
 
-# Priority order: c++ septic folders first!
-primary_paths = [
-    os.path.join(DIR_C_SEPTIC, "planners"),
-    os.path.join(DIR_C_SEPTIC, "best_genomes_and_configs"),
-    os.path.join(DIR_C_SEPTIC, "live_preview_and_webots/tools/launchers"),
-    DIR_C_SEPTIC,
-]
-fallback_paths = [
-    os.path.join(GA_OPTIMIZER_DIR, "planners"),
-    DATA_DIR,
-    GA_OPTIMIZER_DIR,
-    WORKSPACE_ROOT,
-    CURR_DIR,
-]
-
-for p in fallback_paths:
-    if p and p not in sys.path and os.path.exists(p):
-        sys.path.append(p)
-
-for p in reversed(primary_paths):
-    if p and os.path.exists(p):
-        while p in sys.path:
-            sys.path.remove(p)
+for p in [GA_OPTIMIZER_DIR, PLANNERS_DIR, DATA_DIR, WORKSPACE_ROOT, CURR_DIR]:
+    if p not in sys.path and os.path.exists(p):
         sys.path.insert(0, p)
-
-
 
 try:
     from controller import Robot, Supervisor
@@ -74,10 +46,6 @@ from cpp_smart_hybrid_costmap import CppSmartHybridCostmap
 from imu_encoder_fusion import IMUEncoderFusion
 from tof_gap_scout import ToFGapScout
 from stuck_recovery_manager import StuckRecoveryManager
-from anti_wrong_way_watchdog import AntiWrongWayWatchdog, wrap_to_pi
-
-def wrap_to_pi(angle_rad: float) -> float:
-    return math.atan2(math.sin(angle_rad), math.cos(angle_rad))
 from planner_config import (
     TIME_STEP_MS,
     DT,
@@ -348,17 +316,56 @@ def load_track_walls() -> Tuple[np.ndarray, np.ndarray]:
 
 def load_active_config() -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
     """
-    Loads active config from best_planner_genome.json first (or active_preview_config.json fallback).
+    Loads active config from active_preview_config.json first,
+    or falls back to ga_checkpoint.json or best_planner_genome.json.
     Returns: (planner_type, genes, info_dict)
     """
-    # 1. Primary: load best_planner_genome.json
+    # 1. Primary: check active_preview_config.json
+    active_path = os.path.join(GA_OPTIMIZER_DIR, "active_preview_config.json")
+    if os.path.exists(active_path):
+        try:
+            with open(active_path, "r", encoding="utf-8") as f:
+                d = json.load(f)
+                p_type = d.get("planner", "OPTION_2_SL_MPC")
+                genes = d.get("genes") or d.get("best_genome") or {}
+                info = {
+                    "source": active_path,
+                    "title": d.get("title", f"Active Config ({p_type})"),
+                    "fitness": d.get("fitness", d.get("best_fitness", "N/A")),
+                    "metrics": d.get("metrics", d.get("best_metrics", {})),
+                }
+                print(f"[Champion Preview] Loaded Active Config: {info['title']} (Planner: {p_type}, Fitness: {info['fitness']})", flush=True)
+                return p_type, genes, info
+        except Exception as e:
+            print(f"[Champion Preview] Failed to parse active_preview_config.json: {e}", flush=True)
+
+    # 2. Check ga_checkpoint.json
+    ckpt_path = os.path.join(GA_OPTIMIZER_DIR, "ga_checkpoint.json")
+    if os.path.exists(ckpt_path):
+        try:
+            with open(ckpt_path, "r", encoding="utf-8") as f:
+                d = json.load(f)
+                p_type = d.get("planner", "OPTION_2_SL_MPC")
+                genes = d.get("best_genome") or d.get("genes") or {}
+                info = {
+                    "source": ckpt_path,
+                    "title": f"GA Checkpoint Gen {d.get('generation', '?')} ({p_type})",
+                    "fitness": d.get("best_fitness", "N/A"),
+                    "metrics": d.get("best_metrics", {}),
+                }
+                print(f"[Champion Preview] Loaded from GA Checkpoint {ckpt_path} (Planner: {p_type}, Fitness: {info['fitness']})", flush=True)
+                return p_type, genes, info
+        except Exception as e:
+            print(f"[Champion Preview] Failed to parse ga_checkpoint.json: {e}", flush=True)
+
+    # 3. Check best_planner_genome.json
     fb_path = os.path.join(GA_OPTIMIZER_DIR, "best_planner_genome.json")
     if os.path.exists(fb_path):
         try:
             with open(fb_path, "r", encoding="utf-8") as f:
                 d = json.load(f)
-                p_type = d.get("planner", "OPTION_3_SEPTIC")
-                genes = d.get("genes", {})
+                p_type = d.get("planner", "OPTION_2_SL_MPC")
+                genes = d.get("genes") or d.get("best_genome") or {}
                 info = {
                     "source": fb_path,
                     "title": f"Best Planner Genome ({p_type})",
@@ -370,26 +377,7 @@ def load_active_config() -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
         except Exception as e:
             print(f"[Champion Preview] Failed to parse best_planner_genome.json: {e}", flush=True)
 
-    # 2. Fallback to active_preview_config.json
-    active_path = os.path.join(GA_OPTIMIZER_DIR, "active_preview_config.json")
-    if os.path.exists(active_path):
-        try:
-            with open(active_path, "r", encoding="utf-8") as f:
-                d = json.load(f)
-                p_type = d.get("planner", "OPTION_3_SEPTIC")
-                genes = d.get("genes", {})
-                info = {
-                    "source": active_path,
-                    "title": d.get("title", p_type),
-                    "fitness": d.get("fitness", "N/A"),
-                    "metrics": d.get("metrics", {}),
-                }
-                print(f"[Champion Preview] Active Config: {info['title']} (Fitness: {info['fitness']})", flush=True)
-                return p_type, genes, info
-        except Exception as e:
-            print(f"[Champion Preview] Failed to parse active_preview_config.json: {e}", flush=True)
-
-    return "OPTION_3_SEPTIC", {}, {"title": "Default Septic", "fitness": "N/A", "metrics": {}}
+    return "OPTION_2_SL_MPC", {}, {"title": "Default SL-MPC", "fitness": "N/A", "metrics": {}}
 
 
 def create_planner(planner_type: str, genes: Dict[str, Any], costmap: CppSmartHybridCostmap):
@@ -398,20 +386,28 @@ def create_planner(planner_type: str, genes: Dict[str, Any], costmap: CppSmartHy
     mu_val = float(genes.get("mu_friction", 0.817))
 
     if "OPTION_2" in p_up or "MPC" in p_up:
-        print(f"[Champion Preview] Initializing OPTION_2_SL_MPC Planner (Horizon={genes.get('horizon_N', 17)})...", flush=True)
+        print(f"[Champion Preview] Initializing OPTION_2_SL_MPC Planner (Horizon={genes.get('horizon_N', 30)})...", flush=True)
         planner = CurvilinearSLMPC(
-            horizon_N=int(genes.get("horizon_N", 17)),
-            dt=float(genes.get("dt", 0.055)),
-            q_progress=float(genes.get("q_progress", 7.60)),
-            q_cte=float(genes.get("q_cte", 13.92)),
-            q_heading=float(genes.get("q_heading", 9.99)),
-            r_steer=float(genes.get("r_steer", 5.90)),
-            r_accel=float(genes.get("r_accel", 1.74)),
-            r_steer_rate=float(genes.get("r_steer_rate", 16.39)),
+            costmap_engine=costmap,
+            horizon_N=int(genes.get("horizon_N", 30)),
+            dt=float(genes.get("dt", 0.016667)),
+            q_progress=float(genes.get("q_progress", 8.00)),
+            q_cte=float(genes.get("q_cte", 18.00)),
+            q_heading=float(genes.get("q_heading", 8.00)),
+            r_steer=float(genes.get("r_steer", 5.00)),
+            r_accel=float(genes.get("r_accel", 2.00)),
+            r_steer_rate=float(genes.get("r_steer_rate", 10.00)),
             mu_friction=mu_val,
-            v_corner_factor=float(genes.get("v_corner_factor", 0.877)),
-            pure_pursuit_blend_gain=float(genes.get("pp_blend_gain", 0.341)),
-            lookahead_blend_m=float(genes.get("lookahead_blend_m", 0.404)),
+            v_corner_factor=float(genes.get("v_corner_factor", 0.95)),
+            pure_pursuit_blend_gain=float(genes.get("pp_blend_gain", 0.35)),
+            lookahead_blend_m=float(genes.get("lookahead_blend_m", 0.45)),
+            v_cruise_max=float(genes.get("v_cruise_max", 5.50)),
+            v_cruise_min=float(genes.get("v_cruise_min", 0.60)),
+            straight_lock_dist_m=float(genes.get("straight_lock_dist", 1.70)),
+            straight_lock_speed_mps=float(genes.get("straight_lock_speed", 5.50)),
+            alt_switch_hysteresis=float(genes.get("alt_switch_hysteresis", 15.00)),
+            alt_min_separation_m=float(genes.get("alt_min_separation_m", 0.25)),
+            alt_aperture_bias=float(genes.get("alt_aperture_bias", 1.80)),
         )
     elif "OPTION_1" in p_up or "BVP" in p_up:
         print(f"[Champion Preview] Initializing OPTION_1_BVP State Lattice Planner...", flush=True)
@@ -564,7 +560,7 @@ def main():
     for name in TOF_SENSOR_NAMES:
         dev = robot.getDevice(name)
         if dev:
-            dev.enable(TIME_STEP_MS)
+            dev.enable(TOF_TIME_STEP_MS)
             tofs[name] = dev
 
     # Moving Obstacles
@@ -591,12 +587,15 @@ def main():
 
     # Load Active Config
     planner_type, genes, info = load_active_config()
-    r_infl = float(genes.get("r_inflation_m", 0.0886))
-    target_lookahead_m = float(genes.get("target_lookahead_m", 1.262))
-    aggr_dist_far = float(genes.get("aggr_dist_far_m", 1.40))
-    aggr_dist_close = float(genes.get("aggr_dist_close_m", 0.55))
-    aggr_min_scale = float(genes.get("aggr_min_scale", 0.15))
-    steer_deadband = float(genes.get("steer_deadband_rad", 0.030))
+    mu_val = float(genes.get("mu_friction", 0.817))
+    r_infl = float(genes.get("r_inflation_m", 0.090))
+    target_lookahead_m = float(genes.get("target_lookahead_m", 1.35))
+    aggr_dist_far = float(genes.get("aggr_dist_far_m", 1.70))
+    aggr_dist_close = float(genes.get("aggr_dist_close_m", 1.00))
+    aggr_min_scale = float(genes.get("aggr_min_scale", 0.30))
+    steer_deadband = float(genes.get("steer_deadband_rad", 0.002))
+    straight_lock_dist = float(genes.get("straight_lock_dist", 1.70))
+    straight_lock_speed = float(genes.get("straight_lock_speed", 5.50))
 
     # Electronic Differential
     ediff = ElectronicDifferential4WD(
@@ -610,7 +609,7 @@ def main():
         v_max=V_MAX_WHEEL,
     )
 
-    fusion = IMUEncoderFusion(wheel_radius=WHEEL_RADIUS, dt=DT)
+    fusion = IMUEncoderFusion(wheel_radius=WHEEL_RADIUS, dt=DT_PLANNER)
     fusion.attach_devices(encoders=encoders, imu_dev=imu_dev, gyro_dev=gyro, accel_dev=accel)
 
     costmap = CppSmartHybridCostmap(
@@ -618,7 +617,17 @@ def main():
         resolution=GRID_RES,
         r_inflation_m=r_infl,
     )
-    gap_scout = ToFGapScout()
+    gap_scout = ToFGapScout(
+        w_gap_distance=float(genes.get("w_gap_distance", 3.50)),
+        w_gap_width=float(genes.get("w_gap_width", 2.00)),
+        w_align_steer=float(genes.get("w_gap_steer", 0.80)),
+        w_align_straight=float(genes.get("w_gap_straight", 0.40)),
+        w_side_clearance=float(genes.get("w_side_clearance", 2.80)),
+        gap_dist_exp_k=float(genes.get("gap_dist_exp_k", 0.60)),
+        gap_progress_margin_m=float(genes.get("gap_progress_margin_m", 0.15)),
+        alt_min_separation_m=float(genes.get("alt_min_separation_m", 0.25)),
+        alt_aperture_bias=float(genes.get("alt_aperture_bias", 1.80)),
+    )
 
     planner = create_planner(planner_type, genes, costmap)
 
@@ -634,36 +643,15 @@ def main():
             pass
 
     # Initialize Intelligent Multi-Point K-Turn Recovery Manager
-    recovery_manager = StuckRecoveryManager()
-
-    # Initialize Anti-Wrong-Way and U-Turn Discrimination Watchdog
-    aww_watchdog = AntiWrongWayWatchdog()
-
-    # Initialize Webots Keyboard
-    keyboard = robot.getKeyboard() if hasattr(robot, "getKeyboard") else None
-    if keyboard:
-        keyboard.enable(TIME_STEP_MS)
-
-    # Front & Back Pillar Nodes (for interactive toggling in test worlds)
-    front_pillar_node = robot.getFromDef("FRONT_PILLAR") if WEBOTS_AVAILABLE and hasattr(robot, "getFromDef") else None
-    front_pillar_trans = front_pillar_node.getField("translation") if front_pillar_node else None
-    front_pillar_active = True
-    front_pillar_pos = [2.6, 0.4, 0.06]
-    if front_pillar_trans:
-        p = front_pillar_trans.getSFVec3f()
-        front_pillar_pos = [float(p[0]), float(p[1]), float(p[2])]
-
-    back_pillar_node = robot.getFromDef("BACK_PILLAR") if WEBOTS_AVAILABLE and hasattr(robot, "getFromDef") else None
-    back_pillar_trans = back_pillar_node.getField("translation") if back_pillar_node else None
-    back_pillar_active = True
-    back_pillar_pos = [-0.2066, 0.39, 0.06]
-    if back_pillar_trans:
-        p = back_pillar_trans.getSFVec3f()
-        back_pillar_pos = [float(p[0]), float(p[1]), float(p[2])]
+    recovery_manager = StuckRecoveryManager(
+        reverse_speed_m_s=float(genes.get("recovery_reverse_speed", 1.30)),
+        steer_angle_rad=float(genes.get("recovery_steer_angle_rad", 0.4538)),
+        emergency_backup_dist_m=float(genes.get("emergency_backup_dist_m", 0.09)),
+        clearance_exit_m=float(genes.get("recovery_clearance_exit_m", 0.28)),
+    )
 
     # Initialize UDP streaming socket for Live Preview Map (Port 9876 / 9877)
     gui_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    gui_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     cmd_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     cmd_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
@@ -672,29 +660,32 @@ def main():
     except Exception as e:
         print(f"[Champion Preview] Note: Could not bind cmd_sock to 9877: {e}", flush=True)
 
+    # Enable Keyboard Control for Live User Interaction
+    keyboard = robot.getKeyboard()
+    if keyboard:
+        try:
+            keyboard.enable(TIME_STEP_MS)
+        except Exception:
+            pass
+
     sim_is_paused = False
     sim_step_one_frame = False
-    sim_speed_mult = 0.50  # Default 0.50x (Half Speed)
+    sim_speed_mult = 1.0  # Default 1.0x (Real-Time Webots Playback)
 
     step_count = 0
     active_steer = 0.0
+    v_est = 0.0
+    yaw_rate = 0.0
+    cached_yaw_rate = 0.0
     last_print_time = 0.0
     lap_start_time = 0.0
     current_lap = 0
     stall_counter = 0
-    dr_x = 0.0
-    dr_y = 0.0
-    rx = 0.0
-    ry = 0.0
-    ryaw = 0.0
-    v_est = 0.0
-    yaw_rate = 0.0
-    target_speed = float(genes.get("v_cruise_min", V_MIN_CRUISE))
-    dist = 0.0
-    mode_desc = "NORMAL_DRIVE"
 
     cached_target_steer = 0.0
     cached_target_speed = float(genes.get("v_cruise_min", V_MIN_CRUISE))
+    rate_limited_speed = 0.0
+    was_recovering = False
     cached_theta_g = 0.0
     cached_xg = 0.0
     cached_yg = 1.0
@@ -704,126 +695,44 @@ def main():
     cached_plan_ms = 0.0
     cached_map_ms = 0.0
     cached_tofs = {k: TOF_MAX_RANGE_M for k in TOF_SENSOR_NAMES}
-    front_tof_keys = ["tof_fl_3", "tof_fr_3", "tof_fl_2", "tof_fr_2"]
-
-    def send_lean_telemetry():
-        try:
-            curr_sim_time = float(robot.getTime())
-            aww_data = aww_watchdog.get_detailed_telemetry(rx, ry, ryaw, v_est, yaw_rate, now_s=curr_sim_time)
-            lean_pkt = {
-                "type": "telemetry",
-                "time": round(curr_sim_time, 3),
-                "mode": str(mode_desc),
-                "v_est": round(float(v_est), 3),
-                "v_cmd": round(float(target_speed), 3),
-                "steer_deg": round(math.degrees(float(active_steer)), 2),
-                "dist_m": round(float(dist), 3),
-                "lap": int(current_lap),
-                "pose": [round(float(rx), 3), round(float(ry), 3), round(float(ryaw), 3)],
-                "front_pillar": bool(front_pillar_active),
-                "back_pillar": bool(back_pillar_active),
-                "watchdog_mode": str(getattr(aww_watchdog.mode, "name", aww_watchdog.mode)),
-                "sim_speed": round(float(sim_speed_mult), 2),
-                "aww": aww_data,
-                "tof": {k: round(float(v), 3) for k, v in cached_tofs.items()},
-            }
-            gui_sock.sendto(json.dumps(lean_pkt).encode("utf-8"), ("127.0.0.1", 9876))
-        except Exception as e:
-            print(f"[Champion Preview] Lean UDP send error: {e}", flush=True)
-
-    def toggle_front_pillar():
-        nonlocal front_pillar_active
-        if not front_pillar_trans:
-            print("\n>>> [PILLAR] FRONT_PILLAR node not found in world", flush=True)
-            return
-        front_pillar_active = not front_pillar_active
-        if front_pillar_active:
-            front_pillar_trans.setSFVec3f([front_pillar_pos[0], front_pillar_pos[1], 0.06])
-            print(f"\n>>> [KEYBOARD] FRONT PILLAR: RAISED (ACTIVE BLOCKING) at (2.60, 0.40, 0.06)", flush=True)
-        else:
-            front_pillar_trans.setSFVec3f([front_pillar_pos[0], front_pillar_pos[1], -5.0])
-            print(f"\n>>> [KEYBOARD] FRONT PILLAR: LOWERED (CLEARED) at (2.60, 0.40, -5.00)", flush=True)
-        send_lean_telemetry()
-
-    def toggle_back_pillar():
-        nonlocal back_pillar_active
-        if not back_pillar_trans:
-            print("\n>>> [PILLAR] BACK_PILLAR node not found in world", flush=True)
-            return
-        back_pillar_active = not back_pillar_active
-        if back_pillar_active:
-            back_pillar_trans.setSFVec3f([back_pillar_pos[0], back_pillar_pos[1], 0.06])
-            print(f"\n>>> [KEYBOARD] BACK PILLAR: RAISED (ACTIVE BLOCKING) at (-0.21, 0.39, 0.06)", flush=True)
-        else:
-            back_pillar_trans.setSFVec3f([back_pillar_pos[0], back_pillar_pos[1], -5.0])
-            print(f"\n>>> [KEYBOARD] BACK PILLAR: LOWERED (CLEARED) at (-0.21, 0.39, -5.00)", flush=True)
-        send_lean_telemetry()
-
-    def set_watchdog_mode(mode_name: str):
-        aww_watchdog.set_mode(mode_name)
-        print(f"\n>>> [KEYBOARD] ANTI-WRONG-WAY WATCHDOG MODE SWITCHED -> {mode_name}", flush=True)
-        send_lean_telemetry()
-
-    def reset_robot_pose():
-        nonlocal dr_x, dr_y, rx, ry, ryaw
-        if car_trans_field and car_rot_field:
-            car_trans_field.setSFVec3f(START_POS)
-            car_rot_field.setSFRotation(START_ROT)
-            if robot_node:
-                robot_node.resetPhysics()
-            aww_watchdog.reset()
-            recovery_manager.state = "DRIVE"
-            fusion.x_est = 0.0
-            fusion.y_est = 0.0
-            fusion.total_distance_m = 0.0
-            dr_x = 0.0
-            dr_y = 0.0
-            rx = 0.0
-            ry = 0.0
-            ryaw = 0.0
-            print("\n>>> [ROBOT RESET] TELEPORTED TO START POSE (0, 0)", flush=True)
-            send_lean_telemetry()
-
+    if "tof_front_left_4.1deg" in cached_tofs:
+        front_tof_keys = [
+            "tof_front_left_4.1deg", "tof_front_right_4.1deg",
+            "tof_front_left_15.4deg", "tof_front_right_15.4deg",
+        ]
+    else:
+        front_tof_keys = ["tof_fl_3", "tof_fr_3", "tof_fl_2", "tof_fr_2"]
     plan_res = {}
-    prob_map = None
-    hazard_mask = None
-
-    # Send initial startup beacon to GUI
-    try:
-        init_aww = aww_watchdog.get_detailed_telemetry(0.0, 0.0, 0.0, 0.0, 0.0, now_s=0.0)
-        beacon_pkt = {
-            "time": 0.0,
-            "mode": "READY",
-            "status": "OK",
-            "v_est": 0.0,
-            "v_cmd": 0.0,
-            "steer_deg": 0.0,
-            "dist_m": 0.0,
-            "lap": 0,
-            "gap": [0, 0, 0],
-            "targets": [],
-            "plan_ms": 0.0,
-            "map_ms": 0.0,
-            "surviving": 0,
-            "candidates": 0,
-            "tof": cached_tofs,
-            "best_line": [],
-            "candidate_lines": [],
-            "grid_shape": [0, 0],
-            "grid_bounds": [-1.0, 1.0, -0.5, 2.0],
-            "grid_data": "",
-            "hazard_data": "",
-            "aww": init_aww,
-            "pose": [0.0, 0.0, 0.0],
-        }
-        gui_sock.sendto(json.dumps(beacon_pkt).encode("utf-8"), ("127.0.0.1", 9876))
-    except Exception:
-        pass
 
     print(f"[Champion Preview] Controller active! Running Multi-Rate (120 Hz Sim/IMU/4WD, 60 Hz ToF/Planner)", flush=True)
 
     while robot.step(TIME_STEP_MS) != -1:
         wall_start_t = time.perf_counter()
+
+        # Check for keyboard commands
+        if keyboard:
+            try:
+                k = keyboard.getKey()
+                while k > 0:
+                    if k in (ord('+'), ord('=')):
+                        sim_speed_mult = min(5.0, round(sim_speed_mult + 0.10, 2))
+                        print(f"\n>>> [KEYBOARD] SIMULATION SPEED: {sim_speed_mult:.2f}x", flush=True)
+                    elif k in (ord('-'), ord('_')):
+                        sim_speed_mult = max(0.05, round(sim_speed_mult - 0.10, 2))
+                        print(f"\n>>> [KEYBOARD] SIMULATION SPEED: {sim_speed_mult:.2f}x", flush=True)
+                    elif k in (ord('P'), ord('p'), ord(' ')):
+                        sim_is_paused = not sim_is_paused
+                        print(f"\n>>> [KEYBOARD] PAUSED: {sim_is_paused}", flush=True)
+                    elif k in (ord('R'), ord('r')):
+                        if car_trans_field:
+                            car_trans_field.setSFVec3f(START_POS)
+                        if car_rot_field:
+                            car_rot_field.setSFRotation(START_ROT)
+                        track_tracker.reset(START_POS)
+                        print("\n>>> [KEYBOARD] ROBOT POSE RESET TO TRACK START", flush=True)
+                    k = keyboard.getKey()
+            except Exception:
+                pass
 
         # Check for commands from GUI
         try:
@@ -839,9 +748,8 @@ def main():
                     sim_is_paused = False
                     sim_step_one_frame = True
                 elif cmd_type == "set_speed":
-                    sim_speed_mult = float(cmd_dict.get("val", 0.50))
+                    sim_speed_mult = float(cmd_dict.get("val", 1.0))
                     print(f"[Champion Preview] Live updated simulation speed: {sim_speed_mult:.2f}x", flush=True)
-                    send_lean_telemetry()
                 elif cmd_type == "set_param":
                     p_name = cmd_dict.get("name")
                     p_val = float(cmd_dict.get("val", 0.0))
@@ -850,67 +758,16 @@ def main():
                     if hasattr(planner, p_name):
                         setattr(planner, p_name, p_val)
                     print(f"[Champion Preview] Live tuned {p_name} = {p_val}", flush=True)
-                elif cmd_type == "toggle_front_pillar":
-                    toggle_front_pillar()
-                elif cmd_type == "toggle_back_pillar":
-                    toggle_back_pillar()
-                elif cmd_type == "set_watchdog_mode":
-                    set_watchdog_mode(cmd_dict.get("mode", "OPTION_COMBINED_HYBRID"))
-                elif cmd_type == "reset_robot":
-                    reset_robot_pose()
+
         except (BlockingIOError, socket.error):
             pass
         except Exception as e:
             print(f"[Champion Preview] Command parse error: {e}", flush=True)
 
-        # Read Webots Keyboard Input
-        if keyboard:
-            k = keyboard.getKey()
-            while k > 0:
-                if k in (ord('F'), ord('f')):
-                    toggle_front_pillar()
-                elif k in (ord('B'), ord('b')):
-                    toggle_back_pillar()
-                elif k == ord('1'):
-                    set_watchdog_mode("OPTION_1_BREADCRUMB")
-                elif k == ord('2'):
-                    set_watchdog_mode("OPTION_2_KINEMATIC_ARC")
-                elif k == ord('3'):
-                    set_watchdog_mode("OPTION_3_FLOW_COSTMAP")
-                elif k == ord('4'):
-                    set_watchdog_mode("OPTION_4_LATERAL_SEPARATION")
-                elif k == ord('5'):
-                    set_watchdog_mode("OPTION_COMBINED_HYBRID")
-                elif k == ord('0'):
-                    set_watchdog_mode("DISABLED")
-                elif k in (ord('+'), ord('=')):
-                    sim_speed_mult = min(5.0, round(sim_speed_mult + 0.10, 2))
-                    print(f"\n>>> [KEYBOARD] SIMULATION SPEED MULTIPLIER: {sim_speed_mult:.2f}x", flush=True)
-                    send_lean_telemetry()
-                elif k in (ord('-'), ord('_')):
-                    sim_speed_mult = max(0.05, round(sim_speed_mult - 0.10, 2))
-                    print(f"\n>>> [KEYBOARD] SIMULATION SPEED MULTIPLIER: {sim_speed_mult:.2f}x", flush=True)
-                    send_lean_telemetry()
-                elif k == ord('['):
-                    sim_speed_mult = max(0.05, round(sim_speed_mult * 0.5, 2))
-                    print(f"\n>>> [KEYBOARD] SIMULATION SPEED HALVED: {sim_speed_mult:.2f}x", flush=True)
-                    send_lean_telemetry()
-                elif k == ord(']'):
-                    sim_speed_mult = min(5.0, round(sim_speed_mult * 2.0, 2))
-                    print(f"\n>>> [KEYBOARD] SIMULATION SPEED DOUBLED: {sim_speed_mult:.2f}x", flush=True)
-                    send_lean_telemetry()
-                elif k in (ord('R'), ord('r')):
-                    reset_robot_pose()
-                elif k in (ord('H'), ord('h'), ord('?')):
-                    print_interactive_help()
-                k = keyboard.getKey()
-
-
         if sim_is_paused:
             for m in motors.values():
                 if m:
                     m.setVelocity(0.0)
-            send_lean_telemetry()
             time.sleep(0.02)
             continue
 
@@ -921,19 +778,7 @@ def main():
         step_count += 1
         sim_time = step_count * DT
 
-        # Update reverse moving obstacles
-        if obs_fields and obs_engine.total_length > 0:
-            n_obs = len(obs_fields)
-            for k, field in enumerate(obs_fields):
-                obs_s = (float(k + 1) * (obs_engine.total_length / float(n_obs + 1)) - MOVING_OBSTACLE_SPEED_MPS * sim_time) % obs_engine.total_length
-                ox, oy = obs_engine.get_position_at_s(obs_s)
-                field.setSFVec3f([float(ox), float(oy), 0.075])
-
-        # Sensor fusion at 120 Hz
-        v_est, yaw_rate, yaw = fusion.update(DT)
-        v_est = max(0.0, v_est) if not math.isnan(v_est) else 0.0
-
-        # Webots Real Ground-Truth Data (No Sensors)
+        # Webots Real Ground-Truth Data
         car_pos = car_trans_field.getSFVec3f() if car_trans_field else [0.0, 0.0, 0.028]
         cx, cy, cz = float(car_pos[0]), float(car_pos[1]), float(car_pos[2])
 
@@ -944,20 +789,33 @@ def main():
         dist = float(track_tracker.update([cx, cy]))
         calculated_lap = int(track_tracker.current_lap)
 
-        # Initial physics warmup pause (0.35 s)
-        if sim_time < 0.35:
+        # Update reverse moving obstacles
+        if obs_fields and obs_engine.total_length > 0:
+            n_obs = len(obs_fields)
+            for k, field in enumerate(obs_fields):
+                obs_s = (float(k + 1) * (obs_engine.total_length / float(n_obs + 1)) - MOVING_OBSTACLE_SPEED_MPS * sim_time) % obs_engine.total_length
+                ox, oy = obs_engine.get_position_at_s(obs_s)
+                field.setSFVec3f([float(ox), float(oy), 0.075])
+
+        # Initial physics warmup pause (0.50 s)
+        if sim_time < 0.50:
             for m in motors.values():
                 if m:
                     m.setVelocity(0.0)
             for s in servos.values():
                 if s:
                     s.setPosition(0.0)
-            send_lean_telemetry()
             continue
 
-        # Run 16-CH ToF, Costmap & Path Planner at 60 Hz (Decimation = 2)
+        # 60 Hz Control Tick (Decimation = 2)
+        # Fusion, 16-CH ToF, Costmap, Path Planner, Recovery, Straight-Lock & Quieting
         run_planner_step = (step_count % PLANNER_DECIMATION == 0)
         if run_planner_step:
+            # Sensor fusion at 60 Hz (Zero Cheating)
+            v_est, yaw_rate, yaw = fusion.update(dt=DT_PLANNER)
+            v_est = max(0.0, v_est) if not math.isnan(v_est) else 0.0
+            cached_yaw_rate = yaw_rate
+
             for name in TOF_SENSOR_NAMES:
                 dev = tofs.get(name)
                 if dev:
@@ -989,89 +847,100 @@ def main():
             )
             cached_plan_ms = (time.perf_counter() - t_plan_0) * 1000.0
 
-            cached_target_steer = float(plan_res.get("cmd_steer_rad", 0.0))
-            cached_target_speed = float(plan_res.get("cmd_speed_mps", genes.get("v_cruise_min", V_MIN_CRUISE)))
-            d_fl3 = cached_tofs.get("tof_fl_3", TOF_MAX_RANGE_M)
-            d_fr3 = cached_tofs.get("tof_fr_3", TOF_MAX_RANGE_M)
+            raw_target_steer = float(plan_res.get("cmd_steer_rad", 0.0))
+            raw_target_speed = float(plan_res.get("cmd_speed_mps", genes.get("v_cruise_min", V_MIN_CRUISE)))
+            cached_theta_g = float(theta_g)
+            if "tof_front_left_4.1deg" in cached_tofs:
+                d_fl3 = cached_tofs.get("tof_front_left_4.1deg", TOF_MAX_RANGE_M)
+                d_fr3 = cached_tofs.get("tof_front_right_4.1deg", TOF_MAX_RANGE_M)
+                d_fl_lock = cached_tofs.get("tof_front_left_4.1deg", 0.0)
+                d_fr_lock = cached_tofs.get("tof_front_right_4.1deg", 0.0)
+            else:
+                d_fl3 = cached_tofs.get("tof_fl_3", TOF_MAX_RANGE_M)
+                d_fr3 = cached_tofs.get("tof_fr_3", TOF_MAX_RANGE_M)
+                d_fl_lock = cached_tofs.get("tof_fl_3", 0.0)
+                d_fr_lock = cached_tofs.get("tof_fr_3", 0.0)
             cached_d_straight = min(d_fl3, d_fr3)
             cached_front_min_m = min([cached_tofs.get(k, TOF_MAX_RANGE_M) for k in front_tof_keys])
 
-        # Dead-reckoned 2D pose from BNO08x + Encoders (with safe fallback)
-        if hasattr(fusion, "get_pose_2d"):
-            rx, ry, ryaw = fusion.get_pose_2d()
-        else:
-            dr_x += v_est * math.cos(yaw) * DT
-            dr_y += v_est * math.sin(yaw) * DT
-            rx, ry, ryaw = dr_x, dr_y, yaw
+            # Recovery Manager at 60 Hz
+            is_recovering, rec_v, rec_steer = recovery_manager.update(
+                dt=DT_PLANNER,
+                current_v=v_est,
+                commanded_v=raw_target_speed,
+                cached_tofs=cached_tofs,
+                heading_err=cached_theta_g,
+                active_steer=active_steer,
+            )
 
-        # Update Anti-Wrong-Way Watchdog at 120 Hz
-        aww_status = aww_watchdog.update(
-            x=rx,
-            y=ry,
-            yaw=ryaw,
-            v_est=v_est,
-            yaw_rate=yaw_rate,
-            cached_tofs=cached_tofs,
-            now_s=sim_time,
-        )
+            if is_recovering:
+                target_speed = rec_v
+                target_steer = rec_steer
+                active_steer = rec_steer
+                mode_desc = f"RECOVERY_{recovery_manager.state}"
+                was_recovering = True
+            else:
+                if was_recovering:
+                    was_recovering = False
+                    active_steer = 0.0
 
-        if aww_status.is_wrong_way and not recovery_manager.state.startswith("PIVOT") and recovery_manager.state != "CORRECTIVE_180":
-            if aww_status.corrective_action == "CORRECTIVE_180":
-                yaw_diff = wrap_to_pi(aww_status.target_recovery_yaw - ryaw) if aww_status.target_recovery_yaw is not None else 1.0
-                steer_sign = 1.0 if yaw_diff >= 0 else -1.0
-                recovery_manager.trigger_corrective_180(
-                    target_yaw=aww_status.target_recovery_yaw,
-                    steer_sign=steer_sign,
-                    current_yaw=ryaw,
+                # Fast Straight-Line Lock (60 Hz, guarded by turn intent)
+                is_straight_locked = (
+                    d_fl_lock >= straight_lock_dist and
+                    d_fr_lock >= straight_lock_dist and
+                    abs(cached_theta_g) < 0.08 and
+                    abs(raw_target_steer) < 0.08
                 )
+                if is_straight_locked:
+                    target_speed = straight_lock_speed
+                    target_steer = 0.0
+                    active_steer = 0.0
+                    mode_desc = "STRAIGHT_LOCK"
+                else:
+                    target_speed = raw_target_speed
+                    target_steer = raw_target_steer
+                    steer_delta = target_steer - active_steer
 
-        # Recovery Manager & Steering Aggressiveness at 120 Hz
-        is_recovering, rec_v, rec_steer = recovery_manager.update(
-            dt=DT,
-            current_v=v_est,
-            commanded_v=cached_target_speed,
-            cached_tofs=cached_tofs,
-            heading_err=cached_theta_g,
-            current_yaw=ryaw,
-            current_x=rx,
-            current_y=ry,
-            now_s=sim_time,
-        )
+                    # Progressive distance and small-offset steering aggressiveness
+                    if cached_d_straight >= aggr_dist_far:
+                        dist_scale = aggr_min_scale
+                    elif cached_d_straight <= aggr_dist_close:
+                        dist_scale = 1.0
+                    else:
+                        frac = (aggr_dist_far - cached_d_straight) / max(0.001, (aggr_dist_far - aggr_dist_close))
+                        dist_scale = float(aggr_min_scale + (frac ** 1.5) * (1.0 - aggr_min_scale))
 
-        if is_recovering:
-            target_speed = rec_v
-            target_steer = rec_steer
-            active_steer = rec_steer
-            mode_desc = f"RECOVERY_{recovery_manager.state}"
+                    err_mag = abs(steer_delta)
+                    if err_mag <= steer_deadband:
+                        err_scale = 0.90
+                    elif err_mag >= 0.05:
+                        err_scale = 1.0
+                    else:
+                        err_frac = (err_mag - steer_deadband) / max(0.001, (0.05 - steer_deadband))
+                        err_scale = float(0.90 + err_frac * (1.0 - 0.90))
+
+                    steer_aggressiveness = float(max(0.85, min(1.0, dist_scale * err_scale)))
+                    active_steer = active_steer + steer_aggressiveness * steer_delta
+                    mode_desc = "OPTION_2_SL_MPC"
+
+            cached_target_speed = target_speed
+            cached_target_steer = active_steer
+
+        # 4WD Electronic Differential & Motor Commands at 120 Hz
+        # Unified Friction Rate Limiter for speed command (enforces acceleration & deceleration limits)
+        speed_err = cached_target_speed - rate_limited_speed
+        if (rate_limited_speed >= 0.0 and speed_err > 0.0) or (rate_limited_speed <= 0.0 and speed_err < 0.0):
+            max_dv = (0.85 * mu_val * 9.81) * DT
         else:
-            target_speed = cached_target_speed
-            target_steer = cached_target_steer
-            steer_delta = target_steer - active_steer
+            max_dv = (1.00 * mu_val * 9.81) * DT
 
-            # Progressive distance and small-offset steering aggressiveness
-            if cached_d_straight >= aggr_dist_far:
-                dist_scale = aggr_min_scale
-            elif cached_d_straight <= aggr_dist_close:
-                dist_scale = 1.0
-            else:
-                frac = (aggr_dist_far - cached_d_straight) / max(0.001, (aggr_dist_far - aggr_dist_close))
-                dist_scale = float(aggr_min_scale + (frac ** 1.5) * (1.0 - aggr_min_scale))
+        if abs(speed_err) <= max_dv:
+            rate_limited_speed = cached_target_speed
+        else:
+            rate_limited_speed += math.copysign(max_dv, speed_err)
 
-            err_mag = abs(steer_delta)
-            if err_mag <= steer_deadband:
-                err_scale = 0.90
-            elif err_mag >= 0.05:
-                err_scale = 1.0
-            else:
-                err_frac = (err_mag - steer_deadband) / max(0.001, (0.05 - steer_deadband))
-                err_scale = float(0.90 + err_frac * (1.0 - 0.90))
-
-            steer_aggressiveness = float(max(0.85, min(1.0, dist_scale * err_scale)))
-            active_steer = active_steer + steer_aggressiveness * steer_delta
-            mode_desc = "SEPTIC_SPLINE"
-
-        # Electronic Differential & Motor Commands at 120 Hz
-        actuators = ediff.update(target_v=target_speed, target_steer_rad=active_steer, gyro_z_rad_s=yaw_rate)
+        live_gyro_z = float(gyro.getValues()[2]) if gyro else cached_yaw_rate
+        actuators = ediff.update(target_v=rate_limited_speed, target_steer_rad=cached_target_steer, gyro_z_rad_s=live_gyro_z)
 
         if servos["left"]:
             servos["left"].setPosition(actuators["steer_left"])
@@ -1086,101 +955,69 @@ def main():
             motors["RL"].setVelocity(actuators["omega_RL"])
         if motors["RR"]:
             motors["RR"].setVelocity(actuators["omega_RR"])
-        # 1. Ultra-lean telemetry stream (450 bytes) at 60 Hz for Watchdog Studio & real-time controls
-        if step_count % 2 == 0:
-            send_lean_telemetry()
 
-        # 2. Full costmap and trajectory packet at 12 Hz for map viewers
-        if step_count % 10 == 0:
+        if step_count % 2 == 0:
             try:
                 prob_map_send = costmap.get_probability_map() if hasattr(costmap, "get_probability_map") else prob_map
                 hazard_mask_send = costmap.get_hazard_mask() if hasattr(costmap, "get_hazard_mask") else hazard_mask
                 if prob_map_send is not None and hazard_mask_send is not None:
                     prob_down = (prob_map_send[::2, ::2] * 255.0).astype(np.uint8)
                     hazard_down = hazard_mask_send[::2, ::2].astype(np.uint8)
+
                     grid_compressed = base64.b64encode(zlib.compress(prob_down.tobytes())).decode("ascii")
                     hazard_compressed = base64.b64encode(zlib.compress(hazard_down.tobytes())).decode("ascii")
-                    grid_shape = [int(s) for s in prob_down.shape]
-                else:
-                    grid_compressed = ""
-                    hazard_compressed = ""
-                    grid_shape = [0, 0]
 
-                def to_py(obj):
-                    if isinstance(obj, (np.floating, np.float32, np.float64)):
-                        return float(obj)
-                    elif isinstance(obj, (np.integer, np.int32, np.int64)):
-                        return int(obj)
-                    elif isinstance(obj, (list, tuple)):
-                        return [to_py(x) for x in obj]
-                    elif isinstance(obj, dict):
-                        return {k: to_py(v) for k, v in obj.items()}
-                    return obj
+                    def to_py(obj):
+                        if isinstance(obj, (np.floating, np.float32, np.float64)):
+                            return float(obj)
+                        elif isinstance(obj, (np.integer, np.int32, np.int64)):
+                            return int(obj)
+                        elif isinstance(obj, (list, tuple)):
+                            return [to_py(x) for x in obj]
+                        elif isinstance(obj, dict):
+                            return {k: to_py(v) for k, v in obj.items()}
+                        return obj
 
-                b_line = to_py(plan_res.get("best_line", [])) if "plan_res" in locals() else []
-                c_lines = to_py(plan_res.get("candidate_lines", []))[:20] if "plan_res" in locals() else []
-                g_gap = [round(float(xg), 3), round(float(yg), 3), round(float(width), 3)] if "xg" in locals() else [0, 0, 0]
-                g_targets = [[round(float(tx), 3), round(float(ty), 3), round(float(ap), 3)] for (tx, ty, ap) in (gap_scout.last_targets or [])]
+                    b_line = to_py(plan_res.get("best_line", [])) if "plan_res" in locals() else []
+                    c_lines = to_py(plan_res.get("candidate_lines", []))[:20] if "plan_res" in locals() else []
+                    g_gap = [round(float(xg), 3), round(float(yg), 3), round(float(width), 3)] if "xg" in locals() else [0, 0, 0]
+                    g_targets = [[round(float(tx), 3), round(float(ty), 3), round(float(ap), 3)] for (tx, ty, ap) in (gap_scout.last_targets or [])]
 
-                aww_pkt = aww_watchdog.get_detailed_telemetry(rx, ry, ryaw, v_est, yaw_rate, now_s=sim_time)
-                gui_pkt = {
-                    "type": "full_map",
-                    "time": round(float(sim_time), 3),
-                    "mode": mode_desc,
-                    "status": plan_res.get("status", "OK") if "plan_res" in locals() else "OK",
-                    "v_est": round(float(v_est), 3),
-                    "v_cmd": round(float(target_speed), 3),
-                    "steer_deg": round(math.degrees(float(active_steer)), 2),
-                    "dist_m": round(float(dist), 3),
-                    "lap": int(current_lap),
-                    "gap": g_gap,
-                    "targets": g_targets,
-                    "plan_ms": round(float(cached_plan_ms), 2),
-                    "map_ms": round(float(cached_map_ms), 2),
-                    "surviving": int(plan_res.get("surviving_count", 0)) if "plan_res" in locals() else 0,
-                    "candidates": int(plan_res.get("candidate_count", len(c_lines))) if "plan_res" in locals() else 0,
-                    "tof": {k: round(float(v), 3) for k, v in cached_tofs.items()},
-                    "best_line": b_line,
-                    "candidate_lines": c_lines,
-                    "grid_shape": grid_shape,
-                    "grid_bounds": [-1.0, 1.0, -0.5, 2.0],
-                    "grid_data": grid_compressed,
-                    "hazard_data": hazard_compressed,
-                    "front_pillar": bool(front_pillar_active),
-                    "back_pillar": bool(back_pillar_active),
-                    "watchdog_mode": str(getattr(aww_watchdog.mode, "name", aww_watchdog.mode)),
-                    "sim_speed": round(float(sim_speed_mult), 2),
-                    "aww": aww_pkt,
-                    "pose": [round(float(rx), 3), round(float(ry), 3), round(float(ryaw), 3)],
-                }
-                gui_sock.sendto(json.dumps(gui_pkt).encode("utf-8"), ("127.0.0.1", 9876))
-            except Exception as e:
-                print(f"[Champion Preview] UDP streaming error: {e}", flush=True)
+                    gui_pkt = {
+                        "time": round(float(sim_time), 3),
+                        "mode": mode_desc,
+                        "status": plan_res.get("status", "OK") if "plan_res" in locals() else "OK",
+                        "v_est": round(float(v_est), 3),
+                        "v_cmd": round(float(cached_target_speed), 3),
+                        "steer_deg": round(math.degrees(float(cached_target_steer)), 2),
+                        "dist_m": round(float(dist), 3),
+                        "lap": int(current_lap),
+                        "gap": g_gap,
+                        "targets": g_targets,
+                        "plan_ms": round(float(cached_plan_ms), 2),
+                        "map_ms": round(float(cached_map_ms), 2),
+                        "surviving": int(plan_res.get("surviving_count", 0)) if "plan_res" in locals() else 0,
+                        "candidates": int(plan_res.get("candidate_count", len(c_lines))) if "plan_res" in locals() else 0,
+                        "tof": {k: round(float(v), 3) for k, v in cached_tofs.items()},
+                        "best_line": b_line,
+                        "candidate_lines": c_lines,
+                        "grid_shape": [int(s) for s in prob_down.shape],
+                        "grid_bounds": [float(GRID_X_MIN), float(GRID_X_MAX), float(GRID_Y_MIN), float(GRID_Y_MAX)],
+                        "grid_data": grid_compressed,
+                        "hazard_data": hazard_compressed,
+                    }
+                    gui_sock.sendto(json.dumps(gui_pkt).encode("utf-8"), ("127.0.0.1", 9876))
+            except Exception:
+                pass
 
         # Stall logging
-        if sim_time > 0.5 and target_speed >= 0.50 and v_real < 0.12:
+        if sim_time > 0.5 and cached_target_speed >= 0.50 and v_real < 0.12:
             stall_counter += 1
             if stall_counter * DT >= 0.5 and sim_time - last_print_time >= 0.5:
                 print(f"  [Vehicle Stall] Stopped against barrier (v_real={v_real:.2f}m/s).", flush=True)
+                last_print_time = sim_time
         else:
             stall_counter = 0
-
-        # Actuators
-        actuators = ediff.update(target_v=target_speed, target_steer_rad=target_steer, gyro_z_rad_s=yaw_rate)
-
-        if servos["left"]:
-            servos["left"].setPosition(actuators["steer_left"])
-        if servos["right"]:
-            servos["right"].setPosition(actuators["steer_right"])
-
-        if motors["FL"]:
-            motors["FL"].setVelocity(actuators["omega_FL"])
-        if motors["FR"]:
-            motors["FR"].setVelocity(actuators["omega_FR"])
-        if motors["RL"]:
-            motors["RL"].setVelocity(actuators["omega_RL"])
-        if motors["RR"]:
-            motors["RR"].setVelocity(actuators["omega_RR"])
 
         # Lap counting
         if calculated_lap > current_lap:
@@ -1193,8 +1030,8 @@ def main():
         if step_count % 2 == 0:
             print(
                 f"[Telemetry] Mode: {mode_desc:14s} | Time: {sim_time:5.1f}s | Lap: {current_lap:2d} | "
-                f"Dist: {dist:6.1f}m | Speed: {v_real:4.2f}m/s (cmd: {target_speed:4.2f}) | "
-                f"Steer: {math.degrees(target_steer):+5.1f} deg | Plan Latency: {cached_plan_ms:4.2f}ms",
+                f"Dist: {dist:6.1f}m | Speed: {v_real:4.2f}m/s (cmd: {cached_target_speed:4.2f}) | "
+                f"Steer: {math.degrees(cached_target_steer):+5.1f} deg | Plan Latency: {cached_plan_ms:4.2f}ms",
                 flush=True,
             )
 

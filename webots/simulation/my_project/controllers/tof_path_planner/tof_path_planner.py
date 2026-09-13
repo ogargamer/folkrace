@@ -21,13 +21,23 @@ CURR_DIR = os.path.dirname(os.path.abspath(__file__))
 CONTROLLERS_DIR = os.path.dirname(CURR_DIR)
 MY_PROJECT_DIR = os.path.dirname(CONTROLLERS_DIR)
 WORKSPACE_ROOT = os.path.dirname(MY_PROJECT_DIR)
+FRONT_COSTMAP_DIR = os.path.join(CONTROLLERS_DIR, "tof_costmap_front_only")
 SCANNER_DIR = os.path.join(CONTROLLERS_DIR, "tof_16ch_grid_scanner")
 MPPI_DIR = os.path.join(CONTROLLERS_DIR, "mppi_controller")
 PLANNERS_DIR = os.path.join(CONTROLLERS_DIR, "tof_path_planners")
 
-for p in [WORKSPACE_ROOT, MY_PROJECT_DIR, CONTROLLERS_DIR, SCANNER_DIR, MPPI_DIR, PLANNERS_DIR, CURR_DIR]:
+# Remove any previous entries to avoid ordering conflicts
+for p in [SCANNER_DIR, FRONT_COSTMAP_DIR]:
+    while p in sys.path:
+        sys.path.remove(p)
+
+for p in [WORKSPACE_ROOT, MY_PROJECT_DIR, CONTROLLERS_DIR, MPPI_DIR, PLANNERS_DIR, CURR_DIR]:
     if p not in sys.path and os.path.exists(p):
-        sys.path.insert(0, p)
+        sys.path.append(p)
+
+# FRONT_COSTMAP_DIR MUST ALWAYS BE AT INDEX 0 so it takes precedence over scanner dir
+if os.path.exists(FRONT_COSTMAP_DIR):
+    sys.path.insert(0, FRONT_COSTMAP_DIR)
 
 try:
     from controller import Robot, Supervisor
@@ -70,15 +80,19 @@ from planner_config import (
     MOVING_OBSTACLE_SPEED_MPS,
     MOVING_OBSTACLE_Z_ELEVATION,
     RECOVERY_REVERSE_SPEED_MPS,
-    RECOVERY_FORWARD_SPEED_MPS,
     RECOVERY_STEER_ANGLE_RAD,
     RECOVERY_STALL_CONFIRM_S,
     RECOVERY_FRONT_BLOCKED_M,
     RECOVERY_REVERSE_STROKE_MAX_S,
-    RECOVERY_FORWARD_STROKE_MAX_S,
     RECOVERY_TOTAL_TIMEOUT_S,
     RECOVERY_CLEARANCE_EXIT_M,
     RECOVERY_EXIT_MIN_TIME_S,
+    ACCEL_FWD_MAX,
+    BRAKE_DECEL_MAX,
+    SERVO_MAX_SPEED_RAD_S,
+    STRAIGHT_LOCK_DIST_M,
+    STRAIGHT_LOCK_SPEED_MPS,
+    EMERGENCY_BACKUP_DIST_M,
     compute_steering_aggressiveness,
 )
 from imu_encoder_fusion import IMUEncoderFusion
@@ -86,149 +100,7 @@ from tof_gap_scout import ToFGapScout
 from planner_option1_bvp import BVPDynamicStateLattice
 from planner_option2_sl_mpc import CurvilinearSLMPC
 from planner_option3_septic import SepticSplineTractionProfiler
-
-
-# ==============================================================================
-# NON-BLOCKING STUCK & REVERSE RECOVERY MANAGER
-# ==============================================================================
-class StuckRecoveryState:
-    NORMAL_DRIVE = "DRIVE"
-    PIVOT_REVERSE = "PIVOT_REVERSE"
-    PIVOT_FORWARD = "PIVOT_FORWARD"
-
-
-class StuckRecoveryManager:
-    """
-    Intelligent Autonomous Multi-Point K-Turn & Clearance Recovery Controller:
-    - Eliminates endless reverse backing up into rear walls or competitors.
-    - If facing backwards or physically stalled, executes rapid alternating 3-point K-turns
-      (Reverse Arc <-> Forward Arc) that continuously rotate the chassis toward open space.
-    - Instantly exits to NORMAL_DRIVE the moment front clearance and forward alignment are restored.
-    """
-
-    def __init__(
-        self,
-        reverse_speed_m_s: float = RECOVERY_REVERSE_SPEED_MPS,
-        forward_speed_m_s: float = RECOVERY_FORWARD_SPEED_MPS,
-        steer_angle_rad: float = RECOVERY_STEER_ANGLE_RAD,
-    ):
-        self.state = StuckRecoveryState.NORMAL_DRIVE
-        self.reverse_speed = reverse_speed_m_s
-        self.forward_speed = forward_speed_m_s
-        self.steer_angle = steer_angle_rad
-        self.stall_timer = 0.0
-        self.stroke_timer = 0.0
-        self.total_recovery_timer = 0.0
-        self.preferred_yaw_sign = 1.0
-
-    def trigger_emergency_recovery(self, heading_err: float = 0.0, steer_dir: Optional[float] = None):
-        """Immediately triggers intelligent recovery maneuver."""
-        self.state = StuckRecoveryState.PIVOT_REVERSE
-        self.stroke_timer = 0.0
-        self.total_recovery_timer = 0.0
-        if abs(heading_err) > math.radians(25.0):
-            self.preferred_yaw_sign = 1.0 if heading_err > 0 else -1.0
-        elif steer_dir is not None:
-            self.preferred_yaw_sign = 1.0 if steer_dir > 0 else -1.0
-        else:
-            self.preferred_yaw_sign = 1.0
-        print(f"[RECOVERY] Multi-point recovery engaged (Yaw Target Sign: {self.preferred_yaw_sign:+.0f})...", flush=True)
-
-    def update(
-        self,
-        dt: float,
-        current_v: float,
-        commanded_v: float,
-        cached_tofs: Dict[str, float],
-        heading_err: float = 0.0,
-    ) -> Tuple[bool, float, float]:
-        """
-        Updates recovery state machine.
-        Returns:
-            (is_recovering, target_v, target_steer)
-        """
-        front_keys = ["tof_fl_3", "tof_fr_3", "tof_fl_2", "tof_fr_2"]
-        rear_keys = ["tof_bl_3", "tof_br_3", "tof_bl_2", "tof_br_2"]
-        left_keys = ["tof_fl_0", "tof_fl_1", "tof_bl_0", "tof_bl_1"]
-        right_keys = ["tof_fr_0", "tof_fr_1", "tof_br_0", "tof_br_1"]
-
-        min_all_dist = min(cached_tofs.values()) if cached_tofs else TOF_MAX_RANGE_M
-        min_front_cone = min([cached_tofs.get(k, TOF_MAX_RANGE_M) for k in front_keys])
-        min_rear_cone = min([cached_tofs.get(k, TOF_MAX_RANGE_M) for k in rear_keys])
-        left_dist = min([cached_tofs.get(k, TOF_MAX_RANGE_M) for k in left_keys])
-        right_dist = min([cached_tofs.get(k, TOF_MAX_RANGE_M) for k in right_keys])
-
-        # 1. Spinout / Wrong-Way Detection (|heading_err| > 75 deg)
-        is_facing_backwards = abs(heading_err) > math.radians(75.0)
-
-        # 2. Physical Stall Detection (Forward throttle commanded but vehicle blocked)
-        is_stalled_forward = (commanded_v > 0.30 and abs(current_v) < 0.10 and min_front_cone < RECOVERY_FRONT_BLOCKED_M)
-
-        if self.state == StuckRecoveryState.NORMAL_DRIVE:
-            if is_facing_backwards:
-                self.trigger_emergency_recovery(heading_err=heading_err)
-            elif is_stalled_forward:
-                self.stall_timer += dt
-                if self.stall_timer > RECOVERY_STALL_CONFIRM_S:
-                    side_steer = 1.0 if left_dist < right_dist else -1.0
-                    self.trigger_emergency_recovery(heading_err=heading_err, steer_dir=side_steer)
-            else:
-                self.stall_timer = max(0.0, self.stall_timer - dt * 2.0)
-            return False, 0.0, 0.0
-
-        # Active Recovery Loop
-        self.stroke_timer += dt
-        self.total_recovery_timer += dt
-
-        is_aligned_forward = abs(heading_err) <= math.radians(45.0)
-        has_sufficient_clearance = (min_front_cone >= RECOVERY_CLEARANCE_EXIT_M and min_all_dist >= 0.16)
-
-        # EXIT GATE: Front clear + heading facing forward, or total timeout reached
-        if (self.total_recovery_timer >= RECOVERY_EXIT_MIN_TIME_S and has_sufficient_clearance and is_aligned_forward) or (self.total_recovery_timer >= RECOVERY_TOTAL_TIMEOUT_S):
-            self.state = StuckRecoveryState.NORMAL_DRIVE
-            self.stall_timer = 0.0
-            print(f"[RECOVERY] K-Turn complete (Front={min_front_cone*100:.1f}cm, HeadErr={math.degrees(heading_err):+.1f} deg in {self.total_recovery_timer*1000:.0f}ms). Resuming full race pace!", flush=True)
-            return False, 0.0, 0.0
-
-        # Update preferred yaw rotation if heading error is substantial
-        if abs(heading_err) > math.radians(30.0):
-            self.preferred_yaw_sign = 1.0 if heading_err > 0 else -1.0
-
-        # --- STROKE 1: REVERSE ARC ---
-        if self.state == StuckRecoveryState.PIVOT_REVERSE:
-            target_v = -self.reverse_speed
-            # In reverse: steer in OPPOSITE direction of desired yaw rotation (steer right -> yaw CCW)
-            target_steer = -self.preferred_yaw_sign * self.steer_angle
-
-            # Rear barrier contact or reverse stroke limit reached -> switch to FORWARD ARC
-            is_stalled_reverse = (self.stroke_timer > 0.12 and abs(current_v) < 0.08)
-            stroke_timeout = (self.stroke_timer >= RECOVERY_REVERSE_STROKE_MAX_S) or (min_rear_cone < 0.12)
-
-            if is_stalled_reverse or stroke_timeout:
-                self.state = StuckRecoveryState.PIVOT_FORWARD
-                self.stroke_timer = 0.0
-                print(f"[RECOVERY] Rear limit reached (v={current_v:.2f}m/s, rear={min_rear_cone*100:.1f}cm). Switching to forward pivot arc...", flush=True)
-
-            return True, target_v, target_steer
-
-        # --- STROKE 2: FORWARD ARC ---
-        elif self.state == StuckRecoveryState.PIVOT_FORWARD:
-            target_v = self.forward_speed
-            # In forward: steer in SAME direction of desired yaw rotation (steer left -> yaw CCW)
-            target_steer = self.preferred_yaw_sign * self.steer_angle
-
-            # Front barrier clearance closed or forward stroke limit reached -> switch back to REVERSE ARC
-            front_blocked = (self.stroke_timer > 0.10 and min_front_cone < 0.18)
-            stroke_timeout = (self.stroke_timer >= RECOVERY_FORWARD_STROKE_MAX_S)
-
-            if front_blocked or stroke_timeout:
-                self.state = StuckRecoveryState.PIVOT_REVERSE
-                self.stroke_timer = 0.0
-                print(f"[RECOVERY] Front obstacle approached ({min_front_cone*100:.1f}cm). Alternating back to reverse arc...", flush=True)
-
-            return True, target_v, target_steer
-
-        return False, 0.0, 0.0
+from stuck_recovery_manager import StuckRecoveryManager, StuckRecoveryState
 
 
 def read_tof_multi_ray(dev: any, noise_pct: float = 0.02) -> float:
@@ -379,13 +251,18 @@ def run_autonomous_controller(forced_planner_type: Optional[str] = None):
 
     # 5. Initialize 16-Channel ToF Lidar Sensor Array (at 60 Hz = 16 ms)
     tof_devices = {}
-    for dev_name in TOF_SENSOR_NAMES:
+    active_tof_names = []
+    is_front_only = any(robot.getDevice(n) is not None for n in TOF_SENSOR_NAMES)
+    candidate_sensors = TOF_SENSOR_NAMES if is_front_only else getattr(planner_config, "LEGACY_TOF_SENSOR_NAMES", TOF_SENSOR_NAMES)
+
+    for dev_name in candidate_sensors:
         dev = robot.getDevice(dev_name)
         if dev:
             dev.enable(TOF_TIME_STEP_MS)
             tof_devices[dev_name] = dev
+            active_tof_names.append(dev_name)
 
-    print(f"[ToF Controller] Enabled {len(tof_devices)}/16 ToF sensors at {PLANNER_HZ} Hz (IMU & 4WD at {SIM_HZ} Hz).", flush=True)
+    print(f"[ToF Controller] Enabled {len(tof_devices)}/16 ToF sensors ({'Front-Only 16ch' if is_front_only else 'Legacy 4-Quadrant'}) at {PLANNER_HZ} Hz (IMU & 4WD at {SIM_HZ} Hz).", flush=True)
 
     # 6. Initialize Modules
     costmap = CppSmartHybridCostmap(
@@ -422,8 +299,12 @@ def run_autonomous_controller(forced_planner_type: Optional[str] = None):
     # 7. Non-Blocking Stuck & Reverse Recovery Manager
     recovery_manager = StuckRecoveryManager(
         reverse_speed_m_s=RECOVERY_REVERSE_SPEED_MPS,
-        forward_speed_m_s=RECOVERY_FORWARD_SPEED_MPS,
         steer_angle_rad=RECOVERY_STEER_ANGLE_RAD,
+        emergency_backup_dist_m=EMERGENCY_BACKUP_DIST_M,
+        clearance_exit_m=RECOVERY_CLEARANCE_EXIT_M,
+        servo_slew_rad_s=SERVO_MAX_SPEED_RAD_S,
+        brake_decel_max=BRAKE_DECEL_MAX,
+        accel_fwd_max=ACCEL_FWD_MAX,
     )
 
     # 8. Moving Obstacles along Racing Line (Reverse motion at 0.50 m/s pace)
@@ -446,10 +327,16 @@ def run_autonomous_controller(forced_planner_type: Optional[str] = None):
         print(f"[ToF Controller] Hooked {len(obs_fields)} moving obstacles to reverse engine at {MOVING_OBSTACLE_SPEED_MPS:.2f} m/s.", flush=True)
 
     step_count = 0
-    cached_tofs = {k: TOF_MAX_RANGE_M for k in TOF_SENSOR_NAMES}
+    cached_tofs = {k: TOF_MAX_RANGE_M for k in active_tof_names}
     active_steer = 0.0
     cached_target_steer = 0.0
     cached_target_speed = float(V_MIN_CRUISE)
+    rate_limited_speed = 0.0
+    was_recovering = False
+    cached_v_est = 0.0
+    cached_yaw_rate = 0.0
+    cached_yaw = 0.0
+    cached_steer_aggr = 1.0
     cached_plan_res = {"cmd_steer_rad": 0.0, "cmd_speed_mps": V_MIN_CRUISE, "status": "WARMUP"}
     cached_plan_ms = 0.0
     cached_map_ms = 0.0
@@ -546,6 +433,20 @@ def run_autonomous_controller(forced_planner_type: Optional[str] = None):
                             import planner_config
                             planner_config.ALPHA_PEAK = float(p_val)
                             print(f"[ToF Controller] Live updated peak slip angle to: {math.degrees(p_val):.1f} deg", flush=True)
+                        elif p_name == "alt_switch_hysteresis":
+                            import planner_config
+                            planner_config.ALT_SWITCH_HYSTERESIS = float(p_val)
+                            if hasattr(planner, "alt_switch_hysteresis"):
+                                planner.alt_switch_hysteresis = float(p_val)
+                            print(f"[ToF Controller] Live updated Challenger Switch Hysteresis to: {float(p_val):.1f}", flush=True)
+                        elif p_name == "alt_min_separation_m":
+                            import planner_config
+                            planner_config.ALT_MIN_SEPARATION_M = float(p_val)
+                            if hasattr(gap_scout, "alt_min_separation_m"):
+                                gap_scout.alt_min_separation_m = float(p_val)
+                            if hasattr(planner, "alt_min_separation_m"):
+                                planner.alt_min_separation_m = float(p_val)
+                            print(f"[ToF Controller] Live updated Challenger Min Separation to: {float(p_val)*100:.1f} cm", flush=True)
         except (BlockingIOError, socket.error):
             pass
         except Exception as e:
@@ -574,9 +475,6 @@ def run_autonomous_controller(forced_planner_type: Optional[str] = None):
                 ox, oy = obs_engine.get_position_at_s(obs_s)
                 field.setSFVec3f([float(ox), float(oy), float(MOVING_OBSTACLE_Z_ELEVATION)])
 
-        # A. Update IMU + Wheel Encoder Odometry at 120 Hz (Zero Cheating)
-        v_est, yaw_rate, yaw = fusion.update(dt=DT)
-
         # Initial warmup pause (0.50 s)
         if t_now < 0.50:
             for m in motors.values():
@@ -587,12 +485,19 @@ def run_autonomous_controller(forced_planner_type: Optional[str] = None):
                     s.setPosition(0.0)
             continue
 
-        # B, C, D, E: Run 16-channel ToF sensor sampling, C++ costmap, and path planner at 60 Hz
+        # 60 Hz Control Tick (every 2nd step)
+        # Fusion, 16-channel ToF sampling, Costmap, Gap Scout, Planner, Recovery Manager, Straight-Lock
         run_planner_step = (step_count % PLANNER_DECIMATION == 0)
         if run_planner_step:
+            # A. Update IMU + Wheel Encoder Odometry at 60 Hz (Zero Cheating)
+            v_est, yaw_rate, yaw = fusion.update(dt=DT_PLANNER)
+            cached_v_est = v_est
+            cached_yaw_rate = yaw_rate
+            cached_yaw = yaw
+
             # B. Read 16 ToF Sensors (60 Hz)
             min_tof = TOF_MAX_RANGE_M
-            for name in TOF_SENSOR_NAMES:
+            for name in active_tof_names:
                 dev = tof_devices.get(name)
                 if dev:
                     val = read_tof_multi_ray(dev, noise_pct=0.02)
@@ -612,7 +517,7 @@ def run_autonomous_controller(forced_planner_type: Optional[str] = None):
                 cached_tofs,
                 hazard_mask,
                 costmap,
-                target_lookahead_m=1.35,
+                target_lookahead_m=1.70,
                 steer_current=active_steer,
                 prob_map=prob_map,
             )
@@ -634,33 +539,142 @@ def run_autonomous_controller(forced_planner_type: Optional[str] = None):
 
             cached_plan_res = plan_res
             cached_plan_ms = plan_ms
-            cached_target_steer = float(plan_res.get("cmd_steer_rad", 0.0))
-            cached_target_speed = float(plan_res.get("cmd_speed_mps", V_MIN_CRUISE))
+            raw_target_steer = float(plan_res.get("cmd_steer_rad", 0.0))
+            raw_target_speed = float(plan_res.get("cmd_speed_mps", V_MIN_CRUISE))
 
-            # Side obstacle guard: Check direct lateral ToF sensors
-            d_left_side = min(
-                cached_tofs.get("tof_fl_0", TOF_MAX_RANGE_M),
-                cached_tofs.get("tof_bl_0", TOF_MAX_RANGE_M),
-                cached_tofs.get("tof_fl_1", TOF_MAX_RANGE_M),
-            )
-            d_right_side = min(
-                cached_tofs.get("tof_fr_0", TOF_MAX_RANGE_M),
-                cached_tofs.get("tof_br_0", TOF_MAX_RANGE_M),
-                cached_tofs.get("tof_fr_1", TOF_MAX_RANGE_M),
-            )
+            # Side obstacle guard & straight/front clearance metrics:
+            if "tof_front_right_82.9deg" in cached_tofs:
+                # In front-only cross-pointing rig:
+                # Right sensors point to left side; Left sensors point to right side
+                d_left_side = min(
+                    cached_tofs.get("tof_front_right_82.9deg", TOF_MAX_RANGE_M),
+                    cached_tofs.get("tof_front_right_71.6deg", TOF_MAX_RANGE_M),
+                    cached_tofs.get("tof_front_right_60.4deg", TOF_MAX_RANGE_M),
+                )
+                d_right_side = min(
+                    cached_tofs.get("tof_front_left_82.9deg", TOF_MAX_RANGE_M),
+                    cached_tofs.get("tof_front_left_71.6deg", TOF_MAX_RANGE_M),
+                    cached_tofs.get("tof_front_left_60.4deg", TOF_MAX_RANGE_M),
+                )
+                d_front_l = cached_tofs.get("tof_front_left_4.1deg", TOF_MAX_RANGE_M)
+                d_front_r = cached_tofs.get("tof_front_right_4.1deg", TOF_MAX_RANGE_M)
+                cached_d_straight = min(d_front_l, d_front_r)
+                front_keys = [
+                    "tof_front_left_4.1deg", "tof_front_right_4.1deg",
+                    "tof_front_left_15.4deg", "tof_front_right_15.4deg",
+                ]
+            else:
+                d_left_side = min(
+                    cached_tofs.get("tof_fl_0", TOF_MAX_RANGE_M),
+                    cached_tofs.get("tof_bl_0", TOF_MAX_RANGE_M),
+                    cached_tofs.get("tof_fl_1", TOF_MAX_RANGE_M),
+                )
+                d_right_side = min(
+                    cached_tofs.get("tof_fr_0", TOF_MAX_RANGE_M),
+                    cached_tofs.get("tof_br_0", TOF_MAX_RANGE_M),
+                    cached_tofs.get("tof_fr_1", TOF_MAX_RANGE_M),
+                )
+                d_fl3 = cached_tofs.get("tof_fl_3", TOF_MAX_RANGE_M)
+                d_fr3 = cached_tofs.get("tof_fr_3", TOF_MAX_RANGE_M)
+                cached_d_straight = min(d_fl3, d_fr3)
+                front_keys = ["tof_fl_3", "tof_fr_3", "tof_fl_2", "tof_fr_2"]
 
-            # Lateral clearance metrics (Septic Spline Planner optimizes clearance natively via costmap)
-            d_side_min = min(d_left_side, d_right_side)
-
-            d_fl3 = cached_tofs.get("tof_fl_3", TOF_MAX_RANGE_M)
-            d_fr3 = cached_tofs.get("tof_fr_3", TOF_MAX_RANGE_M)
-            cached_d_straight = min(d_fl3, d_fr3)
-
-            front_keys = ["tof_fl_3", "tof_fr_3", "tof_fl_2", "tof_fr_2"]
             cached_front_min_m = min([cached_tofs.get(k, TOF_MAX_RANGE_M) for k in front_keys])
 
-        target_steer = cached_target_steer
+            # Non-Blocking Stuck & Reverse Recovery Manager (evaluated at 60 Hz)
+            is_recovering, rec_v, rec_steer = recovery_manager.update(
+                dt=DT_PLANNER,
+                current_v=v_est,
+                commanded_v=raw_target_speed,
+                cached_tofs=cached_tofs,
+                heading_err=theta_g,
+                active_steer=active_steer,
+            )
+
+            if is_recovering:
+                target_speed = rec_v
+                target_steer = rec_steer
+                active_steer = rec_steer
+                steer_aggressiveness = 1.0
+                was_recovering = True
+            else:
+                if was_recovering:
+                    # Clean Handshake: recovery exited with wheels centered; hand off smoothly
+                    was_recovering = False
+                    active_steer = 0.0
+
+                # Fast Straight-Line Lock (evaluated at 60 Hz, guarded by turn intent)
+                if "tof_front_left_4.1deg" in cached_tofs:
+                    is_straight_locked = (
+                        cached_tofs.get("tof_front_left_4.1deg", 0.0) >= STRAIGHT_LOCK_DIST_M and
+                        cached_tofs.get("tof_front_right_4.1deg", 0.0) >= STRAIGHT_LOCK_DIST_M and
+                        abs(theta_g) < 0.08 and
+                        abs(raw_target_steer) < 0.08
+                    )
+                else:
+                    is_straight_locked = (
+                        cached_tofs.get("tof_fl_3", 0.0) >= STRAIGHT_LOCK_DIST_M and
+                        cached_tofs.get("tof_fr_3", 0.0) >= STRAIGHT_LOCK_DIST_M and
+                        abs(theta_g) < 0.08 and
+                        abs(raw_target_steer) < 0.08
+                    )
+
+                if is_straight_locked:
+                    target_speed = STRAIGHT_LOCK_SPEED_MPS
+                    target_steer = 0.0
+                    active_steer = 0.0
+                    steer_aggressiveness = compute_steering_aggressiveness(cached_d_straight, steer_error_rad=0.0)
+                else:
+                    # Straight-distance & small-offset adaptive steering aggressiveness (60 Hz):
+                    target_speed = raw_target_speed
+                    target_steer = raw_target_steer
+                    steer_delta = target_steer - active_steer
+                    steer_aggressiveness = compute_steering_aggressiveness(cached_d_straight, steer_error_rad=steer_delta)
+                    active_steer = active_steer + steer_aggressiveness * steer_delta
+
+            # Save command setpoints for 120 Hz 4WD Differential
+            cached_target_speed = target_speed
+            cached_target_steer = active_steer
+            cached_steer_aggr = steer_aggressiveness
+
+        # F. 4WD Electronic Differential Torque & Ackermann Steering Allocation at 120 Hz
+        # Consumes commands every 2nd step, runs at 120 Hz with live gyro slip damping
+        # Unified Friction Rate Limiter for speed command (enforces acceleration & deceleration limits)
+        speed_err = cached_target_speed - rate_limited_speed
+        if (rate_limited_speed >= 0.0 and speed_err > 0.0) or (rate_limited_speed <= 0.0 and speed_err < 0.0):
+            max_dv = ACCEL_FWD_MAX * DT
+        else:
+            max_dv = BRAKE_DECEL_MAX * DT
+
+        if abs(speed_err) <= max_dv:
+            rate_limited_speed = cached_target_speed
+        else:
+            rate_limited_speed += math.copysign(max_dv, speed_err)
+
+        live_gyro_z = float(gyro.getValues()[2]) if gyro else cached_yaw_rate
+        actuators = ediff.update(target_v=rate_limited_speed, target_steer_rad=cached_target_steer, gyro_z_rad_s=live_gyro_z)
+
+        # H. Command Webots Actuators (at 120 Hz)
+        if servos["left"]:
+            servos["left"].setPosition(actuators["steer_left"])
+        if servos["right"]:
+            servos["right"].setPosition(actuators["steer_right"])
+
+        if motors["FL"]:
+            motors["FL"].setVelocity(actuators["omega_FL"])
+        if motors["FR"]:
+            motors["FR"].setVelocity(actuators["omega_FR"])
+        if motors["RL"]:
+            motors["RL"].setVelocity(actuators["omega_RL"])
+        if motors["RR"]:
+            motors["RR"].setVelocity(actuators["omega_RR"])
+
+        # Prepare variables for 60 Hz Telemetry & GUI broadcasting
+        v_est = cached_v_est
+        yaw_rate = cached_yaw_rate
         target_speed = cached_target_speed
+        target_steer = cached_target_steer
+        steer_aggressiveness = cached_steer_aggr
         plan_res = cached_plan_res
         plan_ms = cached_plan_ms
         map_ms = cached_map_ms
@@ -669,30 +683,6 @@ def run_autonomous_controller(forced_planner_type: Optional[str] = None):
         hazard_mask = cached_hazard_mask
         front_min_m = cached_front_min_m
         d_straight = cached_d_straight
-
-        # Non-Blocking Stuck & Reverse Recovery Manager (evaluated at 120 Hz)
-        is_recovering, rec_v, rec_steer = recovery_manager.update(
-            dt=DT,
-            current_v=v_est,
-            commanded_v=target_speed,
-            cached_tofs=cached_tofs,
-            heading_err=theta_g,
-        )
-
-        if is_recovering:
-            target_speed = rec_v
-            target_steer = rec_steer
-            active_steer = rec_steer
-        else:
-            # Straight-distance & small-offset adaptive steering aggressiveness (evaluated at 120 Hz):
-            steer_delta = target_steer - active_steer
-            steer_aggressiveness = compute_steering_aggressiveness(d_straight, steer_error_rad=steer_delta)
-
-            # Scale steering response based on straight clear distance and target offset:
-            active_steer = active_steer + steer_aggressiveness * steer_delta
-
-        # F. 4WD Electronic Differential Torque & Ackermann Steering Allocation at 120 Hz
-        actuators = ediff.update(target_v=target_speed, target_steer_rad=active_steer, gyro_z_rad_s=yaw_rate)
 
         # H. Command Webots Actuators (at 120 Hz)
         if servos["left"]:

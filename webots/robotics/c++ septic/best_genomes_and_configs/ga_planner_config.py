@@ -106,7 +106,6 @@ COLLISION_DISTANCE_MIN_M: float = 0.020  # Fatal obstacle proximity threshold (2
 # Format: (gene_name, min_val, max_val, type, default_val, description)
 
 # ------------------------------------------------------------------------------
-# ------------------------------------------------------------------------------
 # OPTION 1: BVP Dynamic State Lattice Genes
 # ------------------------------------------------------------------------------
 OPTION_1_BVP_GENE_SPECS: List[Tuple[str, float, float, type, float, str]] = [
@@ -128,20 +127,51 @@ OPTION_1_BVP_GENE_SPECS: List[Tuple[str, float, float, type, float, str]] = [
 # OPTION 2: Curvilinear Frenet SL-MPC Genes
 # ------------------------------------------------------------------------------
 OPTION_2_SL_MPC_GENE_SPECS: List[Tuple[str, float, float, type, float, str]] = [
-    ("horizon_N",           10.0,   24.0,    int,   16.0,    "MPC prediction horizon steps"),
-    ("dt",                   0.030,  0.070,  float,  0.050,  "MPC prediction discretization timestep (s)"),
-    ("mu_friction",          0.50,   0.90,   float,  0.70,   "Tire friction coefficient governing steer vs brake loads"),
-    ("r_inflation_m",        0.075,  0.120,  float,  0.090,  "ToF obstacle expansion / inflation radius (0.075m - 0.120m)"),
-    ("q_progress",           2.00,  25.00,   float,  8.00,   "Frenet longitudinal progress reward weight"),
-    ("q_cte",                5.00,  45.00,   float, 18.00,   "Frenet cross-track error penalty weight"),
-    ("q_heading",            2.00,  20.00,   float,  8.00,   "Frenet heading error penalty weight"),
+    # Speeds & Limits
+    ("v_cruise_max",         1.80,   5.50,   float,  5.50,   "Max straight clearing speed (m/s)"),
+    ("v_cruise_min",         1.20,   2.50,   float,  1.20,   "Min corner crawl speed (m/s)"),
+    # Horizon & Discretization
+    ("horizon_N",           10.0,   24.0,    int,   18.0,    "MPC prediction horizon steps"),
+    ("dt",                   0.015,  0.060,  float,  0.020,  "MPC prediction discretization timestep (s)"),
+    # Tire Friction & Costmap Inflation
+    ("mu_friction",          0.7,   0.85,   float,  0.85,   "Tire friction coefficient governing steer vs brake loads"),
+    ("r_inflation_m",        0.075,  0.075,  float,  0.075,  "ToF obstacle expansion / inflation radius (0.075m - 0.120m)"),
+    # MPC Objective Weights
+    ("q_progress",           2.00,  25.00,   float,  8.00,   "Longitudinal progress reward weight"),
+    ("q_cte",                1.00,  45.00,   float, 18.00,   "Cross-track error penalty weight"),
+    ("q_heading",            2.00,  20.00,   float,  8.00,   "Heading error penalty weight"),
     ("r_steer",              1.00,  15.00,   float,  5.00,   "Steering angle effort penalty weight"),
     ("r_accel",              0.50,   8.00,   float,  2.00,   "Acceleration/braking effort penalty weight"),
     ("r_steer_rate",         2.00,  30.00,   float, 10.00,   "Steering rate slew penalty weight"),
     ("v_corner_factor",      0.60,   0.95,   float,  0.82,   "Friction circle speed scaling for curvature"),
-    ("pp_blend_gain",        0.10,   0.65,   float,  0.35,   "Pure pursuit lookahead blend ratio with MPC"),
+    ("pp_blend_gain",        0.00,   0.65,   float,  0.35,   "Pure pursuit lookahead blend ratio with MPC"),
     ("lookahead_blend_m",    0.25,   0.75,   float,  0.45,   "Pure pursuit blend lookahead distance (m)"),
+    # Gap Scout Parameters
     ("target_lookahead_m",   0.80,   1.80,   float,  1.35,   "Scout lookahead target projection distance (m)"),
+    ("w_gap_distance",       1.00,   8.00,   float,  3.50,   "Gap scout distance reward weight"),
+    ("w_gap_width",          0.50,   5.00,   float,  2.00,   "Gap scout aperture width reward weight"),
+    ("w_gap_steer",          0.20,   3.00,   float,  0.80,   "Gap scout steering alignment penalty weight"),
+    ("w_gap_straight",       0.10,   2.00,   float,  0.40,   "Gap scout straight heading alignment reward weight"),
+    ("w_side_clearance",     0.00,   6.00,   float,  2.80,   "Gap scout side asymmetry clearance weight (lower allows tighter apexing)"),
+    ("gap_dist_exp_k",       0.20,   1.50,   float,  0.60,   "Gap scout exponential distance reward factor (d > 1m+margin)"),
+    ("gap_progress_margin_m",0.05,   0.35,   float,  0.15,   "Gap scout corridor margin over 1.0m track width (m)"),
+    # Dual-Path Line Choice & Challenger Selection (Primary vs Alternative)
+    ("alt_min_separation_m", 0.15,   0.60,   float,  0.25,   "Min lateral separation (m) between primary and challenger lines"),
+    ("alt_aperture_bias",    0.50,   4.00,   float,  1.80,   "Challenger aperture width bias multiplier (safety/opening priority)"),
+    ("alt_switch_hysteresis",2.00,  80.00,   float, 15.00,   "MPC cost reduction threshold needed for challenger to overthrow primary line"),
+    # Fast Straight-Line Lock
+    ("straight_lock_dist",   1.70,   1.70,   float,  1.70,   "Forward clearance (m) to lock straight line acceleration"),
+    ("straight_lock_speed",  5.50,   5.50,   float,  5.50,   "Speed ceiling (m/s) when straight-line locked"),
+    # Straight Quieting & Anti-Oscillation Adaptive Steering Response
+    ("aggr_dist_far_m",      1.40,   1.80,   float,  1.70,   "Forward clearance distance (m) to engage max straight quieting"),
+    ("aggr_dist_close_m",    0.60,   1.60,   float,  1.00,   "Emergency distance threshold (m) below which 100% steering authority is engaged"),
+    ("aggr_min_scale",       0.20,   0.95,   float,  0.30,   "Minimal steering authority scale on open straights"),
+    ("steer_deadband_rad",   0.000,  0.005,  float,  0.002,  "Steering error deadband (rad) for sensor noise quieting"),
+    # Stuck & Emergency Recovery
+    ("emergency_backup_dist_m", 0.08, 0.12,  float,  0.09,   "Distance threshold (m) below which emergency reverse is triggered"),
+    ("recovery_reverse_speed",  0.80, 2.00,  float,  1.30,   "Emergency reverse backing speed (m/s)"),
+    ("recovery_clearance_exit_m", 0.18, 0.45, float, 0.28,   "Front clearance threshold (m) to conclude reverse and center steering"),
+    ("recovery_steer_angle_rad",0.30, 0.698, float,  0.454,  "Recovery pivot steering angle (rad)"),
 ]
 
 # ------------------------------------------------------------------------------
@@ -291,14 +321,74 @@ def generate_logical_initial_population(genome_cls, pop_size: int) -> List[BaseP
         ]
     elif isinstance(sample_inst, Option2SLMPCGenome):
         archetypes = [
-            # 1. Baseline Calibrated
-            {"horizon_N": 16, "dt": 0.050, "mu_friction": 0.70, "r_inflation_m": 0.090, "q_progress": 8.0, "q_cte": 18.0, "q_heading": 8.0, "r_steer": 5.0, "r_accel": 2.0, "r_steer_rate": 10.0, "v_corner_factor": 0.82, "pp_blend_gain": 0.35, "lookahead_blend_m": 0.45, "target_lookahead_m": 1.35},
-            # 2. Fast Aggressive
-            {"horizon_N": 12, "dt": 0.040, "mu_friction": 0.82, "r_inflation_m": 0.080, "q_progress": 14.0, "q_cte": 14.0, "q_heading": 6.0, "r_steer": 3.0, "r_accel": 1.2, "r_steer_rate": 7.0, "v_corner_factor": 0.90, "pp_blend_gain": 0.25, "lookahead_blend_m": 0.35, "target_lookahead_m": 1.20},
-            # 3. Safe Long-Horizon
-            {"horizon_N": 20, "dt": 0.055, "mu_friction": 0.65, "r_inflation_m": 0.110, "q_progress": 6.0, "q_cte": 26.0, "q_heading": 12.0, "r_steer": 7.0, "r_accel": 3.0, "r_steer_rate": 15.0, "v_corner_factor": 0.72, "pp_blend_gain": 0.45, "lookahead_blend_m": 0.55, "target_lookahead_m": 1.55},
-            # 4. Pure-Pursuit Damped
-            {"horizon_N": 16, "dt": 0.045, "mu_friction": 0.75, "r_inflation_m": 0.085, "q_progress": 10.0, "q_cte": 20.0, "q_heading": 9.0, "r_steer": 4.0, "r_accel": 1.8, "r_steer_rate": 8.0, "v_corner_factor": 0.85, "pp_blend_gain": 0.55, "lookahead_blend_m": 0.40, "target_lookahead_m": 1.40},
+            # 0. Cyan Champion Calibrated Baseline
+            {
+                "v_cruise_max": 5.50, "v_cruise_min": 1.20,
+                "horizon_N": 18, "dt": 0.020,
+                "mu_friction": 0.85, "r_inflation_m": 0.090,
+                "q_progress": 8.0, "q_cte": 18.0, "q_heading": 8.0,
+                "r_steer": 5.0, "r_accel": 2.0, "r_steer_rate": 10.0,
+                "v_corner_factor": 0.82, "pp_blend_gain": 0.35, "lookahead_blend_m": 0.45,
+                "target_lookahead_m": 1.35, "w_gap_distance": 3.50, "w_gap_width": 2.00,
+                "w_gap_steer": 0.80, "w_gap_straight": 0.40,
+                "gap_dist_exp_k": 0.60, "gap_progress_margin_m": 0.15,
+                "straight_lock_dist": 1.70, "straight_lock_speed": 5.50,
+                "aggr_dist_far_m": 1.70, "aggr_dist_close_m": 1.00, "aggr_min_scale": 0.30,
+                "steer_deadband_rad": 0.002,
+                "emergency_backup_dist_m": 0.09, "recovery_reverse_speed": 1.30,
+                "recovery_clearance_exit_m": 0.28, "recovery_steer_angle_rad": 0.454,
+            },
+            # 1. High-Momentum Apex Striker
+            {
+                "v_cruise_max": 5.50, "v_cruise_min": 1.50,
+                "horizon_N": 16, "dt": 0.025,
+                "mu_friction": 0.88, "r_inflation_m": 0.082,
+                "q_progress": 12.0, "q_cte": 14.0, "q_heading": 6.0,
+                "r_steer": 3.5, "r_accel": 1.5, "r_steer_rate": 8.0,
+                "v_corner_factor": 0.88, "pp_blend_gain": 0.25, "lookahead_blend_m": 0.40,
+                "target_lookahead_m": 1.45, "w_gap_distance": 4.50, "w_gap_width": 2.20,
+                "w_gap_steer": 0.60, "w_gap_straight": 0.50,
+                "gap_dist_exp_k": 0.70, "gap_progress_margin_m": 0.12,
+                "straight_lock_dist": 1.65, "straight_lock_speed": 5.50,
+                "aggr_dist_far_m": 1.68, "aggr_dist_close_m": 1.10, "aggr_min_scale": 0.35,
+                "steer_deadband_rad": 0.002,
+                "emergency_backup_dist_m": 0.08, "recovery_reverse_speed": 1.40,
+                "recovery_clearance_exit_m": 0.30, "recovery_steer_angle_rad": 0.480,
+            },
+            # 2. Safe High-Clearance Sentinel
+            {
+                "v_cruise_max": 4.50, "v_cruise_min": 1.00,
+                "horizon_N": 20, "dt": 0.025,
+                "mu_friction": 0.75, "r_inflation_m": 0.105,
+                "q_progress": 6.0, "q_cte": 25.0, "q_heading": 12.0,
+                "r_steer": 7.0, "r_accel": 3.0, "r_steer_rate": 15.0,
+                "v_corner_factor": 0.75, "pp_blend_gain": 0.45, "lookahead_blend_m": 0.55,
+                "target_lookahead_m": 1.25, "w_gap_distance": 3.00, "w_gap_width": 2.80,
+                "w_gap_steer": 1.10, "w_gap_straight": 0.30,
+                "gap_dist_exp_k": 0.50, "gap_progress_margin_m": 0.20,
+                "straight_lock_dist": 1.75, "straight_lock_speed": 5.00,
+                "aggr_dist_far_m": 1.75, "aggr_dist_close_m": 1.20, "aggr_min_scale": 0.40,
+                "steer_deadband_rad": 0.003,
+                "emergency_backup_dist_m": 0.10, "recovery_reverse_speed": 1.20,
+                "recovery_clearance_exit_m": 0.25, "recovery_steer_angle_rad": 0.454,
+            },
+            # 3. Pure-Pursuit Damped Flow
+            {
+                "v_cruise_max": 5.00, "v_cruise_min": 1.30,
+                "horizon_N": 18, "dt": 0.020,
+                "mu_friction": 0.82, "r_inflation_m": 0.088,
+                "q_progress": 9.0, "q_cte": 20.0, "q_heading": 9.0,
+                "r_steer": 4.5, "r_accel": 1.8, "r_steer_rate": 9.0,
+                "v_corner_factor": 0.82, "pp_blend_gain": 0.50, "lookahead_blend_m": 0.45,
+                "target_lookahead_m": 1.40, "w_gap_distance": 3.80, "w_gap_width": 2.00,
+                "w_gap_steer": 0.75, "w_gap_straight": 0.45,
+                "gap_dist_exp_k": 0.65, "gap_progress_margin_m": 0.14,
+                "straight_lock_dist": 1.70, "straight_lock_speed": 5.50,
+                "aggr_dist_far_m": 1.70, "aggr_dist_close_m": 1.05, "aggr_min_scale": 0.32,
+                "steer_deadband_rad": 0.002,
+                "emergency_backup_dist_m": 0.09, "recovery_reverse_speed": 1.30,
+                "recovery_clearance_exit_m": 0.28, "recovery_steer_angle_rad": 0.454,
+            },
         ]
     elif isinstance(sample_inst, Option3SepticGenome):
         archetypes = [

@@ -111,6 +111,29 @@ class CppSmartHybridCostmap:
             _lib.costmap_destroy(self._handle)
             self._handle = None
 
+    @staticmethod
+    def _extract_range(readings: Dict[str, float], name: str, idx: int) -> float:
+        if name in readings:
+            return float(readings[name])
+        # Front-only 16ch fallback mapping to 4-quadrant layout
+        front_left_keys = [
+            "tof_front_left_4.1deg", "tof_front_left_15.4deg", "tof_front_left_26.6deg", "tof_front_left_37.9deg",
+            "tof_front_left_49.1deg", "tof_front_left_60.4deg", "tof_front_left_71.6deg", "tof_front_left_82.9deg"
+        ]
+        front_right_keys = [
+            "tof_front_right_4.1deg", "tof_front_right_15.4deg", "tof_front_right_26.6deg", "tof_front_right_37.9deg",
+            "tof_front_right_49.1deg", "tof_front_right_60.4deg", "tof_front_right_71.6deg", "tof_front_right_82.9deg"
+        ]
+        if "fl" in name and idx < 4:
+            k = front_left_keys[min(idx * 2, 7)]
+            if k in readings:
+                return float(readings[k])
+        elif "fr" in name and idx < 8:
+            k = front_right_keys[min((idx - 4) * 2, 7)]
+            if k in readings:
+                return float(readings[k])
+        return 1.80
+
     def process_tof_frame(
         self, readings: Dict[str, float], noise_pct: float = 0.0
     ) -> Tuple[np.ndarray, np.ndarray, float]:
@@ -118,7 +141,7 @@ class CppSmartHybridCostmap:
         t0 = time.perf_counter()
 
         for i, name in enumerate(SENSOR_NAMES):
-            raw_z = readings.get(name, 1.80)
+            raw_z = self._extract_range(readings, name, i)
             if noise_pct > 0.0 and raw_z < 1.79:
                 noise = np.random.uniform(-noise_pct, noise_pct) * raw_z
                 z = float(np.clip(raw_z + noise, 0.02, 1.80))

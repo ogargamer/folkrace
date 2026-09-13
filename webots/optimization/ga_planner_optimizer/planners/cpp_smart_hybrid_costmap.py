@@ -1,8 +1,8 @@
 """
 ================================================================================
-  PYTHON CTYPES WRAPPER FOR EXACT CONTINUOUS C++ SMART HYBRID COSTMAP (15mm)
-  - Zero range buckets (exact continuous floating-point math)
-  - Cross-beam circle-circle triangulation
+  PYTHON CTYPES WRAPPER FOR C++ SMART HYBRID COSTMAP (FRONT-ONLY TOF RIG)
+  - 16 Front ToF Sensors (8 Left + 8 Right cross-pointing)
+  - 64 Cross-beam circle-circle triangulation pairs
   - Continuous Bayesian angular decay
   - Native AVX2 machine-code compilation
   - Sub-0.10 ms execution time
@@ -17,10 +17,10 @@ import numpy as np
 
 # Load the compiled shared library
 CURR_DIR = os.path.dirname(os.path.abspath(__file__))
-DLL_PATH = os.path.join(CURR_DIR, "smart_hybrid_costmap_15mm.dll")
+DLL_PATH = os.path.join(CURR_DIR, "smart_hybrid_costmap_front.dll")
 
 if not os.path.exists(DLL_PATH):
-    raise FileNotFoundError(f"Cannot find compiled DLL at {DLL_PATH}")
+    raise FileNotFoundError(f"Cannot find compiled DLL at {DLL_PATH}. Run compile_dll.py first.")
 
 _lib = ctypes.CDLL(DLL_PATH)
 
@@ -57,17 +57,31 @@ _lib.costmap_get_width.restype = ctypes.c_int
 _lib.costmap_get_height.argtypes = [ctypes.c_void_p]
 _lib.costmap_get_height.restype = ctypes.c_int
 
-# Standard sensor names order matching C++ array
+# Standard sensor names order matching C++ array and only_front_tofs.proto
 SENSOR_NAMES = [
-    "tof_fl_0", "tof_fl_1", "tof_fl_2", "tof_fl_3",
-    "tof_fr_0", "tof_fr_1", "tof_fr_2", "tof_fr_3",
-    "tof_bl_0", "tof_bl_1", "tof_bl_2", "tof_bl_3",
-    "tof_br_0", "tof_br_1", "tof_br_2", "tof_br_3",
+    # Front-Left (0..7)
+    "tof_front_left_4.1deg",
+    "tof_front_left_15.4deg",
+    "tof_front_left_26.6deg",
+    "tof_front_left_37.9deg",
+    "tof_front_left_49.1deg",
+    "tof_front_left_60.4deg",
+    "tof_front_left_71.6deg",
+    "tof_front_left_82.9deg",
+    # Front-Right (8..15)
+    "tof_front_right_4.1deg",
+    "tof_front_right_15.4deg",
+    "tof_front_right_26.6deg",
+    "tof_front_right_37.9deg",
+    "tof_front_right_49.1deg",
+    "tof_front_right_60.4deg",
+    "tof_front_right_71.6deg",
+    "tof_front_right_82.9deg",
 ]
 
 
 class CppSmartHybridCostmap:
-    """High-performance C++ Smart Hybrid Costmap (15 mm default, exact continuous math)."""
+    """High-performance C++ Smart Hybrid Costmap for 16-channel Front-Only ToF rig."""
 
     def __init__(
         self,
@@ -92,60 +106,114 @@ class CppSmartHybridCostmap:
         self.shape = (self.height, self.width)
         self.total_cells = self.width * self.height
 
-        # Coordinate meshgrid matching C++ index order
+        # Coordinate meshgrid matching C++ index order (row-major: Y is rows, X is cols)
         xs = np.linspace(self.x_min, self.x_max, self.width, dtype=np.float32)
         ys = np.linspace(self.y_min, self.y_max, self.height, dtype=np.float32)
         self.X, self.Y = np.meshgrid(xs, ys)
 
         # Preallocated C-contiguous NumPy output buffers
-        self._ranges_buf = np.zeros(16, dtype=np.float32)
-        self._prob_buf = np.zeros(self.total_cells, dtype=np.float32)
-        self._hazard_buf = np.zeros(self.total_cells, dtype=np.uint8)
-
-        self._ranges_ptr = self._ranges_buf.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
-        self._prob_ptr = self._prob_buf.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
-        self._hazard_ptr = self._hazard_buf.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8))
+        self.prob_map = np.zeros((self.height, self.width), dtype=np.float32)
+        self.hazard_mask = np.zeros((self.height, self.width), dtype=np.uint8)
+        self._lib = _lib
+        self.raw_ranges_c = (ctypes.c_float * 16)()
 
     def __del__(self):
         if hasattr(self, "_handle") and self._handle:
             _lib.costmap_destroy(self._handle)
             self._handle = None
 
+    @staticmethod
+    def _extract_range(readings: Dict[str, float], name: str, idx: int) -> float:
+        if name in readings:
+            return float(readings[name])
+        alt = name.replace("15.4", "15.3").replace("37.9", "37.8").replace("60.4", "60.3")
+        if alt in readings:
+            return float(readings[alt])
+        alt2 = name.replace("15.3", "15.4").replace("37.8", "37.9").replace("60.3", "60.4")
+        if alt2 in readings:
+            return float(readings[alt2])
+        # Legacy 4-quadrant fallback
+        legacy_fl = ["tof_fl_0", "tof_fl_1", "tof_fl_2", "tof_fl_3"]
+        legacy_fr = ["tof_fr_0", "tof_fr_1", "tof_fr_2", "tof_fr_3"]
+        if idx < 8:
+            leg_name = legacy_fl[idx // 2]
+            if leg_name in readings:
+                return float(readings[leg_name])
+        else:
+            leg_name = legacy_fr[(idx - 8) // 2]
+            if leg_name in readings:
+                return float(readings[leg_name])
+        return 1.80
+
     def process_tof_frame(
         self, readings: Dict[str, float], noise_pct: float = 0.0
     ) -> Tuple[np.ndarray, np.ndarray, float]:
+        """Drop-in 50/60 Hz Webots controller execution method returning (prob_map, hazard_mask, exec_ms)."""
         import time
         t0 = time.perf_counter()
 
         for i, name in enumerate(SENSOR_NAMES):
-            raw_z = readings.get(name, 1.80)
-            if noise_pct > 0.0 and raw_z < 1.79:
+            raw_z = self._extract_range(readings, name, i)
+            if noise_pct > 0.0 and raw_z < 1.799:
                 noise = np.random.uniform(-noise_pct, noise_pct) * raw_z
-                z = float(np.clip(raw_z + noise, 0.02, 1.80))
+                z = float(np.clip(raw_z + noise, 0.001, 1.80))
             else:
                 z = raw_z
-            self._ranges_buf[i] = z
+            self.raw_ranges_c[i] = z
 
-        _lib.costmap_process_frame(self._handle, self._ranges_ptr, self._prob_ptr, self._hazard_ptr)
-
-        prob_map = self._prob_buf.reshape(self.shape)
-        hazard_mask = self._hazard_buf.reshape(self.shape)
+        _lib.costmap_process_frame(
+            self._handle,
+            self.raw_ranges_c,
+            self.prob_map.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            self.hazard_mask.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
+        )
         exec_ms = (time.perf_counter() - t0) * 1000.0
-        return prob_map, hazard_mask, exec_ms
+        return self.prob_map, self.hazard_mask, exec_ms
 
-    def build_costmap(self, readings: Dict[str, float], noise_pct: float = 0.0) -> np.ndarray:
-        prob_map, _, _ = self.process_tof_frame(readings, noise_pct=noise_pct)
-        return prob_map
+    def process_frame(
+        self, readings: Dict[str, float]
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Runs the complete C++ costmap update."""
+        for i, name in enumerate(SENSOR_NAMES):
+            self.raw_ranges_c[i] = self._extract_range(readings, name, i)
+
+        _lib.costmap_process_frame(
+            self._handle,
+            self.raw_ranges_c,
+            self.prob_map.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            self.hazard_mask.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
+        )
+
+        return self.prob_map, self.hazard_mask
+
+    def build_costmap(
+        self, readings: Dict[str, float], noise_pct: float = 0.0
+    ) -> np.ndarray:
+        """Compatibility wrapper for benchmark evaluation suites."""
+        if noise_pct > 0.0:
+            noisy = {}
+            for k, v in readings.items():
+                if v < 1.799:
+                    noise = np.random.uniform(-noise_pct, noise_pct) * v
+                    noisy[k] = float(np.clip(v + noise, 0.001, 1.80))
+                else:
+                    noisy[k] = v
+            p_map, _ = self.process_frame(noisy)
+        else:
+            p_map, _ = self.process_frame(readings)
+
+        return p_map
 
     def probe_path(self, xs: np.ndarray, ys: np.ndarray) -> bool:
-        """Instant O(1) candidate path verification against 15mm hazard mask."""
+        """Instant collision check for an entire trajectory in local frame."""
         xs_c = np.ascontiguousarray(xs, dtype=np.float32)
         ys_c = np.ascontiguousarray(ys, dtype=np.float32)
-        count = len(xs_c)
+        n = len(xs_c)
+
         res = _lib.costmap_probe_path(
             self._handle,
             xs_c.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
             ys_c.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
-            count,
+            n,
         )
         return bool(res == 1)

@@ -4,7 +4,7 @@ import sys
 import importlib.util
 
 DIR = os.path.dirname(os.path.abspath(__file__))
-TARGET = os.path.join(DIR, "live_preview_and_webots/tools/launchers", "launch_septic_live_map.py")
+TARGET = os.path.join(DIR, "live_preview_and_launchers", "launch_septic_live_map.py")
 
 spec = importlib.util.spec_from_file_location("septic_live_map_launcher", TARGET)
 mod = importlib.util.module_from_spec(spec)

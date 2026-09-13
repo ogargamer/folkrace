@@ -28,10 +28,36 @@ except ImportError:
     cma = None
 
 CURR_DIR = os.path.dirname(os.path.abspath(__file__))
-GA_OPTIMIZER_DIR = CURR_DIR
-WORKSPACE_ROOT = os.path.dirname(GA_OPTIMIZER_DIR)
 
-for p in [GA_OPTIMIZER_DIR, WORKSPACE_ROOT]:
+def _find_optimizer_dir(start_dir: str) -> str:
+    if os.path.exists(os.path.join(start_dir, "worlds", "Cyan_Champion_GA.wbt")):
+        return start_dir
+    p = start_dir
+    for _ in range(6):
+        cand = os.path.join(p, "webots", "optimization", "ga_planner_optimizer")
+        if os.path.exists(os.path.join(cand, "worlds", "Cyan_Champion_GA.wbt")):
+            return cand
+        cand2 = os.path.join(p, "optimization", "ga_planner_optimizer")
+        if os.path.exists(os.path.join(cand2, "worlds", "Cyan_Champion_GA.wbt")):
+            return cand2
+        parent = os.path.dirname(p)
+        if parent == p:
+            break
+        p = parent
+    return start_dir
+
+OPTIMIZER_PROJECT_DIR = _find_optimizer_dir(CURR_DIR)
+GA_OPTIMIZER_DIR = OPTIMIZER_PROJECT_DIR
+WORKSPACE_ROOT = os.path.dirname(OPTIMIZER_PROJECT_DIR)
+
+for p in [
+    CURR_DIR,
+    OPTIMIZER_PROJECT_DIR,
+    os.path.join(OPTIMIZER_PROJECT_DIR, "planners"),
+    os.path.join(OPTIMIZER_PROJECT_DIR, "controllers", "ga_supervisor_worker"),
+    os.path.join(OPTIMIZER_PROJECT_DIR, "data"),
+    WORKSPACE_ROOT,
+]:
     if p not in sys.path and os.path.exists(p):
         sys.path.insert(0, p)
 
@@ -55,9 +81,9 @@ from ga_planner_config import (
 )
 from ga_evaluator import ParallelWorkerPool, run_rendered_preview, BASE_WORKER_PORT
 
-CHECKPOINT_FILE = os.path.join(GA_OPTIMIZER_DIR, "ga_checkpoint.json")
-HISTORY_CSV_FILE = os.path.join(GA_OPTIMIZER_DIR, "ga_history.csv")
-BEST_GENOME_FILE = os.path.join(GA_OPTIMIZER_DIR, "best_planner_genome.json")
+CHECKPOINT_FILE = os.path.join(CURR_DIR, "ga_checkpoint.json")
+HISTORY_CSV_FILE = os.path.join(CURR_DIR, "ga_history.csv")
+BEST_GENOME_FILE = os.path.join(CURR_DIR, "best_planner_genome.json")
 
 
 class CMAESOptimizerAdapter:
@@ -409,20 +435,27 @@ def run_genetic_algorithm(
         cma_adapters[p] = None
 
         # Checkpoint file specific to planner
-        ckpt_path = os.path.join(GA_OPTIMIZER_DIR, f"ga_checkpoint_{p.lower()}.json") if is_multi else CHECKPOINT_FILE
-        cma_path = os.path.join(GA_OPTIMIZER_DIR, f"cma_state_{p.lower()}.pkl") if is_multi else os.path.join(GA_OPTIMIZER_DIR, "cma_state.pkl")
+        planner_ckpt = os.path.join(CURR_DIR, f"ga_checkpoint_{p.lower()}.json")
+        ckpt_path = planner_ckpt if (is_multi or os.path.exists(planner_ckpt)) else CHECKPOINT_FILE
+        planner_cma = os.path.join(CURR_DIR, f"cma_state_{p.lower()}.pkl")
+        cma_path = planner_cma if (is_multi or os.path.exists(planner_cma)) else os.path.join(CURR_DIR, "cma_state.pkl")
 
         if resume and os.path.exists(ckpt_path):
             try:
                 with open(ckpt_path, "r", encoding="utf-8") as f:
                     ckpt = json.load(f)
-                    start_gens[p] = ckpt.get("generation", 0) + 1
-                    pop_dicts = ckpt.get("population", [])
-                    populations[p] = [genome_cls(d) for d in pop_dicts]
-                    best_fitnesses[p] = float(ckpt.get("best_fitness", -1e9))
-                    best_genomes[p] = genome_cls(ckpt.get("best_genome", {}))
-                    best_metrics_map[p] = ckpt.get("best_metrics", {})
-                    print(f"[Optimizer] Resuming {p} from Generation {start_gens[p]} (Best Fitness: {best_fitnesses[p]:.1f}).", flush=True)
+                    ckpt_p = ckpt.get("planner", "")
+                    if ckpt_p and ckpt_p != p:
+                        print(f"[Optimizer] Checkpoint in {ckpt_path} is for {ckpt_p}, not {p}. Starting fresh for {p}.", flush=True)
+                        populations[p] = []
+                    else:
+                        start_gens[p] = ckpt.get("generation", 0) + 1
+                        pop_dicts = ckpt.get("population", [])
+                        populations[p] = [genome_cls(d) for d in pop_dicts]
+                        best_fitnesses[p] = float(ckpt.get("best_fitness", -1e9))
+                        best_genomes[p] = genome_cls(ckpt.get("best_genome", {}))
+                        best_metrics_map[p] = ckpt.get("best_metrics", {})
+                        print(f"[Optimizer] Resuming {p} from Generation {start_gens[p]} (Best Fitness: {best_fitnesses[p]:.1f}).", flush=True)
             except Exception as e:
                 print(f"[Optimizer] Checkpoint load failed for {p} ({e}), starting fresh.", flush=True)
                 populations[p] = []
@@ -559,7 +592,7 @@ def run_genetic_algorithm(
                     print(f"  *** NEW CHAMPION FOR {p}! Dist: {best_metrics_map[p].get('distance_m', 0.0):.2f}m, Fit: {gen_best_fit:.1f} ***", flush=True)
 
                     # Save Planner Champion JSON
-                    champion_file = os.path.join(GA_OPTIMIZER_DIR, f"best_genome_{p.lower()}.json") if is_multi else BEST_GENOME_FILE
+                    champion_file = os.path.join(CURR_DIR, f"best_genome_{p.lower()}.json") if is_multi else BEST_GENOME_FILE
                     with open(champion_file, "w", encoding="utf-8") as f:
                         json.dump({
                             "planner": p,
@@ -605,7 +638,7 @@ def run_genetic_algorithm(
                     if gen < num_generations - 1:
                         populations[p] = adapter.ask()
                     # Save CMA-ES state (after ask so that iteration counter and candidates are aligned)
-                    cma_file = os.path.join(GA_OPTIMIZER_DIR, f"cma_state_{p.lower()}.pkl") if is_multi else os.path.join(GA_OPTIMIZER_DIR, "cma_state.pkl")
+                    cma_file = os.path.join(CURR_DIR, f"cma_state_{p.lower()}.pkl") if is_multi else os.path.join(CURR_DIR, "cma_state.pkl")
                     adapter.save_state(cma_file)
                 else:
                     if gen < num_generations - 1:
@@ -634,7 +667,7 @@ def run_genetic_algorithm(
                         populations[p] = next_population
 
                 # 4. Save Planner Checkpoint for Next Generation
-                ckpt_file = os.path.join(GA_OPTIMIZER_DIR, f"ga_checkpoint_{p.lower()}.json") if is_multi else CHECKPOINT_FILE
+                ckpt_file = os.path.join(CURR_DIR, f"ga_checkpoint_{p.lower()}.json") if is_multi else CHECKPOINT_FILE
                 with open(ckpt_file, "w", encoding="utf-8") as f:
                     json.dump({
                         "generation": gen,

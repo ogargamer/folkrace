@@ -19,10 +19,36 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
 
 CURR_DIR = os.path.dirname(os.path.abspath(__file__))
-GA_OPTIMIZER_DIR = CURR_DIR
-WORKSPACE_ROOT = os.path.dirname(GA_OPTIMIZER_DIR)
 
-for p in [GA_OPTIMIZER_DIR, WORKSPACE_ROOT]:
+def _find_optimizer_dir(start_dir: str) -> str:
+    if os.path.exists(os.path.join(start_dir, "worlds", "Cyan_Champion_GA.wbt")):
+        return start_dir
+    p = start_dir
+    for _ in range(6):
+        cand = os.path.join(p, "webots", "optimization", "ga_planner_optimizer")
+        if os.path.exists(os.path.join(cand, "worlds", "Cyan_Champion_GA.wbt")):
+            return cand
+        cand2 = os.path.join(p, "optimization", "ga_planner_optimizer")
+        if os.path.exists(os.path.join(cand2, "worlds", "Cyan_Champion_GA.wbt")):
+            return cand2
+        parent = os.path.dirname(p)
+        if parent == p:
+            break
+        p = parent
+    return start_dir
+
+OPTIMIZER_PROJECT_DIR = _find_optimizer_dir(CURR_DIR)
+GA_OPTIMIZER_DIR = OPTIMIZER_PROJECT_DIR
+WORKSPACE_ROOT = os.path.dirname(OPTIMIZER_PROJECT_DIR)
+
+for p in [
+    CURR_DIR,
+    OPTIMIZER_PROJECT_DIR,
+    os.path.join(OPTIMIZER_PROJECT_DIR, "planners"),
+    os.path.join(OPTIMIZER_PROJECT_DIR, "controllers", "ga_supervisor_worker"),
+    os.path.join(OPTIMIZER_PROJECT_DIR, "data"),
+    WORKSPACE_ROOT,
+]:
     if p not in sys.path and os.path.exists(p):
         sys.path.insert(0, p)
 
@@ -38,7 +64,7 @@ from ga_planner_config import (
     BasePlannerGenome,
 )
 
-DEFAULT_WORLD_PATH = os.path.join(GA_OPTIMIZER_DIR, "worlds", "Cyan_Champion_GA.wbt")
+DEFAULT_WORLD_PATH = os.path.join(OPTIMIZER_PROJECT_DIR, "worlds", "Cyan_Champion_GA.wbt")
 
 
 class HeadlessWebotsWorker:
@@ -129,9 +155,11 @@ class HeadlessWebotsWorker:
         env["WEBOTS_HOME"] = webots_home
         env["PATH"] = webots_bin_dir + os.pathsep + py_dir + os.pathsep + py_scripts + os.pathsep + env.get("PATH", "")
         env["PYTHONPATH"] = os.pathsep.join([
-            GA_OPTIMIZER_DIR,
-            os.path.join(GA_OPTIMIZER_DIR, "planners"),
-            os.path.join(GA_OPTIMIZER_DIR, "controllers", "ga_supervisor_worker"),
+            CURR_DIR,
+            OPTIMIZER_PROJECT_DIR,
+            os.path.join(OPTIMIZER_PROJECT_DIR, "planners"),
+            os.path.join(OPTIMIZER_PROJECT_DIR, "controllers", "ga_supervisor_worker"),
+            os.path.join(OPTIMIZER_PROJECT_DIR, "data"),
             WORKSPACE_ROOT,
         ])
         env["GA_WORKER_PORT"] = str(self.port)
@@ -174,7 +202,7 @@ class HeadlessWebotsWorker:
             return
 
         try:
-            log_dir = os.path.join(GA_OPTIMIZER_DIR, "logs")
+            log_dir = os.path.join(CURR_DIR, "logs")
             os.makedirs(log_dir, exist_ok=True)
             self.log_path = os.path.join(log_dir, f"worker_{self.worker_id}.log")
             self.log_file = open(self.log_path, "w", encoding="utf-8")
@@ -182,7 +210,7 @@ class HeadlessWebotsWorker:
             self.proc = subprocess.Popen(
                 cmd,
                 env=env,
-                cwd=GA_OPTIMIZER_DIR,
+                cwd=OPTIMIZER_PROJECT_DIR,
                 startupinfo=startupinfo,
                 creationflags=creationflags,
                 stdout=self.log_file,

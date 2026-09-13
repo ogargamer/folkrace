@@ -22,10 +22,37 @@ import numpy as np
 
 # Discover controller paths
 CURR_DIR = os.path.dirname(os.path.abspath(__file__))
-PLANNERS_DIR = os.path.join(CURR_DIR, "planners")
-WORKSPACE_ROOT = os.path.dirname(CURR_DIR)
 
-for p in [CURR_DIR, PLANNERS_DIR, WORKSPACE_ROOT]:
+def _find_optimizer_dir(start_dir: str) -> str:
+    if os.path.exists(os.path.join(start_dir, "worlds", "Cyan_Champion_GA.wbt")):
+        return start_dir
+    p = start_dir
+    for _ in range(6):
+        cand = os.path.join(p, "webots", "optimization", "ga_planner_optimizer")
+        if os.path.exists(os.path.join(cand, "worlds", "Cyan_Champion_GA.wbt")):
+            return cand
+        cand2 = os.path.join(p, "optimization", "ga_planner_optimizer")
+        if os.path.exists(os.path.join(cand2, "worlds", "Cyan_Champion_GA.wbt")):
+            return cand2
+        parent = os.path.dirname(p)
+        if parent == p:
+            break
+        p = parent
+    return start_dir
+
+OPTIMIZER_PROJECT_DIR = _find_optimizer_dir(CURR_DIR)
+GA_OPTIMIZER_DIR = OPTIMIZER_PROJECT_DIR
+PLANNERS_DIR = os.path.join(OPTIMIZER_PROJECT_DIR, "planners")
+WORKSPACE_ROOT = os.path.dirname(OPTIMIZER_PROJECT_DIR)
+
+for p in [
+    CURR_DIR,
+    OPTIMIZER_PROJECT_DIR,
+    PLANNERS_DIR,
+    os.path.join(OPTIMIZER_PROJECT_DIR, "controllers", "ga_supervisor_worker"),
+    os.path.join(OPTIMIZER_PROJECT_DIR, "data"),
+    WORKSPACE_ROOT,
+]:
     if p not in sys.path and os.path.exists(p):
         sys.path.insert(0, p)
 
@@ -71,7 +98,7 @@ from ga_planner_config import (
     get_genome_class,
     compute_efficiency_multiplier,
 )
-from webots/optimization/ga_optimizer import GAController, run_genetic_algorithm, HISTORY_CSV_FILE, BEST_GENOME_FILE, CHECKPOINT_FILE
+from ga_optimizer import GAController, run_genetic_algorithm, HISTORY_CSV_FILE, BEST_GENOME_FILE, CHECKPOINT_FILE
 
 try:
     from cpp_planner_option3_septic import CppSepticSplineTractionProfiler, DLL_PATH as SEPTIC_DLL_PATH
@@ -458,6 +485,10 @@ class GADashboardGUI(QMainWindow):
         self.planner_combo.addItem("Option 1: BVP Dynamic State Lattice", "OPTION_1_BVP")
         self.planner_combo.addItem("Option 2: Curvilinear SL-MPC (OSQP)", "OPTION_2_SL_MPC")
         self.planner_combo.setToolTip("Select which path planner to optimize when in Single Planner mode")
+        for i in range(self.planner_combo.count()):
+            if self.planner_combo.itemData(i) == ACTIVE_PLANNER:
+                self.planner_combo.setCurrentIndex(i)
+                break
         p_box.addWidget(p_lbl)
         p_box.addWidget(self.planner_combo)
         header_layout.addLayout(p_box)
@@ -553,7 +584,14 @@ class GADashboardGUI(QMainWindow):
         self.btn_abort.setEnabled(False)
         self.btn_abort.clicked.connect(self.abort_ga)
 
+        self.btn_live_preview = QPushButton("LIVE PREVIEW")
+        self.btn_live_preview.setObjectName("btnLivePreview")
+        self.btn_live_preview.setStyleSheet("background-color: #0284C7; color: white; font-weight: bold; padding: 6px 12px; border-radius: 4px;")
+        self.btn_live_preview.setToolTip("Launches Webots 3D Real-Time rendered preview running the best parameters from ga_checkpoint.json.")
+        self.btn_live_preview.clicked.connect(self.launch_live_preview)
+
         header_layout.addWidget(self.btn_start)
+        header_layout.addWidget(self.btn_live_preview)
         header_layout.addWidget(self.btn_pause)
         header_layout.addWidget(self.btn_resume)
         header_layout.addWidget(self.btn_stop)
@@ -715,6 +753,82 @@ class GADashboardGUI(QMainWindow):
             self.btn_stop.setEnabled(False)
             self.btn_abort.setEnabled(False)
 
+    def launch_live_preview(self):
+        """Launches Webots 3D rendered preview running the best parameters from ga_checkpoint.json."""
+        try:
+            p_name = self.planner_combo.currentText()
+            ckpt_path = os.path.join(CURR_DIR, f"ga_checkpoint_{p_name.lower()}.json")
+            if not os.path.exists(ckpt_path):
+                ckpt_path = os.path.join(CURR_DIR, "ga_checkpoint.json")
+
+            best_genes = None
+            fit = "N/A"
+            metrics = {}
+            gen = 0
+            if os.path.exists(ckpt_path):
+                with open(ckpt_path, "r", encoding="utf-8") as f:
+                    d = json.load(f)
+                    best_genes = d.get("best_genome") or d.get("genes")
+                    p_name = d.get("planner", p_name)
+                    fit = d.get("best_fitness", d.get("fitness", "N/A"))
+                    metrics = d.get("best_metrics", d.get("metrics", {}))
+                    gen = d.get("generation", 0)
+
+            if not best_genes:
+                bg_path = os.path.join(CURR_DIR, f"best_genome_{p_name.lower()}.json")
+                if os.path.exists(bg_path):
+                    with open(bg_path, "r", encoding="utf-8") as f:
+                        d = json.load(f)
+                        best_genes = d.get("genes") or d.get("best_genome", {})
+                        fit = d.get("fitness", "N/A")
+                        metrics = d.get("metrics", {})
+                        gen = d.get("generation", 0)
+
+            active_cfg = {
+                "planner": p_name,
+                "fitness": fit,
+                "metrics": metrics,
+                "genes": best_genes or {},
+                "generation": gen,
+                "title": f"{p_name} Champion (Gen {gen}, Fitness {fit})",
+                "note": "Activated for live preview from GA Dashboard.",
+            }
+            active_path = os.path.join(CURR_DIR, "active_preview_config.json")
+            with open(active_path, "w", encoding="utf-8") as f:
+                json.dump(active_cfg, f, indent=2)
+
+            world_path = os.path.join(CURR_DIR, "worlds", "Cyan_Champion_Live_Preview.wbt")
+            if not os.path.exists(world_path):
+                world_path = os.path.join(CURR_DIR, "worlds", "Cyan_Champion_GA.wbt")
+
+            webots_bin = WEBOTS_BINARY
+            env = os.environ.copy()
+            webots_home = r"C:\Program Files\Webots"
+            webots_bin_dir = os.path.dirname(webots_bin)
+            py_dir = os.path.dirname(sys.executable)
+            py_scripts = os.path.join(py_dir, "Scripts")
+
+            env["WEBOTS_HOME"] = webots_home
+            env["PATH"] = webots_bin_dir + os.pathsep + py_dir + os.pathsep + py_scripts + os.pathsep + env.get("PATH", "")
+            env["PYTHONPATH"] = os.pathsep.join([
+                CURR_DIR,
+                os.path.join(CURR_DIR, "planners"),
+                os.path.join(CURR_DIR, "controllers", "champion_live_preview"),
+                os.path.join(CURR_DIR, "data"),
+                WORKSPACE_ROOT,
+            ])
+            env["PYTHONUNBUFFERED"] = "1"
+
+            cmd = [
+                webots_bin,
+                "--mode=realtime",
+                world_path,
+            ]
+            self.on_status_change(f"PREVIEW: {p_name} (Live Webots)")
+            subprocess.Popen(cmd, env=env, cwd=CURR_DIR)
+        except Exception as e:
+            self.on_status_change(f"Error launching live preview: {e}")
+
     def on_status_change(self, status: str):
         self.status_pill.setText(f" {status} ")
         if status == "RUNNING":
@@ -845,7 +959,11 @@ class GADashboardGUI(QMainWindow):
             try:
                 ckpt_path = os.path.join(CURR_DIR, f"best_genome_{p_name.lower()}.json")
                 if not os.path.exists(ckpt_path):
+                    ckpt_path = os.path.join(OPTIMIZER_PROJECT_DIR, f"best_genome_{p_name.lower()}.json")
+                if not os.path.exists(ckpt_path):
                     ckpt_path = os.path.join(CURR_DIR, f"ga_checkpoint_{p_name.lower()}.json")
+                if not os.path.exists(ckpt_path):
+                    ckpt_path = os.path.join(OPTIMIZER_PROJECT_DIR, f"ga_checkpoint_{p_name.lower()}.json")
                 genome_cls = get_genome_class(p_name)
                 if os.path.exists(ckpt_path):
                     with open(ckpt_path, "r", encoding="utf-8") as f:
@@ -858,6 +976,9 @@ class GADashboardGUI(QMainWindow):
                     if "OPTION_3" in p_name:
                         data["engine"] = "C++ Native AVX2 (septic_traction_profiler.dll)"
                         data["compute_budget"] = "~3.5 ms execution window (210-280 candidates, 36 spatial points)"
+                    elif "OPTION_2" in p_name:
+                        data["engine"] = "Curvilinear Slack-Constrained SL-MPC (OSQP)"
+                        data["compute_budget"] = "~15 ms execution window (Horizon N=18, dt=0.02s, 36 Tunable Genes)"
                     txt_widget.setPlainText(json.dumps(data, indent=2))
                 else:
                     default_genes = genome_cls().to_dict()
@@ -870,6 +991,9 @@ class GADashboardGUI(QMainWindow):
                     if "OPTION_3" in p_name:
                         preview["engine"] = "C++ Native AVX2 (septic_traction_profiler.dll)"
                         preview["compute_budget"] = "~3.5 ms execution window (210-280 candidates, 36 spatial points)"
+                    elif "OPTION_2" in p_name:
+                        preview["engine"] = "Curvilinear Slack-Constrained SL-MPC (OSQP)"
+                        preview["compute_budget"] = "~15 ms execution window (Horizon N=18, dt=0.02s, 36 Tunable Genes)"
                     txt_widget.setPlainText(json.dumps(preview, indent=2))
             except Exception as e:
                 txt_widget.setPlainText(f"Error loading {p_name} preview: {e}")

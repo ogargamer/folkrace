@@ -14,7 +14,7 @@ import math
 #   - "OPTION2_SL_MPC" : Curvilinear Slack-Constrained SL-MPC (OSQP)
 #   - "OPTION3_SEPTIC" : G^3 Septic Spline Pool + Bidirectional Dynamic Traction Profiler
 # ==============================================================================
-PLANNER_TYPE = "OPTION1_BVP"
+PLANNER_TYPE = "OPTION2_SL_MPC"
 
 # ==============================================================================
 # 1. PHYSICAL VEHICLE & ACTUATOR SPECIFICATIONS
@@ -46,6 +46,21 @@ TIRE_MU = 0.85                 # dimensionless tire-ground Coulomb friction coef
 GRAVITY_G = 9.81               # m/s^2 gravitational acceleration
 ALPHA_PEAK = 0.220             # radians (~12.6 degrees dynamic peak tire slip angle before severe washout)
 
+# --- UNIFIED FRICTION-DERIVED ACCELERATION & SERVO LIMITS ---
+# Master Traction Limit: Base Acceleration = TIRE_MU * GRAVITY_G (~8.34 m/s^2 @ mu=0.85)
+A_MAX_BASE = TIRE_MU * GRAVITY_G
+ACCEL_FWD_RATIO = 0.85                  # 85% of mu*g for smooth forward motor acceleration without wheel spin
+BRAKE_DECEL_RATIO = 1.00                # 100% of mu*g for maximum braking / stopping deceleration
+LAT_ACCEL_RATIO = 0.95                  # 95% of mu*g for dynamic cornering limit
+
+ACCEL_FWD_MAX = ACCEL_FWD_RATIO * A_MAX_BASE      # ~7.09 m/s^2 forward motor acceleration limit
+BRAKE_DECEL_MAX = BRAKE_DECEL_RATIO * A_MAX_BASE  # ~8.34 m/s^2 braking / deceleration limit
+LAT_ACCEL_MAX = LAT_ACCEL_RATIO * A_MAX_BASE      # ~7.92 m/s^2 cornering lateral acceleration limit
+
+# PTK 9497 MG-D Digital Servo Specifications (at 8.4V HV)
+# Spec: ~0.068 s / 60 deg -> (pi/3) / 0.068 = ~15.4 rad/s slew rate
+SERVO_MAX_SPEED_RAD_S = 15.4            # rad/s maximum steering servo slew rate at 8.4V
+
 # Linear cornering stiffness per axle (N/rad)
 C_AF = 34.0                    # Front cornering stiffness (N/rad)
 C_AR = 38.0                    # Rear cornering stiffness (N/rad)
@@ -68,21 +83,40 @@ TOF_TIME_STEP_MS = 16          # ToF sensor sampling interval in ms (60 Hz)
 # +Y is Forward, +X is Right
 GRID_X_MIN = -1.25             # meters (left boundary)
 GRID_X_MAX = 1.25              # meters (right boundary)
-GRID_Y_MIN = 0.00              # meters (rear axle / origin)
+GRID_Y_MIN = -0.10             # meters (10 cm chassis clearance behind origin)
 GRID_Y_MAX = 2.00              # meters (forward preview range)
 GRID_RES = 0.015               # meters (15 mm grid resolution)
 R_INFLATION_M = 0.090          # meters (9.0 cm default dilation: bare minimum is 7.5cm for 15cm chassis width)
 
-# Sensor device names
+# Sensor device names: 16-Channel Front-Only ToF rig (only_front_tofs.proto)
 TOF_SENSOR_NAMES = [
-    "tof_fl_0", "tof_fl_1", "tof_fl_2", "tof_fl_3",
-    "tof_fr_0", "tof_fr_1", "tof_fr_2", "tof_fr_3",
-    "tof_flank_left_6.4deg", "tof_flank_left_17.6deg", "tof_flank_left_28.9deg", "tof_flank_left_40.1deg",
-    "tof_flank_right_6.4deg", "tof_flank_right_17.6deg", "tof_flank_right_28.9deg", "tof_flank_right_40.1deg",
+    # Front-Left Array (cross-pointing Right, 8 sensors)
+    "tof_front_left_4.1deg",
+    "tof_front_left_15.4deg",
+    "tof_front_left_26.6deg",
+    "tof_front_left_37.9deg",
+    "tof_front_left_49.1deg",
+    "tof_front_left_60.4deg",
+    "tof_front_left_71.6deg",
+    "tof_front_left_82.9deg",
+    # Front-Right Array (cross-pointing Left, 8 sensors)
+    "tof_front_right_4.1deg",
+    "tof_front_right_15.4deg",
+    "tof_front_right_26.6deg",
+    "tof_front_right_37.9deg",
+    "tof_front_right_49.1deg",
+    "tof_front_right_60.4deg",
+    "tof_front_right_71.6deg",
+    "tof_front_right_82.9deg",
 ]
-FRONT_TOF_SENSOR_NAMES = [
+FRONT_TOF_SENSOR_NAMES = TOF_SENSOR_NAMES
+
+# Legacy 4-quadrant ToF rig names (Folkrace.proto backward compatibility)
+LEGACY_TOF_SENSOR_NAMES = [
     "tof_fl_0", "tof_fl_1", "tof_fl_2", "tof_fl_3",
     "tof_fr_0", "tof_fr_1", "tof_fr_2", "tof_fr_3",
+    "tof_bl_0", "tof_bl_1", "tof_bl_2", "tof_bl_3",
+    "tof_br_0", "tof_br_1", "tof_br_2", "tof_br_3",
 ]
 TOF_MAX_RANGE_M = 1.80         # meters max range
 TOF_MIN_RANGE_M = 0.001        # meters min range
@@ -108,11 +142,28 @@ GAP_MIN_LOOKAHEAD_M = 0.35     # meters minimum lookahead distance
 GAP_OFFSETS = [-0.10, -0.08, -0.05, -0.03, -0.01, 0.00, 0.01, 0.03, 0.05, 0.08, 0.10]  # meters lateral exploration offsets
 
 # Candidate Evaluation Weights:
-# Score = W_DIST * (dist/max_r) + W_WIDTH * (width/max_w) - W_DEV_STEER * |theta - current_steer| - W_DEV_STRAIGHT * |theta|
+# Score = W_DIST * dist_weight_factor + W_WIDTH * (width/max_w) - W_DEV_STEER * |theta - current_steer| - W_DEV_STRAIGHT * |theta|
 WEIGHT_GAP_DISTANCE = 3.0      # Preference for longer/further clear gaps
 WEIGHT_GAP_WIDTH = 1.5         # Preference for wider open apertures
 WEIGHT_ALIGN_STEER = 1.0       # Preference for turning toward where servo is already aiming
 WEIGHT_ALIGN_STRAIGHT = 0.5    # Preference for going straight when openings are equal
+WEIGHT_SIDE_CLEARANCE = 2.8    # Preference for steering away from close walls / side asymmetry
+
+
+# Exponential Distance Preference (1.0m Walled Track Geometry):
+# Since the track is walled off and 1.0m wide, any sightline > 1.0m + margin is certainly the path towards progress.
+TRACK_CORRIDOR_WIDTH_M = 1.00  # meters standard walled race corridor width
+GAP_PROGRESS_MARGIN_M = 0.15   # meters: 1.0m + 0.15m = 1.15m threshold for definitive open corridor
+GAP_DIST_EXP_K = 0.60          # slight exponential growth scaling factor for distance beyond threshold (~48% boost at 1.80m)
+STRAIGHT_LOCK_DIST_M = 1.70    # meters: forward clearance on both 4.1 deg ToFs to lock full speed straight
+STRAIGHT_LOCK_SPEED_MPS = 5.50 # m/s: top speed cruising when straight locked
+EMERGENCY_BACKUP_DIST_M = 0.09 # meters (9cm): emergency threshold on 4.1 deg ToFs to trigger reverse
+
+# Dual-Path Candidate Selection & Smart Challenger Arbitration (Option 2 SL-MPC)
+ALT_MIN_SEPARATION_M = 0.25      # meters: minimum lateral separation between primary and challenger target lines
+ALT_APERTURE_BIAS = 1.80         # multiplier on aperture width reward for challenger target (safety/opening priority)
+ALT_SWITCH_HYSTERESIS = 15.0     # objective cost reduction threshold needed for challenger to overthrow primary line
+
 
 # ==============================================================================
 # 5. OPTION 1: TARGET-GUIDED BVP DYNAMIC STATE LATTICE (HEUN / RK2)
@@ -137,8 +188,9 @@ OPT2_WEIGHT_STEER_EFFORT = 0.3 # weight penalizing steering angle magnitude
 OPT2_WEIGHT_STEER_RATE = 0.15  # weight penalizing steering velocity (slew)
 OPT2_WEIGHT_FX_EFFORT = 0.005  # weight penalizing excessive motor force
 OPT2_WEIGHT_SLACK_EPS = 500.0  # well-conditioned L1/L2 penalty for corridor boundary slack
+OPT2_WEIGHT_SLIP_SLACK = 2000.0 # heavy penalty for tire slip slack to prevent saturation
 OPT2_FRICTION_OCTAGON_C1 = 1.2 # linear factor in polyhedral friction envelope
-OPT2_TARGET_SPEED_MPS = 2.40   # m/s reference forward speed
+OPT2_TARGET_SPEED_MPS = 4.50   # m/s reference forward speed (accelerates up to 4.5m/s on clear straights)
 OPT2_CORRIDOR_STEP_M = 0.015   # meters resolution when stepping outward to find bounds
 
 # ==============================================================================
@@ -147,8 +199,8 @@ OPT2_CORRIDOR_STEP_M = 0.015   # meters resolution when stepping outward to find
 # A. Friction-Coupled Acceleration, Deceleration & Cornering
 OPT3_MU_FRICTION = TIRE_MU      # Tire friction coefficient governing grip limits
 OPT3_TRACTION_MARGIN = 0.9     # Friction circle safety margin (leaves 15% grip reserve for front steering tires)
-OPT3_ACCEL_MAX = 0.90 * TIRE_MU * GRAVITY_G  # m/s^2 forward motor acceleration limit (~4.17 m/s^2 @ mu=0.85)
-OPT3_DECEL_MAX = 1.00 * TIRE_MU * GRAVITY_G  # m/s^2 trail-braking deceleration limit (~6.67 m/s^2 @ mu=0.85)
+OPT3_ACCEL_MAX = ACCEL_FWD_MAX  # m/s^2 forward motor acceleration limit (0.85 * mu * g)
+OPT3_DECEL_MAX = BRAKE_DECEL_MAX# m/s^2 trail-braking deceleration limit (1.00 * mu * g)
 OPT3_DS = 0.025                 # meters spatial arc-length step for dynamic profiling
 
 # B. Speed Ceiling & Cruise Speeds
@@ -229,42 +281,12 @@ def compute_steering_aggressiveness(d_straight: float, steer_error_rad: float = 
 # ==============================================================================
 # 8. NON-BLOCKING STUCK & REVERSE RECOVERY MANAGER
 # ==============================================================================
-RECOVERY_REVERSE_SPEED_MPS = 1.30    # m/s reverse backing velocity during K-turn
-RECOVERY_FORWARD_SPEED_MPS = 1.30    # m/s forward recovery stroke velocity
-RECOVERY_STEER_ANGLE_RAD = 0.4538    # radians (26.0 deg) steering lock during K-turn strokes
+RECOVERY_REVERSE_SPEED_MPS = 1.30    # m/s reverse backing velocity during recovery arc
+RECOVERY_STEER_ANGLE_RAD = 0.4538    # radians (26.0 deg) steering lock during reverse arc
 RECOVERY_STALL_CONFIRM_S = 0.15      # seconds of low forward speed before engaging recovery
 RECOVERY_FRONT_BLOCKED_M = 0.25      # meters front clearance threshold to detect forward stall
-RECOVERY_REVERSE_STROKE_MAX_S = 0.40 # seconds (400ms) maximum per reverse stroke
-RECOVERY_FORWARD_STROKE_MAX_S = 0.25 # seconds maximum per forward stroke
+RECOVERY_REVERSE_STROKE_MAX_S = 0.35 # seconds maximum reverse stroke failsafe
 RECOVERY_TOTAL_TIMEOUT_S = 1.20      # seconds maximum total recovery duration before forced exit
-RECOVERY_CLEARANCE_EXIT_M = 0.25     # meters (25cm) front clearance on fl3 and fr3 to exit reverse early
+RECOVERY_CLEARANCE_EXIT_M = 0.28     # meters minimum front clearance to conclude reverse and center
 RECOVERY_EXIT_MIN_TIME_S = 0.08      # seconds minimum recovery stroke time before clearance check
-
-# ==============================================================================
-# 9. ANTI-WRONG-WAY & U-TURN DISCRIMINATION WATCHDOG
-# Modes:
-#   - "DISABLED"                   : Pass-through (no filtering or monitoring)
-#   - "OPTION_1_BREADCRUMB"        : Trail overlap & double-180 reverse correction
-#   - "OPTION_2_KINEMATIC_ARC"     : Dynamic curvature limit (R = v / omega >= R_min)
-#   - "OPTION_3_FLOW_COSTMAP"      : 2D directional flow stamping & one-way barrier
-#   - "OPTION_4_LATERAL_SEPARATION": Lateral corridor shift across 180 yaw excursion
-#   - "OPTION_COMBINED_HYBRID"     : Multi-layered active protection ensemble
-# ==============================================================================
-ANTI_WRONG_WAY_MODE = "OPTION_COMBINED_HYBRID"
-
-AWW_BREADCRUMB_LOOKBACK_M = 4.0      # meters: historical trail distance to retain
-AWW_BREADCRUMB_SPACING_M = 0.05      # meters: spatial distance between downsampled breadcrumbs
-AWW_CORRIDOR_HALF_WIDTH_M = 0.25     # meters: corridor lateral threshold for in-lane overlap
-AWW_REVERSE_CONE_ANGLE_DEG = 45.0    # degrees: cone alignment angle against incoming path
-AWW_MIN_HAIRPIN_RADIUS_M = 0.32      # meters: physical track minimum hairpin arc radius
-AWW_FLOW_GRID_RES_M = 0.05           # meters: spatial cell resolution for directional flow map
-AWW_FLOW_DECAY_S = 3.0               # seconds: memory retention duration for corridor flow (synced to history window)
-AWW_LATERAL_SEPARATION_MIN_M = 0.40  # meters: minimum lateral corridor offset for legitimate U-turn
-AWW_AUTO_CORRECT_180_ENABLED = True  # enable automatic 180 corrective spin if in-lane reversal caught
-AWW_CORRECTIVE_180_SPEED_MPS = 1.20  # m/s: driving speed during corrective 180 pivot
-AWW_CORRECTIVE_180_STEER_RAD = 0.60  # radians: steering angle during corrective 180 pivot
-
-# UNIFIED CONFIGURATION PARAMETERS FOR WRONG-WAY & BACKUP ORIGIN CHECK
-AWW_HISTORY_WINDOW_S = 3.0           # seconds: unified rolling history window for breadcrumbs, flow costmap, and recovery
-AWW_LOOKAHEAD_M = 1.0                # meters: unified forward lookahead distance to test against incoming origin path
-
+RECOVERY_SERVO_SLEW_RAD_S = SERVO_MAX_SPEED_RAD_S  # rad/s PTK 9497 8.4V centering slew rate (15.4 rad/s)

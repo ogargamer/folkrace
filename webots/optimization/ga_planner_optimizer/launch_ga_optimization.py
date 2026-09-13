@@ -55,7 +55,7 @@ def main():
 
     cmd = [
         sys.executable,
-        os.path.join(GA_OPTIMIZER_DIR, "webots/optimization/ga_optimizer.py"),
+        os.path.join(GA_OPTIMIZER_DIR, "ga_optimizer.py"),
         "--planner", planner_key,
         "--algorithm", args.algorithm,
         "--cores", str(args.cores),

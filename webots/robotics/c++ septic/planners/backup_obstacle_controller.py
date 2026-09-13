@@ -86,40 +86,88 @@ class BackupObstacleController:
         In reverse, steering Left (+steer) rotates chassis clockwise (front turns Right).
         Steering Right (-steer) rotates chassis counter-clockwise (front turns Left).
         """
-        # Tier 1: tof_fl_3 vs tof_fr_3
-        fl3 = float(tof_readings.get("tof_fl_3", 1.80))
-        fr3 = float(tof_readings.get("tof_fr_3", 1.80))
-        diff_1 = fr3 - fl3
+        is_front_rig = "tof_front_left_4.1deg" in tof_readings or "tof_front_right_4.1deg" in tof_readings
 
-        if abs(diff_1) > self.similar_eps:
-            if diff_1 > 0.0:
-                # Obstacle on Left (fl3 < fr3) -> open on Right -> steer Left (+steer) so front swings Right
-                return self.max_steer, "TIER1_FL3_FR3_RIGHT"
-            else:
-                # Obstacle on Right (fr3 < fl3) -> open on Left -> steer Right (-steer) so front swings Left
-                return -self.max_steer, "TIER1_FL3_FR3_LEFT"
+        if is_front_rig:
+            fl_center = float(tof_readings.get("tof_front_left_4.1deg", 1.80))
+            fr_center = float(tof_readings.get("tof_front_right_4.1deg", 1.80))
+            diff_1 = fr_center - fl_center
 
-        # Tier 2: tof_flank_left_6.4deg vs tof_flank_right_6.4deg
-        flank_l6_4 = float(tof_readings.get("tof_flank_left_6.4deg", tof_readings.get("tof_flank_left_7", tof_readings.get("tof_bl_0", 1.80))))
-        flank_r6_4 = float(tof_readings.get("tof_flank_right_6.4deg", tof_readings.get("tof_flank_right_7", tof_readings.get("tof_br_0", 1.80))))
-        diff_2 = flank_r6_4 - flank_l6_4
+            # Tier 1: 4.1 deg center sensors
+            if abs(diff_1) > self.similar_eps:
+                if diff_1 > 0.0:
+                    # Obstacle on Left (fl < fr) -> open on Right -> steer Left (+steer) so front swings Right
+                    return self.max_steer, "TIER1_FRONT_4_1DEG_RIGHT"
+                else:
+                    # Obstacle on Right (fr < fl) -> open on Left -> steer Right (-steer) so front swings Left
+                    return -self.max_steer, "TIER1_FRONT_4_1DEG_LEFT"
 
-        if abs(diff_2) > self.similar_eps:
-            if diff_2 > 0.0:
-                return self.max_steer, "TIER2_FLANK_L6_4_R6_4_RIGHT"
-            else:
-                return -self.max_steer, "TIER2_FLANK_L6_4_R6_4_LEFT"
+            # Tier 2: 15.4 deg inner sensors
+            fl_inner = float(tof_readings.get("tof_front_left_15.4deg", 1.80))
+            fr_inner = float(tof_readings.get("tof_front_right_15.4deg", 1.80))
+            diff_2 = fr_inner - fl_inner
+            if abs(diff_2) > self.similar_eps:
+                if diff_2 > 0.0:
+                    return self.max_steer, "TIER2_FRONT_15_4DEG_RIGHT"
+                else:
+                    return -self.max_steer, "TIER2_FRONT_15_4DEG_LEFT"
 
-        # Tier 3: tof_flank_left_17.6deg vs tof_flank_right_17.6deg
-        flank_l17_6 = float(tof_readings.get("tof_flank_left_17.6deg", tof_readings.get("tof_flank_left_18", tof_readings.get("tof_bl_1", 1.80))))
-        flank_r17_6 = float(tof_readings.get("tof_flank_right_17.6deg", tof_readings.get("tof_flank_right_18", tof_readings.get("tof_br_1", 1.80))))
-        diff_3 = flank_r17_6 - flank_l17_6
+            # Tier 3: Flank sensors (cross-pointing: right sensors probe left side, left sensors probe right side)
+            d_left_side = min(
+                float(tof_readings.get("tof_front_right_82.9deg", 1.80)),
+                float(tof_readings.get("tof_front_right_71.6deg", 1.80)),
+                float(tof_readings.get("tof_front_right_60.4deg", 1.80)),
+                float(tof_readings.get("tof_front_right_49.1deg", 1.80)),
+            )
+            d_right_side = min(
+                float(tof_readings.get("tof_front_left_82.9deg", 1.80)),
+                float(tof_readings.get("tof_front_left_71.6deg", 1.80)),
+                float(tof_readings.get("tof_front_left_60.4deg", 1.80)),
+                float(tof_readings.get("tof_front_left_49.1deg", 1.80)),
+            )
+            diff_side = d_left_side - d_right_side
+            if abs(diff_side) > self.similar_eps:
+                if diff_side > 0.0:
+                    # More room on left -> steer Right (-steer) so front swings Left
+                    return -self.max_steer, "TIER3_FLANK_LEFT"
+                else:
+                    # More room on right -> steer Left (+steer) so front swings Right
+                    return self.max_steer, "TIER3_FLANK_RIGHT"
+        else:
+            # Tier 1: tof_fl_3 vs tof_fr_3
+            fl3 = float(tof_readings.get("tof_fl_3", 1.80))
+            fr3 = float(tof_readings.get("tof_fr_3", 1.80))
+            diff_1 = fr3 - fl3
 
-        if abs(diff_3) > self.similar_eps:
-            if diff_3 > 0.0:
-                return self.max_steer, "TIER3_FLANK_L17_6_R17_6_RIGHT"
-            else:
-                return -self.max_steer, "TIER3_FLANK_L17_6_R17_6_LEFT"
+            if abs(diff_1) > self.similar_eps:
+                if diff_1 > 0.0:
+                    # Obstacle on Left (fl3 < fr3) -> open on Right -> steer Left (+steer) so front swings Right
+                    return self.max_steer, "TIER1_FL3_FR3_RIGHT"
+                else:
+                    # Obstacle on Right (fr3 < fl3) -> open on Left -> steer Right (-steer) so front swings Left
+                    return -self.max_steer, "TIER1_FL3_FR3_LEFT"
+
+            # Tier 2: tof_flank_left_6.4deg vs tof_flank_right_6.4deg
+            flank_l6_4 = float(tof_readings.get("tof_flank_left_6.4deg", tof_readings.get("tof_flank_left_7", tof_readings.get("tof_bl_0", 1.80))))
+            flank_r6_4 = float(tof_readings.get("tof_flank_right_6.4deg", tof_readings.get("tof_flank_right_7", tof_readings.get("tof_br_0", 1.80))))
+            diff_2 = flank_r6_4 - flank_l6_4
+
+            if abs(diff_2) > self.similar_eps:
+                if diff_2 > 0.0:
+                    return self.max_steer, "TIER2_FLANK_L6_4_R6_4_RIGHT"
+                else:
+                    return -self.max_steer, "TIER2_FLANK_L6_4_R6_4_LEFT"
+
+            # Tier 3: tof_flank_left_17.6deg vs tof_flank_right_17.6deg
+            flank_l17_6 = float(tof_readings.get("tof_flank_left_17.6deg", tof_readings.get("tof_flank_left_18", tof_readings.get("tof_bl_1", 1.80))))
+            flank_r17_6 = float(tof_readings.get("tof_flank_right_17.6deg", tof_readings.get("tof_flank_right_18", tof_readings.get("tof_br_1", 1.80))))
+            diff_3 = flank_r17_6 - flank_l17_6
+
+            if abs(diff_3) > self.similar_eps:
+                if diff_3 > 0.0:
+                    return self.max_steer, "TIER3_FLANK_L17_6_R17_6_RIGHT"
+                else:
+                    return -self.max_steer, "TIER3_FLANK_L17_6_R17_6_LEFT"
 
         # Tier 4: IMU Vector History Logic
         # Steer backwards so front points towards locked_target_yaw
@@ -155,12 +203,18 @@ class BackupObstacleController:
         Returns:
             Tuple[bool, float, float]: (active, cmd_steer_rad, cmd_speed_mps)
         """
-        fl3 = float(tof_readings.get("tof_fl_3", 1.80))
-        fr3 = float(tof_readings.get("tof_fr_3", 1.80))
+        if "tof_front_left_4.1deg" in tof_readings or "tof_front_right_4.1deg" in tof_readings:
+            fl_center = float(tof_readings.get("tof_front_left_4.1deg", 1.80))
+            fr_center = float(tof_readings.get("tof_front_right_4.1deg", 1.80))
+            center_keys = ("tof_front_left_4.1deg", "tof_front_right_4.1deg")
+        else:
+            fl_center = float(tof_readings.get("tof_fl_3", 1.80))
+            fr_center = float(tof_readings.get("tof_fr_3", 1.80))
+            center_keys = ("tof_fl_3", "tof_fr_3")
 
         # 1. Trigger condition from normal forward operation
         if not self.is_active:
-            if fl3 <= self.trigger_dist or fr3 <= self.trigger_dist or contact_detected:
+            if fl_center <= self.trigger_dist or fr_center <= self.trigger_dist or contact_detected:
                 self.is_active = True
                 self.timer_s = 0.0
                 steer, reason = self.resolve_escape_steer(tof_readings, current_yaw, locked_target_yaw)
@@ -172,9 +226,9 @@ class BackupObstacleController:
             self.timer_s += dt
 
             # Exit condition: both front sensors see at least clear_dist (25 cm) AND any other ToF sees >= 40 cm
-            other_tofs = [v for k, v in tof_readings.items() if k not in ("tof_fl_3", "tof_fr_3")]
+            other_tofs = [v for k, v in tof_readings.items() if k not in center_keys]
             any_other_clear_40cm = any(d >= 0.40 for d in other_tofs) if other_tofs else False
-            if fl3 >= self.clear_dist and fr3 >= self.clear_dist and any_other_clear_40cm:
+            if fl_center >= self.clear_dist and fr_center >= self.clear_dist and any_other_clear_40cm:
                 self.reset()
                 return False, 0.0, 0.0
 
