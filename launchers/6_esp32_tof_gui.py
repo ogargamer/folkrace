@@ -6,7 +6,7 @@
   multizone distance matrices, targets, thresholds, and sensor health.
 
   Usage:
-    python 6_hardware_tof_gui.py
+    python 6_esp32_tof_gui.py
 ================================================================================
 """
 
