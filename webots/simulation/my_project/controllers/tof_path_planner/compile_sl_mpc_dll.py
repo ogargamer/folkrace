@@ -65,6 +65,11 @@ def compile_dll():
         sys.exit(1)
     else:
         print(f"[BUILD SUCCESS] Created {dll_output} ({os.path.getsize(dll_output)} bytes)")
+        if os.path.exists(old_dll):
+            try:
+                os.remove(old_dll)
+            except Exception:
+                pass
 
 if __name__ == "__main__":
     compile_dll()

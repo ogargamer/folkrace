@@ -1,14 +1,11 @@
 """
 ================================================================================
-  AUTONOMOUS TOF PATH PLANNERS INTERACTIVE GUI & LIVE TUNER
+  AUTONOMOUS TOF PATH PLANNER INTERACTIVE GUI & LIVE TUNER
   - Live 15mm C++ ToF Costmap Visualization & Hazard Boundary Overlay
-  - Real-Time Switching between all 3 Planners:
-      1. Option 1: Target-Guided BVP State Lattice (Heun RK2)
-      2. Option 2: Curvilinear Slack-Constrained SL-MPC (OSQP)
-      3. Option 3: G^3 Septic Spline Pool + Bidirectional Traction Profiler
-  - Displays All Potential Candidate Trajectory Lines + Winning Best Path
+  - Real-Time Native C++ Curvilinear SL-MPC (OSQP) Trajectory Display
+  - Displays Primary Racing Line + Challenger Line & Dynamic Gaps
   - Live Interactive Tuning of Parameters (Inflation Radius, Target Speed, Slip Angle)
-  - Full Simulation Control: Pause, Play, Single-Step (20ms)
+  - Full Simulation Control: Pause, Play, Single-Step (8.3ms)
 ================================================================================
 """
 
@@ -65,25 +62,6 @@ FRONT_TOF_SENSOR_RIG = [
     ("tof_front_right_60.4deg",  0.070, 0.095, 2.6245, "FR 60.4°"),
     ("tof_front_right_71.6deg",  0.070, 0.095, 2.8208, "FR 71.6°"),
     ("tof_front_right_82.9deg",  0.070, 0.095, 3.0172, "FR 82.9°"),
-]
-
-LEGACY_TOF_SENSOR_RIG = [
-    ("tof_fl_0", -0.070,  0.095, 0.9097, "FL 0"),
-    ("tof_fl_1", -0.070,  0.095, 1.1060, "FL 1"),
-    ("tof_fl_2", -0.070,  0.095, 1.3024, "FL 2"),
-    ("tof_fl_3", -0.070,  0.095, 1.4987, "FL 3"),
-    ("tof_fr_0",  0.070,  0.095, 2.2318, "FR 0"),
-    ("tof_fr_1",  0.070,  0.095, 2.0356, "FR 1"),
-    ("tof_fr_2",  0.070,  0.095, 1.8391, "FR 2"),
-    ("tof_fr_3",  0.070,  0.095, 1.6428, "FR 3"),
-    ("tof_bl_0", -0.070, -0.095, 1.6957, "BL 0"),
-    ("tof_bl_1", -0.070, -0.095, 1.8920, "BL 1"),
-    ("tof_bl_2", -0.070, -0.095, 2.0883, "BL 2"),
-    ("tof_bl_3", -0.070, -0.095, 2.2847, "BL 3"),
-    ("tof_br_0",  0.070, -0.095, 1.4462, "BR 0"),
-    ("tof_br_1",  0.070, -0.095, 1.2499, "BR 1"),
-    ("tof_br_2",  0.070, -0.095, 1.0536, "BR 2"),
-    ("tof_br_3",  0.070, -0.095, 0.8573, "BR 3"),
 ]
 
 
@@ -491,9 +469,7 @@ class ComprehensivePlannerGUI(QMainWindow):
         switch_layout = QVBoxLayout(switch_group)
 
         self.cb_planner = QComboBox()
-        self.cb_planner.addItem("Option 1: BVP State Lattice (Heun RK2)", "OPTION1_BVP")
-        self.cb_planner.addItem("Option 2: Curvilinear SL-MPC (OSQP)", "OPTION2_SL_MPC")
-        self.cb_planner.addItem("Option 3: G^3 Septic Spline + Traction", "OPTION3_SEPTIC")
+        self.cb_planner.addItem("Option 2: Curvilinear SL-MPC (OSQP / C++)", "OPTION2_SL_MPC")
         self.cb_planner.setStyleSheet("font-size: 13px; font-weight: bold; padding: 6px;")
         self.cb_planner.currentIndexChanged.connect(self._on_planner_selected)
         switch_layout.addWidget(self.cb_planner)
@@ -1021,7 +997,7 @@ class ComprehensivePlannerGUI(QMainWindow):
             is_conn = self.udp_connected
 
         if is_conn:
-            self.lbl_conn.setText("🟢 LIVE WEBOTS 50Hz STREAM CONNECTED")
+            self.lbl_conn.setText("🟢 LIVE WEBOTS 60Hz STREAM CONNECTED")
             self.lbl_conn.setStyleSheet("font-weight: bold; color: #00e676;")
         else:
             self.lbl_conn.setText("🔴 WAITING FOR WEBOTS: Run track_racing.wbt")

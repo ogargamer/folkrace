@@ -1,6 +1,6 @@
 """
 ================================================================================
-  UNIFIED AUTONOMOUS TOF+IMU RACING CONTROLLER (50 Hz)
+  UNIFIED AUTONOMOUS TOF+IMU RACING CONTROLLER (120 Hz Dynamics / 60 Hz Planner)
   Zero cheating: No racing line, no global cheating, no 360-degree lidar.
   Relies purely on:
     - 16-channel ToF sensor rig (15 mm C++ Smart Hybrid Costmap)
@@ -161,7 +161,7 @@ class ReverseObstacleEngine:
 
 
 def run_autonomous_controller(forced_planner_type: Optional[str] = None):
-    """Main execution loop running at 50 Hz in Webots."""
+    """Main execution loop running at 120 Hz Dynamics / 60 Hz Planner in Webots."""
     if not WEBOTS_AVAILABLE:
         print("[ToF Controller] Webots API not detected. Exiting.", flush=True)
         return
@@ -234,20 +234,17 @@ def run_autonomous_controller(forced_planner_type: Optional[str] = None):
     if accel:
         accel.enable(TIME_STEP_MS)
 
-    # 5. Initialize 16-Channel ToF Lidar Sensor Array (at 60 Hz = 16 ms)
+    # 5. Initialize 16-Channel Front-Only Cross-Pointing ToF Lidar Array (at 60 Hz = 16 ms)
     tof_devices = {}
     active_tof_names = []
-    is_front_only = any(robot.getDevice(n) is not None for n in TOF_SENSOR_NAMES)
-    candidate_sensors = TOF_SENSOR_NAMES if is_front_only else getattr(planner_config, "LEGACY_TOF_SENSOR_NAMES", TOF_SENSOR_NAMES)
-
-    for dev_name in candidate_sensors:
+    for dev_name in TOF_SENSOR_NAMES:
         dev = robot.getDevice(dev_name)
         if dev:
             dev.enable(TOF_TIME_STEP_MS)
             tof_devices[dev_name] = dev
             active_tof_names.append(dev_name)
 
-    print(f"[ToF Controller] Enabled {len(tof_devices)}/16 ToF sensors ({'Front-Only 16ch' if is_front_only else 'Legacy 4-Quadrant'}) at {PLANNER_HZ} Hz (IMU & 4WD at {SIM_HZ} Hz).", flush=True)
+    print(f"[ToF Controller] Enabled {len(tof_devices)}/16 ToF sensors at {PLANNER_HZ} Hz (IMU & 4WD at {SIM_HZ} Hz).", flush=True)
 
     # 6. Initialize Modules
     costmap = CppSmartHybridCostmap(
@@ -356,7 +353,7 @@ def run_autonomous_controller(forced_planner_type: Optional[str] = None):
 
     max_sim_seconds = float(os.environ.get("WEBOTS_RUN_SECONDS", "0"))
 
-    # Main 50 Hz Simulation Control Loop
+    # Main Simulation Control Loop (120 Hz Dynamics / 60 Hz Planner)
     while robot.step(TIME_STEP_MS) != -1:
         wall_start_t = time.perf_counter()
 
@@ -391,9 +388,7 @@ def run_autonomous_controller(forced_planner_type: Optional[str] = None):
                             print(f"[ToF Controller] Live updated inflation radius to: {p_val*100:.1f} cm", flush=True)
                         elif p_name == "target_speed":
                             import planner_config
-                            planner_config.OPT1_TARGET_SPEED_MPS = float(p_val)
                             planner_config.OPT2_TARGET_SPEED_MPS = float(p_val)
-                            planner_config.OPT3_TOP_SPEED_MPS = float(p_val)
                             print(f"[ToF Controller] Live updated target cruising speed to: {p_val:.2f} m/s", flush=True)
                         elif p_name == "alpha_peak":
                             import planner_config
@@ -509,41 +504,24 @@ def run_autonomous_controller(forced_planner_type: Optional[str] = None):
             raw_target_speed = float(plan_res.get("cmd_speed_mps", V_MIN_CRUISE))
 
             # Side obstacle guard & straight/front clearance metrics:
-            if "tof_front_right_82.9deg" in cached_tofs:
-                # In front-only cross-pointing rig:
-                # Right sensors point to left side; Left sensors point to right side
-                d_left_side = min(
-                    cached_tofs.get("tof_front_right_82.9deg", TOF_MAX_RANGE_M),
-                    cached_tofs.get("tof_front_right_71.6deg", TOF_MAX_RANGE_M),
-                    cached_tofs.get("tof_front_right_60.4deg", TOF_MAX_RANGE_M),
-                )
-                d_right_side = min(
-                    cached_tofs.get("tof_front_left_82.9deg", TOF_MAX_RANGE_M),
-                    cached_tofs.get("tof_front_left_71.6deg", TOF_MAX_RANGE_M),
-                    cached_tofs.get("tof_front_left_60.4deg", TOF_MAX_RANGE_M),
-                )
-                d_front_l = cached_tofs.get("tof_front_left_4.1deg", TOF_MAX_RANGE_M)
-                d_front_r = cached_tofs.get("tof_front_right_4.1deg", TOF_MAX_RANGE_M)
-                cached_d_straight = min(d_front_l, d_front_r)
-                front_keys = [
-                    "tof_front_left_4.1deg", "tof_front_right_4.1deg",
-                    "tof_front_left_15.4deg", "tof_front_right_15.4deg",
-                ]
-            else:
-                d_left_side = min(
-                    cached_tofs.get("tof_fl_0", TOF_MAX_RANGE_M),
-                    cached_tofs.get("tof_bl_0", TOF_MAX_RANGE_M),
-                    cached_tofs.get("tof_fl_1", TOF_MAX_RANGE_M),
-                )
-                d_right_side = min(
-                    cached_tofs.get("tof_fr_0", TOF_MAX_RANGE_M),
-                    cached_tofs.get("tof_br_0", TOF_MAX_RANGE_M),
-                    cached_tofs.get("tof_fr_1", TOF_MAX_RANGE_M),
-                )
-                d_fl3 = cached_tofs.get("tof_fl_3", TOF_MAX_RANGE_M)
-                d_fr3 = cached_tofs.get("tof_fr_3", TOF_MAX_RANGE_M)
-                cached_d_straight = min(d_fl3, d_fr3)
-                front_keys = ["tof_fl_3", "tof_fr_3", "tof_fl_2", "tof_fr_2"]
+            # Right sensors point to left side; Left sensors point to right side
+            d_left_side = min(
+                cached_tofs.get("tof_front_right_82.9deg", TOF_MAX_RANGE_M),
+                cached_tofs.get("tof_front_right_71.6deg", TOF_MAX_RANGE_M),
+                cached_tofs.get("tof_front_right_60.4deg", TOF_MAX_RANGE_M),
+            )
+            d_right_side = min(
+                cached_tofs.get("tof_front_left_82.9deg", TOF_MAX_RANGE_M),
+                cached_tofs.get("tof_front_left_71.6deg", TOF_MAX_RANGE_M),
+                cached_tofs.get("tof_front_left_60.4deg", TOF_MAX_RANGE_M),
+            )
+            d_front_l = cached_tofs.get("tof_front_left_4.1deg", TOF_MAX_RANGE_M)
+            d_front_r = cached_tofs.get("tof_front_right_4.1deg", TOF_MAX_RANGE_M)
+            cached_d_straight = min(d_front_l, d_front_r)
+            front_keys = [
+                "tof_front_left_4.1deg", "tof_front_right_4.1deg",
+                "tof_front_left_15.4deg", "tof_front_right_15.4deg",
+            ]
 
             cached_front_min_m = min([cached_tofs.get(k, TOF_MAX_RANGE_M) for k in front_keys])
 
@@ -649,21 +627,6 @@ def run_autonomous_controller(forced_planner_type: Optional[str] = None):
         hazard_mask = cached_hazard_mask
         front_min_m = cached_front_min_m
         d_straight = cached_d_straight
-
-        # H. Command Webots Actuators (at 120 Hz)
-        if servos["left"]:
-            servos["left"].setPosition(actuators["steer_left"])
-        if servos["right"]:
-            servos["right"].setPosition(actuators["steer_right"])
-
-        if motors["FL"]:
-            motors["FL"].setVelocity(actuators["omega_FL"])
-        if motors["FR"]:
-            motors["FR"].setVelocity(actuators["omega_FR"])
-        if motors["RL"]:
-            motors["RL"].setVelocity(actuators["omega_RL"])
-        if motors["RR"]:
-            motors["RR"].setVelocity(actuators["omega_RR"])
 
         # I. Log Comprehensive Telemetry (JSONL format at 25 Hz)
         if telem_file is not None and step_count % 2 == 0:

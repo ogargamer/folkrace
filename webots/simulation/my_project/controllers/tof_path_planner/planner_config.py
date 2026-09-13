@@ -9,10 +9,7 @@ import math
 
 # ==============================================================================
 # ACTIVE PLANNER SELECTION
-# Options:
-#   - "OPTION1_BVP"    : Target-Guided BVP Dynamic State Lattice (Heun / RK2)
-#   - "OPTION2_SL_MPC" : Curvilinear Slack-Constrained SL-MPC (OSQP)
-#   - "OPTION3_SEPTIC" : G^3 Septic Spline Pool + Bidirectional Dynamic Traction Profiler
+# Option 2: Curvilinear Slack-Constrained SL-MPC (OSQP / C++ Native)
 # ==============================================================================
 PLANNER_TYPE = "OPTION2_SL_MPC"
 
@@ -110,14 +107,6 @@ TOF_SENSOR_NAMES = [
     "tof_front_right_82.9deg",
 ]
 FRONT_TOF_SENSOR_NAMES = TOF_SENSOR_NAMES
-
-# Legacy 4-quadrant ToF rig names (Folkrace.proto backward compatibility)
-LEGACY_TOF_SENSOR_NAMES = [
-    "tof_fl_0", "tof_fl_1", "tof_fl_2", "tof_fl_3",
-    "tof_fr_0", "tof_fr_1", "tof_fr_2", "tof_fr_3",
-    "tof_bl_0", "tof_bl_1", "tof_bl_2", "tof_bl_3",
-    "tof_br_0", "tof_br_1", "tof_br_2", "tof_br_3",
-]
 TOF_MAX_RANGE_M = 1.80         # meters max range
 TOF_MIN_RANGE_M = 0.001        # meters min range
 
@@ -166,18 +155,7 @@ ALT_SWITCH_HYSTERESIS = 30.0     # objective cost reduction threshold needed for
 
 
 # ==============================================================================
-# 5. OPTION 1: TARGET-GUIDED BVP DYNAMIC STATE LATTICE (HEUN / RK2)
-# ==============================================================================
-OPT1_HORIZON_STEPS = 14        # steps forward simulation horizon (~233 ms preview @ 60 Hz)
-OPT1_DT = DT_PLANNER           # seconds integration time step (60 Hz = 0.01667 s)
-OPT1_WEIGHT_TIME = 1.0         # cost weight for traversal duration
-OPT1_WEIGHT_JERK = 0.20        # cost weight for lateral jerk / rate of change
-OPT1_WEIGHT_GAP_OFFSET = 1.2   # cost weight for lateral deviation from gap centroid
-OPT1_TARGET_SPEED_MPS = 2.40   # m/s nominal target cruising speed
-OPT1_PROBE_SAMPLES = 16        # number of spatial coordinate pairs sent to C++ probe_path
-
-# ==============================================================================
-# 6. OPTION 2: CURVILINEAR SLACK-CONSTRAINED SL-MPC (OSQP / C++ NATIVE)
+# 5. OPTION 2: CURVILINEAR SLACK-CONSTRAINED SL-MPC (OSQP / C++ NATIVE)
 # ==============================================================================
 # Prediction horizon & timestep
 OPT2_HORIZON_N = 30                 # prediction horizon steps (fixed at 30 in QP sparsity table)
@@ -206,96 +184,53 @@ OPT2_ALT_SWITCH_HYSTERESIS = ALT_SWITCH_HYSTERESIS      # cost reduction needed 
 OPT2_ALT_MIN_SEPARATION_M = ALT_MIN_SEPARATION_M        # min lateral separation between paths (0.25 m)
 OPT2_ALT_APERTURE_BIAS = ALT_APERTURE_BIAS              # challenger aperture width bias multiplier (1.80)
 
-# Backwards compatibility alias
+# Target speed alias
 OPT2_TARGET_SPEED_MPS = OPT2_V_CRUISE_MAX
 
 # ==============================================================================
-# 7. OPTION 3: G^3 SEPTIC SPLINE POOL + DYNAMIC TRACTION PROFILER
+# 6. ADAPTIVE STEERING AGGRESSIVENESS & SMOOTHING
 # ==============================================================================
-# A. Friction-Coupled Acceleration, Deceleration & Cornering
-OPT3_MU_FRICTION = TIRE_MU      # Tire friction coefficient governing grip limits
-OPT3_TRACTION_MARGIN = 0.9     # Friction circle safety margin (leaves 15% grip reserve for front steering tires)
-OPT3_ACCEL_MAX = ACCEL_FWD_MAX  # m/s^2 forward motor acceleration limit (0.85 * mu * g)
-OPT3_DECEL_MAX = BRAKE_DECEL_MAX# m/s^2 trail-braking deceleration limit (1.00 * mu * g)
-OPT3_DS = 0.025                 # meters spatial arc-length step for dynamic profiling
-
-# B. Speed Ceiling & Cruise Speeds
-OPT3_TOP_SPEED_MPS = 5.50       # m/s absolute top speed ceiling (matches 5.5m/s motor limit)
-OPT3_V_ENTRY_MAX = 5.50         # m/s max straight clearing entry speed
-OPT3_V_CRUISE_MIN = 1.50        # m/s minimum corner apex crawl speed
-
-# Candidate Spline Generation Grid (Spaced, Centered, Non-Redundant Alternatives)
-OPT3_STRAIGHT_LOCK_DIST_M = 1.70     # meters forward clearance required to lock onto pure straight line
-OPT3_STRAIGHT_LOCK_SPEED_MPS = 5.50  # m/s top speed acceleration when straight locked
-OPT3_PROBE_SAMPLES = 36         # arc-length point resolution per spline
-OPT3_NUM_LAT_OFFSETS = 5        # number of well-spaced lateral exploration lines across corridor (-0.16m to +0.16m)
-OPT3_LAT_OFFSET_MAX = 0.16      # meters lateral offset search half-width (distinct corridor paths across gap aperture)
-OPT3_NUM_HEAD_OFFSETS = 1       # single tangent target (eliminates redundant 5-way micro-fanning whiskers at the tip)
-OPT3_HEAD_OFFSET_MAX = 0.00     # radians exit heading exploration offset
-OPT3_NUM_BLEND_WEIGHTS = 3      # turn-in heading blend candidates (calmed chassis-aligned entry)
-OPT3_BLEND_WEIGHTS = [0.08, 0.20, 0.40]  # turn-in blend progression (calmed down from [0.30, 0.55, 0.80] to stop aggressive initial kick)
-OPT3_INITIAL_SLEW_SCALE = 0.12  # initial slew rate injection factor (scaled down from 0.40 to prevent sharp initial jerk)
-OPT3_MAX_EXTRA_TARGETS = 2      # multi-target scouting depth (primary + intermediate-depth)
-OPT3_NUM_SPLINES = OPT3_NUM_LAT_OFFSETS * OPT3_NUM_HEAD_OFFSETS * OPT3_NUM_BLEND_WEIGHTS  # 5 * 1 * 3 = 15 distinct candidates per target
-
-# D. Multi-Objective Trajectory Cost Weights (Smooth, Composed Paths)
-OPT3_W_TIME = 1.00              # traversal duration minimization weight
-OPT3_W_CLEARANCE = 2.50         # obstacle clearance reward weight
-OPT3_W_CURVATURE_SMOOTH = 0.20  # curvature profile smoothness penalty weight (increased for smoother curves)
-OPT3_W_CHORD_ALIGN = 1.50       # tangent alignment weight to target chord
-OPT3_W_STEER_EFFORT = 0.80      # steering effort / rapid flapping penalty weight (increased from 0.35 to 0.80)
-
-# E. Dynamic Tracking Controller Gains
-OPT3_STEER_KP = 0.75            # pure pursuit lateral tracking proportional gain (calmed from 0.95)
-OPT3_PP_LOOKAHEAD_GAIN = 0.35   # lookahead time constant in seconds (lookahead = v * gain, increased for smoother curvature)
-OPT3_LOOKAHEAD_MIN_M = 0.40     # meters minimum lookahead distance (increased from 0.35m)
-OPT3_LOOKAHEAD_MAX_M = 0.90     # meters maximum lookahead distance
-
-# F. Straight-Distance & Small-Offset Adaptive Steering Aggressiveness
-# Governed by:
-# 1. min(tof_fl_3, tof_fr_3) for straight vs close proximity
-# 2. Target steer error magnitude |target_steer - active_steer| for smooth small-error centering
-OPT3_AGGR_DIST_FAR_M = 1.70      # meters: distance where steering quieting begins on open straights
-OPT3_AGGR_DIST_CLOSE_M = 1.35    # meters: distance where full 100% steering aggressiveness is guaranteed
-OPT3_AGGR_MIN_SCALE = 0.90       # conservative aggressiveness scale on straights (90% response preserves turning authority)
-OPT3_AGGR_MAX_SCALE = 1.00       # full aggressiveness scale (100% response)
+STEER_AGGR_DIST_FAR_M = 1.70      # meters: distance where steering quieting begins on open straights
+STEER_AGGR_DIST_CLOSE_M = 1.35    # meters: distance where full 100% steering aggressiveness is guaranteed
+STEER_AGGR_MIN_SCALE = 0.90       # conservative aggressiveness scale on straights (90% response preserves turning authority)
+STEER_AGGR_MAX_SCALE = 1.00       # full aggressiveness scale (100% response)
 
 # Small Target Offset Steering Smoothing (tunes micro-adjustments on straights)
-OPT3_STEER_ERROR_DEADBAND_RAD = 0.002       # radians (~0.11 deg): sub-degree deadband for sensor noise
-OPT3_STEER_SMALL_ERROR_THRESHOLD_RAD = 0.05 # radians (~2.86 deg): angle threshold above which full response is engaged
-OPT3_STEER_SMALL_ERROR_MIN_GAIN = 0.90      # minimum gain applied near deadband (never freezes steering)
+STEER_ERROR_DEADBAND_RAD = 0.002       # radians (~0.11 deg): sub-degree deadband for sensor noise
+STEER_SMALL_ERROR_THRESHOLD_RAD = 0.05 # radians (~2.86 deg): angle threshold above which full response is engaged
+STEER_SMALL_ERROR_MIN_GAIN = 0.90      # minimum gain applied near deadband (never freezes steering)
 
 
 def compute_steering_aggressiveness(d_straight: float, steer_error_rad: float = 0.0) -> float:
     """
     Computes conservative compound steering aggressiveness factor:
-    1. Distance ahead: min(tof_fl_3, tof_fr_3) scaling from 0.90 (far >= 1.70m) to 1.00 (close <= 1.35m)
+    1. Distance ahead: min(front ToFs) scaling from 0.90 (far >= 1.70m) to 1.00 (close <= 1.35m)
     2. Small steering error attenuation: keeps response >= 0.90 at all times so robot never stalls turning.
     """
     # 1. Distance-based scale (Progressive curve)
-    if d_straight >= OPT3_AGGR_DIST_FAR_M:
-        dist_scale = OPT3_AGGR_MIN_SCALE
-    elif d_straight <= OPT3_AGGR_DIST_CLOSE_M:
-        dist_scale = OPT3_AGGR_MAX_SCALE
+    if d_straight >= STEER_AGGR_DIST_FAR_M:
+        dist_scale = STEER_AGGR_MIN_SCALE
+    elif d_straight <= STEER_AGGR_DIST_CLOSE_M:
+        dist_scale = STEER_AGGR_MAX_SCALE
     else:
-        frac = (OPT3_AGGR_DIST_FAR_M - d_straight) / max(0.001, (OPT3_AGGR_DIST_FAR_M - OPT3_AGGR_DIST_CLOSE_M))
-        dist_scale = float(OPT3_AGGR_MIN_SCALE + (frac ** 1.5) * (OPT3_AGGR_MAX_SCALE - OPT3_AGGR_MIN_SCALE))
+        frac = (STEER_AGGR_DIST_FAR_M - d_straight) / max(0.001, (STEER_AGGR_DIST_FAR_M - STEER_AGGR_DIST_CLOSE_M))
+        dist_scale = float(STEER_AGGR_MIN_SCALE + (frac ** 1.5) * (STEER_AGGR_MAX_SCALE - STEER_AGGR_MIN_SCALE))
 
     # 2. Target offset / steering error attenuation (conservative: minimum 0.90 authority)
     err_mag = abs(steer_error_rad)
-    if err_mag <= OPT3_STEER_ERROR_DEADBAND_RAD:
-        err_scale = OPT3_STEER_SMALL_ERROR_MIN_GAIN
-    elif err_mag >= OPT3_STEER_SMALL_ERROR_THRESHOLD_RAD:
+    if err_mag <= STEER_ERROR_DEADBAND_RAD:
+        err_scale = STEER_SMALL_ERROR_MIN_GAIN
+    elif err_mag >= STEER_SMALL_ERROR_THRESHOLD_RAD:
         err_scale = 1.0
     else:
-        err_frac = (err_mag - OPT3_STEER_ERROR_DEADBAND_RAD) / max(0.001, (OPT3_STEER_SMALL_ERROR_THRESHOLD_RAD - OPT3_STEER_ERROR_DEADBAND_RAD))
-        err_scale = float(OPT3_STEER_SMALL_ERROR_MIN_GAIN + err_frac * (1.0 - OPT3_STEER_SMALL_ERROR_MIN_GAIN))
+        err_frac = (err_mag - STEER_ERROR_DEADBAND_RAD) / max(0.001, (STEER_SMALL_ERROR_THRESHOLD_RAD - STEER_ERROR_DEADBAND_RAD))
+        err_scale = float(STEER_SMALL_ERROR_MIN_GAIN + err_frac * (1.0 - STEER_SMALL_ERROR_MIN_GAIN))
 
     return float(max(0.85, min(1.0, dist_scale * err_scale)))
 
 
 # ==============================================================================
-# 8. NON-BLOCKING STUCK & REVERSE RECOVERY MANAGER
+# 7. NON-BLOCKING STUCK & REVERSE RECOVERY MANAGER
 # ==============================================================================
 RECOVERY_REVERSE_SPEED_MPS = 1.30    # m/s reverse backing velocity during recovery arc
 RECOVERY_STEER_ANGLE_RAD = 0.6    # radians (26.0 deg) steering lock during reverse arc
