@@ -81,7 +81,7 @@ def main():
     atexit.register(cleanup)
     time.sleep(1.0)  # Allow GUI window and UDP socket to bind
 
-    # 2. Launch Webots with Cyan_Champion_ToF_Track.wbt
+    # 2. Launch Webots with track_racing.wbt
     print(f"[2/2] Launching Webots Real-Time Simulation with C++ SL-MPC Controller...", flush=True)
     print(f"      World: {WORLD_PATH}")
     webots_cmd = [

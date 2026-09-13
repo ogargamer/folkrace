@@ -1024,7 +1024,7 @@ class ComprehensivePlannerGUI(QMainWindow):
             self.lbl_conn.setText("🟢 LIVE WEBOTS 50Hz STREAM CONNECTED")
             self.lbl_conn.setStyleSheet("font-weight: bold; color: #00e676;")
         else:
-            self.lbl_conn.setText("🔴 WAITING FOR WEBOTS: Run Cyan_Champion_ToF_Track.wbt")
+            self.lbl_conn.setText("🔴 WAITING FOR WEBOTS: Run track_racing.wbt")
             self.lbl_conn.setStyleSheet("font-weight: bold; color: #ff5252;")
 
         if pkt is not None:

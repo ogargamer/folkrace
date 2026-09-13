@@ -283,10 +283,10 @@ class WebotsTrackProgressTracker:
 
 
 def load_track_walls() -> Tuple[np.ndarray, np.ndarray]:
-    """Loads exact left and right wall point coordinates from Cyan_Champion_Live_Preview.wbt."""
-    world_path = os.path.join(GA_OPTIMIZER_DIR, "worlds", "Cyan_Champion_Live_Preview.wbt")
+    """Loads exact left and right wall point coordinates from track_preview.wbt."""
+    world_path = os.path.join(MY_PROJECT_DIR, "worlds", "track_preview.wbt")
     if not os.path.exists(world_path):
-        world_path = os.path.join(GA_OPTIMIZER_DIR, "worlds", "Cyan_Champion_GA.wbt")
+        world_path = os.path.join(MY_PROJECT_DIR, "worlds", "track_racing.wbt")
     try:
         with open(world_path, "r", encoding="utf-8", errors="ignore") as f:
             text = f.read()

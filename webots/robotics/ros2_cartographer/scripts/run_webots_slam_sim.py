@@ -4,7 +4,7 @@ import time
 import subprocess
 
 webots_bin = r"C:\Program Files\Webots\msys64\mingw64\bin\webots.exe"
-world_path = os.path.abspath(r"webots/simulation/my_project\worlds\Cyan_Champion_Track_Static.wbt")
+world_path = os.path.abspath(r"webots/assets/maps/cyan_champion_clean_static/Cyan_Champion_Track_Static.wbt")
 
 env = os.environ.copy()
 env["WEBOTS_RUN_SECONDS"] = "130.0"

@@ -45,7 +45,7 @@ env["ACTIVE_PATHFINDER"] = "MPPI"
 
 # Webots binary path
 webots_bin = r"C:\Program Files\Webots\msys64\mingw64\bin\webots.exe"
-world_path = os.path.abspath(r"webots/simulation/my_project\worlds\Cyan_Champion_Track.wbt")
+world_path = os.path.abspath(r"webots/simulation/my_project\worlds\track_racing.wbt")
 
 cmd = [
     webots_bin,

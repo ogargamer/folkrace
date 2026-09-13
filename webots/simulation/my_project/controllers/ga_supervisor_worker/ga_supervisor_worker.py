@@ -190,10 +190,10 @@ class ReverseObstacleEngine:
 
 
 def load_track_walls() -> Tuple[np.ndarray, np.ndarray]:
-    """Loads exact left and right wall point coordinates from Cyan_Champion_GA.wbt."""
-    world_path = os.path.join(GA_OPTIMIZER_DIR, "worlds", "Cyan_Champion_GA.wbt")
+    """Loads exact left and right wall point coordinates from track_ga_eval.wbt."""
+    world_path = os.path.join(MY_PROJECT_DIR, "worlds", "track_ga_eval.wbt")
     if not os.path.exists(world_path):
-        world_path = os.path.join(WORKSPACE_ROOT, "Cyan_Champion_ToF_Track.wbt")
+        world_path = os.path.join(MY_PROJECT_DIR, "worlds", "track_racing.wbt")
     try:
         with open(world_path, "r", encoding="utf-8", errors="ignore") as f:
             text = f.read()
