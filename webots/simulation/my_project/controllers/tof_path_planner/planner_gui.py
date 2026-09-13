@@ -474,20 +474,6 @@ class ComprehensivePlannerGUI(QMainWindow):
         self.cb_planner.currentIndexChanged.connect(self._on_planner_selected)
         switch_layout.addWidget(self.cb_planner)
 
-        # Check persisted planner choice on startup
-        planner_state_file = os.path.join(CURR_DIR, "..", "tof_path_planner", "active_planner.json")
-        if os.path.exists(planner_state_file):
-            try:
-                with open(planner_state_file, "r", encoding="utf-8") as f:
-                    saved_p = json.load(f).get("planner")
-                    idx = self.cb_planner.findData(saved_p)
-                    if idx >= 0:
-                        self.cb_planner.blockSignals(True)
-                        self.cb_planner.setCurrentIndex(idx)
-                        self.cb_planner.blockSignals(False)
-            except Exception:
-                pass
-
         btn_switch = QPushButton("⚡ Switch Active Planner in Webots")
         btn_switch.setStyleSheet("background-color: #00838f; color: white; font-weight: bold; padding: 6px;")
         btn_switch.clicked.connect(self._send_planner_switch)

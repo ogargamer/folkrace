@@ -169,21 +169,10 @@ def run_autonomous_controller(forced_planner_type: Optional[str] = None):
     robot = Supervisor()
     robot_node = robot.getSelf()
 
-    # Persistent Planner Selection File
-    planner_state_file = os.path.join(CURR_DIR, "active_planner.json")
-    persisted_planner = None
-    if os.path.exists(planner_state_file):
-        try:
-            with open(planner_state_file, "r", encoding="utf-8") as f:
-                p_cfg = json.load(f)
-                persisted_planner = p_cfg.get("planner")
-        except Exception:
-            pass
-
-    active_planner_name = forced_planner_type or persisted_planner or os.environ.get("PLANNER_TYPE", PLANNER_TYPE)
+    active_planner_name = forced_planner_type or os.environ.get("PLANNER_TYPE", PLANNER_TYPE)
     print("=" * 80, flush=True)
     print(f"  STARTING AUTONOMOUS TOF CONTROLLER (Multi-Rate: 120 Hz Sim/IMU/4WD, 60 Hz ToF/Planner)", flush=True)
-    print(f"  Active Path Planner: {active_planner_name} (Persisted: {persisted_planner})", flush=True)
+    print(f"  Active Path Planner: {active_planner_name} (C++ Curvilinear SL-MPC)", flush=True)
     print("=" * 80, flush=True)
 
     # 1. Initialize 4WD Drive Motors
@@ -324,10 +313,13 @@ def run_autonomous_controller(forced_planner_type: Optional[str] = None):
     cached_front_min_m = TOF_MAX_RANGE_M
     cached_d_straight = TOF_MAX_RANGE_M
 
-    telem_path = os.environ.get("TELEMETRY_LOG_FILE", os.path.join(WORKSPACE_ROOT, f"telemetry_{active_planner_name.lower()}.jsonl"))
+    scratch_dir = os.path.join(WORKSPACE_ROOT, "scratch")
+    if not os.path.exists(scratch_dir):
+        os.makedirs(scratch_dir, exist_ok=True)
+    telem_path = os.environ.get("TELEMETRY_LOG_FILE", os.path.join(scratch_dir, f"telemetry_{active_planner_name.lower()}.jsonl"))
     try:
         telem_file = open(telem_path, "w", encoding="utf-8")
-        print(f"[ToF Controller] Logging detailed telemetry to {os.path.basename(telem_path)}", flush=True)
+        print(f"[ToF Controller] Logging detailed telemetry to scratch/{os.path.basename(telem_path)}", flush=True)
     except Exception as e:
         print(f"[ToF Controller] Telemetry log disabled: {e}", flush=True)
         telem_file = None
