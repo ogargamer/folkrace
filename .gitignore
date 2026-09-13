@@ -20,3 +20,7 @@ cma_state.pkl
 ga_checkpoint.json
 active_preview_config.json
 ga_history.csv
+scratch/
+temp/
+*.bak
+*.tmp
