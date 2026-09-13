@@ -22,13 +22,17 @@ import numpy as np
 
 # Discover controller paths
 CURR_DIR = os.path.dirname(os.path.abspath(__file__))
-SUPERVISOR_DIR = CURR_DIR
-GA_OPTIMIZER_DIR = os.path.dirname(os.path.dirname(SUPERVISOR_DIR))
-PLANNERS_DIR = os.path.join(GA_OPTIMIZER_DIR, "planners")
-DATA_DIR = os.path.join(GA_OPTIMIZER_DIR, "data")
-WORKSPACE_ROOT = os.path.dirname(GA_OPTIMIZER_DIR)
+CONTROLLERS_DIR = os.path.dirname(CURR_DIR)
+MY_PROJECT_DIR = os.path.dirname(CONTROLLERS_DIR)
+WEBOTS_DIR = os.path.dirname(os.path.dirname(MY_PROJECT_DIR))
+WORKSPACE_ROOT = os.path.dirname(WEBOTS_DIR)
 
-for p in [GA_OPTIMIZER_DIR, PLANNERS_DIR, DATA_DIR, WORKSPACE_ROOT, CURR_DIR]:
+PLANNERS_DIR = os.path.join(CONTROLLERS_DIR, "tof_path_planners")
+FRONT_COSTMAP_DIR = os.path.join(CONTROLLERS_DIR, "tof_costmap_front_only")
+GA_OPTIMIZER_DIR = os.path.join(WEBOTS_DIR, "optimization", "ga_planner_optimizer")
+DATA_DIR = os.path.join(GA_OPTIMIZER_DIR, "data")
+
+for p in [FRONT_COSTMAP_DIR, PLANNERS_DIR, CONTROLLERS_DIR, MY_PROJECT_DIR, GA_OPTIMIZER_DIR, DATA_DIR, WORKSPACE_ROOT, CURR_DIR]:
     if p not in sys.path and os.path.exists(p):
         sys.path.insert(0, p)
 
@@ -93,9 +97,7 @@ from cpp_smart_hybrid_costmap import CppSmartHybridCostmap
 from imu_encoder_fusion import IMUEncoderFusion
 from tof_gap_scout import ToFGapScout
 from stuck_recovery_manager import StuckRecoveryManager
-from planner_option1_bvp import BVPDynamicStateLattice
 from planner_option2_sl_mpc import CurvilinearSLMPC
-from planner_option3_septic import SepticSplineTractionProfiler
 from planner_config import (
     TIME_STEP_MS,
     DT,
@@ -127,10 +129,7 @@ from planner_config import (
     R_INFLATION_M,
     compute_steering_aggressiveness,
 )
-try:
-    from cpp_planner_option3_septic import CppSepticSplineTractionProfiler
-except ImportError:
-    CppSepticSplineTractionProfiler = None
+
 
 # Track racing line origin start pose (matches Point 0 of cyan_champion_trajectory.csv)
 START_POS = list(ROBOT_START_POS)
@@ -546,99 +545,28 @@ def run_supervisor_worker():
         straight_lock_dist = float(gene_dict.get("straight_lock_dist", 1.70))
         straight_lock_speed = float(gene_dict.get("straight_lock_speed", 5.50))
 
-        p_up = planner_name.upper()
-        if "OPTION_2" in p_up or "MPC" in p_up:
-            planner = CurvilinearSLMPC(
-                costmap_engine=costmap,
-                horizon_N=int(gene_dict.get("horizon_N", 30)),
-                dt=float(gene_dict.get("dt", DT_PLANNER)),
-                q_progress=float(gene_dict.get("q_progress", 8.00)),
-                q_cte=float(gene_dict.get("q_cte", 18.00)),
-                q_heading=float(gene_dict.get("q_heading", 8.00)),
-                r_steer=float(gene_dict.get("r_steer", 5.00)),
-                r_accel=float(gene_dict.get("r_accel", 2.00)),
-                r_steer_rate=float(gene_dict.get("r_steer_rate", 10.00)),
-                mu_friction=mu_val,
-                v_corner_factor=float(gene_dict.get("v_corner_factor", 0.95)),
-                pure_pursuit_blend_gain=float(gene_dict.get("pp_blend_gain", 0.35)),
-                lookahead_blend_m=float(gene_dict.get("lookahead_blend_m", 0.45)),
-                v_cruise_max=float(gene_dict.get("v_cruise_max", 5.50)),
-                v_cruise_min=float(gene_dict.get("v_cruise_min", 0.60)),
-                straight_lock_dist_m=straight_lock_dist,
-                straight_lock_speed_mps=straight_lock_speed,
-                alt_switch_hysteresis=float(gene_dict.get("alt_switch_hysteresis", 15.00)),
-                alt_min_separation_m=float(gene_dict.get("alt_min_separation_m", 0.25)),
-                alt_aperture_bias=float(gene_dict.get("alt_aperture_bias", 1.80)),
-            )
-
-        elif "OPTION_1" in p_up or "BVP" in p_up:
-            planner = BVPDynamicStateLattice(
-                v_cruise_max=float(gene_dict.get("v_cruise_max", 3.50)),
-                v_cruise_min=float(gene_dict.get("v_cruise_min", 1.20)),
-                mu_friction=mu_val,
-                w_target_dist=float(gene_dict.get("w_target_dist", 6.00)),
-                w_heading_align=float(gene_dict.get("w_heading_align", 4.50)),
-                w_curvature=float(gene_dict.get("w_curvature", 2.00)),
-                w_side_bias=float(gene_dict.get("w_side_bias", 1.00)),
-                w_smoothness=float(gene_dict.get("w_smoothness", 2.50)),
-                slew_rate_limit_deg=float(gene_dict.get("slew_rate_limit_deg", 10.0)),
-            )
-        elif "OPTION_3" in p_up or "SEPTIC" in p_up:
-            blend_w0 = float(gene_dict.get("blend_w0", 0.08))
-            blend_w1 = float(gene_dict.get("blend_w1", 0.20))
-            blend_w2 = float(gene_dict.get("blend_w2", 0.40))
-            num_blends = int(gene_dict.get("num_blend_weights", 3))
-            if num_blends == 2:
-                blends = [blend_w0, blend_w2]
-            elif num_blends == 4:
-                blends = [blend_w0, 0.5 * (blend_w0 + blend_w1), blend_w1, blend_w2]
-            elif num_blends >= 5:
-                blends = [blend_w0, 0.5 * (blend_w0 + blend_w1), blend_w1, 0.5 * (blend_w1 + blend_w2), blend_w2]
-            else:
-                blends = [blend_w0, blend_w1, blend_w2]
-
-            if CppSepticSplineTractionProfiler is not None:
-                planner = CppSepticSplineTractionProfiler(
-                    costmap_engine=costmap,
-                    v_entry_max=float(gene_dict.get("v_entry_max", 5.50)),
-                    v_cruise_min=float(gene_dict.get("v_cruise_min", 1.50)),
-                    mu_friction=mu_val,
-                    probe_samples=int(gene_dict.get("probe_samples", 36)),
-                    num_lat_offsets=int(gene_dict.get("num_lat_offsets", 5)),
-                    lat_offset_max=float(gene_dict.get("lat_offset_max", 0.16)),
-                    num_head_offsets=int(gene_dict.get("num_head_offsets", 1)),
-                    head_offset_max=float(gene_dict.get("head_offset_max", 0.00)),
-                    num_blend_weights=len(blends),
-                    blend_weights=blends,
-                    max_extra_targets=int(gene_dict.get("max_extra_targets", 2)),
-                    w_time=float(gene_dict.get("w_time", 1.00)),
-                    w_clearance=float(gene_dict.get("w_clearance", 2.50)),
-                    w_curvature_smooth=float(gene_dict.get("kappa_smooth_gain", 0.20)),
-                    w_chord_align=float(gene_dict.get("w_chord_tangent", 1.50)),
-                    w_steer_effort=float(gene_dict.get("w_steer_effort", 0.80)),
-                    slew_deg_max=float(gene_dict.get("slew_deg_max", 12.03)),
-                    steer_kp=float(gene_dict.get("steer_kp", 0.75)),
-                    pp_lookahead_gain=float(gene_dict.get("pp_lookahead_gain", 0.35)),
-                    straight_lock_dist_m=straight_lock_dist,
-                )
-            else:
-                planner = SepticSplineTractionProfiler(
-                    costmap_engine=costmap,
-                    v_entry_max=float(gene_dict.get("v_entry_max", 5.50)),
-                    v_cruise_min=float(gene_dict.get("v_cruise_min", 1.50)),
-                    mu_friction=mu_val,
-                    w_clearance=float(gene_dict.get("w_clearance", 2.50)),
-                    w_chord_tangent=float(gene_dict.get("w_chord_tangent", 1.50)),
-                    kappa_smooth_gain=float(gene_dict.get("kappa_smooth_gain", 0.20)),
-                    pp_lookahead_gain=float(gene_dict.get("pp_lookahead_gain", 0.35)),
-                    slew_deg_max=float(gene_dict.get("slew_deg_max", 12.03)),
-                    steer_kp=float(gene_dict.get("steer_kp", 0.75)),
-                    blend_w0=blend_w0,
-                    blend_w1=blend_w1,
-                    blend_w2=blend_w2,
-                )
-        else:
-            raise ValueError(f"Unsupported planner: {planner_name}")
+        planner = CurvilinearSLMPC(
+            costmap_engine=costmap,
+            horizon_N=int(gene_dict.get("horizon_N", 30)),
+            dt=float(gene_dict.get("dt", DT_PLANNER)),
+            q_progress=float(gene_dict.get("q_progress", 8.00)),
+            q_cte=float(gene_dict.get("q_cte", 18.00)),
+            q_heading=float(gene_dict.get("q_heading", 8.00)),
+            r_steer=float(gene_dict.get("r_steer", 5.00)),
+            r_accel=float(gene_dict.get("r_accel", 2.00)),
+            r_steer_rate=float(gene_dict.get("r_steer_rate", 10.00)),
+            mu_friction=mu_val,
+            v_corner_factor=float(gene_dict.get("v_corner_factor", 0.95)),
+            pure_pursuit_blend_gain=float(gene_dict.get("pp_blend_gain", 0.35)),
+            lookahead_blend_m=float(gene_dict.get("lookahead_blend_m", 0.45)),
+            v_cruise_max=float(gene_dict.get("v_cruise_max", 5.50)),
+            v_cruise_min=float(gene_dict.get("v_cruise_min", 0.60)),
+            straight_lock_dist_m=straight_lock_dist,
+            straight_lock_speed_mps=straight_lock_speed,
+            alt_switch_hysteresis=float(gene_dict.get("alt_switch_hysteresis", 15.00)),
+            alt_min_separation_m=float(gene_dict.get("alt_min_separation_m", 0.25)),
+            alt_aperture_bias=float(gene_dict.get("alt_aperture_bias", 1.80)),
+        )
 
         planner.costmap = costmap
 

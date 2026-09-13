@@ -131,18 +131,17 @@ class ElectronicDifferential4WD:
         yaw_error = gyro_z_rad_s - omega_cmd
 
         if abs(target_v) >= V_SLIP_GATE:
-            # Dynamic tolerance scales with commanded yaw rate (accounts for natural tire slip compliance)
             dyn_thresh = max(self.thresh_spin, 0.40 * abs(omega_cmd))
 
-            # Case A: True Oversteer (vehicle rotating faster than commanded in turn direction)
+            # Case A: True Oversteer
             if omega_cmd > 0.05 and (gyro_z_rad_s - omega_cmd) > dyn_thresh:
                 slip_state = SLIP_OVERSTEER
             elif omega_cmd < -0.05 and (omega_cmd - gyro_z_rad_s) > dyn_thresh:
                 slip_state = SLIP_OVERSTEER
-            # Case B: Counter-steer slide or uncommanded spinout while straight/counter-steering
+            # Case B: Counter-steer slide or uncommanded spinout
             elif abs(gyro_z_rad_s) > max(1.20, self.thresh_spin * 2.0) and (gyro_z_rad_s * omega_cmd <= 0.0):
                 slip_state = SLIP_OVERSTEER
-            # Case C: Severe Understeer / Wall Plow (Front wheels turned hard but vehicle not turning)
+            # Case C: Severe Understeer / Wall Plow
             else:
                 omega_achievable = min(abs(omega_cmd), (0.90 * 9.81) / max(abs(target_v), 0.50))
                 if abs(delta) > 0.15 and omega_achievable > 1.20 and abs(gyro_z_rad_s) < (0.35 * omega_achievable):

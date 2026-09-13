@@ -348,9 +348,7 @@ def run_genetic_algorithm(
     Executes the optimization pipeline (Single Planner or All Planners Interleaved).
     Supports either CMA-ES (Covariance Matrix Adaptation Evolution Strategy) or Standard GA.
     """
-    p_up = planner_name.upper()
-    is_multi = p_up in ["ALL", "ALL_PLANNERS", "ALL-PLANNERS"]
-    planners_to_run = ["OPTION_1_BVP", "OPTION_2_SL_MPC", "OPTION_3_SEPTIC"] if is_multi else [p_up]
+    planners_to_run = ["OPTION_2_SL_MPC"]
     is_cma = str(algorithm).upper().startswith("CMA")
 
     # --------------------------------------------------------------------------
