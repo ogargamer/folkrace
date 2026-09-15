@@ -21,19 +21,20 @@ TRACK_REAR = 0.1000            # meters (lateral distance between rear wheel cen
 TRACK_FRONT = 0.0822           # meters (lateral distance between front wheel centers)
 TRACK_KINGPIN = 0.0620         # meters (distance between front steering kingpin pivots)
 WHEEL_RADIUS = 0.0275          # meters (27.5 mm rolling radius)
-VEHICLE_MASS = 0.600           # kg total vehicle mass
-IZ = 0.0025                    # kg * m^2 vehicle moment of inertia around yaw axis
+VEHICLE_MASS = 1.000           # kg total vehicle mass
 
 # Center of Gravity distribution
 LF = 0.06625                   # meters (front axle to CoG, approx 50/50 split)
 LR = 0.06625                   # meters (rear axle to CoG)
+
+# Vehicle moment of inertia around vertical yaw axis (Iz = (1/12) * m * (L^2 + W^2))
+IZ = (1.0 / 12.0) * VEHICLE_MASS * (WHEELBASE**2 + ((TRACK_FRONT + TRACK_REAR) / 2.0)**2)  # kg * m^2
 
 # Actuator Limits (Virtual Bicycle Model)
 MAX_STEERING_RAD = 0.698132     # radians (+- 40.0 deg steering limit matching Webots servo limits)
 MAX_SERVO_RATE_RAD_S = 10.5    # rad/s maximum steering slew rate
 MOTOR_DIR = -1.0               # Webots motor sign (-1.0 pushes vehicle forward)
 V_MAX_WHEEL = 5.500            # m/s physical maximum wheel velocity (200 rad/s * 0.0275m)
-V_MIN_CRUISE = 1.2           # m/s minimum driving speed (prevents zero-speed stall)
 V_MAX_CRUISE = 5.50            # m/s maximum straight-line cruising speed (matches 5.5m/s motor ceiling)
 
 # ==============================================================================
@@ -53,6 +54,14 @@ LAT_ACCEL_RATIO = 0.95                  # 95% of mu*g for dynamic cornering limi
 ACCEL_FWD_MAX = ACCEL_FWD_RATIO * A_MAX_BASE      # ~7.09 m/s^2 forward motor acceleration limit
 BRAKE_DECEL_MAX = BRAKE_DECEL_RATIO * A_MAX_BASE  # ~8.34 m/s^2 braking / deceleration limit
 LAT_ACCEL_MAX = LAT_ACCEL_RATIO * A_MAX_BASE      # ~7.92 m/s^2 cornering lateral acceleration limit
+
+# Kinematic turning radius at inside wheel lock (40 deg mechanical lock -> ~35.05 deg Ackermann)
+# R_min = (L / tan(delta_in)) + (w / 2)
+R_MIN_TURN = (WHEELBASE / math.tan(MAX_STEERING_RAD)) + (TRACK_KINGPIN / 2.0)  # ~0.1889 m
+DELTA_ACKERMANN_MAX = math.atan(WHEELBASE / R_MIN_TURN)                        # ~0.6118 rad (~35.05 deg)
+
+# Friction-limited minimum crawl / tightest cornering speed: v = sqrt(a_lat_max * R_min)
+V_MIN_CRUISE = math.sqrt(LAT_ACCEL_MAX * R_MIN_TURN)                           # ~1.223 m/s dynamic cornering floor
 
 # PTK 9497 MG-D Digital Servo Specifications (at 8.4V HV)
 # Spec: ~0.068 s / 60 deg -> (pi/3) / 0.068 = ~15.4 rad/s slew rate
@@ -175,7 +184,7 @@ OPT2_V_CORNER_FACTOR = 0.95         # friction circle cornering speed scaling fa
 OPT2_PP_BLEND_GAIN = 0.35           # pure pursuit entry blend gain
 OPT2_LOOKAHEAD_BLEND_M = 0.45       # pure pursuit lookahead blend distance (m)
 OPT2_V_CRUISE_MAX = V_MAX_CRUISE    # m/s top cruising speed limit (5.50 m/s)
-OPT2_V_CRUISE_MIN = V_MIN_CRUISE    # m/s cornering / crawl speed floor (0.60 m/s)
+OPT2_V_CRUISE_MIN = V_MIN_CRUISE    # m/s cornering / crawl speed floor (~1.22 m/s)
 
 # Fast straight-line lock & dual-path challenger arbitration
 OPT2_STRAIGHT_LOCK_DIST_M = STRAIGHT_LOCK_DIST_M        # forward clearance to lock straight (1.70 m)

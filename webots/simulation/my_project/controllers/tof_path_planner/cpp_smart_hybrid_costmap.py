@@ -122,6 +122,20 @@ class CppSmartHybridCostmap:
             _lib.costmap_destroy(self._handle)
             self._handle = None
 
+    def clear(self) -> None:
+        """Clears probability and hazard output buffers."""
+        self.prob_map.fill(0.0)
+        self.hazard_mask.fill(0)
+
+    def update(self, readings: any, current_steer_rad: float = 0.0) -> Tuple[np.ndarray, np.ndarray, float]:
+        """Convenience method accepting either list/array of 16 ranges or dict."""
+        if isinstance(readings, (list, tuple, np.ndarray)):
+            r_dict = {name: float(readings[i]) for i, name in enumerate(SENSOR_NAMES) if i < len(readings)}
+            return self.process_tof_frame(r_dict)
+        elif isinstance(readings, dict):
+            return self.process_tof_frame(readings)
+        return self.prob_map, self.hazard_mask, 0.0
+
     @staticmethod
     def _extract_range(readings: Dict[str, float], name: str, idx: int) -> float:
         if name in readings:

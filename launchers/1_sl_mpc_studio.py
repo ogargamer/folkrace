@@ -33,7 +33,7 @@ def ensure_c_plus_plus_sl_mpc():
     """Confirms C++ DLL exists and sets active_planner.json to OPTION2_SL_MPC."""
     if not os.path.exists(SL_MPC_DLL):
         print(f"[Warning] {SL_MPC_DLL} not found! Attempting compilation...", flush=True)
-        compile_script = os.path.join(PLANNERS_DIR, "compile_sl_mpc_dll.py")
+        compile_script = os.path.join(PLANNERS_DIR, "cpp", "build_dlls.py")
         if os.path.exists(compile_script):
             subprocess.run([sys.executable, compile_script], check=True)
 
@@ -58,9 +58,37 @@ def main():
 
     ensure_c_plus_plus_sl_mpc()
 
+    webots_home = r"C:\Program Files\Webots"
+    webots_bin_dir = os.path.dirname(WEBOTS_BIN)
+    py_dir = os.path.dirname(sys.executable)
+    py_scripts = os.path.join(py_dir, "Scripts")
+
     env = os.environ.copy()
+    env["WEBOTS_HOME"] = webots_home
+    env["PATH"] = webots_bin_dir + os.pathsep + py_dir + os.pathsep + py_scripts + os.pathsep + env.get("PATH", "")
+    env["PYTHONPATH"] = os.pathsep.join([
+        PLANNERS_DIR,
+        MY_PROJECT_DIR,
+        ROOT_DIR,
+    ])
     env["PLANNER_TYPE"] = "OPTION2_SL_MPC"
+    env["WEBOTS_CONTROLLER_MODE"] = "racing"
     env["PYTHONUNBUFFERED"] = "1"
+
+    def _kill_proc(proc):
+        if proc is None or proc.poll() is not None:
+            return
+        try:
+            if sys.platform == "win32":
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=4)
+            else:
+                proc.terminate()
+                proc.wait(timeout=3)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
 
     # 1. Launch PyQt5 Planner GUI in background subprocess
     print("[1/2] Spawning Planner GUI (UDP Telemetry listener on port 9876)...", flush=True)
@@ -69,28 +97,43 @@ def main():
         cwd=PLANNERS_DIR,
         env=env,
     )
-
-    def cleanup():
-        if gui_proc.poll() is None:
-            print("\n[Cleanup] Closing Planner GUI...", flush=True)
-            gui_proc.terminate()
-
-    atexit.register(cleanup)
-    time.sleep(1.0)
+    time.sleep(0.6)
 
     # 2. Launch Webots with track_racing.wbt
     print(f"[2/2] Launching Webots Real-Time Simulation with C++ SL-MPC Controller...", flush=True)
     print(f"      World: {WORLD_PATH}")
     webots_cmd = [
         WEBOTS_BIN,
+        "--stdout",
+        "--stderr",
         "--mode=realtime",
         WORLD_PATH,
     ]
+    webots_proc = subprocess.Popen(webots_cmd, env=env, cwd=MY_PROJECT_DIR)
+
+    def cleanup():
+        if webots_proc and webots_proc.poll() is None:
+            _kill_proc(webots_proc)
+        if gui_proc and gui_proc.poll() is None:
+            _kill_proc(gui_proc)
+
+    atexit.register(cleanup)
 
     try:
-        subprocess.run(webots_cmd, env=env, cwd=MY_PROJECT_DIR)
+        while True:
+            gui_done = gui_proc.poll() is not None
+            webots_done = webots_proc.poll() is not None
+            if gui_done:
+                print("\n[Studio] Telemetry GUI closed. Terminating Webots...", flush=True)
+                break
+            if webots_done:
+                print("\n[Studio] Webots simulation closed. Terminating GUI...", flush=True)
+                break
+            time.sleep(0.3)
     except KeyboardInterrupt:
-        print("\n[Session] Shutting down simulation studio.", flush=True)
+        print("\n[Studio] Session stopped by user. Cleaning up...", flush=True)
+    finally:
+        cleanup()
 
 
 if __name__ == "__main__":

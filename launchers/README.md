@@ -15,8 +15,8 @@ All hardware-dependent launchers explicitly identify their target platform in th
 | # | Target | Launcher Script | Description |
 |---|--------|----------------|-------------|
 | **1** | Simulation | [`1_sl_mpc_studio.py`](./1_sl_mpc_studio.py) | Launches Webots simulation (`track_racing.wbt`) with C++ Curvilinear S-L MPC and spawns the live 2D telemetry GUI studio. |
-| **2** | Simulation | [`2_champion_preview.py`](./2_champion_preview.py) | Visual 3D replay preview (`track_preview.wbt`) with 3 dynamic moving obstacles and the champion CMA-ES genome. |
-| **3** | Telemetry | [`3_planner_gui.py`](./3_planner_gui.py) | Standalone PyQt5 Live Telemetry & Costmap Tuner GUI listening on UDP port 9876. |
+| **2** | Simulation | [`2_champion_preview.py`](./2_champion_preview.py) | Launches Webots 3D champion preview (`track_racing.wbt`) with 3 dynamic obstacles AND live 2D telemetry GUI simultaneously. |
+| **3** | Simulation & Telemetry | [`3_planner_gui.py`](./3_planner_gui.py) | Launches Webots simulation (`track_racing.wbt`) AND PyQt5 Live Telemetry & Costmap Tuner GUI simultaneously. |
 | **4** | GA Training | [`4_ga_dashboard.py`](./4_ga_dashboard.py) | Standalone real-time Genetic Algorithm / CMA-ES convergence & fitness monitor dashboard. |
 | **5** | GA Training | [`5_ga_optimizer.py`](./5_ga_optimizer.py) | Headless Genetic Algorithm optimization runner for training new champion genomes. |
 | **6** | **ESP32** | [`6_esp32_tof_gui.py`](./6_esp32_tof_gui.py) | Physical ESP32 VL53L8CX 16-channel ToF sensor live distance matrix visualizer and calibration GUI over USB serial. |

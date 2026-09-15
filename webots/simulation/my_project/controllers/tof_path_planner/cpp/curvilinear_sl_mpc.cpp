@@ -166,7 +166,8 @@ public:
         if (solver.settings) {
             solver.settings->eps_abs = 0.0015;
             solver.settings->eps_rel = 0.0015;
-            solver.settings->check_termination = 15;
+            solver.settings->max_iter = 60;
+            solver.settings->check_termination = 10;
             solver.settings->polishing = 0;
         }
     }

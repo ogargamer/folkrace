@@ -2,18 +2,20 @@
 ================================================================================
   2. LAUNCHER: C++ SL-MPC CHAMPION 3D REPLAY PREVIEW (DYNAMIC OBSTACLES)
 ================================================================================
-  Launches Webots real-time mode with track_preview.wbt.
+  Launches Webots real-time mode with track_racing.wbt AND spawns the live
+  PyQt5 2D Telemetry GUI alongside it by default.
   Loads the champion CMA-ES genome, enables 3 dynamic moving obstacles, and
   evaluates lap times with full 3D visual preview.
 
   Usage:
-    python 2_champion_preview.py
-    python 2_champion_preview.py --gui   (Also open live 2D telemetry map)
+    python 2_champion_preview.py             (Launches Webots + Live GUI)
+    python 2_champion_preview.py --no-gui    (Webots only)
 ================================================================================
 """
 
 import os
 import sys
+import time
 import json
 import argparse
 import subprocess
@@ -21,10 +23,9 @@ import subprocess
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WEBOTS_DIR = os.path.join(ROOT_DIR, "webots")
 MY_PROJECT_DIR = os.path.join(WEBOTS_DIR, "simulation", "my_project")
-WORLD_PATH = os.path.join(MY_PROJECT_DIR, "worlds", "track_preview.wbt")
+WORLD_PATH = os.path.join(MY_PROJECT_DIR, "worlds", "track_racing.wbt")
 GA_OPTIMIZER_DIR = os.path.join(WEBOTS_DIR, "optimization", "ga_planner_optimizer")
-CHAMPION_DIR = os.path.join(MY_PROJECT_DIR, "controllers", "champion_live_preview")
-ACTIVE_CONFIG_PATH = os.path.join(CHAMPION_DIR, "active_preview_config.json")
+ACTIVE_CONFIG_PATH = os.path.join(GA_OPTIMIZER_DIR, "active_preview_config.json")
 PLANNERS_DIR = os.path.join(MY_PROJECT_DIR, "controllers", "tof_path_planner")
 WEBOTS_BIN = r"C:\Program Files\Webots\msys64\mingw64\bin\webots.exe"
 
@@ -64,7 +65,23 @@ def activate_champion_config() -> bool:
         return False
 
 
-def launch_webots(launch_gui: bool = False):
+def _kill_proc(proc):
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        if sys.platform == "win32":
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=4)
+        else:
+            proc.terminate()
+            proc.wait(timeout=3)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
+def launch_webots(launch_gui: bool = True):
     if not os.path.exists(WEBOTS_BIN):
         print(f"[Error] Webots executable not found at {WEBOTS_BIN}")
         return
@@ -72,13 +89,6 @@ def launch_webots(launch_gui: bool = False):
     if not os.path.exists(WORLD_PATH):
         print(f"[Error] World file not found at {WORLD_PATH}")
         return
-
-    gui_proc = None
-    if launch_gui:
-        gui_script = os.path.join(PLANNERS_DIR, "planner_gui.py")
-        if os.path.exists(gui_script):
-            print("[Spawning] Live Telemetry Map GUI (Port 9876)...", flush=True)
-            gui_proc = subprocess.Popen([sys.executable, gui_script], cwd=PLANNERS_DIR)
 
     env = os.environ.copy()
     webots_home = r"C:\Program Files\Webots"
@@ -90,36 +100,68 @@ def launch_webots(launch_gui: bool = False):
     env["PATH"] = webots_bin_dir + os.pathsep + py_dir + os.pathsep + py_scripts + os.pathsep + env.get("PATH", "")
     env["PYTHONPATH"] = os.pathsep.join([
         PLANNERS_DIR,
-        CHAMPION_DIR,
         os.path.join(GA_OPTIMIZER_DIR, "data"),
         GA_OPTIMIZER_DIR,
         MY_PROJECT_DIR,
         ROOT_DIR,
     ])
+    env["WEBOTS_CONTROLLER_MODE"] = "preview"
     env["PYTHONUNBUFFERED"] = "1"
+
+    gui_proc = None
+    if launch_gui:
+        gui_script = os.path.join(PLANNERS_DIR, "planner_gui.py")
+        if os.path.exists(gui_script):
+            print("[1/2] Spawning Live Telemetry Map GUI (Port 9876)...", flush=True)
+            gui_proc = subprocess.Popen([sys.executable, gui_script], cwd=PLANNERS_DIR, env=env)
+            time.sleep(0.6)
 
     cmd = [
         WEBOTS_BIN,
+        "--stdout",
+        "--stderr",
         "--mode=realtime",
         WORLD_PATH,
     ]
 
     print("=" * 80)
-    print("  LAUNCHING REAL-TIME 3D WEBOTS CHAMPION PREVIEW")
+    print("  LAUNCHING REAL-TIME 3D WEBOTS CHAMPION PREVIEW + LIVE TELEMETRY GUI")
     print(f"  World:    {WORLD_PATH}")
     print(f"  Champion: {CHAMPION_CONFIG['title']}")
     print("=" * 80)
 
+    print(f"[{'2/2' if gui_proc else '1/1'}] Launching Webots simulation...", flush=True)
+    webots_proc = subprocess.Popen(cmd, env=env, cwd=MY_PROJECT_DIR)
+
+    def cleanup():
+        if webots_proc and webots_proc.poll() is None:
+            _kill_proc(webots_proc)
+        if gui_proc and gui_proc.poll() is None:
+            _kill_proc(gui_proc)
+
+    import atexit
+    atexit.register(cleanup)
+
     try:
-        subprocess.run(cmd, env=env, cwd=MY_PROJECT_DIR)
+        while True:
+            gui_done = gui_proc is not None and gui_proc.poll() is not None
+            webots_done = webots_proc.poll() is not None
+            if gui_done:
+                print("\n[Launcher] Telemetry GUI closed. Terminating Webots simulation...", flush=True)
+                break
+            if webots_done:
+                print("\n[Launcher] Webots simulation closed. Terminating Telemetry GUI...", flush=True)
+                break
+            time.sleep(0.3)
+    except KeyboardInterrupt:
+        print("\n[Launcher] User interrupted session. Shutting down cleanly...", flush=True)
     finally:
-        if gui_proc is not None and gui_proc.poll() is None:
-            gui_proc.terminate()
+        cleanup()
 
 
 def main():
     parser = argparse.ArgumentParser(description="Launch Webots Real-Time Preview with C++ SL-MPC Champion Config")
-    parser.add_argument("--gui", "-g", action="store_true", help="Launch live 2D telemetry map GUI alongside Webots")
+    parser.add_argument("--no-gui", action="store_true", help="Do not launch live 2D telemetry map GUI alongside Webots")
     parser.add_argument("--no-launch", action="store_true", help="Only set active config without launching Webots")
 
     args = parser.parse_args()
@@ -128,7 +170,7 @@ def main():
         return
 
     if not args.no_launch:
-        launch_webots(launch_gui=args.gui)
+        launch_webots(launch_gui=not args.no_gui)
 
 
 if __name__ == "__main__":

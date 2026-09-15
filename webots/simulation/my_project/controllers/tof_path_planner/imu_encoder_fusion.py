@@ -47,6 +47,21 @@ class IMUEncoderFusion:
         self.gyro_dev = None
         self.accel_dev = None
 
+    def reset(self) -> None:
+        """Resets fusion internal kinematic state and encoder baseline."""
+        self._prev_pos = {
+            "FL": None,
+            "FR": None,
+            "RL": None,
+            "RR": None,
+        }
+        self.v_est = 0.0
+        self.v_wheels = 0.0
+        self.yaw = 0.0
+        self.yaw_rate = 0.0
+        self.a_forward = 0.0
+        self.total_distance_m = 0.0
+
     def attach_devices(
         self,
         encoders: Dict[str, any],

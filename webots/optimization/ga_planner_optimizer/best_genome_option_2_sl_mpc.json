@@ -19,7 +19,7 @@
     "dt": 0.017,
     "mu_friction": 0.839,
     "r_inflation_m": 0.075,
-    "q_progress": 10.881,
+    "q_progress": 15.0,
     "q_cte": 15.282,
     "q_heading": 2.958,
     "r_steer": 10.708,
@@ -36,9 +36,11 @@
     "w_side_clearance": 3.148,
     "gap_dist_exp_k": 1.131,
     "gap_progress_margin_m": 0.189,
+    "gap_latch_hysteresis": 1.25,
+    "gap_latch_dist_m": 0.28,
     "alt_min_separation_m": 0.106,
     "alt_aperture_bias": 2.305,
-    "alt_switch_hysteresis": 27.245,
+    "alt_switch_hysteresis": 8.0,
     "straight_lock_dist": 1.7,
     "straight_lock_speed": 5.5,
     "aggr_dist_far_m": 1.8,
@@ -53,5 +55,5 @@
   "generation": 195,
   "algorithm": "CMA_ES",
   "title": "OPTION 2: Curvilinear SL-MPC Champion (CMA-ES Gen 195, Fitness 7170.03)",
-  "note": "Optimal parameters from ga_checkpoint.json (Distance: 48.87m, 3 laps, Speed: 2.61 m/s)."
+  "note": "Optimal parameters with active Champion Preview tuning (q_progress=15.0, alt_switch_hysteresis=8.0, v_cruise_min=1.223)."
 }

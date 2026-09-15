@@ -409,10 +409,10 @@ class ComprehensivePlannerGUI(QMainWindow):
         # Build UI
         self._build_ui()
 
-        # Timer for UI updates (25 FPS / 40 ms matching 25 Hz telemetry)
+        # Timer for UI updates (60 FPS / 16 ms matching 60 Hz telemetry)
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._update_gui)
-        self.timer.start(40)
+        self.timer.start(16)
 
     def _build_ui(self):
         central = QWidget(self)
@@ -513,7 +513,7 @@ class ComprehensivePlannerGUI(QMainWindow):
         ]
         for label, val in self.sim_speed_options:
             self.cb_sim_speed.addItem(label, val)
-        self.cb_sim_speed.setCurrentIndex(0)  # 0.05x default (20x Slow-Mo)
+        self.cb_sim_speed.setCurrentIndex(4)  # 1.00x default (Real-Time 1x)
         self.cb_sim_speed.currentIndexChanged.connect(self._on_sim_speed_changed)
         speed_row.addWidget(self.cb_sim_speed)
         sim_layout.addLayout(speed_row)
@@ -942,7 +942,10 @@ class ComprehensivePlannerGUI(QMainWindow):
 
     def _on_sim_speed_changed(self, idx: int):
         speed_val = self.cb_sim_speed.currentData()
-        self._send_cmd({"cmd": "set_speed", "val": speed_val})
+        if speed_val is not None:
+            print(f"[GUI] Live Simulation Speed command sent: {speed_val:.2f}x", flush=True)
+            for _ in range(3):
+                self._send_cmd({"cmd": "set_speed", "val": float(speed_val)})
 
     def _on_inflation_slider(self, val: int):
         r_m = val / 1000.0

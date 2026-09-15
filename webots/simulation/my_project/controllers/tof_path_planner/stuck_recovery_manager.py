@@ -11,9 +11,12 @@
 
 import math
 from typing import Any, Dict, Optional, Tuple
+import numpy as np
 
 try:
     from .planner_config import (
+        WHEELBASE,
+        MAX_STEERING_RAD,
         RECOVERY_REVERSE_SPEED_MPS,
         RECOVERY_STEER_ANGLE_RAD,
         RECOVERY_STALL_CONFIRM_S,
@@ -29,6 +32,8 @@ try:
     )
 except ImportError:
     from planner_config import (
+        WHEELBASE,
+        MAX_STEERING_RAD,
         RECOVERY_REVERSE_SPEED_MPS,
         RECOVERY_STEER_ANGLE_RAD,
         RECOVERY_STALL_CONFIRM_S,
@@ -53,6 +58,8 @@ class StuckRecoveryState:
 class StuckRecoveryManager:
     """
     Intelligent Autonomous Recovery Controller:
+    - Evaluates forward kinematic escape arcs (Left/Right max steering lock & Center)
+      projected directly onto the inflated costmap (hazard_mask).
     - Reverses away from obstacle along escape curvature until front clearance opens up.
     - Decelerates reverse motion smoothly to 0 m/s while concurrently centering the front servo.
     - Hands control cleanly back to the path planner with 0 steering offset and 0 yaw rate shock.
@@ -67,6 +74,9 @@ class StuckRecoveryManager:
         servo_slew_rad_s: float = RECOVERY_SERVO_SLEW_RAD_S,
         brake_decel_max: float = BRAKE_DECEL_MAX,
         accel_fwd_max: float = ACCEL_FWD_MAX,
+        wheelbase_m: float = WHEELBASE,
+        max_steer_rad: float = MAX_STEERING_RAD,
+        arc_lookahead_m: float = 0.35,
         **kwargs,
     ):
         self.state = StuckRecoveryState.NORMAL_DRIVE
@@ -87,82 +97,90 @@ class StuckRecoveryManager:
         self.current_cmd_v = 0.0
         self.current_cmd_steer = 0.0
 
+        # --- KINEMATIC ESCAPE ARCS PRECOMPUTATION ---
+        self.wheelbase = float(wheelbase_m)
+        self.max_steer_rad = float(max_steer_rad)
+        self.r_min_turn = self.wheelbase / max(1e-3, math.tan(self.max_steer_rad))
+        self.bumper_y = 0.095  # front bumper mount Y in vehicle frame
+
+        self.arc_lookahead_m = float(arc_lookahead_m)
+        self.arc_step_ds = 0.015  # 15mm steps
+        n_pts = max(3, int(self.arc_lookahead_m / self.arc_step_ds))
+        self._arc_s = np.linspace(self.arc_step_ds, self.arc_lookahead_m, n_pts, dtype=np.float32)
+
+        # Left Turn Arc (full left lock: sweeps left -X)
+        self._arc_pts_left = np.zeros((n_pts, 2), dtype=np.float32)
+        self._arc_pts_left[:, 0] = -self.r_min_turn * (1.0 - np.cos(self._arc_s / self.r_min_turn))
+        self._arc_pts_left[:, 1] = self.bumper_y + self.r_min_turn * np.sin(self._arc_s / self.r_min_turn)
+
+        # Right Turn Arc (full right lock: sweeps right +X)
+        self._arc_pts_right = np.zeros((n_pts, 2), dtype=np.float32)
+        self._arc_pts_right[:, 0] = self.r_min_turn * (1.0 - np.cos(self._arc_s / self.r_min_turn))
+        self._arc_pts_right[:, 1] = self.bumper_y + self.r_min_turn * np.sin(self._arc_s / self.r_min_turn)
+
+        # Center Straight Sightline
+        self._arc_pts_center = np.zeros((n_pts, 2), dtype=np.float32)
+        self._arc_pts_center[:, 0] = 0.0
+        self._arc_pts_center[:, 1] = self.bumper_y + self._arc_s
+
+    def evaluate_costmap_escape_arcs(
+        self,
+        hazard_mask: Optional[np.ndarray],
+        costmap_obj: Optional[Any],
+    ) -> Tuple[float, float, float]:
+        """
+        Projects maximum steering lock arcs (Left, Right) and Center sightline onto the inflated costmap.
+        Returns:
+            (d_clear_left, d_clear_right, d_clear_center) in meters.
+        """
+        if hazard_mask is None or costmap_obj is None:
+            return (TOF_MAX_RANGE_M, TOF_MAX_RANGE_M, TOF_MAX_RANGE_M)
+
+        res = getattr(costmap_obj, "res", 0.015)
+        x_min = getattr(costmap_obj, "x_min", -1.25)
+        y_min = getattr(costmap_obj, "y_min", 0.0)
+        h, w = hazard_mask.shape
+
+        def _trace(pts: np.ndarray) -> float:
+            for i in range(len(pts)):
+                px = pts[i, 0]
+                py = pts[i, 1]
+                col = int(round((px - x_min) / res))
+                row = int(round((py - y_min) / res))
+                if row < 0 or row >= h or col < 0 or col >= w:
+                    return float(self._arc_s[max(0, i - 1)])
+                if hazard_mask[row, col] > 0:
+                    return float(self._arc_s[max(0, i - 1)])
+            return float(self._arc_s[-1])
+
+        d_left = _trace(self._arc_pts_left)
+        d_right = _trace(self._arc_pts_right)
+        d_center = _trace(self._arc_pts_center)
+        return (d_left, d_right, d_center)
+
     @staticmethod
     def resolve_escape_steer_dir(
-        cached_tofs: Any,
+        arc_clearance: Tuple[float, float, float],
         heading_err: float = 0.0,
-        similar_eps_m: float = 0.025,
+        similar_eps_m: float = 0.020,
+        **kwargs,
     ) -> float:
         """
-        Hierarchical steering direction resolution when triggering emergency backup:
+        Steering direction resolution when triggering emergency backup:
+        Compares clearance along Right max-lock arc vs Left max-lock arc.
         Returns: +1.0 (steer right so front turns right / away from left)
                  or -1.0 (steer left so front turns left / away from right)
         """
-        if isinstance(cached_tofs, dict):
-            if "tof_front_left_4.1deg" in cached_tofs:
-                # 16-Channel Front-Only Cross-Pointing Rig
-                d_fl_4 = float(cached_tofs.get("tof_front_left_4.1deg", 1.80))
-                d_fr_4 = float(cached_tofs.get("tof_front_right_4.1deg", 1.80))
-                d_fl_15 = float(cached_tofs.get("tof_front_left_15.4deg", 1.80))
-                d_fr_15 = float(cached_tofs.get("tof_front_right_15.4deg", 1.80))
+        d_esc_left, d_esc_right, _ = arc_clearance
+        diff_arc = d_esc_right - d_esc_left
+        if abs(diff_arc) > similar_eps_m:
+            return 1.0 if diff_arc > 0.0 else -1.0
 
-                # Left flank (right bumper sensors cross-pointing left):
-                d_left_side = min(
-                    float(cached_tofs.get("tof_front_right_82.9deg", 1.80)),
-                    float(cached_tofs.get("tof_front_right_71.6deg", 1.80)),
-                    float(cached_tofs.get("tof_front_right_60.4deg", 1.80)),
-                    float(cached_tofs.get("tof_front_right_49.1deg", 1.80)),
-                )
-                # Right flank (left bumper sensors cross-pointing right):
-                d_right_side = min(
-                    float(cached_tofs.get("tof_front_left_82.9deg", 1.80)),
-                    float(cached_tofs.get("tof_front_left_71.6deg", 1.80)),
-                    float(cached_tofs.get("tof_front_left_60.4deg", 1.80)),
-                    float(cached_tofs.get("tof_front_left_49.1deg", 1.80)),
-                )
+        # Secondary fallback: Heading error alignment
+        if abs(heading_err) > math.radians(10.0):
+            return 1.0 if heading_err > 0.0 else -1.0
 
-                # Tier 1: 4.1 deg center sensors (d_fr_4 - d_fl_4)
-                # If d_fr_4 > d_fl_4, obstacle is on the left, right has more space.
-                # In forward steering, +steer turns right. In reverse steering, -steer swings the front right!
-                # Returning +1.0 indicates escape toward the right.
-                diff_1 = d_fr_4 - d_fl_4
-                if abs(diff_1) > similar_eps_m:
-                    return 1.0 if diff_1 > 0.0 else -1.0
-
-                # Tier 2: 15.4 deg inner sensors
-                diff_2 = d_fr_15 - d_fl_15
-                if abs(diff_2) > similar_eps_m:
-                    return 1.0 if diff_2 > 0.0 else -1.0
-
-                # Tier 3: Lateral flank clearance
-                diff_side = d_left_side - d_right_side
-                if abs(diff_side) > 0.035:
-                    return 1.0 if diff_side < 0.0 else -1.0
-
-                # Tier 4: Heading error fallback
-                if abs(heading_err) > math.radians(10.0):
-                    return 1.0 if heading_err > 0.0 else -1.0
-
-                return 1.0
-            else:
-                fl3 = float(cached_tofs.get("tof_fl_3", 1.80))
-                fr3 = float(cached_tofs.get("tof_fr_3", 1.80))
-                diff_1 = fr3 - fl3
-                if abs(diff_1) > similar_eps_m:
-                    return 1.0 if diff_1 > 0.0 else -1.0
-                if abs(heading_err) > math.radians(10.0):
-                    return 1.0 if heading_err > 0.0 else -1.0
-                return 1.0
-        else:
-            tofs = list(cached_tofs)
-            fl_c = float(tofs[0]) if len(tofs) > 0 else 1.80
-            fr_c = float(tofs[8]) if len(tofs) > 8 else (float(tofs[7]) if len(tofs) > 7 else 1.80)
-            diff_1 = fr_c - fl_c
-            if abs(diff_1) > similar_eps_m:
-                return 1.0 if diff_1 > 0.0 else -1.0
-            if abs(heading_err) > math.radians(10.0):
-                return 1.0 if heading_err > 0.0 else -1.0
-            return 1.0
+        return 1.0
 
     def trigger_emergency_recovery(
         self,
@@ -196,51 +214,38 @@ class StuckRecoveryManager:
         dt: float,
         current_v: float,
         commanded_v: float,
-        cached_tofs: Dict[str, float],
         heading_err: float = 0.0,
         active_steer: float = 0.0,
+        hazard_mask: Optional[np.ndarray] = None,
+        costmap_obj: Optional[Any] = None,
+        cached_tofs: Optional[Dict[str, float]] = None,
+        **kwargs,
     ) -> Tuple[bool, float, float]:
         """
-        Updates recovery state machine.
+        Updates recovery state machine using costmap max-lock escape arc evaluations.
         Returns:
             (is_recovering, target_v, target_steer)
         """
-        if isinstance(cached_tofs, dict):
-            if "tof_front_left_4.1deg" in cached_tofs:
-                front_keys = [
-                    "tof_front_left_4.1deg", "tof_front_right_4.1deg",
-                    "tof_front_left_15.4deg", "tof_front_right_15.4deg",
-                ]
-                d_fl3 = cached_tofs.get("tof_front_left_4.1deg", TOF_MAX_RANGE_M)
-                d_fr3 = cached_tofs.get("tof_front_right_4.1deg", TOF_MAX_RANGE_M)
-            else:
-                front_keys = ["tof_fl_3", "tof_fr_3", "tof_fl_2", "tof_fr_2"]
-                d_fl3 = cached_tofs.get("tof_fl_3", TOF_MAX_RANGE_M)
-                d_fr3 = cached_tofs.get("tof_fr_3", TOF_MAX_RANGE_M)
+        # Project Max Steering Lock Escape Arcs onto Costmap Hazard Mask
+        d_esc_l, d_esc_r, d_esc_c = self.evaluate_costmap_escape_arcs(hazard_mask, costmap_obj)
+        arc_clearance = (d_esc_l, d_esc_r, d_esc_c)
 
-            min_all_dist = min(cached_tofs.values()) if cached_tofs else TOF_MAX_RANGE_M
-            min_front_cone = min([cached_tofs.get(k, TOF_MAX_RANGE_M) for k in front_keys]) if front_keys else TOF_MAX_RANGE_M
-        else:
-            tofs_arr = list(cached_tofs)
-            min_all_dist = min(tofs_arr) if tofs_arr else TOF_MAX_RANGE_M
-            d_fl3 = tofs_arr[0] if len(tofs_arr) > 0 else TOF_MAX_RANGE_M
-            d_fr3 = tofs_arr[8] if len(tofs_arr) > 8 else TOF_MAX_RANGE_M
-            min_front_cone = min([tofs_arr[i] for i in [0, 1, 8, 9] if i < len(tofs_arr)]) if tofs_arr else TOF_MAX_RANGE_M
-
-        is_front_imminent_obstacle = (d_fl3 <= self.emergency_backup_dist_m or d_fr3 <= self.emergency_backup_dist_m)
+        # Imminent blockage: no forward escape trajectory is open beyond emergency threshold
+        max_forward_escape = max(d_esc_l, d_esc_r, d_esc_c)
+        is_front_imminent_obstacle = (max_forward_escape <= self.emergency_backup_dist_m)
         is_facing_backwards = abs(heading_err) > math.radians(75.0)
-        is_stalled_forward = (commanded_v > 0.30 and abs(current_v) < 0.10 and min_front_cone < RECOVERY_FRONT_BLOCKED_M)
+        is_stalled_forward = (commanded_v > 0.30 and abs(current_v) < 0.10 and max_forward_escape < RECOVERY_FRONT_BLOCKED_M)
 
-        # Immediate override for 9cm obstacle from any state
+        # Immediate override for imminent obstacle from any state
         if is_front_imminent_obstacle and self.state != StuckRecoveryState.PIVOT_REVERSE:
-            side_steer = self.resolve_escape_steer_dir(cached_tofs, heading_err=heading_err, similar_eps_m=0.025)
+            side_steer = self.resolve_escape_steer_dir(arc_clearance=arc_clearance, heading_err=heading_err)
             self.trigger_emergency_recovery(heading_err=heading_err, steer_dir=side_steer, current_v=current_v, current_steer=active_steer, instant_reverse=True)
             return True, self.current_cmd_v, self.current_cmd_steer
 
         # STATE 0: NORMAL DRIVE
         if self.state == StuckRecoveryState.NORMAL_DRIVE:
             if is_front_imminent_obstacle:
-                side_steer = self.resolve_escape_steer_dir(cached_tofs, heading_err=heading_err, similar_eps_m=0.025)
+                side_steer = self.resolve_escape_steer_dir(arc_clearance=arc_clearance, heading_err=heading_err)
                 self.trigger_emergency_recovery(heading_err=heading_err, steer_dir=side_steer, current_v=current_v, current_steer=active_steer, instant_reverse=True)
                 return True, self.current_cmd_v, self.current_cmd_steer
             elif is_facing_backwards:
@@ -249,7 +254,7 @@ class StuckRecoveryManager:
             elif is_stalled_forward:
                 self.stall_timer += dt
                 if self.stall_timer > RECOVERY_STALL_CONFIRM_S:
-                    side_steer = self.resolve_escape_steer_dir(cached_tofs, heading_err=heading_err, similar_eps_m=0.025)
+                    side_steer = self.resolve_escape_steer_dir(arc_clearance=arc_clearance, heading_err=heading_err)
                     self.trigger_emergency_recovery(heading_err=heading_err, steer_dir=side_steer, current_v=current_v, current_steer=active_steer, instant_reverse=True)
                     return True, self.current_cmd_v, self.current_cmd_steer
             else:
@@ -261,7 +266,7 @@ class StuckRecoveryManager:
         self.total_recovery_timer += dt
 
         # Global failsafe timeout: if recovery is stuck longer than timeout, force exit to drive
-        if self.total_recovery_timer >= RECOVERY_TOTAL_TIMEOUT_S and not is_front_imminent_obstacle and d_fl3 > 0.12 and d_fr3 > 0.12:
+        if self.total_recovery_timer >= RECOVERY_TOTAL_TIMEOUT_S and not is_front_imminent_obstacle and max_forward_escape > 0.12:
             self.state = StuckRecoveryState.NORMAL_DRIVE
             self.stall_timer = 0.0
             self.stroke_timer = 0.0
@@ -278,13 +283,12 @@ class StuckRecoveryManager:
             self.current_cmd_steer = target_steer
 
             # Check stopping conditions for reverse backing:
+            forward_cleared = (max_forward_escape >= self.clearance_exit_m)
+
             has_sufficient_clearance = (
                 self.stroke_timer >= RECOVERY_EXIT_MIN_TIME_S
-                and min_front_cone >= self.clearance_exit_m
-                and min_all_dist >= 0.14
+                and forward_cleared
                 and not is_front_imminent_obstacle
-                and d_fl3 > 0.15
-                and d_fr3 > 0.15
             )
             is_stalled_reverse = (self.stroke_timer > 0.45 and current_v > -0.05 and not is_front_imminent_obstacle)
             stroke_timeout = (self.stroke_timer >= RECOVERY_REVERSE_STROKE_MAX_S and not is_front_imminent_obstacle)

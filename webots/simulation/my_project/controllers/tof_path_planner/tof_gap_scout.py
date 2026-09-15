@@ -111,14 +111,23 @@ LEGACY_TOF_SENSOR_RIG = [
 
 TOF_SENSOR_RIG = FRONT_TOF_SENSOR_RIG
 
-# Front bumper origin offset (+Y forward in vehicle local frame, matching front ToF mount Y)
-BUMPER_X = 0.000
-BUMPER_Y = 0.095
+# 16-Channel ToF Pod Geometry:
+# 8 zones per corner, each zone has 11.25 deg FOV (8 * 11.25 deg = 90.0 deg total FOV per pod).
+# Zone midpoints: 4.125 deg, 15.375 deg, ..., 82.875 deg.
+# Zone outer bounds: from -1.5 deg (-0.0262 rad) to +88.5 deg (+1.5446 rad).
+_NUM_CORNER_RAYS = 90
 
-# 177 dense radial exploration rays spanning -88 deg to +88 deg in 1 deg steps relative to vehicle forward (+Y)
-_NUM_SCOUT_RAYS = 177
-_RAY_ANGLES_REL = np.linspace(-math.radians(88), math.radians(88), _NUM_SCOUT_RAYS)
-_RAY_AZIMUTHS = (math.pi / 2.0) - _RAY_ANGLES_REL
+# Left Pod (-0.07m, 0.095m, cross-pointing Right): -1.5 deg to +88.5 deg rel to +Y
+_LEFT_REL_ANGLES = np.linspace(math.radians(-1.5), math.radians(88.5), _NUM_CORNER_RAYS)
+_LEFT_AZIMUTHS = (math.pi / 2.0) - _LEFT_REL_ANGLES
+_LEFT_COS = np.cos(_LEFT_AZIMUTHS)
+_LEFT_SIN = np.sin(_LEFT_AZIMUTHS)
+
+# Right Pod (+0.07m, 0.095m, cross-pointing Left): +1.5 deg to -88.5 deg rel to +Y (i.e. -1.5 deg to +88.5 deg leftwards)
+_RIGHT_REL_ANGLES = np.linspace(math.radians(1.5), -math.radians(88.5), _NUM_CORNER_RAYS)
+_RIGHT_AZIMUTHS = (math.pi / 2.0) - _RIGHT_REL_ANGLES
+_RIGHT_COS = np.cos(_RIGHT_AZIMUTHS)
+_RIGHT_SIN = np.sin(_RIGHT_AZIMUTHS)
 
 
 class ToFGapScout:
@@ -138,6 +147,9 @@ class ToFGapScout:
         gap_progress_margin_m: float = GAP_PROGRESS_MARGIN_M,
         alt_min_separation_m: float = ALT_MIN_SEPARATION_M,
         alt_aperture_bias: float = ALT_APERTURE_BIAS,
+        gap_latch_hysteresis: float = 1.25,
+        gap_latch_dist_m: float = 0.28,
+        ray_origin_offset_m: float = 0.070,
         **kwargs,
     ):
         self.w_gap_distance = float(w_gap_distance)
@@ -149,10 +161,25 @@ class ToFGapScout:
         self.gap_progress_margin_m = float(gap_progress_margin_m)
         self.alt_min_separation_m = float(alt_min_separation_m)
         self.alt_aperture_bias = float(alt_aperture_bias)
+        self.gap_latch_hysteresis = float(gap_latch_hysteresis)
+        self.gap_latch_dist_m = float(gap_latch_dist_m)
+        self.ray_origin_offset_m = float(ray_origin_offset_m)
         self.last_xg: float = 0.0
         self.last_yg: float = 1.20
         self.last_aperture: float = 0.50
         self.last_targets: List[Tuple[float, float, float]] = []
+        self.active_corridor_x: Optional[float] = None
+        self.active_corridor_y: Optional[float] = None
+
+    def set_active_target(self, x: float, y: float) -> None:
+        """Sets the active corridor anchor so Slot 0 reliably tracks this path branch."""
+        self.active_corridor_x = float(x)
+        self.active_corridor_y = float(y)
+
+    def reset_active_target(self) -> None:
+        """Resets active corridor anchor (e.g. after recovery or on wide-open track)."""
+        self.active_corridor_x = None
+        self.active_corridor_y = None
 
     def scout_gap(
         self,
@@ -183,16 +210,14 @@ class ToFGapScout:
         else:
             xg_prim, yg_prim, aperture = targets[0]
 
-        # Fast temporal tracking: aggressive responsiveness so it does not lag
-        d_change = math.hypot(xg_prim - self.last_xg, yg_prim - self.last_yg)
-        alpha = 0.85 if d_change > 0.15 else 0.50
-        self.last_xg = (1.0 - alpha) * self.last_xg + alpha * xg_prim
-        self.last_yg = (1.0 - alpha) * self.last_yg + alpha * yg_prim
+        # Raw physical target coordinates directly without EMA smoothing or midpoint blending
+        self.last_xg = xg_prim
+        self.last_yg = yg_prim
         self.last_aperture = aperture
         self.last_targets = targets
 
-        theta_g = math.atan2(self.last_xg, self.last_yg)
-        return self.last_xg, self.last_yg, aperture, theta_g
+        theta_g = math.atan2(xg_prim, yg_prim)
+        return xg_prim, yg_prim, aperture, theta_g
 
     def find_furthest_targets(
         self,
@@ -267,46 +292,53 @@ class ToFGapScout:
                 })
 
         # ----------------------------------------------------------------------
-        # 2. EVALUATE DENSE RADIAL RAYS ACROSS FRONT FOV (-88 to +88 deg)
-        # Origin: Front Bumper (BUMPER_X=0.0, BUMPER_Y=0.095m)
+        # 2. EVALUATE DENSE RADIAL RAYS (180 TOTAL: 90 PER FRONT CORNER POD)
+        # Left Corner (-0.07m, 0.095m):  90 rays spanning -89 deg to 0 deg (Left to Center)
+        # Right Corner (+0.07m, 0.095m): 90 rays spanning 0 deg to +89 deg (Center to Right)
         # ----------------------------------------------------------------------
         max_r = min(max_lookahead_m, GAP_MAX_LOOKAHEAD_M)
         n_steps = int(max_r / step_ds)
 
-        for az in _RAY_AZIMUTHS:
-            cos_az = math.cos(az)
-            sin_az = math.sin(az)
-            clear_dist = max_r
+        corner_fans = [
+            (-self.ray_origin_offset_m, 0.095, _LEFT_COS, _LEFT_SIN),
+            (self.ray_origin_offset_m, 0.095, _RIGHT_COS, _RIGHT_SIN),
+        ]
 
-            for s in range(1, n_steps + 1):
-                d = s * step_ds
-                px = BUMPER_X + d * cos_az
-                py = BUMPER_Y + d * sin_az
-                col = int(round((px - x_min) / res))
-                row = int(round((py - y_min) / res))
-                if row < 0 or row >= h or col < 0 or col >= w:
-                    clear_dist = max(GAP_MIN_LOOKAHEAD_M, d - step_ds)
-                    break
-                if hazard_mask[row, col] > 0:
-                    clear_dist = max(GAP_MIN_LOOKAHEAD_M, d - step_ds)
-                    break
+        for ox, oy, cos_arr, sin_arr in corner_fans:
+            for i in range(_NUM_CORNER_RAYS):
+                cos_az = float(cos_arr[i])
+                sin_az = float(sin_arr[i])
+                clear_dist = max_r
 
-            eff_dist = max(GAP_MIN_LOOKAHEAD_M, clear_dist - 0.06)
-            # Physical target point in vehicle local coordinates (origin at vehicle center / rear axle)
-            tx = BUMPER_X + eff_dist * cos_az
-            ty = max(0.18, BUMPER_Y + eff_dist * sin_az)
-            total_dist = math.hypot(tx, ty)
+                for s in range(1, n_steps + 1):
+                    d = s * step_ds
+                    px = ox + d * cos_az
+                    py = oy + d * sin_az
+                    col = int(round((px - x_min) / res))
+                    row = int(round((py - y_min) / res))
+                    if row < 0 or row >= h or col < 0 or col >= w:
+                        clear_dist = max(GAP_MIN_LOOKAHEAD_M, d - step_ds)
+                        break
+                    if hazard_mask[row, col] > 0:
+                        clear_dist = max(GAP_MIN_LOOKAHEAD_M, d - step_ds)
+                        break
 
-            # True relative angle from vehicle origin (0, 0) to target (tx, ty)
-            rel_angle = math.atan2(tx, ty)
-            steer_equiv = -rel_angle
-            aperture_m = max(GAP_MIN_WIDTH_M, min(1.20, total_dist * 0.30))
+                eff_dist = max(GAP_MIN_LOOKAHEAD_M, clear_dist - 0.06)
+                # Physical target point in vehicle local coordinates (origin at vehicle center / rear axle)
+                tx = ox + eff_dist * cos_az
+                ty = max(0.18, oy + eff_dist * sin_az)
+                total_dist = math.hypot(tx, ty)
 
-            candidates.append({
-                "tx": tx, "ty": ty, "dist": total_dist,
-                "aperture": aperture_m, "steer_equiv": steer_equiv,
-                "rel_angle": rel_angle,
-            })
+                # True relative angle from vehicle origin (0, 0) to target (tx, ty)
+                rel_angle = math.atan2(tx, ty)
+                steer_equiv = -rel_angle
+                aperture_m = max(GAP_MIN_WIDTH_M, min(1.20, total_dist * 0.30))
+
+                candidates.append({
+                    "tx": tx, "ty": ty, "dist": total_dist,
+                    "aperture": aperture_m, "steer_equiv": steer_equiv,
+                    "rel_angle": rel_angle,
+                })
 
         if not candidates:
             return [(0.0, max_lookahead_m, 0.40)]
@@ -395,8 +427,31 @@ class ToFGapScout:
         # ----------------------------------------------------------------------
         targets = []
         if scored_candidates:
-            # Target 0: Primary Racing Line (Highest overall scout score)
-            _, c0 = scored_candidates[0]
+            # Check if an active corridor anchor is present to lock Slot 0
+            c0 = None
+            best_score, best_cand = scored_candidates[0]
+            if self.active_corridor_x is not None and self.active_corridor_y is not None:
+                act_x = self.active_corridor_x
+                act_y = self.active_corridor_y
+                for sc, c in scored_candidates:
+                    tx, ty = c["tx"], c["ty"]
+                    same_side = (act_x < -0.05 and tx < -0.02) or (act_x > 0.05 and tx > 0.02)
+                    near_active = math.hypot(tx - act_x, ty - act_y) <= self.gap_latch_dist_m
+                    if same_side or near_active:
+                        # Only retain the latched corridor if it isn't severely inferior to the best opening.
+                        # Hysteresis buffer prevents chattering between equal left/right openings around center obstacles,
+                        # while letting genuine open corners break through cleanly.
+                        if (sc + self.gap_latch_hysteresis) >= best_score:
+                            c0 = c
+                        break
+
+            # Fallback if no candidate matched the active corridor, on cold start, or when broken by superior opening
+            if c0 is None:
+                c0 = best_cand
+
+            self.active_corridor_x = c0["tx"]
+            self.active_corridor_y = c0["ty"]
+
             tx0, ty0, ap0 = c0["tx"], c0["ty"], c0["aperture"]
             targets.append((tx0, ty0, ap0))
 
@@ -443,7 +498,7 @@ class ToFGapScout:
                     targets.append((best_challenger["tx"], best_challenger["ty"], best_challenger["aperture"]))
                 else:
                     # Fallback: next distinct candidate by spatial separation >= 15 cm
-                    for _, c in scored_candidates[1:]:
+                    for _, c in scored_candidates:
                         tx, ty, ap = c["tx"], c["ty"], c["aperture"]
                         if math.hypot(tx - tx0, ty - ty0) >= 0.15:
                             targets.append((tx, ty, ap))

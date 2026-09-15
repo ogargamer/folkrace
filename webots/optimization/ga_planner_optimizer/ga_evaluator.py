@@ -14,6 +14,7 @@ import json
 import time
 import socket
 import subprocess
+import queue
 from typing import Dict, List, Optional, Tuple, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
@@ -23,22 +24,23 @@ CURR_DIR = os.path.dirname(os.path.abspath(__file__))
 def _find_world_path(start_dir: str) -> str:
     p = start_dir
     for _ in range(6):
-        cand = os.path.join(p, "webots", "simulation", "my_project", "worlds", "track_ga_eval.wbt")
+        cand = os.path.join(p, "webots", "simulation", "my_project", "worlds", "track_racing.wbt")
         if os.path.exists(cand):
             return cand
-        cand2 = os.path.join(p, "simulation", "my_project", "worlds", "track_ga_eval.wbt")
+        cand2 = os.path.join(p, "simulation", "my_project", "worlds", "track_racing.wbt")
         if os.path.exists(cand2):
             return cand2
         parent = os.path.dirname(p)
         if parent == p:
             break
         p = parent
-    return os.path.join(start_dir, "track_ga_eval.wbt")
+    return os.path.join(start_dir, "track_racing.wbt")
 
 DEFAULT_WORLD_PATH = _find_world_path(CURR_DIR)
 OPTIMIZER_PROJECT_DIR = os.path.dirname(os.path.dirname(DEFAULT_WORLD_PATH)) if os.path.exists(DEFAULT_WORLD_PATH) else CURR_DIR
-
-WORKSPACE_ROOT = os.path.dirname(OPTIMIZER_PROJECT_DIR)
+MY_PROJECT_DIR = OPTIMIZER_PROJECT_DIR
+WEBOTS_DIR = os.path.dirname(os.path.dirname(MY_PROJECT_DIR))
+WORKSPACE_ROOT = os.path.dirname(WEBOTS_DIR)
 
 for p in [OPTIMIZER_PROJECT_DIR, CURR_DIR]:
     if p not in sys.path and os.path.exists(p):
@@ -150,12 +152,12 @@ class HeadlessWebotsWorker:
             CURR_DIR,
             OPTIMIZER_PROJECT_DIR,
             os.path.join(OPTIMIZER_PROJECT_DIR, "controllers", "tof_path_planner"),
-            os.path.join(OPTIMIZER_PROJECT_DIR, "controllers", "ga_supervisor_worker"),
             os.path.join(CURR_DIR, "data"),
             WORKSPACE_ROOT,
         ])
         env["GA_WORKER_PORT"] = str(self.port)
         env["GA_WORKER_ID"] = str(self.worker_id)
+        env["WEBOTS_CONTROLLER_MODE"] = "ga_eval"
         env["PYTHONUNBUFFERED"] = "1"
 
         if self.rendered:
@@ -392,22 +394,28 @@ class ParallelWorkerPool:
 
         results: List[Optional[Tuple[float, Dict[str, Any]]]] = [None] * len(population_genomes)
 
-        def eval_task(cand_idx: int, genome: BasePlannerGenome, worker_idx: int):
+        worker_q = queue.Queue()
+        for w in self.workers:
+            worker_q.put(w)
+
+        def eval_task(cand_idx: int, genome: BasePlannerGenome):
             if ctrl and getattr(ctrl, "abort_requested", False):
                 return cand_idx, -5000.0, {"crashed": True, "aborted": True}
             if self._shutdown_called or not self.workers:
                 return cand_idx, -5000.0, {"crashed": True, "aborted": True}
-            worker = self.workers[worker_idx % len(self.workers)]
-            fitness, metrics = worker.evaluate(planner_name, genome.to_dict(), duration_s)
-            return cand_idx, fitness, metrics
+            worker = worker_q.get()
+            try:
+                fitness, metrics = worker.evaluate(planner_name, genome.to_dict(), duration_s)
+                return cand_idx, fitness, metrics
+            finally:
+                worker_q.put(worker)
 
         with ThreadPoolExecutor(max_workers=len(self.workers)) as executor:
             futures = []
             for idx, genome in enumerate(population_genomes):
                 if ctrl and getattr(ctrl, "abort_requested", False):
                     break
-                worker_idx = idx % len(self.workers)
-                futures.append(executor.submit(eval_task, idx, genome, worker_idx))
+                futures.append(executor.submit(eval_task, idx, genome))
 
             for future in as_completed(futures):
                 if ctrl and getattr(ctrl, "abort_requested", False):

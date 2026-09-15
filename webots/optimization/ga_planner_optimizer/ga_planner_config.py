@@ -91,8 +91,8 @@ COLLISION_DISTANCE_MIN_M: float = 0.020
 
 OPTION_2_SL_MPC_GENE_SPECS: List[Tuple[str, float, float, type, float, str]] = [
     # Speeds & Limits
-    ("v_cruise_max",         1.80,   5.50,   float,  5.50,   "Max straight clearing speed (m/s)"),
-    ("v_cruise_min",         1.20,   2.50,   float,  1.20,   "Min corner crawl speed (m/s)"),
+    ("v_cruise_max",         5.0,   5.00,   float,  5.00,   "Max straight clearing speed (m/s)"),
+    ("v_cruise_min",         1.223,   2.50,   float,  1.223,  "Min corner crawl speed (m/s)"),
     # Horizon & Discretization (Fixed at N=30, dt=1/60s to match native C++ OSQP codegen)
     ("horizon_N",           30.0,   30.0,    int,   30.0,    "MPC prediction horizon steps (fixed at 30 in native QP tables)"),
     ("dt",                   0.016667, 0.016667, float, 0.016667, "MPC prediction discretization timestep (s)"),
@@ -100,7 +100,7 @@ OPTION_2_SL_MPC_GENE_SPECS: List[Tuple[str, float, float, type, float, str]] = [
     ("mu_friction",          0.70,   0.90,   float,  0.85,   "Tire friction coefficient governing steer vs brake loads"),
     ("r_inflation_m",        0.075,  0.075,  float,  0.075,  "ToF obstacle expansion / inflation radius (0.075m - 0.120m)"),
     # MPC Objective Weights
-    ("q_progress",           2.00,  25.00,   float,  8.00,   "Longitudinal progress reward weight"),
+    ("q_progress",           2.00,  25.00,   float, 15.00,   "Longitudinal progress reward weight"),
     ("q_cte",                1.00,  45.00,   float, 18.00,   "Cross-track error penalty weight"),
     ("q_heading",            2.00,  20.00,   float,  8.00,   "Heading error penalty weight"),
     ("r_steer",              1.00,  15.00,   float,  5.00,   "Steering angle effort penalty weight"),
@@ -110,7 +110,7 @@ OPTION_2_SL_MPC_GENE_SPECS: List[Tuple[str, float, float, type, float, str]] = [
     ("pp_blend_gain",        0.00,   0.65,   float,  0.35,   "Pure pursuit lookahead blend ratio with MPC"),
     ("lookahead_blend_m",    0.25,   0.75,   float,  0.45,   "Pure pursuit blend lookahead distance (m)"),
     # Gap Scout Parameters
-    ("target_lookahead_m",   0.80,   1.80,   float,  1.70,   "Scout lookahead target projection distance (m)"),
+    ("target_lookahead_m",   1.70,   1.70,   float,  1.70,   "Scout lookahead target projection distance (m)"),
     ("w_gap_distance",       1.00,   8.00,   float,  3.00,   "Gap scout distance reward weight"),
     ("w_gap_width",          0.50,   5.00,   float,  1.50,   "Gap scout aperture width reward weight"),
     ("w_gap_steer",          0.20,   3.00,   float,  1.00,   "Gap scout steering alignment penalty weight"),
@@ -118,10 +118,12 @@ OPTION_2_SL_MPC_GENE_SPECS: List[Tuple[str, float, float, type, float, str]] = [
     ("w_side_clearance",     0.00,   6.00,   float,  2.80,   "Gap scout side asymmetry clearance weight"),
     ("gap_dist_exp_k",       0.20,   1.50,   float,  0.60,   "Gap scout exponential distance reward factor"),
     ("gap_progress_margin_m",0.05,   0.35,   float,  0.15,   "Gap scout corridor margin over 1.0m track width (m)"),
+    ("gap_latch_hysteresis", 0.20,   3.50,   float,  1.25,   "Gap scout corridor latch score margin"),
+    ("gap_latch_dist_m",     0.12,   0.50,   float,  0.28,   "Gap scout corridor latch spatial association radius (m)"),
     # Dual-Path Line Choice & Challenger Selection (Primary vs Alternative)
     ("alt_min_separation_m", 0.10,   0.50,   float,  0.15,   "Min lateral separation (m) between primary and challenger lines"),
     ("alt_aperture_bias",    0.50,   4.00,   float,  1.80,   "Challenger aperture width bias multiplier"),
-    ("alt_switch_hysteresis",2.00,  80.00,   float, 30.00,   "MPC cost reduction threshold needed to switch lines"),
+    ("alt_switch_hysteresis",2.00,  80.00,   float,  8.00,   "MPC cost reduction threshold needed to switch lines"),
     # Fast Straight-Line Lock
     ("straight_lock_dist",   1.70,   1.70,   float,  1.70,   "Forward clearance (m) to lock straight line acceleration"),
     ("straight_lock_speed",  5.50,   5.50,   float,  5.50,   "Speed ceiling (m/s) when straight-line locked"),
@@ -131,9 +133,9 @@ OPTION_2_SL_MPC_GENE_SPECS: List[Tuple[str, float, float, type, float, str]] = [
     ("aggr_min_scale",       0.20,   0.95,   float,  0.30,   "Minimal steering authority scale on open straights"),
     ("steer_deadband_rad",   0.000,  0.005,  float,  0.002,  "Steering error deadband (rad) for sensor noise quieting"),
     # Stuck & Emergency Recovery
-    ("emergency_backup_dist_m", 0.08, 0.12,  float,  0.09,   "Distance threshold (m) below which emergency reverse is triggered"),
+    ("emergency_backup_dist_m", 0.09, 0.15,  float,  0.09,   "Distance threshold (m) below which emergency reverse is triggered"),
     ("recovery_reverse_speed",  0.80, 2.00,  float,  1.30,   "Emergency reverse backing speed (m/s)"),
-    ("recovery_clearance_exit_m", 0.18, 0.45, float, 0.28,   "Front clearance threshold (m) to conclude reverse and center steering"),
+    ("recovery_clearance_exit_m", 0.25, 0.25, float, 0.25,   "Front clearance threshold (m) to conclude reverse and center steering"),
     ("recovery_steer_angle_rad",0.30, 0.698, float,  0.600,  "Recovery pivot steering angle (rad)"),
 ]
 
@@ -212,17 +214,18 @@ def generate_logical_initial_population(genome_cls, pop_size: int) -> List[BaseP
     archetypes = [
         # 0. Cyan Champion Calibrated Baseline
         {
-            "v_cruise_max": 5.50, "v_cruise_min": 1.20,
+            "v_cruise_max": 5.50, "v_cruise_min": 1.223,
             "horizon_N": 30, "dt": 0.016667,
             "mu_friction": 0.85, "r_inflation_m": 0.075,
-            "q_progress": 8.0, "q_cte": 18.0, "q_heading": 8.0,
+            "q_progress": 15.0, "q_cte": 18.0, "q_heading": 8.0,
             "r_steer": 5.0, "r_accel": 2.0, "r_steer_rate": 10.0,
             "v_corner_factor": 0.95, "pp_blend_gain": 0.35, "lookahead_blend_m": 0.45,
             "target_lookahead_m": 1.70, "w_gap_distance": 3.00, "w_gap_width": 1.50,
             "w_gap_steer": 1.00, "w_gap_straight": 0.50,
             "w_side_clearance": 2.80,
             "gap_dist_exp_k": 0.60, "gap_progress_margin_m": 0.15,
-            "alt_min_separation_m": 0.15, "alt_aperture_bias": 1.80, "alt_switch_hysteresis": 30.00,
+            "gap_latch_hysteresis": 1.25, "gap_latch_dist_m": 0.28,
+            "alt_min_separation_m": 0.15, "alt_aperture_bias": 1.80, "alt_switch_hysteresis": 8.00,
             "straight_lock_dist": 1.70, "straight_lock_speed": 5.50,
             "aggr_dist_far_m": 1.70, "aggr_dist_close_m": 1.00, "aggr_min_scale": 0.30,
             "steer_deadband_rad": 0.002,
@@ -234,14 +237,15 @@ def generate_logical_initial_population(genome_cls, pop_size: int) -> List[BaseP
             "v_cruise_max": 5.50, "v_cruise_min": 1.50,
             "horizon_N": 30, "dt": 0.016667,
             "mu_friction": 0.88, "r_inflation_m": 0.075,
-            "q_progress": 12.0, "q_cte": 14.0, "q_heading": 6.0,
+            "q_progress": 18.0, "q_cte": 14.0, "q_heading": 6.0,
             "r_steer": 3.5, "r_accel": 1.5, "r_steer_rate": 8.0,
             "v_corner_factor": 0.95, "pp_blend_gain": 0.25, "lookahead_blend_m": 0.40,
             "target_lookahead_m": 1.60, "w_gap_distance": 4.00, "w_gap_width": 1.80,
             "w_gap_steer": 0.80, "w_gap_straight": 0.50,
             "w_side_clearance": 2.50,
             "gap_dist_exp_k": 0.70, "gap_progress_margin_m": 0.12,
-            "alt_min_separation_m": 0.15, "alt_aperture_bias": 1.80, "alt_switch_hysteresis": 25.00,
+            "gap_latch_hysteresis": 1.10, "gap_latch_dist_m": 0.25,
+            "alt_min_separation_m": 0.15, "alt_aperture_bias": 1.80, "alt_switch_hysteresis": 7.00,
             "straight_lock_dist": 1.65, "straight_lock_speed": 5.50,
             "aggr_dist_far_m": 1.68, "aggr_dist_close_m": 1.10, "aggr_min_scale": 0.35,
             "steer_deadband_rad": 0.002,
@@ -250,17 +254,18 @@ def generate_logical_initial_population(genome_cls, pop_size: int) -> List[BaseP
         },
         # 2. Safe High-Clearance Sentinel
         {
-            "v_cruise_max": 4.80, "v_cruise_min": 1.10,
+            "v_cruise_max": 4.80, "v_cruise_min": 1.15,
             "horizon_N": 30, "dt": 0.016667,
             "mu_friction": 0.82, "r_inflation_m": 0.080,
-            "q_progress": 6.0, "q_cte": 22.0, "q_heading": 10.0,
+            "q_progress": 10.0, "q_cte": 22.0, "q_heading": 10.0,
             "r_steer": 6.0, "r_accel": 2.5, "r_steer_rate": 12.0,
             "v_corner_factor": 0.90, "pp_blend_gain": 0.45, "lookahead_blend_m": 0.50,
             "target_lookahead_m": 1.50, "w_gap_distance": 3.00, "w_gap_width": 2.20,
             "w_gap_steer": 1.10, "w_gap_straight": 0.40,
             "w_side_clearance": 3.20,
             "gap_dist_exp_k": 0.50, "gap_progress_margin_m": 0.18,
-            "alt_min_separation_m": 0.20, "alt_aperture_bias": 2.00, "alt_switch_hysteresis": 35.00,
+            "gap_latch_hysteresis": 1.50, "gap_latch_dist_m": 0.32,
+            "alt_min_separation_m": 0.20, "alt_aperture_bias": 2.00, "alt_switch_hysteresis": 12.00,
             "straight_lock_dist": 1.75, "straight_lock_speed": 5.00,
             "aggr_dist_far_m": 1.75, "aggr_dist_close_m": 1.20, "aggr_min_scale": 0.40,
             "steer_deadband_rad": 0.003,

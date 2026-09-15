@@ -61,16 +61,9 @@ All GA hyperparameters, worker allocations, evaluation horizons, and path planne
 ```
 webots/optimization/ga_planner_optimizer/
 ├── ga_planner_config.py         # All exposed GA parameters and gene bounds
-├── webots/optimization/ga_optimizer.py              # Parallel GA engine (tournament selection, elitism, checkpointing)
+├── ga_optimizer.py              # Parallel GA engine (tournament selection, elitism, checkpointing)
 ├── ga_evaluator.py              # Headless Webots worker pool manager
-├── launch_ga_optimization.py    # 1-click launcher CLI
-├── plot_ga_results.py           # Convergence plotter
-├── test_webots/optimization/ga_optimizer_offline.py # Offline verification tests
-├── worlds/
-│   └── Cyan_Champion_GA.wbt     # Headless Webots world with 3 moving obstacles
-├── controllers/
-│   └── ga_supervisor_worker/    # Persistent Webots Supervisor controller
-├── planners/                    # Self-contained planner modules (Option 1, 2, 3)
+├── test_ga_optimizer_offline.py # Offline verification tests
 └── data/
     └── cyan_champion_trajectory.csv # Racing line for moving obstacles
 ```

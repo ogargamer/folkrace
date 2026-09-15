@@ -10,10 +10,10 @@ CURR_DIR = os.path.dirname(os.path.abspath(__file__))
 GA_DIR = CURR_DIR
 WEBOTS_DIR = os.path.dirname(os.path.dirname(GA_DIR))
 MY_PROJECT_DIR = os.path.join(WEBOTS_DIR, "simulation", "my_project")
-SUPERVISOR_DIR = os.path.join(MY_PROJECT_DIR, "controllers", "ga_supervisor_worker")
+PLANNER_DIR = os.path.join(MY_PROJECT_DIR, "controllers", "tof_path_planner")
 WORKSPACE_ROOT = os.path.dirname(WEBOTS_DIR)
 
-for p in [GA_DIR, SUPERVISOR_DIR, WORKSPACE_ROOT]:
+for p in [GA_DIR, PLANNER_DIR, WORKSPACE_ROOT]:
     if p not in sys.path and os.path.exists(p):
         sys.path.insert(0, p)
 
@@ -23,7 +23,7 @@ from ga_planner_config import (
     compute_scalar_fitness,
     OPTION_2_SL_MPC_GENE_SPECS,
 )
-from ga_supervisor_worker import ReverseObstacleEngine
+from obstacle_engine import ReverseObstacleEngine
 
 
 def test_genome_codecs():

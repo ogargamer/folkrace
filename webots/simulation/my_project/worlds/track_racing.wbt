@@ -304,6 +304,9 @@ Pose {
   ]
 }
 only_front_tofs {
+  name "Folkrace"
+  controller "tof_path_planner"
+  supervisor TRUE
 }
 DEF MOVING_OBSTACLE Solid {
   translation 2.5 1 0.07474422176814798

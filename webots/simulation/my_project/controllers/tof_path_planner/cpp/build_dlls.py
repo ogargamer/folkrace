@@ -19,19 +19,20 @@ def find_compiler() -> Tuple[str, dict]:
     """Locates g++ with AVX2 support from PATH or known w64devkit directories."""
     cpp_dir = os.path.dirname(os.path.abspath(__file__))
     controller_dir = os.path.dirname(cpp_dir)
-    workspace_root = os.path.abspath(os.path.join(controller_dir, *[".."] * 3))
+    workspace_root = os.path.abspath(os.path.join(controller_dir, *[".."] * 4))
+    # If workspace_root does not contain .git, step up one more level
+    if not os.path.exists(os.path.join(workspace_root, ".git")):
+        workspace_root = os.path.dirname(workspace_root)
 
     candidates = [
         # Check system PATH first
         shutil.which("g++"),
         # Check workspace tools
-        os.path.join(workspace_root, "tools", "w64devkit", "bin", "g++.exe"),
         os.path.join(workspace_root, "webots", "optimization", "ga_planner_optimizer", "w64devkit", "bin", "g++.exe"),
-        # Check sibling worktrees
-        os.path.join(os.path.dirname(workspace_root), "repo-restructure-tiered-folders", "webots", "optimization", "ga_optimizer", "w64devkit", "bin", "g++.exe"),
-        # System known installations
-        r"C:\Users\nurmi\Documents\Folkrace\tools\w64devkit\bin\g++.exe",
-        r"C:\Users\nurmi\Documents\Folkrace\ga_optimizer\w64devkit\bin\g++.exe",
+        os.path.join(workspace_root, "webots", "tools", "w64devkit", "bin", "g++.exe"),
+        os.path.join(workspace_root, "tools", "w64devkit", "bin", "g++.exe"),
+        # Direct relative path from cpp_dir
+        os.path.abspath(os.path.join(cpp_dir, "..", "..", "..", "..", "optimization", "ga_planner_optimizer", "w64devkit", "bin", "g++.exe")),
     ]
 
     env = os.environ.copy()

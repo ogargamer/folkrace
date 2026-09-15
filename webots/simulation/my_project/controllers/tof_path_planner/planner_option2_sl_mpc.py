@@ -385,23 +385,18 @@ class CppCurvilinearSLMPC:
             primary_ok = (status_prim in (0, 1))
             alt_ok = (status_alt in (0, 1))
             if not primary_ok and alt_ok:
+                # Primary line blocked/infeasible, challenger clear: immediate safety switch
                 winner = 1
             elif primary_ok and not alt_ok:
+                # Challenger infeasible, primary safe: retain primary
                 winner = 0
             elif primary_ok and alt_ok and status_prim == 0:
-                last = getattr(self, "_last_winner", 0)
-                if last == 0:
-                    # Currently following Main (Primary): Challenger must beat Primary by hysteresis to switch
-                    if (cost_alt + self.alt_switch_hysteresis) < cost_prim:
-                        winner = 1
-                    else:
-                        winner = 0
+                # Primary is always the active incumbent line from ToFGapScout.
+                # Challenger (Slot 1) must strictly beat Primary (Slot 0) by the hysteresis cost margin.
+                if (cost_alt + self.alt_switch_hysteresis) < cost_prim:
+                    winner = 1
                 else:
-                    # Currently following Challenger: Primary must beat Challenger by hysteresis to switch back
-                    if (cost_prim + self.alt_switch_hysteresis) < cost_alt:
-                        winner = 0
-                    else:
-                        winner = 1
+                    winner = 0
         self._last_winner = winner
 
         # ----------------------------------------------------------------------

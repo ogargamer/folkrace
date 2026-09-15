@@ -55,7 +55,6 @@ WORKSPACE_ROOT = os.path.dirname(WEBOTS_DIR)
 for p in [
     CURR_DIR,
     OPTIMIZER_PROJECT_DIR,
-    os.path.join(MY_PROJECT_DIR, "controllers", "ga_supervisor_worker"),
     os.path.join(MY_PROJECT_DIR, "controllers", "tof_path_planner"),
     os.path.join(OPTIMIZER_PROJECT_DIR, "data"),
     WORKSPACE_ROOT,
@@ -177,12 +176,29 @@ class CMAESOptimizerAdapter:
         if CMA_RESTART_ON_CONVERGENCE and bool(self.es.stop()):
             print(
                 f"[CMA-ES] Stopping criteria triggered: {self.es.stop()}. "
-                f"Auto-restarting search distribution around best solution with sigma0={self.sigma0:.2f}...",
+                f"Auto-restarting search distribution around top solution with sigma0={self.sigma0:.2f}...",
                 flush=True,
             )
-            best_u = self.es.result.xbest
-            self.es = cma.CMAEvolutionStrategy(best_u, self.sigma0, self.opts)
+            # Re-center around champion genome if available, otherwise xbest or xmean
+            if self.initial_genome is not None:
+                x_anchor = self.initial_genome.to_array()
+                anchor_u = np.clip((x_anchor - self.lower) / self.span, 0.05, 0.95).tolist()
+            elif self.es.result.xbest is not None:
+                anchor_u = self.es.result.xbest
+            else:
+                anchor_u = self.es.mean
+            self.es = cma.CMAEvolutionStrategy(anchor_u, self.sigma0, self.opts)
             self.last_candidates_u = None
+
+    def restart_around_champion(self, champion_genome: BasePlannerGenome, sigma_scale: float = 1.0):
+        """Forces immediate re-centering of CMA-ES around the known best champion."""
+        self.initial_genome = champion_genome
+        x0 = champion_genome.to_array()
+        u0 = np.clip((x0 - self.lower) / self.span, 0.05, 0.95)
+        new_sigma = max(0.05, float(self.sigma0 * sigma_scale))
+        print(f"[CMA-ES] Forcing distribution re-seed around champion (Fitness: {getattr(champion_genome, 'fitness', 'N/A')}) with sigma={new_sigma:.2f}...", flush=True)
+        self.es = cma.CMAEvolutionStrategy(u0.tolist(), new_sigma, self.opts)
+        self.last_candidates_u = None
 
     def set_current_population(self, pop: List[BasePlannerGenome]):
         """Projects an existing population into normalized space for resume operations."""
@@ -209,7 +225,15 @@ class CMAESOptimizerAdapter:
         try:
             with open(filepath, "rb") as f:
                 data = pickle.load(f)
-                self.es = data["es"]
+                loaded_es = data["es"]
+                if hasattr(loaded_es, "N") and loaded_es.N != self.D:
+                    print(
+                        f"[CMA-ES] Pickled state dimension ({loaded_es.N}) does not match current genome specs ({self.D}). "
+                        f"Re-initializing fresh CMA-ES search from champion...",
+                        flush=True,
+                    )
+                    return False
+                self.es = loaded_es
                 self.last_candidates_u = data.get("last_candidates_u", None)
             return True
         except Exception as e:
@@ -349,6 +373,7 @@ def run_genetic_algorithm(
     """
     planners_to_run = ["OPTION_2_SL_MPC"]
     is_cma = str(algorithm).upper().startswith("CMA")
+    is_multi = False
 
     # --------------------------------------------------------------------------
     # Optional 20-Second Rendered Visual Preview (Real-Time Webots Window)
@@ -436,6 +461,7 @@ def run_genetic_algorithm(
     best_metrics_map: Dict[str, Dict[str, Any]] = {}
     start_gens: Dict[str, int] = {}
     cma_adapters: Dict[str, Optional[CMAESOptimizerAdapter]] = {}
+    consecutive_crashes: Dict[str, int] = {}
 
     for p in planners_to_run:
         genome_cls = get_genome_class(p)
@@ -445,6 +471,7 @@ def run_genetic_algorithm(
         best_metrics_map[p] = {}
         start_gens[p] = 0
         cma_adapters[p] = None
+        consecutive_crashes[p] = 0
 
         # Checkpoint file specific to planner
         planner_ckpt = os.path.join(CURR_DIR, f"ga_checkpoint_{p.lower()}.json")
@@ -647,8 +674,24 @@ def run_genetic_algorithm(
                 if is_cma and cma_adapters[p] is not None:
                     adapter = cma_adapters[p]
                     adapter.tell(fitnesses)
+
+                    # Watchdog: detect complete generation collapse (e.g. 100% crashes / zero gradient)
+                    if gen_crashes >= pop_size:
+                        consecutive_crashes[p] = consecutive_crashes.get(p, 0) + 1
+                    else:
+                        consecutive_crashes[p] = 0
+
+                    if consecutive_crashes.get(p, 0) >= 3 and best_genomes[p] is not None:
+                        print(
+                            f"\n[Optimizer Watchdog] Detected {consecutive_crashes[p]} consecutive 100% crash generations for {p}!\n"
+                            f"  -> Rescuing CMA distribution: force-restarting around top champion (Best Fit: {best_fitnesses[p]:.1f}).",
+                            flush=True,
+                        )
+                        adapter.restart_around_champion(best_genomes[p], sigma_scale=0.8)
+                        consecutive_crashes[p] = 0
+
                     if gen < num_generations - 1:
-                        populations[p] = adapter.ask()
+                        populations[p] = adapter.ask(inject_baseline=True)
                     # Save CMA-ES state (after ask so that iteration counter and candidates are aligned)
                     cma_file = os.path.join(CURR_DIR, f"cma_state_{p.lower()}.pkl") if is_multi else os.path.join(CURR_DIR, "cma_state.pkl")
                     adapter.save_state(cma_file)
@@ -661,7 +704,11 @@ def run_genetic_algorithm(
                         for e in range(min(ELITISM_COUNT, pop_size)):
                             elite_idx = sorted_indices[e]
                             elite_copy = genome_cls()
-                            elite_copy.from_array(populations[p][elite_idx].to_array())
+                            if gen_crashes >= pop_size and best_genomes[p] is not None and e == 0:
+                                # When whole generation crashed, inject known champion as elite 0
+                                elite_copy.from_array(best_genomes[p].to_array())
+                            else:
+                                elite_copy.from_array(populations[p][elite_idx].to_array())
                             next_population.append(elite_copy)
 
                         # Fill remainder via Tournament Selection + Crossover + Mutation

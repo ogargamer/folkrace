@@ -22,38 +22,18 @@ import numpy as np
 
 # Discover controller paths
 CURR_DIR = os.path.dirname(os.path.abspath(__file__))
-
-def _find_optimizer_dir(start_dir: str) -> str:
-    if os.path.exists(os.path.join(start_dir, "worlds", "Cyan_Champion_GA.wbt")):
-        return start_dir
-    p = start_dir
-    for _ in range(6):
-        cand = os.path.join(p, "webots", "optimization", "ga_planner_optimizer")
-        if os.path.exists(os.path.join(cand, "worlds", "Cyan_Champion_GA.wbt")):
-            return cand
-        cand2 = os.path.join(p, "optimization", "ga_planner_optimizer")
-        if os.path.exists(os.path.join(cand2, "worlds", "Cyan_Champion_GA.wbt")):
-            return cand2
-        parent = os.path.dirname(p)
-        if parent == p:
-            break
-        p = parent
-    return start_dir
-
-OPTIMIZER_PROJECT_DIR = _find_optimizer_dir(CURR_DIR)
-GA_OPTIMIZER_DIR = OPTIMIZER_PROJECT_DIR
-WEBOTS_DIR = os.path.dirname(os.path.dirname(OPTIMIZER_PROJECT_DIR))
+GA_OPTIMIZER_DIR = CURR_DIR
+OPTIMIZER_PROJECT_DIR = CURR_DIR
+WEBOTS_DIR = os.path.dirname(os.path.dirname(GA_OPTIMIZER_DIR))
 MY_PROJECT_DIR = os.path.join(WEBOTS_DIR, "simulation", "my_project")
 PLANNERS_DIR = os.path.join(MY_PROJECT_DIR, "controllers", "tof_path_planner")
 WORKSPACE_ROOT = os.path.dirname(WEBOTS_DIR)
 
 for p in [
     CURR_DIR,
-    OPTIMIZER_PROJECT_DIR,
+    GA_OPTIMIZER_DIR,
     PLANNERS_DIR,
-    os.path.join(MY_PROJECT_DIR, "controllers", "ga_supervisor_worker"),
-    os.path.join(MY_PROJECT_DIR, "controllers", "champion_live_preview"),
-    os.path.join(OPTIMIZER_PROJECT_DIR, "data"),
+    os.path.join(CURR_DIR, "data"),
     WORKSPACE_ROOT,
 ]:
     if p not in sys.path and os.path.exists(p):
@@ -282,6 +262,7 @@ class GADashboardGUI(QMainWindow):
         self._setup_dark_theme()
         self._init_ui()
         self._load_initial_champion_previews()
+        self._load_history_on_startup()
 
     def _setup_dark_theme(self):
         self.setStyleSheet("""
@@ -484,9 +465,7 @@ class GADashboardGUI(QMainWindow):
         p_lbl = QLabel("Target Planner:")
         p_lbl.setStyleSheet("font-size: 10px; color: #94A3B8;")
         self.planner_combo = QComboBox()
-        self.planner_combo.addItem("Option 3: Septic Spline (C++ Native AVX2, ~3.5ms)", "OPTION_3_SEPTIC")
-        self.planner_combo.addItem("Option 1: BVP Dynamic State Lattice", "OPTION_1_BVP")
-        self.planner_combo.addItem("Option 2: Curvilinear SL-MPC (OSQP)", "OPTION_2_SL_MPC")
+        self.planner_combo.addItem("Option 2: Curvilinear SL-MPC (C++ OSQP)", "OPTION_2_SL_MPC")
         self.planner_combo.setToolTip("Select which path planner to optimize when in Single Planner mode")
         for i in range(self.planner_combo.count()):
             if self.planner_combo.itemData(i) == ACTIVE_PLANNER:
@@ -800,9 +779,7 @@ class GADashboardGUI(QMainWindow):
             with open(active_path, "w", encoding="utf-8") as f:
                 json.dump(active_cfg, f, indent=2)
 
-            world_path = os.path.join(MY_PROJECT_DIR, "worlds", "track_preview.wbt")
-            if not os.path.exists(world_path):
-                world_path = os.path.join(MY_PROJECT_DIR, "worlds", "track_ga_eval.wbt")
+            world_path = os.path.join(MY_PROJECT_DIR, "worlds", "track_racing.wbt")
 
             webots_bin = WEBOTS_BINARY
             env = os.environ.copy()
@@ -815,11 +792,11 @@ class GADashboardGUI(QMainWindow):
             env["PATH"] = webots_bin_dir + os.pathsep + py_dir + os.pathsep + py_scripts + os.pathsep + env.get("PATH", "")
             env["PYTHONPATH"] = os.pathsep.join([
                 CURR_DIR,
-                os.path.join(MY_PROJECT_DIR, "controllers", "champion_live_preview"),
                 os.path.join(MY_PROJECT_DIR, "controllers", "tof_path_planner"),
                 os.path.join(CURR_DIR, "data"),
                 WORKSPACE_ROOT,
             ])
+            env["WEBOTS_CONTROLLER_MODE"] = "preview"
             env["PYTHONUNBUFFERED"] = "1"
 
             cmd = [
@@ -1000,6 +977,73 @@ class GADashboardGUI(QMainWindow):
                     txt_widget.setPlainText(json.dumps(preview, indent=2))
             except Exception as e:
                 txt_widget.setPlainText(f"Error loading {p_name} preview: {e}")
+
+    def _load_history_on_startup(self):
+        """Loads historical generation records from ga_history.csv if available."""
+        if not os.path.exists(HISTORY_CSV_FILE):
+            return
+        try:
+            with open(HISTORY_CSV_FILE, "r", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                rows = list(reader)
+
+            if not rows:
+                return
+
+            for row in rows:
+                gen = int(row.get("Generation", 0))
+                planner = row.get("Planner", "OPTION_2_SL_MPC")
+                best_fit = float(row.get("Best_Fitness", 0.0))
+                mean_fit = float(row.get("Mean_Fitness", 0.0))
+                dist_m = float(row.get("Best_Distance_m", 0.0))
+                speed_mps = float(row.get("Best_Speed_mps", 0.0))
+                crashes = int(float(row.get("Crash_Count", 0)))
+                gen_time = float(row.get("Gen_Time_s", 0.0))
+
+                if planner not in self.data_by_planner:
+                    self.data_by_planner[planner] = {
+                        "gen": [],
+                        "best_fit": [],
+                        "mean_fit": [],
+                        "dist": [],
+                        "speed": [],
+                        "crashes": [],
+                    }
+
+                self.data_by_planner[planner]["gen"].append(gen)
+                self.data_by_planner[planner]["best_fit"].append(best_fit)
+                self.data_by_planner[planner]["mean_fit"].append(mean_fit)
+                self.data_by_planner[planner]["dist"].append(dist_m)
+                self.data_by_planner[planner]["speed"].append(speed_mps)
+                self.data_by_planner[planner]["crashes"].append(crashes)
+
+                row_idx = self.table.rowCount()
+                self.table.insertRow(row_idx)
+                self.table.setItem(row_idx, 0, QTableWidgetItem(str(gen)))
+                self.table.setItem(row_idx, 1, QTableWidgetItem(planner.replace("OPTION_", "Opt").replace("_SL_MPC", "-MPC")))
+                self.table.setItem(row_idx, 2, QTableWidgetItem(f"{best_fit:.1f}"))
+                self.table.setItem(row_idx, 3, QTableWidgetItem(f"{mean_fit:.1f}"))
+                self.table.setItem(row_idx, 4, QTableWidgetItem(f"{dist_m:.2f}"))
+                self.table.setItem(row_idx, 5, QTableWidgetItem(f"{speed_mps:.2f}"))
+                self.table.setItem(row_idx, 6, QTableWidgetItem(str(crashes)))
+                self.table.setItem(row_idx, 7, QTableWidgetItem(f"{gen_time:.1f}"))
+
+            self.table.scrollToBottom()
+            self.canvas.update_plots(self.data_by_planner)
+
+            last_row = rows[-1]
+            last_gen = int(last_row.get("Generation", len(rows)))
+            max_dist_overall = max([max(p["dist"]) for p in self.data_by_planner.values()] or [0.0])
+            max_speed_overall = max([max(p["speed"]) for p in self.data_by_planner.values()] or [0.0])
+            best_fit_overall = max([max(p["best_fit"]) for p in self.data_by_planner.values()] or [0.0])
+            self.lbl_stats.setText(
+                f"History Loaded: Gen {last_gen} | Best Fit: {best_fit_overall:.1f} | Max Dist: {max_dist_overall:.2f} m | Max Speed: {max_speed_overall:.2f} m/s"
+            )
+            pct = min(100, int((last_gen / max(1, self.gen_spin.value())) * 100))
+            self.progress_bar.setValue(pct)
+            self.on_status_change(f"READY (Gen {last_gen} Loaded)")
+        except Exception as e:
+            print(f"[GA Dashboard] Note: Could not load history from {HISTORY_CSV_FILE}: {e}", flush=True)
 
     def closeEvent(self, event):
         """Cleanly abort and kill all Webots processes if window is closed."""
