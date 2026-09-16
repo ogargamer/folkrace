@@ -57,6 +57,21 @@ _lib.costmap_get_width.restype = ctypes.c_int
 _lib.costmap_get_height.argtypes = [ctypes.c_void_p]
 _lib.costmap_get_height.restype = ctypes.c_int
 
+if hasattr(_lib, "costmap_scout_gaps"):
+    _lib.costmap_scout_gaps.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_float),  # ranges_16
+        ctypes.c_float, ctypes.c_float,  # max_lookahead_m, steer_current
+        ctypes.c_float, ctypes.c_float,  # w_gap_distance, w_gap_width
+        ctypes.c_float, ctypes.c_float,  # w_align_steer, w_align_straight
+        ctypes.c_float,                  # w_side_clearance
+        ctypes.c_float, ctypes.c_float,  # gap_dist_exp_k, gap_progress_margin_m
+        ctypes.c_float, ctypes.c_float,  # alt_min_separation_m, alt_aperture_bias
+        ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), # out_targets_x, y, ap
+        ctypes.c_int,                    # max_targets
+    ]
+    _lib.costmap_scout_gaps.restype = ctypes.c_int
+
 # Standard sensor names order matching C++ array and only_front_tofs.proto
 SENSOR_NAMES = [
     # Front-Left (0..7)
@@ -116,6 +131,13 @@ class CppSmartHybridCostmap:
         self.hazard_mask = np.zeros((self.height, self.width), dtype=np.uint8)
         self._lib = _lib
         self.raw_ranges_c = (ctypes.c_float * 16)()
+
+        # Preallocated C-types outputs for fast C++ gap scouting
+        self._out_act_x = ctypes.c_float(0.0)
+        self._out_act_y = ctypes.c_float(0.0)
+        self._out_targets_x = (ctypes.c_float * 4)()
+        self._out_targets_y = (ctypes.c_float * 4)()
+        self._out_targets_ap = (ctypes.c_float * 4)()
 
     def __del__(self):
         if hasattr(self, "_handle") and self._handle:
@@ -231,3 +253,52 @@ class CppSmartHybridCostmap:
             n,
         )
         return bool(res == 1)
+
+    def scout_gaps_native(
+        self,
+        max_lookahead_m: float = 1.40,
+        steer_current: float = 0.0,
+        w_gap_distance: float = 3.50,
+        w_gap_width: float = 2.00,
+        w_align_steer: float = 0.80,
+        w_align_straight: float = 0.40,
+        w_side_clearance: float = 2.80,
+        gap_dist_exp_k: float = 0.60,
+        gap_progress_margin_m: float = 0.15,
+        alt_min_separation_m: float = 0.25,
+        alt_aperture_bias: float = 1.80,
+        top_k: int = 2,
+    ) -> List[Tuple[float, float, float]]:
+        """
+        Executes C++ native gap scouting across the active hazard_mask.
+        Returns: targets_list [(tx, ty, aperture), ...]
+        """
+        n_found = _lib.costmap_scout_gaps(
+            self._handle,
+            self.raw_ranges_c,
+            float(max_lookahead_m),
+            float(steer_current),
+            float(w_gap_distance),
+            float(w_gap_width),
+            float(w_align_steer),
+            float(w_align_straight),
+            float(w_side_clearance),
+            float(gap_dist_exp_k),
+            float(gap_progress_margin_m),
+            float(alt_min_separation_m),
+            float(alt_aperture_bias),
+            self._out_targets_x,
+            self._out_targets_y,
+            self._out_targets_ap,
+            int(top_k),
+        )
+
+        targets = []
+        for i in range(max(1, min(n_found, top_k))):
+            targets.append((
+                float(self._out_targets_x[i]),
+                float(self._out_targets_y[i]),
+                float(self._out_targets_ap[i]),
+            ))
+
+        return targets

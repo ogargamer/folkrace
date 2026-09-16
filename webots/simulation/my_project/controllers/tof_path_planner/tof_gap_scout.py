@@ -147,8 +147,6 @@ class ToFGapScout:
         gap_progress_margin_m: float = GAP_PROGRESS_MARGIN_M,
         alt_min_separation_m: float = ALT_MIN_SEPARATION_M,
         alt_aperture_bias: float = ALT_APERTURE_BIAS,
-        gap_latch_hysteresis: float = 1.25,
-        gap_latch_dist_m: float = 0.28,
         ray_origin_offset_m: float = 0.070,
         **kwargs,
     ):
@@ -161,25 +159,11 @@ class ToFGapScout:
         self.gap_progress_margin_m = float(gap_progress_margin_m)
         self.alt_min_separation_m = float(alt_min_separation_m)
         self.alt_aperture_bias = float(alt_aperture_bias)
-        self.gap_latch_hysteresis = float(gap_latch_hysteresis)
-        self.gap_latch_dist_m = float(gap_latch_dist_m)
         self.ray_origin_offset_m = float(ray_origin_offset_m)
         self.last_xg: float = 0.0
         self.last_yg: float = 1.20
         self.last_aperture: float = 0.50
         self.last_targets: List[Tuple[float, float, float]] = []
-        self.active_corridor_x: Optional[float] = None
-        self.active_corridor_y: Optional[float] = None
-
-    def set_active_target(self, x: float, y: float) -> None:
-        """Sets the active corridor anchor so Slot 0 reliably tracks this path branch."""
-        self.active_corridor_x = float(x)
-        self.active_corridor_y = float(y)
-
-    def reset_active_target(self) -> None:
-        """Resets active corridor anchor (e.g. after recovery or on wide-open track)."""
-        self.active_corridor_x = None
-        self.active_corridor_y = None
 
     def scout_gap(
         self,
@@ -236,6 +220,24 @@ class ToFGapScout:
         without colliding with inflated obstacle boundaries.
         Returns list of (x, y, aperture_width).
         """
+        # Fast C++ Native Gap Scout Path (0.05 ms vs 5 ms)
+        if costmap_obj is not None and hasattr(costmap_obj, "scout_gaps_native") and hasattr(costmap_obj, "_handle") and costmap_obj._handle:
+            targets = costmap_obj.scout_gaps_native(
+                max_lookahead_m=max_lookahead_m,
+                steer_current=steer_current,
+                w_gap_distance=self.w_gap_distance,
+                w_gap_width=self.w_gap_width,
+                w_align_steer=self.w_align_steer,
+                w_align_straight=self.w_align_straight,
+                w_side_clearance=self.w_side_clearance,
+                gap_dist_exp_k=self.gap_dist_exp_k,
+                gap_progress_margin_m=self.gap_progress_margin_m,
+                alt_min_separation_m=self.alt_min_separation_m,
+                alt_aperture_bias=self.alt_aperture_bias,
+                top_k=top_k,
+            )
+            return targets
+
         if hazard_mask is None or costmap_obj is None:
             return [(0.0, max_lookahead_m, 0.40)]
 
@@ -273,8 +275,8 @@ class ToFGapScout:
                         clear_dist = max(GAP_MIN_LOOKAHEAD_M, d - step_ds)
                         break
 
-                # Target at maximum clear beam distance (backed off slightly for vehicle margin)
-                eff_dist = max(GAP_MIN_LOOKAHEAD_M, clear_dist - 0.06)
+                # Target at maximum clear beam distance (backed off by 7.5cm safety margin)
+                eff_dist = max(GAP_MIN_LOOKAHEAD_M, clear_dist - 0.075)
                 tx = sx + eff_dist * cos_h
                 ty = max(0.18, sy + eff_dist * sin_h)
                 total_dist = math.hypot(tx, ty)
@@ -402,6 +404,23 @@ class ToFGapScout:
             steer_diff = abs(c["steer_equiv"] - steer_current)
             straight_diff = abs(c["rel_angle"])
 
+            # Neighboring ToF Zone Width Bonus (0.3x lowest cost / best neighboring zone clearance)
+            neighbor_bonus = 0.0
+            if tof_readings:
+                # Find matching physical zone index for candidate angle
+                rel_deg = math.degrees(c["rel_angle"])
+                active_rig = FRONT_TOF_SENSOR_RIG if any("front" in k for k in tof_readings) else LEGACY_TOF_SENSOR_RIG
+                if rel_deg >= 0.0:
+                    z_idx = min(7, max(0, int(round((rel_deg - 4.1) / 11.25))))
+                else:
+                    z_idx = min(15, max(8, 8 + int(round((-rel_deg - 4.1) / 11.25))))
+                
+                left_neighbor_dist = tof_readings.get(active_rig[z_idx - 1][0], 0.0) if (z_idx > 0 and z_idx != 8) else 0.0
+                right_neighbor_dist = tof_readings.get(active_rig[z_idx + 1][0], 0.0) if (z_idx < 15 and z_idx != 7) else 0.0
+                min_neighbor_dist = max(left_neighbor_dist, right_neighbor_dist)
+                neighbor_norm = min(1.80, min_neighbor_dist) / 1.80
+                neighbor_bonus = 0.30 * self.w_gap_width * neighbor_norm
+
             # Side clearance alignment bonus:
             # c["rel_angle"] < 0 is left. -sin(rel_angle) > 0 for left targets.
             # If side_diff > 0 (left has longer reading), left targets receive a strong bonus!
@@ -413,6 +432,7 @@ class ToFGapScout:
             score = (
                 self.w_gap_distance * dist_factor
                 + self.w_gap_width * width_norm
+                + neighbor_bonus
                 + side_bonus
                 - center_penalty
                 - w_steer * steer_diff
@@ -427,31 +447,7 @@ class ToFGapScout:
         # ----------------------------------------------------------------------
         targets = []
         if scored_candidates:
-            # Check if an active corridor anchor is present to lock Slot 0
-            c0 = None
-            best_score, best_cand = scored_candidates[0]
-            if self.active_corridor_x is not None and self.active_corridor_y is not None:
-                act_x = self.active_corridor_x
-                act_y = self.active_corridor_y
-                for sc, c in scored_candidates:
-                    tx, ty = c["tx"], c["ty"]
-                    same_side = (act_x < -0.05 and tx < -0.02) or (act_x > 0.05 and tx > 0.02)
-                    near_active = math.hypot(tx - act_x, ty - act_y) <= self.gap_latch_dist_m
-                    if same_side or near_active:
-                        # Only retain the latched corridor if it isn't severely inferior to the best opening.
-                        # Hysteresis buffer prevents chattering between equal left/right openings around center obstacles,
-                        # while letting genuine open corners break through cleanly.
-                        if (sc + self.gap_latch_hysteresis) >= best_score:
-                            c0 = c
-                        break
-
-            # Fallback if no candidate matched the active corridor, on cold start, or when broken by superior opening
-            if c0 is None:
-                c0 = best_cand
-
-            self.active_corridor_x = c0["tx"]
-            self.active_corridor_y = c0["ty"]
-
+            best_score, c0 = scored_candidates[0]
             tx0, ty0, ap0 = c0["tx"], c0["ty"], c0["aperture"]
             targets.append((tx0, ty0, ap0))
 
@@ -464,9 +460,12 @@ class ToFGapScout:
                 for _, c in scored_candidates:
                     tx, ty, ap = c["tx"], c["ty"], c["aperture"]
                     lat_sep = abs(tx - tx0)
+                    ang_sep = abs(c["rel_angle"] - c0["rel_angle"])
                     is_opposite_side = (tx0 < -0.04 and tx > 0.04) or (tx0 > 0.04 and tx < -0.04)
+                    min_ang_sep = math.radians(24.0)
 
-                    if lat_sep >= self.alt_min_separation_m or is_opposite_side:
+                    # Must be separated by minimum distance AND not be an immediately adjacent zone
+                    if (lat_sep >= self.alt_min_separation_m or is_opposite_side) and (ang_sep >= min_ang_sep or is_opposite_side):
                         # Compute challenger score with aperture bias
                         d_cand = c["dist"]
                         d_thresh = TRACK_CORRIDOR_WIDTH_M + self.gap_progress_margin_m

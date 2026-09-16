@@ -357,6 +357,312 @@ public:
         }
         return true; // Collision-free
     }
+    // ==========================================================================
+    // C++ HIGH-PERFORMANCE GAP SCOUT & TARGET DISCOVERY CORE
+    // Marches 180 dense radial rays through the updated hazard_mask, evaluates
+    // the 16 physical ToF beam sightlines, and returns primary & challenger targets
+    // ==========================================================================
+    struct TargetCandidate {
+        float tx, ty, dist, aperture, steer_equiv, rel_angle;
+    };
+
+    int scout_gaps(
+        const float* ranges_16,
+        float max_lookahead_m,
+        float steer_current,
+        float w_gap_distance,
+        float w_gap_width,
+        float w_align_steer,
+        float w_align_straight,
+        float w_side_clearance,
+        float gap_dist_exp_k,
+        float gap_progress_margin_m,
+        float alt_min_separation_m,
+        float alt_aperture_bias,
+        float* out_targets_x,
+        float* out_targets_y,
+        float* out_targets_aperture,
+        int max_targets
+    ) {
+        constexpr float GAP_MIN_LOOKAHEAD_M = 0.35f;
+        constexpr float GAP_MAX_LOOKAHEAD_M = 1.70f;
+        constexpr float GAP_MIN_WIDTH_M = 0.0f;
+        constexpr float TRACK_CORRIDOR_WIDTH_M = 1.00f;
+
+        float max_r = std::min(max_lookahead_m, GAP_MAX_LOOKAHEAD_M);
+        float step_ds = std::max(res * 0.8f, 0.012f);
+        int n_steps = static_cast<int>(max_r / step_ds);
+
+        // Preallocated fixed buffer for candidates
+        constexpr int MAX_CAND = 256;
+        TargetCandidate candidates[MAX_CAND];
+        int n_cand = 0;
+
+        // 1. Evaluate 16 physical ToF sensor sightlines strictly through costmap hazard mask
+        if (ranges_16) {
+            for (int i = 0; i < 16; ++i) {
+                if (n_cand >= MAX_CAND) break;
+                float sx = SENSOR_RIG[i].x0;
+                float sy = SENSOR_RIG[i].y0;
+                float heading = SENSOR_RIG[i].heading;
+                float max_range = SENSOR_RIG[i].max_range;
+                float z = std::min(max_range, std::max(0.10f, ranges_16[i]));
+
+                float cos_h = std::cos(heading);
+                float sin_h = std::sin(heading);
+                float clear_dist = z;
+
+                int n_b_steps = static_cast<int>(z / step_ds);
+                for (int s = 1; s <= n_b_steps; ++s) {
+                    float d = s * step_ds;
+                    float px = sx + d * cos_h;
+                    float py = sy + d * sin_h;
+                    int col = static_cast<int>(std::round((px - x_min) / res));
+                    int row = static_cast<int>(std::round((py - y_min) / res));
+                    if (col < 0 || col >= width || row < 0 || row >= height) {
+                        clear_dist = std::max(GAP_MIN_LOOKAHEAD_M, d - step_ds);
+                        break;
+                    }
+                    if (hazard_mask[row * width + col] > 0) {
+                        clear_dist = std::max(GAP_MIN_LOOKAHEAD_M, d - step_ds);
+                        break;
+                    }
+                }
+
+                float eff_dist = std::max(GAP_MIN_LOOKAHEAD_M, clear_dist - 0.075f);
+                float tx = sx + eff_dist * cos_h;
+                float ty = std::max(0.18f, sy + eff_dist * sin_h);
+                float total_dist = std::hypot(tx, ty);
+                float rel_angle = std::atan2(tx, ty);
+                float steer_equiv = -rel_angle;
+                float aperture_m = std::max(GAP_MIN_WIDTH_M, std::min(1.20f, total_dist * 0.35f));
+
+                candidates[n_cand++] = {tx, ty, total_dist, aperture_m, steer_equiv, rel_angle};
+            }
+        }
+
+        // 2. Evaluate 180 dense radial exploration rays (90 Left Pod, 90 Right Pod)
+        constexpr int NUM_CORNER_RAYS = 90;
+        constexpr float PI = 3.14159265358979323846f;
+        constexpr float DEG2RAD = PI / 180.0f;
+
+        // Left Pod (-0.07m, 0.095m): -1.5 deg to +88.5 deg
+        // Right Pod (+0.07m, 0.095m): +1.5 deg to -88.5 deg
+        struct PodConfig {
+            float ox, oy;
+            float start_rel_deg, end_rel_deg;
+        };
+        const PodConfig pods[2] = {
+            {-0.070f, 0.095f, -1.5f, 88.5f},
+            {0.070f, 0.095f, 1.5f, -88.5f}
+        };
+
+        for (int p = 0; p < 2; ++p) {
+            float ox = pods[p].ox;
+            float oy = pods[p].oy;
+            float start_rel = pods[p].start_rel_deg * DEG2RAD;
+            float end_rel = pods[p].end_rel_deg * DEG2RAD;
+            float step_rel = (end_rel - start_rel) / static_cast<float>(NUM_CORNER_RAYS - 1);
+
+            for (int r_idx = 0; r_idx < NUM_CORNER_RAYS; ++r_idx) {
+                if (n_cand >= MAX_CAND) break;
+                float rel_a = start_rel + r_idx * step_rel;
+                float az = (PI * 0.5f) - rel_a;
+                float cos_az = std::cos(az);
+                float sin_az = std::sin(az);
+                float clear_dist = max_r;
+
+                for (int s = 1; s <= n_steps; ++s) {
+                    float d = s * step_ds;
+                    float px = ox + d * cos_az;
+                    float py = oy + d * sin_az;
+                    int col = static_cast<int>(std::round((px - x_min) / res));
+                    int row = static_cast<int>(std::round((py - y_min) / res));
+                    if (col < 0 || col >= width || row < 0 || row >= height) {
+                        clear_dist = std::max(GAP_MIN_LOOKAHEAD_M, d - step_ds);
+                        break;
+                    }
+                    if (hazard_mask[row * width + col] > 0) {
+                        clear_dist = std::max(GAP_MIN_LOOKAHEAD_M, d - step_ds);
+                        break;
+                    }
+                }
+
+                float eff_dist = std::max(GAP_MIN_LOOKAHEAD_M, clear_dist - 0.06f);
+                float tx = ox + eff_dist * cos_az;
+                float ty = std::max(0.18f, oy + eff_dist * sin_az);
+                float total_dist = std::hypot(tx, ty);
+                float rel_angle = std::atan2(tx, ty);
+                float steer_equiv = -rel_angle;
+                float aperture_m = std::max(GAP_MIN_WIDTH_M, std::min(1.20f, total_dist * 0.30f));
+
+                candidates[n_cand++] = {tx, ty, total_dist, aperture_m, steer_equiv, rel_angle};
+            }
+        }
+
+        if (n_cand == 0) {
+            if (out_targets_x) out_targets_x[0] = 0.0f;
+            if (out_targets_y) out_targets_y[0] = max_lookahead_m;
+            if (out_targets_aperture) out_targets_aperture[0] = 0.40f;
+            return 1;
+        }
+
+        // 3. Score Candidate Targets
+        float max_clear_dist = 0.10f;
+        float d_center = 2.0f;
+        for (int i = 0; i < n_cand; ++i) {
+            if (candidates[i].dist > max_clear_dist) max_clear_dist = candidates[i].dist;
+            if (std::abs(candidates[i].rel_angle) < (18.0f * DEG2RAD)) {
+                if (candidates[i].dist < d_center) d_center = candidates[i].dist;
+            }
+        }
+
+        float side_diff = 0.0f;
+        if (ranges_16) {
+            // Right pod sensors (indices 13, 14, 15) point toward LEFT flank (60.4, 71.6, 82.9 deg left)
+            float l_sum = ranges_16[15] + ranges_16[14] + ranges_16[13];
+            // Left pod sensors (indices 5, 6, 7) point toward RIGHT flank (60.4, 71.6, 82.9 deg right)
+            float r_sum = ranges_16[7] + ranges_16[6] + ranges_16[5];
+            float l_mean = l_sum / 3.0f;
+            float r_mean = r_sum / 3.0f;
+            float denom = std::max(0.25f, 0.5f * (l_mean + r_mean));
+            side_diff = (l_mean - r_mean) / denom;
+        }
+
+        float w_straight = w_align_straight;
+        float straight_block_penalty = 0.0f;
+        if (d_center < 1.10f) {
+            w_straight = 0.0f;
+            straight_block_penalty = std::max(0.0f, (0.95f - d_center) / 0.35f) * 3.0f;
+        }
+        float w_steer = (std::abs(steer_current) > 0.08f && d_center >= 1.0f) ? w_align_steer : 0.20f;
+        float min_allowed_dist = (max_clear_dist > 0.85f) ? std::max(GAP_MIN_LOOKAHEAD_M, max_clear_dist * 0.45f) : GAP_MIN_LOOKAHEAD_M;
+
+        struct ScoredCandidate {
+            float score;
+            int cand_idx;
+        };
+        ScoredCandidate scored[MAX_CAND];
+        int n_scored = 0;
+
+        for (int i = 0; i < n_cand; ++i) {
+            const auto& c = candidates[i];
+            if (c.dist < min_allowed_dist) continue;
+
+            float d_cand = c.dist;
+            float d_thresh = TRACK_CORRIDOR_WIDTH_M + gap_progress_margin_m;
+            float dist_base = d_cand / std::max(max_clear_dist, 0.10f);
+            float dist_factor = (d_cand > d_thresh) ? dist_base * std::exp(gap_dist_exp_k * (d_cand - d_thresh)) : dist_base;
+
+            float width_norm = c.aperture / 1.00f;
+            float steer_diff = std::abs(c.steer_equiv - steer_current);
+            float straight_diff = std::abs(c.rel_angle);
+            float side_bonus = w_side_clearance * side_diff * (-std::sin(c.rel_angle));
+            float center_penalty = (std::abs(c.rel_angle) < (20.0f * DEG2RAD)) ? straight_block_penalty : 0.0f;
+
+            // Neighboring ToF Zone Width Bonus (0.3x lowest cost / best neighboring zone clearance)
+            float neighbor_bonus = 0.0f;
+            if (ranges_16) {
+                // Find matching physical zone index for candidate angle
+                // Zones 0..7 (Left, 4.1 deg to 82.9 deg) and 8..15 (Right, -4.1 deg to -82.9 deg)
+                int z_idx = 0;
+                if (c.rel_angle >= 0.0f) {
+                    z_idx = std::min(7, std::max(0, static_cast<int>(std::round((c.rel_angle / DEG2RAD - 4.1f) / 11.25f))));
+                } else {
+                    z_idx = std::min(15, std::max(8, 8 + static_cast<int>(std::round((-c.rel_angle / DEG2RAD - 4.1f) / 11.25f))));
+                }
+                float left_neighbor_dist = (z_idx > 0 && z_idx != 8) ? ranges_16[z_idx - 1] : 0.0f;
+                float right_neighbor_dist = (z_idx < 15 && z_idx != 7) ? ranges_16[z_idx + 1] : 0.0f;
+                float min_neighbor_dist = std::max(left_neighbor_dist, right_neighbor_dist);
+                float neighbor_norm = std::min(1.80f, min_neighbor_dist) / 1.80f;
+                neighbor_bonus = 0.30f * w_gap_width * neighbor_norm;
+            }
+
+            float sc = w_gap_distance * dist_factor
+                     + w_gap_width * width_norm
+                     + neighbor_bonus
+                     + side_bonus
+                     - center_penalty
+                     - w_steer * steer_diff
+                     - w_straight * straight_diff;
+
+            scored[n_scored++] = {sc, i};
+        }
+
+        if (n_scored == 0) {
+            if (out_targets_x) out_targets_x[0] = 0.0f;
+            if (out_targets_y) out_targets_y[0] = max_lookahead_m;
+            if (out_targets_aperture) out_targets_aperture[0] = 0.40f;
+            return 1;
+        }
+
+        std::sort(scored, scored + n_scored, [](const ScoredCandidate& a, const ScoredCandidate& b) {
+            return a.score > b.score;
+        });
+
+        // 4. Smart Corridor Selection (Primary + Challenger)
+        // Candidate 0 is the strictly highest-scoring opening instantaneous
+        int c0_idx = scored[0].cand_idx;
+        const auto& c0 = candidates[c0_idx];
+
+        int num_found = 0;
+        if (out_targets_x && out_targets_y && out_targets_aperture) {
+            out_targets_x[0] = c0.tx;
+            out_targets_y[0] = c0.ty;
+            out_targets_aperture[0] = c0.aperture;
+            num_found = 1;
+
+            if (max_targets >= 2) {
+                // Challenger Line: best opening separated by alt_min_separation_m or opposite side,
+                // and NOT from adjacent ToF zones (minimum angular separation of >= 24.0 deg / 2+ zones)
+                int best_alt_idx = -1;
+                float best_alt_score = -1e9f;
+                constexpr float MIN_ALT_ANGULAR_SEP_RAD = 24.0f * DEG2RAD;
+
+                for (int k = 0; k < n_scored; ++k) {
+                    const auto& c = candidates[scored[k].cand_idx];
+                    float lat_sep = std::abs(c.tx - c0.tx);
+                    float ang_sep = std::abs(c.rel_angle - c0.rel_angle);
+                    bool is_opposite_side = (c0.tx < -0.04f && c.tx > 0.04f) || (c0.tx > 0.04f && c.tx < -0.04f);
+
+                    // Must be separated by minimum distance AND not be an immediately adjacent zone
+                    if ((lat_sep >= alt_min_separation_m || is_opposite_side) && (ang_sep >= MIN_ALT_ANGULAR_SEP_RAD || is_opposite_side)) {
+                        float d_cand = c.dist;
+                        float d_thresh = TRACK_CORRIDOR_WIDTH_M + gap_progress_margin_m;
+                        float dist_base = d_cand / std::max(max_clear_dist, 0.10f);
+                        float dist_factor = (d_cand > d_thresh) ? dist_base * std::exp(gap_dist_exp_k * (d_cand - d_thresh)) : dist_base;
+                        float width_norm = c.aperture / 1.00f;
+                        float steer_diff = std::abs(c.steer_equiv - steer_current);
+                        float straight_diff = std::abs(c.rel_angle);
+                        float side_bonus_alt = (w_side_clearance * 0.45f) * side_diff * (-std::sin(c.rel_angle));
+                        float center_penalty = (std::abs(c.rel_angle) < (20.0f * DEG2RAD)) ? straight_block_penalty : 0.0f;
+
+                        float score_alt = w_gap_distance * dist_factor
+                                        + (w_gap_width * alt_aperture_bias) * width_norm
+                                        + side_bonus_alt
+                                        - center_penalty
+                                        - w_steer * steer_diff
+                                        - w_straight * straight_diff;
+
+                        if (score_alt > best_alt_score) {
+                            best_alt_score = score_alt;
+                            best_alt_idx = scored[k].cand_idx;
+                        }
+                    }
+                }
+
+                if (best_alt_idx >= 0) {
+                    const auto& calt = candidates[best_alt_idx];
+                    out_targets_x[1] = calt.tx;
+                    out_targets_y[1] = calt.ty;
+                    out_targets_aperture[1] = calt.aperture;
+                    num_found = 2;
+                }
+            }
+        }
+
+        return num_found;
+    }
 };
 
 // ==============================================================================
@@ -394,6 +700,36 @@ COSTMAP_API void costmap_process_frame(
     if (out_hazard_mask) {
         std::memcpy(out_hazard_mask, cm->hazard_mask.data(), cm->total_cells * sizeof(uint8_t));
     }
+}
+
+COSTMAP_API int costmap_scout_gaps(
+    void* handle,
+    const float* ranges_16,
+    float max_lookahead_m,
+    float steer_current,
+    float w_gap_distance,
+    float w_gap_width,
+    float w_align_steer,
+    float w_align_straight,
+    float w_side_clearance,
+    float gap_dist_exp_k,
+    float gap_progress_margin_m,
+    float alt_min_separation_m,
+    float alt_aperture_bias,
+    float* out_targets_x,
+    float* out_targets_y,
+    float* out_targets_aperture,
+    int max_targets
+) {
+    if (!handle) return 0;
+    auto* cm = static_cast<SmartHybridCostmapFront*>(handle);
+    return cm->scout_gaps(
+        ranges_16, max_lookahead_m, steer_current,
+        w_gap_distance, w_gap_width, w_align_steer, w_align_straight, w_side_clearance,
+        gap_dist_exp_k, gap_progress_margin_m, alt_min_separation_m, alt_aperture_bias,
+        out_targets_x, out_targets_y, out_targets_aperture,
+        max_targets
+    );
 }
 
 COSTMAP_API int costmap_probe_path(

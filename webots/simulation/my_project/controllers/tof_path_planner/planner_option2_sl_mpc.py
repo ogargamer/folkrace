@@ -195,6 +195,7 @@ class CppCurvilinearSLMPC:
         self.nx = 7
         self.nu = 2
         self._last_winner = 0
+        self._active_target: Optional[Tuple[float, float]] = None
 
         # Preallocated ctypes outputs
         self._out_steer = ctypes.c_double(0.0)
@@ -258,6 +259,11 @@ class CppCurvilinearSLMPC:
         if not self._handle:
             raise RuntimeError("Failed to create C++ CurvilinearSLMPCNative instance")
 
+    def reset_active_target(self) -> None:
+        """Resets the currently tracked active corridor/target line."""
+        self._active_target = None
+        self._last_winner = 0
+
     @property
     def costmap(self):
         return getattr(self, "_costmap", None)
@@ -310,15 +316,47 @@ class CppCurvilinearSLMPC:
     ) -> Dict[str, any]:
         """
         Solves the Curvilinear SL-MPC QP using high-speed native C++ core.
-        Evaluates Primary Racing Line and Smart Challenger Alternative Line.
-        Arbitrates using alt_switch_hysteresis threshold.
+        Tracks active line identity, associates perception candidates to Incumbent vs Challenger,
+        and arbitrates using alt_switch_hysteresis cost margin.
         """
         # ----------------------------------------------------------------------
-        # 1. SOLVE PRIMARY RACING LINE
+        # 0. CANDIDATE ASSOCIATION (INCUMBENT VS CHALLENGER)
+        # ----------------------------------------------------------------------
+        targets = []
+        if extra_targets and len(extra_targets) > 0:
+            targets = list(extra_targets)
+        elif xg is not None and yg is not None:
+            targets = [(float(xg), float(yg), float(aperture_width))]
+
+        if not targets:
+            targets = [(0.0, 1.20, 0.40)]
+
+        prim_target = targets[0]
+        alt_target = targets[1] if len(targets) >= 2 else None
+
+        # Associate incoming stateless candidates with tracked active target
+        if self._active_target is not None and len(targets) >= 2:
+            act_x, act_y = self._active_target
+            d0 = math.hypot(targets[0][0] - act_x, targets[0][1] - act_y)
+            d1 = math.hypot(targets[1][0] - act_x, targets[1][1] - act_y)
+
+            # If target 1 is closer to our currently followed line, target 1 is Incumbent
+            if d1 < d0 and d1 <= 0.45:
+                prim_target = targets[1]
+                alt_target = targets[0]
+            elif d0 <= 0.45:
+                prim_target = targets[0]
+                alt_target = targets[1]
+
+        tx_prim, ty_prim, ap_prim = prim_target
+        theta_prim = math.atan2(tx_prim, max(0.20, ty_prim))
+
+        # ----------------------------------------------------------------------
+        # 1. SOLVE INCUMBENT (PRIMARY) RACING LINE
         # ----------------------------------------------------------------------
         success_prim = _lib.sl_mpc_plan(
             self._handle,
-            float(xg), float(yg), float(theta_g), float(aperture_width),
+            float(tx_prim), float(ty_prim), float(theta_prim), float(ap_prim),
             float(v_current), float(steer_current), float(yaw_rate_current),
             ctypes.byref(self._out_steer),
             ctypes.byref(self._out_speed),
@@ -353,9 +391,9 @@ class CppCurvilinearSLMPC:
         cost_alt = 1e9
         best_line_alt = []
 
-        if extra_targets and len(extra_targets) >= 2 and hasattr(self, "_handle_alt") and self._handle_alt:
-            tx_alt, ty_alt, ap_alt = extra_targets[1]
-            if math.hypot(tx_alt - xg, ty_alt - yg) >= 0.12 or abs(tx_alt - xg) >= 0.08:
+        if alt_target is not None and hasattr(self, "_handle_alt") and self._handle_alt:
+            tx_alt, ty_alt, ap_alt = alt_target
+            if math.hypot(tx_alt - tx_prim, ty_alt - ty_prim) >= 0.12 or abs(tx_alt - tx_prim) >= 0.08:
                 has_challenger = True
                 theta_alt = math.atan2(tx_alt, max(0.20, ty_alt))
                 _lib.sl_mpc_plan(
@@ -376,7 +414,7 @@ class CppCurvilinearSLMPC:
                 best_line_alt = [[float(self._buf_xs1[i]), float(self._buf_ys1[i])] for i in range(n_best_alt)]
 
         # ----------------------------------------------------------------------
-        # 3. ARBITRATION BETWEEN PRIMARY AND CHALLENGER
+        # 3. ARBITRATION BETWEEN INCUMBENT AND CHALLENGER
         # ----------------------------------------------------------------------
         candidate_lines = [best_line_prim, best_line_alt] if (has_challenger and best_line_alt) else [best_line_prim]
 
@@ -391,12 +429,17 @@ class CppCurvilinearSLMPC:
                 # Challenger infeasible, primary safe: retain primary
                 winner = 0
             elif primary_ok and alt_ok and status_prim == 0:
-                # Primary is always the active incumbent line from ToFGapScout.
-                # Challenger (Slot 1) must strictly beat Primary (Slot 0) by the hysteresis cost margin.
+                # Challenger must strictly beat Incumbent by the hysteresis cost margin
                 if (cost_alt + self.alt_switch_hysteresis) < cost_prim:
                     winner = 1
                 else:
                     winner = 0
+
+        # Update active tracked target to the winning line's target
+        if winner == 1 and alt_target is not None:
+            self._active_target = (alt_target[0], alt_target[1])
+        else:
+            self._active_target = (prim_target[0], prim_target[1])
         self._last_winner = winner
 
         # ----------------------------------------------------------------------

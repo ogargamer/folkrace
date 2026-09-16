@@ -69,20 +69,18 @@ class StuckRecoveryManager:
         self,
         reverse_speed_m_s: float = RECOVERY_REVERSE_SPEED_MPS,
         steer_angle_rad: float = RECOVERY_STEER_ANGLE_RAD,
-        emergency_backup_dist_m: float = 0.09,
         clearance_exit_m: float = RECOVERY_CLEARANCE_EXIT_M,
         servo_slew_rad_s: float = RECOVERY_SERVO_SLEW_RAD_S,
         brake_decel_max: float = BRAKE_DECEL_MAX,
         accel_fwd_max: float = ACCEL_FWD_MAX,
         wheelbase_m: float = WHEELBASE,
         max_steer_rad: float = MAX_STEERING_RAD,
-        arc_lookahead_m: float = 0.35,
+        arc_lookahead_m: float = 0.20,
         **kwargs,
     ):
         self.state = StuckRecoveryState.NORMAL_DRIVE
         self.reverse_speed = float(reverse_speed_m_s)
         self.steer_angle = float(steer_angle_rad)
-        self.emergency_backup_dist_m = float(emergency_backup_dist_m)
         self.clearance_exit_m = float(clearance_exit_m)
         self.servo_slew_rad_s = float(servo_slew_rad_s)
         self.brake_decel_max = float(brake_decel_max)
@@ -230,10 +228,24 @@ class StuckRecoveryManager:
         d_esc_l, d_esc_r, d_esc_c = self.evaluate_costmap_escape_arcs(hazard_mask, costmap_obj)
         arc_clearance = (d_esc_l, d_esc_r, d_esc_c)
 
-        # Imminent blockage: no forward escape trajectory is open beyond emergency threshold
+        # 1. Direct physical sightline check: minimum of front 4.1 deg ToFs (straight ahead)
+        d_straight_tof = TOF_MAX_RANGE_M
+        if cached_tofs:
+            d_l_41 = cached_tofs.get("tof_front_left_4.1deg", TOF_MAX_RANGE_M)
+            d_r_41 = cached_tofs.get("tof_front_right_4.1deg", TOF_MAX_RANGE_M)
+            d_straight_tof = min(float(d_l_41), float(d_r_41))
+
+        # 2. Check if front ToFs are blocked (< 15cm):
+        # If front is blocked, check if either side escape curvature is free (>= 15cm).
+        # Only trigger emergency reverse if BOTH front is blocked AND neither side curvature has a way out.
+        front_blocked = (d_straight_tof < 0.15)
+        side_curvature_free = (d_esc_l >= 0.15 or d_esc_r >= 0.15)
+        is_front_imminent_obstacle = front_blocked and (not side_curvature_free)
+
+        # 3. Spinout / Facing Backwards check (110 degrees)
+        is_facing_backwards = abs(heading_err) > math.radians(110.0)
+
         max_forward_escape = max(d_esc_l, d_esc_r, d_esc_c)
-        is_front_imminent_obstacle = (max_forward_escape <= self.emergency_backup_dist_m)
-        is_facing_backwards = abs(heading_err) > math.radians(75.0)
         is_stalled_forward = (commanded_v > 0.30 and abs(current_v) < 0.10 and max_forward_escape < RECOVERY_FRONT_BLOCKED_M)
 
         # Immediate override for imminent obstacle from any state

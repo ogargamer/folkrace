@@ -160,7 +160,7 @@ EMERGENCY_BACKUP_DIST_M = 0.09 # meters (9cm): emergency threshold on 4.1 deg To
 # Dual-Path Candidate Selection & Smart Challenger Arbitration (Option 2 SL-MPC)
 ALT_MIN_SEPARATION_M = 0.15      # meters: minimum lateral separation between primary and challenger target lines
 ALT_APERTURE_BIAS = 1.80         # multiplier on aperture width reward for challenger target (safety/opening priority)
-ALT_SWITCH_HYSTERESIS = 30.0     # objective cost reduction threshold needed for challenger to overthrow primary line
+ALT_SWITCH_HYSTERESIS = 45.0     # objective cost reduction threshold needed for challenger to overthrow primary line
 
 
 # ==============================================================================

@@ -209,7 +209,6 @@ class FolkraceVehicle:
         self.recovery_manager = StuckRecoveryManager(
             reverse_speed_m_s=RECOVERY_REVERSE_SPEED_MPS,
             steer_angle_rad=RECOVERY_STEER_ANGLE_RAD,
-            emergency_backup_dist_m=EMERGENCY_BACKUP_DIST_M,
             clearance_exit_m=RECOVERY_CLEARANCE_EXIT_M,
             servo_slew_rad_s=SERVO_MAX_SPEED_RAD_S,
             brake_decel_max=BRAKE_DECEL_MAX,
@@ -285,8 +284,6 @@ class FolkraceVehicle:
             gap_progress_margin_m=float(genes.get("gap_progress_margin_m", 0.15)),
             alt_min_separation_m=float(genes.get("alt_min_separation_m", 0.25)),
             alt_aperture_bias=float(genes.get("alt_aperture_bias", 1.80)),
-            gap_latch_hysteresis=float(genes.get("gap_latch_hysteresis", 1.25)),
-            gap_latch_dist_m=float(genes.get("gap_latch_dist_m", 0.28)),
             ray_origin_offset_m=float(genes.get("ray_origin_offset_m", 0.070)),
         )
 
@@ -317,7 +314,6 @@ class FolkraceVehicle:
         self.recovery_manager = StuckRecoveryManager(
             reverse_speed_m_s=float(genes.get("recovery_reverse_speed", 1.30)),
             steer_angle_rad=float(genes.get("recovery_steer_angle_rad", 0.4538)),
-            emergency_backup_dist_m=float(genes.get("emergency_backup_dist_m", 0.09)),
             clearance_exit_m=float(genes.get("recovery_clearance_exit_m", 0.28)),
             servo_slew_rad_s=SERVO_MAX_SPEED_RAD_S,
             brake_decel_max=BRAKE_DECEL_MAX,
@@ -344,7 +340,8 @@ class FolkraceVehicle:
 
         self.fusion.reset()
         self.costmap.clear()
-        self.gap_scout.reset_active_target()
+        if hasattr(self, "planner") and hasattr(self.planner, "reset_active_target"):
+            self.planner.reset_active_target()
         self.step_counter = 0
         self.active_steer = 0.0
         self.cached_target_steer = 0.0
@@ -492,12 +489,6 @@ class FolkraceVehicle:
             self.cached_plan_ms = (time.perf_counter() - t_plan_0) * 1000.0
             self.last_plan_res = plan_res
 
-            # When Challenger overthrows Primary line, latch the new corridor in GapScout
-            if plan_res.get("winner_id") == 1:
-                last_targets = getattr(self.gap_scout, "last_targets", None)
-                if last_targets and len(last_targets) >= 2:
-                    self.gap_scout.set_active_target(last_targets[1][0], last_targets[1][1])
-
             raw_target_steer = float(plan_res.get("cmd_steer_rad", 0.0))
             raw_target_speed = float(plan_res.get("cmd_speed_mps", self.v_cruise_min))
 
@@ -519,7 +510,8 @@ class FolkraceVehicle:
                 self.active_steer = rec_steer
                 self.mode_desc = f"RECOVERY_{getattr(self.recovery_manager.state, 'name', self.recovery_manager.state)}"
                 self.was_recovering = True
-                self.gap_scout.reset_active_target()
+                if hasattr(self.planner, "reset_active_target"):
+                    self.planner.reset_active_target()
             else:
                 if self.was_recovering:
                     self.was_recovering = False
