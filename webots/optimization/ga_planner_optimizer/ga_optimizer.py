@@ -144,10 +144,18 @@ class CMAESOptimizerAdapter:
     def ask(self, inject_baseline: bool = False) -> List[BasePlannerGenome]:
         """Samples next population of candidate genomes from CMA-ES distribution."""
         self.last_candidates_u = self.es.ask()
-        if inject_baseline and self.initial_genome is not None and len(self.last_candidates_u) > 0:
-            x0 = self.initial_genome.to_array()
-            u0 = np.clip((x0 - self.lower) / self.span, 0.0, 1.0).tolist()
-            self.last_candidates_u[0] = u0
+        if inject_baseline and len(self.last_candidates_u) > 0:
+            # Candidate 0 is GUARANTEED to be the active all-time champion (Elitism guarantee)
+            if self.initial_genome is not None:
+                x0 = self.initial_genome.to_array()
+                u0 = np.clip((x0 - self.lower) / self.span, 0.0, 1.0).tolist()
+                self.last_candidates_u[0] = u0
+            else:
+                seeds = generate_logical_initial_population(self.genome_cls, 1)
+                if seeds:
+                    x0 = seeds[0].to_array()
+                    u0 = np.clip((x0 - self.lower) / self.span, 0.0, 1.0).tolist()
+                    self.last_candidates_u[0] = u0
 
         pop: List[BasePlannerGenome] = []
         for u in self.last_candidates_u:
@@ -190,13 +198,13 @@ class CMAESOptimizerAdapter:
             self.es = cma.CMAEvolutionStrategy(anchor_u, self.sigma0, self.opts)
             self.last_candidates_u = None
 
-    def restart_around_champion(self, champion_genome: BasePlannerGenome, sigma_scale: float = 1.0):
-        """Forces immediate re-centering of CMA-ES around the known best champion."""
+    def restart_around_champion(self, champion_genome: BasePlannerGenome, sigma_scale: float = 0.2):
+        """Forces immediate re-centering of CMA-ES around the known best champion with a tight neighborhood."""
         self.initial_genome = champion_genome
         x0 = champion_genome.to_array()
         u0 = np.clip((x0 - self.lower) / self.span, 0.05, 0.95)
-        new_sigma = max(0.05, float(self.sigma0 * sigma_scale))
-        print(f"[CMA-ES] Forcing distribution re-seed around champion (Fitness: {getattr(champion_genome, 'fitness', 'N/A')}) with sigma={new_sigma:.2f}...", flush=True)
+        new_sigma = max(0.02, float(self.sigma0 * sigma_scale))
+        print(f"[CMA-ES] Forcing distribution re-seed around champion with tight sigma={new_sigma:.3f}...", flush=True)
         self.es = cma.CMAEvolutionStrategy(u0.tolist(), new_sigma, self.opts)
         self.last_candidates_u = None
 
@@ -628,6 +636,9 @@ def run_genetic_algorithm(
                     best_fitnesses[p] = gen_best_fit
                     best_genomes[p] = populations[p][best_idx]
                     best_metrics_map[p] = gen_best_metrics
+                    # Keep CMA-ES adapter locked to the active all-time champion
+                    if is_cma and cma_adapters[p] is not None:
+                        cma_adapters[p].initial_genome = best_genomes[p]
                     print(f"  *** NEW CHAMPION FOR {p}! Dist: {best_metrics_map[p].get('distance_m', 0.0):.2f}m, Fit: {gen_best_fit:.1f} ***", flush=True)
 
                     # Save Planner Champion JSON
@@ -684,10 +695,10 @@ def run_genetic_algorithm(
                     if consecutive_crashes.get(p, 0) >= 3 and best_genomes[p] is not None:
                         print(
                             f"\n[Optimizer Watchdog] Detected {consecutive_crashes[p]} consecutive 100% crash generations for {p}!\n"
-                            f"  -> Rescuing CMA distribution: force-restarting around top champion (Best Fit: {best_fitnesses[p]:.1f}).",
+                            f"  -> Rescuing CMA distribution: force-restarting around top champion (Best Fit: {best_fitnesses[p]:.1f}) with tight sigma.",
                             flush=True,
                         )
-                        adapter.restart_around_champion(best_genomes[p], sigma_scale=0.8)
+                        adapter.restart_around_champion(best_genomes[p], sigma_scale=0.2)
                         consecutive_crashes[p] = 0
 
                     if gen < num_generations - 1:
