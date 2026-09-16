@@ -1,12 +1,12 @@
 """
 ================================================================================
-  6. LAUNCHER: ESP32 VL53L8CX 16-CHANNEL TOF LIVE VIEWER & TUNING GUI
+  3. LAUNCHER: ESP32 VL53L8CX 16-CHANNEL TOF LIVE VIEWER & TUNING GUI
 ================================================================================
   Connects over USB serial to the ESP32 sensor rig, visualizes live 16-channel
   multizone distance matrices, targets, thresholds, and sensor health.
 
   Usage:
-    python 6_esp32_tof_gui.py
+    python 3_esp32_tof_gui.py
 ================================================================================
 """
 

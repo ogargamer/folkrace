@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
 ================================================================================
-  10. LAUNCHER: BNO08X IMU 3D TEST SERVER (ESP32 UART -> PI 5)
+  7. LAUNCHER: BNO08X IMU 3D TEST SERVER (ESP32 UART -> PI 5)
 ================================================================================
   Stops SLAM, starts the esp32 UART IMU 3D Visualizer Server on the
   Raspberry Pi 5 (Port 8000), and opens your browser.
 
   Usage:
-    python 10_pi_imu_server.py
+    python 7_pi_imu_server.py
 ================================================================================
 """
 

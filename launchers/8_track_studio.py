@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
 ================================================================================
-  11. LAUNCHER: MODULAR RACE TRACK STUDIO & CARTOGRAPHER MAP EXPORTER
+  8. LAUNCHER: MODULAR RACE TRACK STUDIO & CARTOGRAPHER MAP EXPORTER
 ================================================================================
   Interactive 1200mm Tile Snapping, Custom Obstacle Drawing & 1-Click Pi 5 Deploy.
   Runs a zero-dependency local web server on port 8088 and opens your browser.
 
   Usage:
-    python 11_track_studio.py
+    python 8_track_studio.py
 ================================================================================
 """
 

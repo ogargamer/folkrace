@@ -1,13 +1,12 @@
 """
 ================================================================================
-  5. LAUNCHER: HEADLESS GENETIC ALGORITHM PATH PLANNER OPTIMIZER
+  2. LAUNCHER: REAL-TIME GENETIC ALGORITHM PERFORMANCE DASHBOARD
 ================================================================================
-  Starts headless parallel GA / CMA-ES evolution for C++ SL-MPC path planners,
-  evaluating candidate genomes in Webots batch mode.
+  Launches the real-time PyQt5 GA Dashboard GUI with live Matplotlib plots,
+  pause/resume controls, and multi-generation tracking.
 
   Usage:
-    python 5_ga_optimizer.py
-    python 5_ga_optimizer.py --algorithm CMA_ES --generations 200
+    python 2_ga_dashboard.py
 ================================================================================
 """
 
@@ -17,8 +16,8 @@ import subprocess
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 GA_DIR = os.path.join(ROOT_DIR, "webots", "optimization", "ga_planner_optimizer")
-LAUNCHER_SCRIPT = os.path.join(GA_DIR, "launch_ga_optimization.py")
+GUI_SCRIPT = os.path.join(GA_DIR, "ga_dashboard_gui.py")
 
 if __name__ == "__main__":
-    cmd = [sys.executable, LAUNCHER_SCRIPT] + sys.argv[1:]
+    cmd = [sys.executable, GUI_SCRIPT] + sys.argv[1:]
     sys.exit(subprocess.run(cmd, cwd=GA_DIR).returncode)

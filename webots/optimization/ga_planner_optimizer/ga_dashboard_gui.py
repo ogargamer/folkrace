@@ -83,18 +83,11 @@ from ga_planner_config import (
 )
 from ga_optimizer import GAController, run_genetic_algorithm, HISTORY_CSV_FILE, BEST_GENOME_FILE, CHECKPOINT_FILE
 
-try:
-    from cpp_planner_option3_septic import CppSepticSplineTractionProfiler, DLL_PATH as SEPTIC_DLL_PATH
-    CPP_SEPTIC_AVAILABLE = os.path.exists(SEPTIC_DLL_PATH)
-except Exception:
-    CPP_SEPTIC_AVAILABLE = False
-    SEPTIC_DLL_PATH = ""
-
+SL_MPC_DLL_PATH = os.path.join(MY_PROJECT_DIR, "controllers", "tof_path_planner", "curvilinear_sl_mpc.dll")
+CPP_SL_MPC_AVAILABLE = os.path.exists(SL_MPC_DLL_PATH)
 
 PLANNER_COLORS = {
-    "OPTION_1_BVP": "#10B981",    # Emerald Green
     "OPTION_2_SL_MPC": "#3B82F6",  # Electric Blue
-    "OPTION_3_SEPTIC": "#EC4899",  # Neon Pink
 }
 
 
@@ -434,48 +427,30 @@ class GADashboardGUI(QMainWindow):
         header_layout.addWidget(self.status_pill)
 
         # C++ Engine Status Badge
-        if CPP_SEPTIC_AVAILABLE:
-            self.cpp_badge = QLabel(" C++ SEPTIC ENGINE: ACTIVE (AVX2, ~3.5ms) ")
+        if CPP_SL_MPC_AVAILABLE:
+            self.cpp_badge = QLabel(" C++ SL-MPC ENGINE: ACTIVE (AVX2 + OSQP) ")
             self.cpp_badge.setStyleSheet("background-color: #064E3B; color: #34D399; font-weight: bold; font-size: 11px; border: 1px solid #059669; border-radius: 12px; padding: 4px 10px;")
-            self.cpp_badge.setToolTip(f"Native 64-bit DLL Loaded:\n{SEPTIC_DLL_PATH}\nExecution Budget: ~3.5 ms\nCandidates: 210-280 per cycle\nSamples: 36 points\n28 GA Tunable Genes (Anti-Oscillation & Speed Tuning)")
+            self.cpp_badge.setToolTip(f"Native 64-bit DLL Loaded:\n{SL_MPC_DLL_PATH}\nExecution Engine: C++ Curvilinear SL-MPC with OSQP Solver")
         else:
-            self.cpp_badge = QLabel(" C++ ENGINE: NOT DETECTED (PYTHON FALLBACK) ")
+            self.cpp_badge = QLabel(" C++ SL-MPC DLL: NOT FOUND ")
             self.cpp_badge.setStyleSheet("background-color: #451A03; color: #FBBF24; font-weight: bold; font-size: 11px; border: 1px solid #D97706; border-radius: 12px; padding: 4px 10px;")
-            self.cpp_badge.setToolTip("Running Python fallback")
+            self.cpp_badge.setToolTip(f"Missing DLL at {SL_MPC_DLL_PATH}")
         header_layout.addWidget(self.cpp_badge)
 
         header_layout.addStretch()
 
-        # 1. Execution Mode Selector (Single Planner vs All Planners)
-        mode_box = QVBoxLayout()
-        mode_lbl = QLabel("Execution Mode:")
-        mode_lbl.setStyleSheet("font-size: 10px; color: #94A3B8;")
-        self.mode_combo = QComboBox()
-        self.mode_combo.addItems([
-            "Single Planner Only",
-            "ALL Planners (Interleaved 3 Planners)",
-        ])
-        self.mode_combo.setToolTip("Choose whether to optimize only one chosen path planner or run all 3 interleaved each generation")
-        mode_box.addWidget(mode_lbl)
-        mode_box.addWidget(self.mode_combo)
-        header_layout.addLayout(mode_box)
-
-        # 2. Planner Target Selector
+        # 1. Planner Target Info
         p_box = QVBoxLayout()
         p_lbl = QLabel("Target Planner:")
         p_lbl.setStyleSheet("font-size: 10px; color: #94A3B8;")
         self.planner_combo = QComboBox()
         self.planner_combo.addItem("Option 2: Curvilinear SL-MPC (C++ OSQP)", "OPTION_2_SL_MPC")
-        self.planner_combo.setToolTip("Select which path planner to optimize when in Single Planner mode")
-        for i in range(self.planner_combo.count()):
-            if self.planner_combo.itemData(i) == ACTIVE_PLANNER:
-                self.planner_combo.setCurrentIndex(i)
-                break
+        self.planner_combo.setToolTip("Path planner optimized by the Genetic Algorithm (Curvilinear SL-MPC)")
         p_box.addWidget(p_lbl)
         p_box.addWidget(self.planner_combo)
         header_layout.addLayout(p_box)
 
-        # 3. Optimizer Algorithm Selector (CMA-ES vs Standard GA)
+        # 2. Optimizer Algorithm Selector (CMA-ES vs Standard GA)
         algo_box = QVBoxLayout()
         algo_lbl = QLabel("Optimizer Engine:")
         algo_lbl.setStyleSheet("font-size: 10px; color: #94A3B8;")
@@ -624,22 +599,12 @@ class GADashboardGUI(QMainWindow):
         bottom_layout.addWidget(table_group, stretch=3)
 
         # Bottom Right: Champion Genome Parameter Cards
-        params_group = QGroupBox("Live Leaderboard & Champion Parameters")
+        params_group = QGroupBox("Live Leaderboard & Champion Parameters (Option 2: SL-MPC)")
         params_layout = QVBoxLayout(params_group)
 
-        self.tabs = QTabWidget()
-        self.txt_opt1 = QTextEdit()
-        self.txt_opt1.setReadOnly(True)
-        self.txt_opt2 = QTextEdit()
-        self.txt_opt2.setReadOnly(True)
-        self.txt_opt3 = QTextEdit()
-        self.txt_opt3.setReadOnly(True)
-
-        self.tabs.addTab(self.txt_opt3, "Option 3: C++ Septic (28 Genes)")
-        self.tabs.addTab(self.txt_opt1, "Option 1 (BVP)")
-        self.tabs.addTab(self.txt_opt2, "Option 2 (SL-MPC)")
-
-        params_layout.addWidget(self.tabs)
+        self.txt_champion = QTextEdit()
+        self.txt_champion.setReadOnly(True)
+        params_layout.addWidget(self.txt_champion)
         bottom_layout.addWidget(params_group, stretch=2)
 
         splitter.addWidget(bottom_frame)
@@ -647,25 +612,11 @@ class GADashboardGUI(QMainWindow):
 
         root_layout.addWidget(splitter)
 
-    def _on_mode_changed(self, idx: int):
-        """Toggles planner combobox availability based on Single vs All Planners mode."""
-        is_single = (idx == 0)
-        self.planner_combo.setEnabled(is_single)
-        if is_single:
-            self.planner_combo.setStyleSheet("color: #F8FAFC; background-color: #1E293B;")
-        else:
-            self.planner_combo.setStyleSheet("color: #64748B; background-color: #0F172A;")
-
     # --------------------------------------------------------------------------
     # CONTROLLER SLOTS
     # --------------------------------------------------------------------------
     def start_ga(self):
-        is_single = (self.mode_combo.currentIndex() == 0)
-        if is_single:
-            p_name = str(self.planner_combo.currentData())
-        else:
-            p_name = "ALL"
-
+        p_name = "OPTION_2_SL_MPC"
         cores = self.cores_spin.value()
         pop_size = self.pop_spin.value()
         generations = self.gen_spin.value()
@@ -682,7 +633,6 @@ class GADashboardGUI(QMainWindow):
         self.btn_resume.setEnabled(False)
         self.btn_stop.setEnabled(True)
         self.btn_abort.setEnabled(True)
-        self.mode_combo.setEnabled(False)
         self.planner_combo.setEnabled(False)
         self.algo_combo.setEnabled(False)
         self.cores_spin.setEnabled(False)
@@ -738,7 +688,7 @@ class GADashboardGUI(QMainWindow):
     def launch_live_preview(self):
         """Launches Webots 3D rendered preview running the best parameters from ga_checkpoint.json."""
         try:
-            p_name = self.planner_combo.currentText()
+            p_name = "OPTION_2_SL_MPC"
             ckpt_path = os.path.join(CURR_DIR, f"ga_checkpoint_{p_name.lower()}.json")
             if not os.path.exists(ckpt_path):
                 ckpt_path = os.path.join(CURR_DIR, "ga_checkpoint.json")
@@ -832,8 +782,7 @@ class GADashboardGUI(QMainWindow):
         self.btn_resume.setEnabled(False)
         self.btn_stop.setEnabled(False)
         self.btn_abort.setEnabled(False)
-        self.mode_combo.setEnabled(True)
-        self._on_mode_changed(self.mode_combo.currentIndex())
+        self.planner_combo.setEnabled(True)
         self.cores_spin.setEnabled(True)
         self.pop_spin.setEnabled(True)
         self.gen_spin.setEnabled(True)
@@ -870,7 +819,7 @@ class GADashboardGUI(QMainWindow):
         row_idx = self.table.rowCount()
         self.table.insertRow(row_idx)
         self.table.setItem(row_idx, 0, QTableWidgetItem(str(gen)))
-        self.table.setItem(row_idx, 1, QTableWidgetItem(planner.replace("OPTION_", "Opt").replace("_BVP", "-BVP").replace("_SL_MPC", "-MPC").replace("_SEPTIC", "-Septic")))
+        self.table.setItem(row_idx, 1, QTableWidgetItem(planner.replace("OPTION_", "Opt").replace("_SL_MPC", "-MPC")))
         self.table.setItem(row_idx, 2, QTableWidgetItem(f"{best_fit:.1f}"))
         self.table.setItem(row_idx, 3, QTableWidgetItem(f"{mean_fit:.1f}"))
         self.table.setItem(row_idx, 4, QTableWidgetItem(f"{dist_m:.2f}"))
@@ -897,24 +846,12 @@ class GADashboardGUI(QMainWindow):
             "fitness": round(best_fit, 1),
             "distance_m": round(dist_m, 2),
             "mean_speed_mps": round(speed_mps, 2),
+            "engine": "Curvilinear Slack-Constrained SL-MPC (C++ OSQP)",
+            "genes_count": len(genome),
             "genes": genome,
         }
-        if "OPTION_3" in planner or "SEPTIC" in planner:
-            json_obj["engine"] = "C++ Native AVX2 (septic_traction_profiler.dll)"
-            compute_mult = compute_efficiency_multiplier(genome)
-            json_obj["compute_efficiency_multiplier"] = round(compute_mult, 4)
-            probe_pts = int((1.0 + float(genome.get("max_extra_targets", 2))) * float(genome.get("num_lat_offsets", 7)) * float(genome.get("num_head_offsets", 5)) * float(genome.get("num_blend_weights", 3)) * float(genome.get("probe_samples", 36)))
-            json_obj["estimated_eval_points"] = probe_pts
-            json_obj["genes_count"] = len(genome)
-
         json_str = json.dumps(json_obj, indent=2)
-
-        if "OPTION_1" in planner or "BVP" in planner:
-            self.txt_opt1.setPlainText(json_str)
-        elif "OPTION_2" in planner or "MPC" in planner:
-            self.txt_opt2.setPlainText(json_str)
-        elif "OPTION_3" in planner or "SEPTIC" in planner:
-            self.txt_opt3.setPlainText(json_str)
+        self.txt_champion.setPlainText(json_str)
 
         # 5. Update Progress Bar & Overall Stats
         total_gens = self.gen_spin.value()
@@ -930,53 +867,38 @@ class GADashboardGUI(QMainWindow):
         )
 
     def _load_initial_champion_previews(self):
-        """Pre-populates the parameter cards with champion genomes or defaults on startup."""
-        for p_name, txt_widget in [
-            ("OPTION_1_BVP", self.txt_opt1),
-            ("OPTION_2_SL_MPC", self.txt_opt2),
-            ("OPTION_3_SEPTIC", self.txt_opt3),
-        ]:
-            try:
-                ckpt_path = os.path.join(CURR_DIR, f"best_genome_{p_name.lower()}.json")
-                if not os.path.exists(ckpt_path):
-                    ckpt_path = os.path.join(OPTIMIZER_PROJECT_DIR, f"best_genome_{p_name.lower()}.json")
-                if not os.path.exists(ckpt_path):
-                    ckpt_path = os.path.join(CURR_DIR, f"ga_checkpoint_{p_name.lower()}.json")
-                if not os.path.exists(ckpt_path):
-                    ckpt_path = os.path.join(OPTIMIZER_PROJECT_DIR, f"ga_checkpoint_{p_name.lower()}.json")
-                genome_cls = get_genome_class(p_name)
-                if os.path.exists(ckpt_path):
-                    with open(ckpt_path, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                    # Expand genes to current full specification
-                    raw_genes = data.get("genes", data.get("best_genome", {}))
-                    full_genes = genome_cls(raw_genes).to_dict()
-                    data["genes"] = full_genes
-                    data["total_genes"] = len(full_genes)
-                    if "OPTION_3" in p_name:
-                        data["engine"] = "C++ Native AVX2 (septic_traction_profiler.dll)"
-                        data["compute_budget"] = "~3.5 ms execution window (210-280 candidates, 36 spatial points)"
-                    elif "OPTION_2" in p_name:
-                        data["engine"] = "Curvilinear Slack-Constrained SL-MPC (OSQP)"
-                        data["compute_budget"] = "~15 ms execution window (Horizon N=18, dt=0.02s, 36 Tunable Genes)"
-                    txt_widget.setPlainText(json.dumps(data, indent=2))
-                else:
-                    default_genes = genome_cls().to_dict()
-                    preview = {
-                        "planner": p_name,
-                        "status": "Ready for initial evaluation",
-                        "total_genes": len(default_genes),
-                        "genes": default_genes,
-                    }
-                    if "OPTION_3" in p_name:
-                        preview["engine"] = "C++ Native AVX2 (septic_traction_profiler.dll)"
-                        preview["compute_budget"] = "~3.5 ms execution window (210-280 candidates, 36 spatial points)"
-                    elif "OPTION_2" in p_name:
-                        preview["engine"] = "Curvilinear Slack-Constrained SL-MPC (OSQP)"
-                        preview["compute_budget"] = "~15 ms execution window (Horizon N=18, dt=0.02s, 36 Tunable Genes)"
-                    txt_widget.setPlainText(json.dumps(preview, indent=2))
-            except Exception as e:
-                txt_widget.setPlainText(f"Error loading {p_name} preview: {e}")
+        """Pre-populates the parameter card with Option 2 SL-MPC champion genome or defaults."""
+        p_name = "OPTION_2_SL_MPC"
+        try:
+            ckpt_path = os.path.join(CURR_DIR, f"best_genome_{p_name.lower()}.json")
+            if not os.path.exists(ckpt_path):
+                ckpt_path = os.path.join(OPTIMIZER_PROJECT_DIR, f"best_genome_{p_name.lower()}.json")
+            if not os.path.exists(ckpt_path):
+                ckpt_path = os.path.join(CURR_DIR, "ga_checkpoint.json")
+            if not os.path.exists(ckpt_path):
+                ckpt_path = os.path.join(OPTIMIZER_PROJECT_DIR, "ga_checkpoint.json")
+            genome_cls = get_genome_class(p_name)
+            if os.path.exists(ckpt_path):
+                with open(ckpt_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                raw_genes = data.get("genes", data.get("best_genome", {}))
+                full_genes = genome_cls(raw_genes).to_dict()
+                data["genes"] = full_genes
+                data["total_genes"] = len(full_genes)
+                data["engine"] = "Curvilinear Slack-Constrained SL-MPC (OSQP)"
+                self.txt_champion.setPlainText(json.dumps(data, indent=2))
+            else:
+                default_genes = genome_cls().to_dict()
+                preview = {
+                    "planner": p_name,
+                    "status": "Ready for initial evaluation",
+                    "engine": "Curvilinear Slack-Constrained SL-MPC (OSQP)",
+                    "total_genes": len(default_genes),
+                    "genes": default_genes,
+                }
+                self.txt_champion.setPlainText(json.dumps(preview, indent=2))
+        except Exception as e:
+            self.txt_champion.setPlainText(f"Error loading {p_name} preview: {e}")
 
     def _load_history_on_startup(self):
         """Loads historical generation records from ga_history.csv if available."""

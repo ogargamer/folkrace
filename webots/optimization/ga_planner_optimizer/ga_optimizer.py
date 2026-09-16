@@ -757,7 +757,7 @@ def run_genetic_algorithm(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Headless Optimizer for ToF Path Planners")
-    parser.add_argument("--planner", type=str, default=ACTIVE_PLANNER, help="OPTION_1_BVP, OPTION_2_SL_MPC, OPTION_3_SEPTIC, or ALL")
+    parser.add_argument("--planner", type=str, default=ACTIVE_PLANNER, help="Target planner (default: OPTION_2_SL_MPC)")
     parser.add_argument("--algorithm", type=str, default=ALGORITHM, choices=["CMA_ES", "cma_es", "cma", "GA", "ga", "genetic_algorithm"], help="Optimization algorithm: CMA_ES or GA")
     parser.add_argument("--cores", type=int, default=NUM_CPU_CORES, help="Number of parallel Webots worker processes")
     parser.add_argument("--pop-size", type=int, default=POPULATION_SIZE, help="Population size per generation")

@@ -60,7 +60,6 @@ def find_trajectory_csv() -> str:
     """Finds canonical cyan champion trajectory CSV path."""
     cands = [
         os.path.join(DATA_DIR, "cyan_champion_trajectory.csv"),
-        os.path.join(WORKSPACE_ROOT, "webots", "assets", "maps", "cyan_champion_clean_static", "cyan_champion_trajectory.csv"),
         os.path.join(WORKSPACE_ROOT, "cyan_champion_trajectory.csv"),
     ]
     for c in cands:

@@ -1,11 +1,10 @@
 """
 ================================================================================
-  1-CLICK LAUNCHER FOR HEADLESS GENETIC ALGORITHM PATH PLANNER OPTIMIZATION
+  1-CLICK LAUNCHER FOR HEADLESS OPTIMIZER (C++ CURVILINEAR SL-MPC)
 ================================================================================
   Usage:
-    python launch_ga_optimization.py --planner option1
-    python launch_ga_optimization.py --planner option2
-    python launch_ga_optimization.py --planner option3 --generations 50 --cores 6
+    python launch_ga_optimization.py
+    python launch_ga_optimization.py --algorithm CMA_ES --generations 50 --cores 14
 ================================================================================
 """
 
@@ -33,8 +32,8 @@ from ga_planner_config import (
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Launch Headless Optimizer for ToF Path Planners")
-    parser.add_argument("--planner", type=str, default=ACTIVE_PLANNER, choices=["all", "ALL", "option1", "option2", "option3", "OPTION_1_BVP", "OPTION_2_SL_MPC", "OPTION_3_SEPTIC"], help="Path planner to optimize (or 'all' for all 3)")
+    parser = argparse.ArgumentParser(description="Launch Headless Optimizer for Curvilinear SL-MPC")
+    parser.add_argument("--planner", type=str, default=ACTIVE_PLANNER, help="Path planner to optimize (default: OPTION_2_SL_MPC)")
     parser.add_argument("--algorithm", type=str, default=ALGORITHM, choices=["CMA_ES", "cma_es", "cma", "GA", "ga", "genetic_algorithm"], help="Optimization engine (CMA_ES or GA)")
     parser.add_argument("--cores", type=int, default=NUM_CPU_CORES, help="Number of CPU cores / Webots instances")
     parser.add_argument("--pop-size", type=int, default=POPULATION_SIZE, help="Population size")
@@ -43,15 +42,7 @@ def main():
     parser.add_argument("--resume", action="store_true", help="Resume from last checkpoint")
 
     args = parser.parse_args()
-
-    # Normalize planner argument
-    p_map = {
-        "all": "ALL",
-        "option1": "OPTION_1_BVP",
-        "option2": "OPTION_2_SL_MPC",
-        "option3": "OPTION_3_SEPTIC",
-    }
-    planner_key = p_map.get(args.planner.lower(), args.planner.upper())
+    planner_key = "OPTION_2_SL_MPC"
 
     cmd = [
         sys.executable,

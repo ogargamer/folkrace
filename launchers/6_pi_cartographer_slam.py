@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ================================================================================
-  9. LAUNCHER: GOOGLE CARTOGRAPHER 2D SLAM (RASPBERRY PI 5)
+  6. LAUNCHER: GOOGLE CARTOGRAPHER 2D SLAM (RASPBERRY PI 5)
 ================================================================================
   1-Click deployment and connection to Raspberry Pi 5 over SSH:
   - Synchronizes latest MS200 LiDAR & BNO08X IMU nodes and SLAM configs.
@@ -9,7 +9,7 @@
   - Automatically opens browser to http://10.43.8.42:8888
 
   Usage:
-    python 9_pi_cartographer_slam.py
+    python 6_pi_cartographer_slam.py
 ================================================================================
 """
 
