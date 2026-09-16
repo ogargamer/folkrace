@@ -223,8 +223,8 @@ def run_racing_studio(robot: any, vehicle: FolkraceVehicle) -> None:
                 flush=True,
             )
 
-        # 5. Simulation Speed Throttling (0.05x to 100x)
-        if sim_speed_mult < 99.0:
+        # 5. Simulation Speed Throttling (only active when slow-motion < 1.0x is explicitly requested)
+        if sim_speed_mult < 0.99:
             target_step_dt = (TIME_STEP_MS / 1000.0) / max(0.01, sim_speed_mult)
             elapsed_wall = time.perf_counter() - wall_start_t
             if elapsed_wall < target_step_dt:
@@ -448,8 +448,8 @@ def run_champion_preview(robot: any, vehicle: FolkraceVehicle) -> None:
                 flush=True,
             )
 
-        # Simulation Speed Throttling (0.05x to 100x)
-        if sim_speed_mult < 99.0:
+        # Simulation Speed Throttling (only active when slow-motion < 1.0x is explicitly requested)
+        if sim_speed_mult < 0.99:
             target_step_dt = (TIME_STEP_MS / 1000.0) / max(0.01, sim_speed_mult)
             elapsed_wall = time.perf_counter() - wall_start_t
             if elapsed_wall < target_step_dt:

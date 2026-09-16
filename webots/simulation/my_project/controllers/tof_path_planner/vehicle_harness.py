@@ -411,7 +411,10 @@ class FolkraceVehicle:
             for s in self.servos.values():
                 if s:
                     s.setPosition(0.0)
-            tof_readings = self.read_tof_sensors()
+            if self.step_counter % PLANNER_DECIMATION == 0:
+                tof_readings = self.read_tof_sensors()
+            else:
+                tof_readings = self.last_tofs
             gx, gy, gyaw = self.get_ground_truth_pose()
             telemetry = {
                 "time_step": self.step_counter,
@@ -446,13 +449,15 @@ class FolkraceVehicle:
             }
             return telemetry, False
 
-        # Read ToF Sensor Array (16 channels)
-        tof_readings = self.read_tof_sensors()
-
         planner_ran = False
+        tof_readings = self.last_tofs
+
         # 60 Hz Control Tick (Decimation = 2)
         if self.step_counter % PLANNER_DECIMATION == 0:
             planner_ran = True
+
+            # Read ToF Sensor Array (16 channels at 60 Hz planner rate)
+            tof_readings = self.read_tof_sensors()
 
             # Sensor fusion at 60 Hz (Zero Cheating)
             v_fused, yaw_fused, yaw_rate = self.fusion.update(dt=DT_PLANNER)
