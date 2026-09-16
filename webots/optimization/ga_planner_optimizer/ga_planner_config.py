@@ -28,7 +28,7 @@ POPULATION_SIZE: int = 42
 NUM_GENERATIONS: int = 9999
 
 # Evaluation duration per candidate in simulation seconds (strictly 20s)
-EVALUATION_DURATION_S: float = 20.0
+EVALUATION_DURATION_S: float = 30.0
 
 # Number of evaluation runs per candidate to average (1 for deterministic, >1 if noisy)
 RUNS_PER_EVALUATION: int = 1
@@ -76,12 +76,11 @@ ROBOT_START_ROT: List[float] = [0.0, 0.0, 1.0, -1.5707953071795862]
 FITNESS_PROGRESS_WEIGHT: float = 150.0
 FITNESS_SPEED_WEIGHT: float = 30.0
 FITNESS_LAP_BONUS: float = 150.0
-FITNESS_COLLISION_PENALTY: float = 300.0
+FITNESS_COLLISION_PENALTY: float = 450.0
 FITNESS_STALL_PENALTY: float = 3000.0
 
 STALL_SPEED_THRESHOLD_MPS: float = 0.15
 STALL_MAX_DURATION_S: float = 1.50
-COLLISION_DISTANCE_MIN_M: float = 0.020
 
 
 # ==============================================================================
@@ -91,13 +90,13 @@ COLLISION_DISTANCE_MIN_M: float = 0.020
 
 OPTION_2_SL_MPC_GENE_SPECS: List[Tuple[str, float, float, type, float, str]] = [
     # Speeds & Limits
-    ("v_cruise_max",         5.0,   5.00,   float,  5.00,   "Max straight clearing speed (m/s)"),
-    ("v_cruise_min",         1.223,   2.50,   float,  1.223,  "Min corner crawl speed (m/s)"),
+    ("v_cruise_max",         5.5,   5.5,   float,  5.5,   "Max straight clearing speed (m/s)"),
+    ("v_cruise_min",         1.223,   1.223,   float,  1.223,  "Min corner crawl speed (m/s)"),
     # Horizon & Discretization (Fixed at N=30, dt=1/60s to match native C++ OSQP codegen)
     ("horizon_N",           30.0,   30.0,    int,   30.0,    "MPC prediction horizon steps (fixed at 30 in native QP tables)"),
     ("dt",                   0.016667, 0.016667, float, 0.016667, "MPC prediction discretization timestep (s)"),
     # Tire Friction & Costmap Inflation
-    ("mu_friction",          0.70,   0.90,   float,  0.85,   "Tire friction coefficient governing steer vs brake loads"),
+    ("mu_friction",          0.80,   0.90,   float,  0.85,   "Tire friction coefficient governing steer vs brake loads"),
     ("r_inflation_m",        0.075,  0.075,  float,  0.075,  "ToF obstacle expansion / inflation radius (0.075m - 0.120m)"),
     # MPC Objective Weights
     ("q_progress",           2.00,  25.00,   float, 15.00,   "Longitudinal progress reward weight"),
@@ -128,16 +127,14 @@ OPTION_2_SL_MPC_GENE_SPECS: List[Tuple[str, float, float, type, float, str]] = [
     ("straight_lock_dist",   1.70,   1.70,   float,  1.70,   "Forward clearance (m) to lock straight line acceleration"),
     ("straight_lock_speed",  5.50,   5.50,   float,  5.50,   "Speed ceiling (m/s) when straight-line locked"),
     # Straight Quieting & Anti-Oscillation Adaptive Steering Response
-    ("aggr_dist_far_m",      1.40,   1.80,   float,  1.72,   "Forward clearance distance (m) to engage max straight quieting"),
-    ("aggr_dist_close_m",    0.60,   1.60,   float,  1.10,   "Emergency distance threshold (m) below which 100% steering authority is engaged"),
+    ("aggr_dist_far_m",      1.72,   1.72,   float,  1.72,   "Forward clearance distance (m) to engage max straight quieting"),
+    ("aggr_dist_close_m",    1.00,   1.30,   float,  1.10,   "Emergency distance threshold (m) below which 100% steering authority is engaged"),
     ("aggr_min_scale",       0.20,   1.0,   float,  1.00,   "Minimal steering authority scale on open straights"),
     ("steer_deadband_rad",   0.000,  0.005,  float,  0.001,  "Steering error deadband (rad) for sensor noise quieting"),
     # Stuck & Emergency Recovery
-    ("emergency_backup_dist_m", 0.09, 0.15,  float,  0.09,   "Distance threshold (m) below which emergency reverse is triggered"),
-    ("recovery_reverse_speed",  0.80, 2.00,  float,  1.30,   "Emergency reverse backing speed (m/s)"),
     ("recovery_clearance_exit_m", 0.25, 0.25, float, 0.25,   "Front clearance threshold (m) to conclude reverse and center steering"),
-    ("recovery_steer_angle_rad",0.30, 0.698, float,  0.600,  "Recovery pivot steering angle (rad)"),
-    ("recovery_arc_lookahead_m",0.10, 0.19,  float,  0.13,   "Kinematic escape arc lookahead length (m) on costmap"),
+    ("recovery_steer_angle_rad",0.698, 0.698, float,  0.698,  "Recovery pivot steering angle (rad)"),
+    ("recovery_arc_lookahead_m",0.10, 0.17,  float,  0.13,   "Kinematic escape arc lookahead length (m) on costmap"),
 ]
 
 
@@ -230,7 +227,6 @@ def generate_logical_initial_population(genome_cls, pop_size: int) -> List[BaseP
             "straight_lock_dist": 1.70, "straight_lock_speed": 5.50,
             "aggr_dist_far_m": 1.70, "aggr_dist_close_m": 1.00, "aggr_min_scale": 0.30,
             "steer_deadband_rad": 0.002,
-            "emergency_backup_dist_m": 0.09, "recovery_reverse_speed": 1.30,
             "recovery_clearance_exit_m": 0.28, "recovery_steer_angle_rad": 0.600,
             "recovery_arc_lookahead_m": 0.13,
         },
@@ -251,7 +247,6 @@ def generate_logical_initial_population(genome_cls, pop_size: int) -> List[BaseP
             "straight_lock_dist": 1.65, "straight_lock_speed": 5.50,
             "aggr_dist_far_m": 1.68, "aggr_dist_close_m": 1.10, "aggr_min_scale": 0.35,
             "steer_deadband_rad": 0.002,
-            "emergency_backup_dist_m": 0.08, "recovery_reverse_speed": 1.40,
             "recovery_clearance_exit_m": 0.30, "recovery_steer_angle_rad": 0.600,
             "recovery_arc_lookahead_m": 0.12,
         },
@@ -272,7 +267,6 @@ def generate_logical_initial_population(genome_cls, pop_size: int) -> List[BaseP
             "straight_lock_dist": 1.75, "straight_lock_speed": 5.00,
             "aggr_dist_far_m": 1.75, "aggr_dist_close_m": 1.20, "aggr_min_scale": 0.40,
             "steer_deadband_rad": 0.003,
-            "emergency_backup_dist_m": 0.10, "recovery_reverse_speed": 1.20,
             "recovery_clearance_exit_m": 0.25, "recovery_steer_angle_rad": 0.550,
             "recovery_arc_lookahead_m": 0.15,
         },

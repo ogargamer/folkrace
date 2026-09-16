@@ -69,7 +69,6 @@ from planner_config import (
     SERVO_MAX_SPEED_RAD_S,
     STRAIGHT_LOCK_DIST_M,
     STRAIGHT_LOCK_SPEED_MPS,
-    EMERGENCY_BACKUP_DIST_M,
 )
 
 
@@ -313,9 +312,18 @@ class FolkraceVehicle:
         )
         self.planner.costmap = self.costmap
 
+        rec_steer = float(genes.get("recovery_steer_angle_rad", RECOVERY_STEER_ANGLE_RAD))
+        # Compute maximum traction-stable reverse velocity governed by tire friction:
+        # v_rev = sqrt(mu * g * (WHEELBASE / tan(steer_angle)))
+        rec_speed = float(
+            math.sqrt(max(0.01, self.mu_val * 9.81 * (WHEELBASE / max(0.01, math.tan(abs(rec_steer))))))
+        )
+        if "recovery_reverse_speed" in genes:
+            rec_speed = float(genes["recovery_reverse_speed"])
+
         self.recovery_manager = StuckRecoveryManager(
-            reverse_speed_m_s=float(genes.get("recovery_reverse_speed", 1.30)),
-            steer_angle_rad=float(genes.get("recovery_steer_angle_rad", 0.4538)),
+            reverse_speed_m_s=rec_speed,
+            steer_angle_rad=rec_steer,
             clearance_exit_m=float(genes.get("recovery_clearance_exit_m", 0.28)),
             servo_slew_rad_s=SERVO_MAX_SPEED_RAD_S,
             brake_decel_max=BRAKE_DECEL_MAX,

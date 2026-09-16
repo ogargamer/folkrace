@@ -466,8 +466,6 @@ class GADashboardGUI(QMainWindow):
         algo_box.addWidget(self.algo_combo)
         header_layout.addLayout(algo_box)
 
-        self.mode_combo.currentIndexChanged.connect(self._on_mode_changed)
-
         # Cores Selector
         cores_box = QVBoxLayout()
         cores_lbl = QLabel("CPU Workers:")

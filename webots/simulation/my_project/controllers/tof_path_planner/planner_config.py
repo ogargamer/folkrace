@@ -155,7 +155,6 @@ GAP_PROGRESS_MARGIN_M = 0.15   # meters: 1.0m + 0.15m = 1.15m threshold for defi
 GAP_DIST_EXP_K = 0.60          # slight exponential growth scaling factor for distance beyond threshold (~48% boost at 1.80m)
 STRAIGHT_LOCK_DIST_M = 1.70    # meters: forward clearance on both 4.1 deg ToFs to lock full speed straight
 STRAIGHT_LOCK_SPEED_MPS = 5.50 # m/s: top speed cruising when straight locked
-EMERGENCY_BACKUP_DIST_M = 0.09 # meters (9cm): emergency threshold on 4.1 deg ToFs to trigger reverse
 
 # Dual-Path Candidate Selection & Smart Challenger Arbitration (Option 2 SL-MPC)
 ALT_MIN_SEPARATION_M = 0.15      # meters: minimum lateral separation between primary and challenger target lines
@@ -241,8 +240,9 @@ def compute_steering_aggressiveness(d_straight: float, steer_error_rad: float = 
 # ==============================================================================
 # 7. NON-BLOCKING STUCK & REVERSE RECOVERY MANAGER
 # ==============================================================================
-RECOVERY_REVERSE_SPEED_MPS = 1.30    # m/s reverse backing velocity during recovery arc
-RECOVERY_STEER_ANGLE_RAD = 0.6    # radians (26.0 deg) steering lock during reverse arc
+RECOVERY_STEER_ANGLE_RAD = 0.698    # radians (~40.0 deg) steering lock during reverse arc
+# Friction circle velocity limit for reverse pivot arc: v = sqrt(mu * g * (L / tan(delta)))
+RECOVERY_REVERSE_SPEED_MPS = float(math.sqrt(0.817 * 9.81 * (WHEELBASE / max(0.01, math.tan(RECOVERY_STEER_ANGLE_RAD))))) # ~1.23 m/s
 RECOVERY_STALL_CONFIRM_S = 0.15      # seconds of low forward speed before engaging recovery
 RECOVERY_FRONT_BLOCKED_M = 0.25      # meters front clearance threshold to detect forward stall
 RECOVERY_REVERSE_STROKE_MAX_S = 0.6 # seconds maximum reverse stroke failsafe
