@@ -3,9 +3,10 @@
   AUTONOMOUS TOF PATH PLANNER INTERACTIVE GUI & LIVE TUNER
   - Live 15mm C++ ToF Costmap Visualization & Hazard Boundary Overlay
   - Real-Time Native C++ Curvilinear SL-MPC (OSQP) Trajectory Display
-  - Displays Primary Racing Line + Challenger Line & Dynamic Gaps
-  - Live Interactive Tuning of Parameters (Inflation Radius, Target Speed, Slip Angle)
-  - Full Simulation Control: Pause, Play, Single-Step (8.3ms)
+  - Primary Racing Line + Challenger Line & Scouted Dynamic Gaps
+  - Reverse Backup Logic Kinematic Checking Curves (Left/Right/Center Escape Arcs)
+  - Live Interactive Tuning of Parameters (Inflation Radius, Speed, Slip, Challenger Hysteresis)
+  - Full Simulation Control: Pause, Play, Single-Step (8.3ms), Speed Multiplier
 ================================================================================
 """
 
@@ -18,7 +19,7 @@ import socket
 import threading
 import zlib
 import base64
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 import numpy as np
 
 # Ensure root paths
@@ -31,14 +32,13 @@ for p in [WORKSPACE_ROOT, MY_PROJECT_DIR, CONTROLLERS_DIR, CURR_DIR]:
     if p not in sys.path and os.path.exists(p):
         sys.path.insert(0, p)
 
-from PyQt5 import QtCore, QtGui, QtWidgets
+from PyQt5 import QtGui, QtWidgets
 from PyQt5.QtCore import Qt, QTimer, QPointF, QRectF
-from PyQt5.QtGui import QColor, QPainter, QPen, QBrush, QFont, QImage, QPixmap
+from PyQt5.QtGui import QColor, QPainter, QPen, QBrush, QFont, QImage, QPalette
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QSlider, QComboBox, QPushButton, QCheckBox, QGroupBox,
-    QDoubleSpinBox, QTabWidget, QSplitter, QStatusBar, QFrame, QGridLayout,
-    QProgressBar, QScrollArea
+    QTabWidget, QFrame, QGridLayout, QProgressBar, QScrollArea
 )
 
 
@@ -65,16 +65,168 @@ FRONT_TOF_SENSOR_RIG = [
 ]
 
 
+# Dark Theme Global QSS Stylesheet
+DARK_THEME_QSS = """
+    QMainWindow, QWidget#CentralWidget {
+        background-color: #0b0e14;
+        color: #e6edf3;
+    }
+    QWidget {
+        background-color: transparent;
+        color: #e6edf3;
+        font-family: 'Segoe UI', 'Consolas', sans-serif;
+    }
+    QGroupBox {
+        font-size: 11px;
+        font-weight: bold;
+        color: #58a6ff;
+        border: 1px solid #262c36;
+        border-radius: 6px;
+        margin-top: 10px;
+        padding-top: 10px;
+        background-color: #131720;
+    }
+    QGroupBox::title {
+        subcontrol-origin: margin;
+        subcontrol-position: top left;
+        padding: 0 6px;
+        left: 10px;
+        background-color: #131720;
+    }
+    QLabel {
+        color: #c9d1d9;
+    }
+    QTabWidget::pane {
+        border: 1px solid #262c36;
+        background-color: #131720;
+        border-radius: 6px;
+    }
+    QTabBar::tab {
+        background: #0b0e14;
+        color: #8b949e;
+        padding: 8px 16px;
+        font-weight: bold;
+        font-size: 11px;
+        border: 1px solid #262c36;
+        border-bottom: none;
+        border-top-left-radius: 6px;
+        border-top-right-radius: 6px;
+        margin-right: 2px;
+    }
+    QTabBar::tab:selected {
+        background: #131720;
+        color: #00e676;
+        border-bottom: 2px solid #00e676;
+    }
+    QTabBar::tab:hover {
+        color: #f0f6fc;
+        background: #1c212c;
+    }
+    QSlider::groove:horizontal {
+        height: 6px;
+        background: #1c212c;
+        border-radius: 3px;
+    }
+    QSlider::sub-page:horizontal {
+        background: #00897b;
+        border-radius: 3px;
+    }
+    QSlider::handle:horizontal {
+        background: #00e676;
+        border: 1px solid #00c853;
+        width: 14px;
+        margin-top: -4px;
+        margin-bottom: -4px;
+        border-radius: 7px;
+    }
+    QSlider::handle:horizontal:hover {
+        background: #69f0ae;
+    }
+    QComboBox {
+        background-color: #1c212c;
+        border: 1px solid #262c36;
+        border-radius: 4px;
+        color: #00e5ff;
+        padding: 4px 8px;
+        font-weight: bold;
+    }
+    QComboBox QAbstractItemView {
+        background-color: #131720;
+        color: #c9d1d9;
+        selection-background-color: #00838f;
+        selection-color: #ffffff;
+        border: 1px solid #262c36;
+    }
+    QPushButton {
+        background-color: #1c212c;
+        border: 1px solid #262c36;
+        border-radius: 5px;
+        color: #c9d1d9;
+        padding: 6px 12px;
+        font-weight: bold;
+    }
+    QPushButton:hover {
+        background-color: #2a3242;
+        color: #f0f6fc;
+    }
+    QCheckBox {
+        color: #c9d1d9;
+        font-size: 11px;
+    }
+    QCheckBox::indicator {
+        width: 14px;
+        height: 14px;
+        border-radius: 3px;
+        border: 1px solid #262c36;
+        background-color: #1c212c;
+    }
+    QCheckBox::indicator:checked {
+        background-color: #00b0ff;
+        border-color: #40c4ff;
+    }
+    QScrollArea {
+        border: none;
+        background: transparent;
+    }
+    QScrollBar:vertical {
+        background: #0b0e14;
+        width: 8px;
+        margin: 0;
+    }
+    QScrollBar::handle:vertical {
+        background: #262c36;
+        min-height: 20px;
+        border-radius: 4px;
+    }
+    QScrollBar::handle:vertical:hover {
+        background: #58a6ff;
+    }
+    QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+        height: 0px;
+    }
+"""
+
+
 # ==============================================================================
-# 1. 2D COSTMAP & TRAJECTORY CANVAS
+# 1. 2D COSTMAP, ESCAPE ARCS & TRAJECTORY CANVAS
 # ==============================================================================
 class PlannerCostmapCanvas(QtWidgets.QWidget):
+    """
+    High-performance 2D Canvas visualizing:
+    - 15mm C++ ToF Costmap Probability Map & Hazard Overlay
+    - Physical Chassis Footprint & Wheel Heading
+    - 16-Channel ToF Cones
+    - Candidate Trajectory Fan (Cyan) & Winning SL-MPC Trajectory (Gold)
+    - Scouted Open Gaps & Multi-Target Candidates (Green/Cyan)
+    - Reverse Backup Logic Kinematic Checking Curves (Thin Magenta/Purple Escape Arcs)
+    """
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setMinimumSize(560, 620)
         self.setMouseTracking(True)
 
-        # Costmap local array metric bounds
+        # Costmap metric bounds
         self.map_x_min = -1.25
         self.map_x_max = 1.25
         self.map_y_min = -0.10
@@ -95,8 +247,36 @@ class PlannerCostmapCanvas(QtWidgets.QWidget):
         self.candidate_lines: Optional[List[List[List[float]]]] = None
         self.gap_info: Optional[List[float]] = None  # [xg, yg, width]
         self.targets: Optional[List[List[float]]] = None  # [[tx, ty, ap], ...]
+        self.steer_deg: float = 0.0
+        self.recovery_state: str = "DRIVE"
 
-        # Display preferences
+        # Precompute Kinematic Reverse Backup Logic Checking Curves (Origin at Robot Center (0.0, 0.0))
+        # Wheelbase = 0.1325m, Max Steer = 27.0 deg (0.471 rad), R_min ~ 0.260m, Lookahead = 0.45m
+        wheelbase = 0.1325
+        max_steer_rad = 0.47123889
+        self.r_min_turn = wheelbase / max(1e-3, math.tan(max_steer_rad))
+        self.origin_y = 0.0   # Robot center (0.0, 0.0)
+        self.bumper_y = 0.095 # Front bumper mount Y in vehicle frame
+        self.arc_lookahead_m = 0.45
+        n_pts = 45
+        self._arc_s = np.linspace(0.0, self.arc_lookahead_m, n_pts, dtype=np.float32)
+
+        # Left Escape Arc (Full left lock: sweeps left -X from robot center)
+        self._arc_pts_left = np.zeros((n_pts, 2), dtype=np.float32)
+        self._arc_pts_left[:, 0] = -self.r_min_turn * (1.0 - np.cos(self._arc_s / self.r_min_turn))
+        self._arc_pts_left[:, 1] = self.origin_y + self.r_min_turn * np.sin(self._arc_s / self.r_min_turn)
+
+        # Right Escape Arc (Full right lock: sweeps right +X from robot center)
+        self._arc_pts_right = np.zeros((n_pts, 2), dtype=np.float32)
+        self._arc_pts_right[:, 0] = self.r_min_turn * (1.0 - np.cos(self._arc_s / self.r_min_turn))
+        self._arc_pts_right[:, 1] = self.origin_y + self.r_min_turn * np.sin(self._arc_s / self.r_min_turn)
+
+        # Center Straight Sightline (Forward along +Y from robot center)
+        self._arc_pts_center = np.zeros((n_pts, 2), dtype=np.float32)
+        self._arc_pts_center[:, 0] = 0.0
+        self._arc_pts_center[:, 1] = self.origin_y + self._arc_s
+
+        # Display layer toggles
         self.show_grid = True
         self.show_rays = True
         self.show_costmap = True
@@ -105,7 +285,7 @@ class PlannerCostmapCanvas(QtWidgets.QWidget):
         self.show_gap = True
         self.show_hazard = True
         self.show_chassis = True
-        self.colormap = "Turbo"
+        self.show_backup_curves = True
 
     def set_data(
         self,
@@ -118,6 +298,7 @@ class PlannerCostmapCanvas(QtWidgets.QWidget):
         targets: Optional[List[List[float]]] = None,
         grid_bounds: Optional[List[float]] = None,
         steer_deg: float = 0.0,
+        recovery_state: str = "DRIVE",
     ):
         if prob_map is not None:
             self.prob_map = prob_map
@@ -129,6 +310,7 @@ class PlannerCostmapCanvas(QtWidgets.QWidget):
         self.gap_info = gap
         self.targets = targets
         self.steer_deg = float(steer_deg)
+        self.recovery_state = str(recovery_state)
         if grid_bounds and len(grid_bounds) == 4:
             self.map_x_min, self.map_x_max, self.map_y_min, self.map_y_max = grid_bounds
         self.update()
@@ -145,10 +327,10 @@ class PlannerCostmapCanvas(QtWidgets.QWidget):
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
-        painter.fillRect(self.rect(), QColor(12, 16, 22))
+        painter.fillRect(self.rect(), QColor(10, 13, 18))
 
-        # 1. Draw Costmap Image
-        if getattr(self, "show_costmap", True) and self.prob_map is not None:
+        # 1. Costmap Probability Image
+        if self.show_costmap and self.prob_map is not None:
             H, W = self.prob_map.shape
             img_data = np.zeros((H, W, 4), dtype=np.uint8)
             val = (np.clip(self.prob_map, 0.0, 1.0) * 255.0).astype(np.uint8)
@@ -207,14 +389,10 @@ class PlannerCostmapCanvas(QtWidgets.QWidget):
 
         # 3. ToF Sensor Rays & Conical Beams (16 Channels)
         if self.show_rays and self.tof_readings:
-            is_front = any("front_left" in k or "front_right" in k for k in self.tof_readings.keys())
-            rig = FRONT_TOF_SENSOR_RIG if is_front else LEGACY_TOF_SENSOR_RIG
-            # True half FOV: each sensor in only_front_tofs.proto has 0.1963 rad (11.25 deg) total FOV
-            # Half FOV is 0.19634954 / 2 = 0.09817 rad (5.625 deg)
-            half_fov = 0.19634954 / 2.0
+            half_fov = 0.19634954 / 2.0  # 5.625 deg half FOV
 
-            for sensor in rig:
-                s_name, sx, sy, heading, s_label = sensor
+            for sensor in FRONT_TOF_SENSOR_RIG:
+                s_name, sx, sy, heading, _ = sensor
                 rng = self.tof_readings.get(s_name)
                 if rng is None:
                     continue
@@ -223,7 +401,7 @@ class PlannerCostmapCanvas(QtWidgets.QWidget):
 
                 p_origin = self.world_to_screen(sx, sy)
 
-                # Arc endpoints across true 11.25 deg cone (from heading - half_fov to heading + half_fov)
+                # Arc endpoints across true 11.25 deg cone
                 n_arc = 6
                 angles = np.linspace(heading - half_fov, heading + half_fov, n_arc)
                 arc_pts = []
@@ -232,7 +410,7 @@ class PlannerCostmapCanvas(QtWidgets.QWidget):
                     ay = sy + disp_r * math.sin(a)
                     arc_pts.append(self.world_to_screen(ax, ay))
 
-                # Midpoint optical axis (proto heading)
+                # Midpoint optical axis
                 cx = sx + disp_r * math.cos(heading)
                 cy = sy + disp_r * math.sin(heading)
                 p_c = self.world_to_screen(cx, cy)
@@ -251,26 +429,26 @@ class PlannerCostmapCanvas(QtWidgets.QWidget):
                     c_fill = QColor(70, 110, 160, 12)
                     c_line = QColor(80, 130, 180, 60)
 
-                # Conical sector polygon (pie wedge)
+                # Conical sector polygon
                 poly = QtGui.QPolygonF([p_origin] + arc_pts)
                 painter.setPen(Qt.NoPen)
                 painter.setBrush(QBrush(c_fill))
                 painter.drawPolygon(poly)
 
-                # Boundary rays demarcating true 11.25 deg FOV edges
+                # Boundary rays
                 edge_pen = QPen(QColor(c_line.red(), c_line.green(), c_line.blue(), 90 if is_hit else 40), 1.0, Qt.SolidLine if is_hit else Qt.DotLine)
                 painter.setPen(edge_pen)
                 painter.drawLine(p_origin, arc_pts[0])
                 painter.drawLine(p_origin, arc_pts[-1])
 
-                # Contact arc on obstacle surface across the zone
+                # Contact arc on obstacle surface
                 if is_hit:
                     arc_pen = QPen(c_line, 2.5, Qt.SolidLine, Qt.RoundCap)
                     painter.setPen(arc_pen)
                     for k in range(len(arc_pts) - 1):
                         painter.drawLine(arc_pts[k], arc_pts[k + 1])
 
-                # Center optical axis ray (midpoint heading)
+                # Center optical axis ray
                 painter.setPen(QPen(c_line, 1.2 if is_hit else 0.8, Qt.DashLine if is_hit else Qt.DotLine))
                 painter.drawLine(p_origin, p_c)
 
@@ -279,7 +457,7 @@ class PlannerCostmapCanvas(QtWidgets.QWidget):
                 painter.setBrush(QBrush(QColor(0, 220, 255, 200)))
                 painter.drawEllipse(p_origin, 2.5, 2.5)
 
-                # Obstacle hit marker and range tag at midpoint
+                # Obstacle hit marker and range tag
                 if is_hit:
                     painter.setPen(QPen(c_line, 2.0))
                     painter.setBrush(QBrush(c_line))
@@ -289,7 +467,7 @@ class PlannerCostmapCanvas(QtWidgets.QWidget):
                         painter.setPen(QPen(QColor(255, 255, 255, 220)))
                         painter.drawText(QPointF(p_c.x() + 4, p_c.y() - 3), f"{disp_r*100:.0f}cm")
 
-        # 4. Candidate Potential Trajectory Lines (Cyan / Blue Translucent Fan)
+        # 4. Candidate Trajectory Lines (Cyan Fan)
         if self.show_candidates and self.candidate_lines:
             cand_pen = QPen(QColor(0, 200, 255, 75), 1.2, Qt.SolidLine)
             painter.setPen(cand_pen)
@@ -300,7 +478,7 @@ class PlannerCostmapCanvas(QtWidgets.QWidget):
                         p2 = self.world_to_screen(line[i + 1][0], line[i + 1][1])
                         painter.drawLine(p1, p2)
 
-        # 4. Best / Winning Trajectory Line (Bright Gold / Yellow Solid Line)
+        # 5. Best / Winning Trajectory Line (Bright Gold Solid Line)
         if self.show_best and self.best_line and len(self.best_line) > 1:
             best_pen = QPen(QColor(255, 215, 0, 240), 3.0, Qt.SolidLine)
             painter.setPen(best_pen)
@@ -309,9 +487,87 @@ class PlannerCostmapCanvas(QtWidgets.QWidget):
                 p2 = self.world_to_screen(self.best_line[i + 1][0], self.best_line[i + 1][1])
                 painter.drawLine(p1, p2)
 
-        # 5. Scouted Open Gap Target Marker & Multi-Target Candidates
+        # 6. Reverse Backup Logic Checking Curves (Left Turn Arc, Right Turn Arc, Center Forward Sightline)
+        if self.show_backup_curves:
+            curves = [
+                ("Left Arc", self._arc_pts_left),
+                ("Center Sightline", self._arc_pts_center),
+                ("Right Arc", self._arc_pts_right),
+            ]
+
+            h_mask = self.hazard_mask
+            has_h = h_mask is not None and isinstance(h_mask, np.ndarray) and h_mask.size > 0
+            if has_h:
+                h_rows, h_cols = h_mask.shape
+                dx = max(1e-4, self.map_x_max - self.map_x_min)
+                dy = max(1e-4, self.map_y_max - self.map_y_min)
+
+            is_recovering = (
+                "RECOVERY" in self.recovery_state.upper()
+                or "PIVOT" in self.recovery_state.upper()
+                or "DECEL" in self.recovery_state.upper()
+            )
+
+            for _, pts in curves:
+                hit_idx = -1
+                if has_h:
+                    for i in range(len(pts)):
+                        px, py = pts[i, 0], pts[i, 1]
+                        if py < self.bumper_y:
+                            continue  # Skip inside vehicle footprint
+                        col = int((px - self.map_x_min) / dx * h_cols)
+                        row = int((py - self.map_y_min) / dy * h_rows)
+                        if 0 <= row < h_rows and 0 <= col < h_cols:
+                            if h_mask[row, col] > 0:
+                                hit_idx = i
+                                break
+
+                clear_end = hit_idx if hit_idx != -1 else len(pts)
+
+                # Draw clear portion (Thin vivid magenta line)
+                if is_recovering:
+                    pen_clear = QPen(QColor(255, 64, 230, 240), 1.8, Qt.SolidLine)
+                else:
+                    pen_clear = QPen(QColor(225, 60, 255, 200), 1.3, Qt.DashLine)
+
+                painter.setPen(pen_clear)
+                for i in range(max(0, clear_end - 1)):
+                    p1 = self.world_to_screen(pts[i, 0], pts[i, 1])
+                    p2 = self.world_to_screen(pts[i + 1, 0], pts[i + 1, 1])
+                    painter.drawLine(p1, p2)
+
+                # If obstructed by hazard mask, draw blocked tail as thin dotted red
+                if hit_idx != -1 and hit_idx < len(pts):
+                    pen_blocked = QPen(QColor(255, 75, 75, 140), 1.1, Qt.DotLine)
+                    painter.setPen(pen_blocked)
+                    for i in range(max(0, hit_idx - 1), len(pts) - 1):
+                        p1 = self.world_to_screen(pts[i, 0], pts[i, 1])
+                        p2 = self.world_to_screen(pts[i + 1, 0], pts[i + 1, 1])
+                        painter.drawLine(p1, p2)
+
+                    # Collision hit dot on obstacle boundary
+                    p_hit = self.world_to_screen(pts[hit_idx, 0], pts[hit_idx, 1])
+                    painter.setPen(QPen(QColor(255, 80, 80, 230), 1.5))
+                    painter.setBrush(QBrush(QColor(255, 50, 50, 210)))
+                    painter.drawEllipse(p_hit, 3.0, 3.0)
+
+                # End-point tick
+                tip_idx = min(clear_end, len(pts) - 1)
+                p_tip = self.world_to_screen(pts[tip_idx, 0], pts[tip_idx, 1])
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(QBrush(QColor(255, 120, 255, 230)))
+                painter.drawEllipse(p_tip, 2.5, 2.5)
+
+            # Center sightline emergency backup threshold ticks (9cm emergency threshold, 15cm blocked threshold)
+            for d_thresh, t_col in [(0.09, QColor(255, 60, 60, 220)), (0.15, QColor(255, 190, 0, 200))]:
+                y_t = self.bumper_y + d_thresh
+                p_tl = self.world_to_screen(-0.025, y_t)
+                p_tr = self.world_to_screen(+0.025, y_t)
+                painter.setPen(QPen(t_col, 1.2, Qt.SolidLine))
+                painter.drawLine(p_tl, p_tr)
+
+        # 7. Scouted Open Gap Target Marker & Candidates
         if self.show_gap and self.targets:
-            # Draw secondary candidate targets first (translucent cyan)
             for cand in self.targets:
                 ctx, cty = cand[0], cand[1]
                 pc = self.world_to_screen(ctx, cty)
@@ -330,10 +586,10 @@ class PlannerCostmapCanvas(QtWidgets.QWidget):
             p_right = self.world_to_screen(xg + width * 0.5, yg)
             painter.drawLine(p_left, p_right)
 
-        # 6. Chassis Footprint & Origin (Accurate 150x200mm Robot Geometry)
+        # 8. Chassis Footprint & Origin (150x200mm Robot Geometry)
         if self.show_chassis:
-            car_w = 0.150  # 150 mm width from only_front_tofs.proto
-            car_l = 0.200  # 200 mm length from only_front_tofs.proto (y from -0.100 to +0.100)
+            car_w = 0.150
+            car_l = 0.200
 
             # Chassis outer boundary
             c_tl = self.world_to_screen(-car_w / 2.0, car_l / 2.0)
@@ -370,7 +626,7 @@ class PlannerCostmapCanvas(QtWidgets.QWidget):
             painter.setPen(QPen(QColor(0, 255, 180, 250), 2.5))
             painter.drawLine(p_fl, p_fr)
 
-            # Front bumper raycast origin dot (x = 0.0, y = +0.095)
+            # Front bumper center origin dot (x = 0.0, y = +0.095)
             p_bmp = self.world_to_screen(0.0, 0.095)
             painter.setPen(QPen(QColor(0, 255, 180), 1.5))
             painter.setBrush(QBrush(QColor(0, 255, 180)))
@@ -384,15 +640,18 @@ class PlannerCostmapCanvas(QtWidgets.QWidget):
 
 
 # ==============================================================================
-# 2. MAIN COMPREHENSIVE GUI WINDOW
+# 2. MAIN COMPREHENSIVE GUI WINDOW & TUNER
 # ==============================================================================
 class ComprehensivePlannerGUI(QMainWindow):
+    """Main Telemetry & Costmap GUI Window with Dark Theme Live Studio."""
+
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Autonomous ToF Multi-Planner Studio & Live Tuner (50 Hz)")
-        self.resize(1240, 800)
+        self.setWindowTitle("Curvilinear SL-MPC Autonomous Racing Studio (60 Hz)")
+        self.resize(1260, 820)
+        self.setStyleSheet(DARK_THEME_QSS)
 
-        # Network sockets
+        # UDP network sockets
         self.udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
@@ -401,21 +660,22 @@ class ComprehensivePlannerGUI(QMainWindow):
         self.latest_pkt: Optional[dict] = None
         self._lock = threading.Lock()
 
-        # Start UDP listener
+        # Start UDP listener thread
         self.running = True
         self.listener_thread = threading.Thread(target=self._udp_worker, daemon=True)
         self.listener_thread.start()
 
-        # Build UI
+        # Build UI layout
         self._build_ui()
 
-        # Timer for UI updates (60 FPS / 16 ms matching 60 Hz telemetry)
+        # 60 FPS UI refresh timer (16 ms)
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._update_gui)
         self.timer.start(16)
 
     def _build_ui(self):
         central = QWidget(self)
+        central.setObjectName("CentralWidget")
         self.setCentralWidget(central)
         layout = QHBoxLayout(central)
         layout.setContentsMargins(10, 10, 10, 10)
@@ -427,58 +687,29 @@ class ComprehensivePlannerGUI(QMainWindow):
 
         # Right Panel Tabs
         self.tabs = QTabWidget()
-        self.tabs.setStyleSheet("""
-            QTabWidget::pane {
-                border: 1px solid #3a3a3a;
-                background-color: #1a1a1a;
-                border-radius: 4px;
-            }
-            QTabBar::tab {
-                background: #252525;
-                color: #aaa;
-                padding: 7px 14px;
-                font-weight: bold;
-                font-size: 11px;
-                border-top-left-radius: 4px;
-                border-top-right-radius: 4px;
-                margin-right: 2px;
-            }
-            QTabBar::tab:selected {
-                background: #333333;
-                color: #00e676;
-                border-bottom: 2px solid #00e676;
-            }
-            QTabBar::tab:hover {
-                color: #ffffff;
-            }
-        """)
 
         # Tab 1: Planner Controls & Tuner
         tab_controls = QWidget()
         ctrl_scroll = QScrollArea()
         ctrl_scroll.setWidgetResizable(True)
-        ctrl_scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
 
         panel = QWidget()
         panel_layout = QVBoxLayout(panel)
         panel_layout.setContentsMargins(6, 6, 6, 6)
         panel_layout.setSpacing(10)
 
-        # 1. PLANNER SELECTOR
-        switch_group = QGroupBox("Active Path Planner (Live Switch)")
-        switch_layout = QVBoxLayout(switch_group)
-
-        self.cb_planner = QComboBox()
-        self.cb_planner.addItem("Option 2: Curvilinear SL-MPC (OSQP / C++)", "OPTION2_SL_MPC")
-        self.cb_planner.setStyleSheet("font-size: 13px; font-weight: bold; padding: 6px;")
-        self.cb_planner.currentIndexChanged.connect(self._on_planner_selected)
-        switch_layout.addWidget(self.cb_planner)
-
-        btn_switch = QPushButton("⚡ Switch Active Planner in Webots")
-        btn_switch.setStyleSheet("background-color: #00838f; color: white; font-weight: bold; padding: 6px;")
-        btn_switch.clicked.connect(self._send_planner_switch)
-        switch_layout.addWidget(btn_switch)
-        panel_layout.addWidget(switch_group)
+        # 1. CONTROLLER BANNER
+        status_group = QGroupBox("Active Controller Architecture")
+        status_layout = QVBoxLayout(status_group)
+        self.lbl_arch = QLabel("🚀 Native C++ Curvilinear SL-MPC (OSQP)")
+        self.lbl_arch.setFont(QFont("Consolas", 11, QFont.Bold))
+        self.lbl_arch.setStyleSheet("color: #00e5ff; padding: 2px;")
+        self.lbl_mode_badge = QLabel("Mode: DRIVE | 60 Hz Control Loop")
+        self.lbl_mode_badge.setFont(QFont("Consolas", 9, QFont.Bold))
+        self.lbl_mode_badge.setStyleSheet("color: #00e676;")
+        status_layout.addWidget(self.lbl_arch)
+        status_layout.addWidget(self.lbl_mode_badge)
+        panel_layout.addWidget(status_group)
 
         # 2. SIMULATION CONTROLS
         sim_group = QGroupBox("Simulation Controls")
@@ -497,7 +728,6 @@ class ComprehensivePlannerGUI(QMainWindow):
         btn_row.addWidget(self.btn_step)
         sim_layout.addLayout(btn_row)
 
-        # Simulation Speed Multiplier (down to 0.05x)
         speed_row = QHBoxLayout()
         speed_row.addWidget(QLabel("Sim Speed:"))
         self.cb_sim_speed = QComboBox()
@@ -513,7 +743,7 @@ class ComprehensivePlannerGUI(QMainWindow):
         ]
         for label, val in self.sim_speed_options:
             self.cb_sim_speed.addItem(label, val)
-        self.cb_sim_speed.setCurrentIndex(4)  # 1.00x default (Real-Time 1x)
+        self.cb_sim_speed.setCurrentIndex(4)  # 1.00x default
         self.cb_sim_speed.currentIndexChanged.connect(self._on_sim_speed_changed)
         speed_row.addWidget(self.cb_sim_speed)
         sim_layout.addLayout(speed_row)
@@ -521,40 +751,40 @@ class ComprehensivePlannerGUI(QMainWindow):
         panel_layout.addWidget(sim_group)
 
         # 3. LIVE PARAMETER TUNING
-        tune_group = QGroupBox("Live Parameter Tuning")
+        tune_group = QGroupBox("Live SL-MPC & Scout Parameter Tuner")
         tune_layout = QVBoxLayout(tune_group)
 
-        # Inflation Radius (7.5cm bare minimum for 15cm chassis, 9.0cm default)
-        tune_layout.addWidget(QLabel("Obstacle Inflation Radius (Bare Min 7.5 cm):"))
-        inf_row = QHBoxLayout()
-        self.slider_inflation = QSlider(Qt.Horizontal)
-        self.slider_inflation.setRange(75, 140)  # 7.5 cm bare minimum to 14.0 cm
-        self.slider_inflation.setValue(90)       # 9.0 cm default
-        self.slider_inflation.valueChanged.connect(self._on_inflation_slider)
-        self.lbl_inflation = QLabel("9.0 cm")
-        self.lbl_inflation.setFont(QFont("Consolas", 10, QFont.Bold))
-        inf_row.addWidget(self.slider_inflation)
-        inf_row.addWidget(self.lbl_inflation)
-        tune_layout.addLayout(inf_row)
-
         # Cruising Speed Ceiling
-        tune_layout.addWidget(QLabel("Cruising Speed Ceiling (m/s):"))
+        tune_layout.addWidget(QLabel("Cruising Speed Target (m/s):"))
         spd_row = QHBoxLayout()
         self.slider_speed = QSlider(Qt.Horizontal)
-        self.slider_speed.setRange(8, 38)  # 0.8 to 3.8 m/s
-        self.slider_speed.setValue(24)
+        self.slider_speed.setRange(8, 55)  # 0.8 to 5.5 m/s
+        self.slider_speed.setValue(55)
         self.slider_speed.valueChanged.connect(self._on_speed_slider)
-        self.lbl_speed = QLabel("2.40 m/s")
+        self.lbl_speed = QLabel("5.50 m/s")
         self.lbl_speed.setFont(QFont("Consolas", 10, QFont.Bold))
         spd_row.addWidget(self.slider_speed)
         spd_row.addWidget(self.lbl_speed)
         tune_layout.addLayout(spd_row)
 
+        # Obstacle Inflation Radius
+        tune_layout.addWidget(QLabel("Obstacle Inflation Radius (Bare Min 7.5 cm):"))
+        inf_row = QHBoxLayout()
+        self.slider_inflation = QSlider(Qt.Horizontal)
+        self.slider_inflation.setRange(75, 140)
+        self.slider_inflation.setValue(75)
+        self.slider_inflation.valueChanged.connect(self._on_inflation_slider)
+        self.lbl_inflation = QLabel("7.5 cm")
+        self.lbl_inflation.setFont(QFont("Consolas", 10, QFont.Bold))
+        inf_row.addWidget(self.slider_inflation)
+        inf_row.addWidget(self.lbl_inflation)
+        tune_layout.addLayout(inf_row)
+
         # Peak Slip Angle
         tune_layout.addWidget(QLabel("Tire Peak Slip Angle (deg):"))
         slip_row = QHBoxLayout()
         self.slider_slip = QSlider(Qt.Horizontal)
-        self.slider_slip.setRange(60, 200)  # 6.0 to 20.0 deg
+        self.slider_slip.setRange(60, 200)
         self.slider_slip.setValue(126)
         self.slider_slip.valueChanged.connect(self._on_slip_slider)
         self.lbl_slip = QLabel("12.6°")
@@ -563,16 +793,16 @@ class ComprehensivePlannerGUI(QMainWindow):
         slip_row.addWidget(self.lbl_slip)
         tune_layout.addLayout(slip_row)
 
-        # Challenger Switch Hysteresis (Anti-Flicker Threshold)
+        # Challenger Switch Hysteresis
         tune_layout.addWidget(QLabel("Challenger Switch Hysteresis (Anti-Flicker):"))
         hyst_row = QHBoxLayout()
         self.slider_hysteresis = QSlider(Qt.Horizontal)
-        self.slider_hysteresis.setRange(0, 60)  # 0.0 to 60.0 cost units
-        self.slider_hysteresis.setValue(15)      # 15.0 default
+        self.slider_hysteresis.setRange(2, 80)
+        self.slider_hysteresis.setValue(8)
         self.slider_hysteresis.valueChanged.connect(self._on_hysteresis_slider)
-        self.lbl_hysteresis = QLabel("15.0")
+        self.lbl_hysteresis = QLabel("8.0")
         self.lbl_hysteresis.setFont(QFont("Consolas", 10, QFont.Bold))
-        self.lbl_hysteresis.setToolTip("MPC cost margin required for Challenger to switch/overthrow Main line.\nIncrease to eliminate flickering between lines.")
+        self.lbl_hysteresis.setToolTip("MPC cost margin required for Challenger to switch/overthrow Main line.")
         hyst_row.addWidget(self.slider_hysteresis)
         hyst_row.addWidget(self.lbl_hysteresis)
         tune_layout.addLayout(hyst_row)
@@ -581,25 +811,15 @@ class ComprehensivePlannerGUI(QMainWindow):
         tune_layout.addWidget(QLabel("Challenger Min Corridor Separation (cm):"))
         sep_row = QHBoxLayout()
         self.slider_separation = QSlider(Qt.Horizontal)
-        self.slider_separation.setRange(10, 60)  # 10 to 60 cm
-        self.slider_separation.setValue(25)      # 25 cm default
+        self.slider_separation.setRange(10, 50)
+        self.slider_separation.setValue(15)
         self.slider_separation.valueChanged.connect(self._on_separation_slider)
-        self.lbl_separation = QLabel("25 cm")
+        self.lbl_separation = QLabel("15 cm")
         self.lbl_separation.setFont(QFont("Consolas", 10, QFont.Bold))
-        self.lbl_separation.setToolTip("Minimum lateral distance between Main and Challenger targets.\nPrevents challenger from collapsing into the primary gap.")
+        self.lbl_separation.setToolTip("Minimum lateral distance between Main and Challenger targets.")
         sep_row.addWidget(self.slider_separation)
         sep_row.addWidget(self.lbl_separation)
         tune_layout.addLayout(sep_row)
-
-        # Steering Architecture Mode Selector
-        tune_layout.addWidget(QLabel("Steering Architecture Mode:"))
-        self.cb_steering_mode = QComboBox()
-        self.cb_steering_mode.addItem("Option 1: Two-Stage Midpoint", 1)
-        self.cb_steering_mode.addItem("Option 2: Corridor-Anchored", 2)
-        self.cb_steering_mode.addItem("Option 0: Classic Septic", 0)
-        self.cb_steering_mode.setStyleSheet("background-color: #2b2b2b; color: #00e676; font-weight: bold; padding: 4px;")
-        self.cb_steering_mode.currentIndexChanged.connect(self._on_steering_mode_changed)
-        tune_layout.addWidget(self.cb_steering_mode)
 
         panel_layout.addWidget(tune_group)
 
@@ -614,7 +834,10 @@ class ComprehensivePlannerGUI(QMainWindow):
         self.lbl_gap.setFont(QFont("Consolas", 9))
         self.lbl_perf = QLabel("Planner: 0.0 ms | Costmap: 0.0 ms | Status: --")
         self.lbl_perf.setFont(QFont("Consolas", 9))
-        self.lbl_dist = QLabel("Distance Traveled: 0.00 m")
+        self.lbl_recovery = QLabel("Recovery Mode: NORMAL | Arcs: Clear")
+        self.lbl_recovery.setFont(QFont("Consolas", 9))
+        self.lbl_recovery.setStyleSheet("color: #ce93d8;")
+        self.lbl_dist = QLabel("Distance Traveled: 0.00 m | Lap: 0")
         self.lbl_dist.setFont(QFont("Consolas", 10, QFont.Bold))
         self.lbl_dist.setStyleSheet("color: #ffd54f;")
 
@@ -622,52 +845,59 @@ class ComprehensivePlannerGUI(QMainWindow):
         telem_layout.addWidget(self.lbl_dyn)
         telem_layout.addWidget(self.lbl_gap)
         telem_layout.addWidget(self.lbl_perf)
+        telem_layout.addWidget(self.lbl_recovery)
         telem_layout.addWidget(self.lbl_dist)
         panel_layout.addWidget(telemetry_group)
 
-        # 5. DISPLAY TOGGLES
+        # 5. DISPLAY LAYER TOGGLES
         disp_group = QGroupBox("Layer Display Options")
         disp_layout = QGridLayout(disp_group)
-
-        self.chk_cand = QCheckBox("Candidate Lines Fan")
-        self.chk_cand.setChecked(True)
-        self.chk_cand.toggled.connect(lambda v: setattr(self.canvas, "show_candidates", v) or self.canvas.update())
-        disp_layout.addWidget(self.chk_cand, 0, 0)
 
         self.chk_best = QCheckBox("Best Trajectory (Gold)")
         self.chk_best.setChecked(True)
         self.chk_best.toggled.connect(lambda v: setattr(self.canvas, "show_best", v) or self.canvas.update())
-        disp_layout.addWidget(self.chk_best, 0, 1)
+        disp_layout.addWidget(self.chk_best, 0, 0)
 
-        self.chk_hazard = QCheckBox("Hazard Mask (Red)")
-        self.chk_hazard.setChecked(True)
-        self.chk_hazard.toggled.connect(lambda v: setattr(self.canvas, "show_hazard", v) or self.canvas.update())
-        disp_layout.addWidget(self.chk_hazard, 1, 0)
+        self.chk_cand = QCheckBox("Candidate Fan (Cyan)")
+        self.chk_cand.setChecked(True)
+        self.chk_cand.toggled.connect(lambda v: setattr(self.canvas, "show_candidates", v) or self.canvas.update())
+        disp_layout.addWidget(self.chk_cand, 0, 1)
+
+        self.chk_backup = QCheckBox("Backup Escape Curves (Magenta)")
+        self.chk_backup.setChecked(True)
+        self.chk_backup.setToolTip("Thin kinematic escape arcs evaluated against costmap to decide reverse direction")
+        self.chk_backup.toggled.connect(lambda v: setattr(self.canvas, "show_backup_curves", v) or self.canvas.update())
+        disp_layout.addWidget(self.chk_backup, 1, 0)
 
         self.chk_gap = QCheckBox("Scouted Gap (Green)")
         self.chk_gap.setChecked(True)
         self.chk_gap.toggled.connect(lambda v: setattr(self.canvas, "show_gap", v) or self.canvas.update())
         disp_layout.addWidget(self.chk_gap, 1, 1)
 
-        self.chk_rays = QCheckBox("ToF Cones (16ch)")
-        self.chk_rays.setChecked(True)
-        self.chk_rays.toggled.connect(lambda v: setattr(self.canvas, "show_rays", v) or self.canvas.update())
-        disp_layout.addWidget(self.chk_rays, 2, 0)
-
-        self.chk_grid = QCheckBox("Grid & Circles")
-        self.chk_grid.setChecked(True)
-        self.chk_grid.toggled.connect(lambda v: setattr(self.canvas, "show_grid", v) or self.canvas.update())
-        disp_layout.addWidget(self.chk_grid, 2, 1)
+        self.chk_hazard = QCheckBox("Hazard Mask (Red)")
+        self.chk_hazard.setChecked(True)
+        self.chk_hazard.toggled.connect(lambda v: setattr(self.canvas, "show_hazard", v) or self.canvas.update())
+        disp_layout.addWidget(self.chk_hazard, 2, 0)
 
         self.chk_costmap = QCheckBox("Costmap (15mm)")
         self.chk_costmap.setChecked(True)
         self.chk_costmap.toggled.connect(lambda v: setattr(self.canvas, "show_costmap", v) or self.canvas.update())
-        disp_layout.addWidget(self.chk_costmap, 3, 0)
+        disp_layout.addWidget(self.chk_costmap, 2, 1)
+
+        self.chk_rays = QCheckBox("ToF Cones (16ch)")
+        self.chk_rays.setChecked(True)
+        self.chk_rays.toggled.connect(lambda v: setattr(self.canvas, "show_rays", v) or self.canvas.update())
+        disp_layout.addWidget(self.chk_rays, 3, 0)
 
         self.chk_chassis = QCheckBox("Chassis Footprint")
         self.chk_chassis.setChecked(True)
         self.chk_chassis.toggled.connect(lambda v: setattr(self.canvas, "show_chassis", v) or self.canvas.update())
         disp_layout.addWidget(self.chk_chassis, 3, 1)
+
+        self.chk_grid = QCheckBox("Grid & Circles")
+        self.chk_grid.setChecked(True)
+        self.chk_grid.toggled.connect(lambda v: setattr(self.canvas, "show_grid", v) or self.canvas.update())
+        disp_layout.addWidget(self.chk_grid, 4, 0)
 
         panel_layout.addWidget(disp_group)
 
@@ -699,12 +929,12 @@ class ComprehensivePlannerGUI(QMainWindow):
 
         def make_card(title: str, default_val: str, default_col: str):
             f = QFrame()
-            f.setStyleSheet("background-color: #222222; border: 1px solid #333; border-radius: 6px;")
+            f.setStyleSheet("background-color: #1a202c; border: 1px solid #2d3748; border-radius: 6px;")
             l = QVBoxLayout(f)
             l.setContentsMargins(4, 4, 4, 4)
             l.setSpacing(2)
             lbl_title = QLabel(title)
-            lbl_title.setStyleSheet("color: #888; font-size: 9px; font-weight: bold;")
+            lbl_title.setStyleSheet("color: #a0aec0; font-size: 9px; font-weight: bold;")
             lbl_val = QLabel(default_val)
             lbl_val.setFont(QFont("Consolas", 11, QFont.Bold))
             lbl_val.setStyleSheet(f"color: {default_col};")
@@ -726,7 +956,6 @@ class ComprehensivePlannerGUI(QMainWindow):
         # 2. Scrollable 16-Channel Bars
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
 
         bars_widget = QWidget()
         bars_layout = QVBoxLayout(bars_widget)
@@ -762,8 +991,8 @@ class ComprehensivePlannerGUI(QMainWindow):
             bar.setFixedHeight(12)
             bar.setStyleSheet("""
                 QProgressBar {
-                    background-color: #252525;
-                    border: 1px solid #383838;
+                    background-color: #1a202c;
+                    border: 1px solid #2d3748;
                     border-radius: 3px;
                 }
                 QProgressBar::chunk {
@@ -802,10 +1031,6 @@ class ComprehensivePlannerGUI(QMainWindow):
             return
 
         min_overall = 999.0
-        # 16-channel front-only cross-pointing layout:
-        # Front: FL 4.1°, FL 15.4°, FR 4.1°, FR 15.4°
-        # Left Flank: FR 49.1°, FR 60.4°, FR 71.6°, FR 82.9° (cross-pointing left into left wall)
-        # Right Flank: FL 49.1°, FL 60.4°, FL 71.6°, FL 82.9° (cross-pointing right into right wall)
         front_beams = ["tof_front_left_4.1deg", "tof_front_left_15.4deg", "tof_front_right_4.1deg", "tof_front_right_15.4deg"]
         left_beams = ["tof_front_right_60.4deg", "tof_front_right_71.6deg", "tof_front_right_82.9deg", "tof_front_right_49.1deg"]
         right_beams = ["tof_front_left_60.4deg", "tof_front_left_71.6deg", "tof_front_left_82.9deg", "tof_front_left_49.1deg"]
@@ -832,8 +1057,8 @@ class ComprehensivePlannerGUI(QMainWindow):
 
                 bar.setStyleSheet(f"""
                     QProgressBar {{
-                        background-color: #252525;
-                        border: 1px solid #383838;
+                        background-color: #1a202c;
+                        border: 1px solid #2d3748;
                         border-radius: 3px;
                     }}
                     QProgressBar::chunk {{
@@ -896,32 +1121,14 @@ class ComprehensivePlannerGUI(QMainWindow):
                     with self._lock:
                         self.udp_connected = False
             except Exception as e:
-                # Log JSON or payload decoding errors
                 print(f"[GUI UDP Error] {e}", flush=True)
 
     def _send_cmd(self, cmd_dict: dict):
         try:
             raw = json.dumps(cmd_dict).encode("utf-8")
-            # Send to localhost on port 9877
             self.udp_sock.sendto(raw, ("127.0.0.1", 9877))
         except Exception as e:
             print(f"[GUI Send Error] {e}", flush=True)
-
-    def _on_planner_selected(self, idx: int):
-        p_type = self.cb_planner.itemData(idx)
-        if p_type:
-            print(f"[GUI] User selected planner in dropdown: {p_type}", flush=True)
-            self._pending_planner_switch = p_type
-            for _ in range(3):
-                self._send_cmd({"cmd": "switch_planner", "planner": p_type})
-
-    def _send_planner_switch(self):
-        p_type = self.cb_planner.currentData()
-        if p_type:
-            print(f"[GUI] User clicked switch button for: {p_type}", flush=True)
-            self._pending_planner_switch = p_type
-            for _ in range(3):
-                self._send_cmd({"cmd": "switch_planner", "planner": p_type})
 
     def _toggle_pause(self):
         self.sim_paused = not self.sim_paused
@@ -962,12 +1169,6 @@ class ComprehensivePlannerGUI(QMainWindow):
         rad = math.radians(deg)
         self.lbl_slip.setText(f"{deg:.1f}°")
         self._send_cmd({"cmd": "set_param", "name": "alpha_peak", "val": rad})
-
-    def _on_steering_mode_changed(self, idx: int):
-        mode_val = self.cb_steering_mode.currentData()
-        if mode_val is not None:
-            print(f"[GUI] User selected Steering Mode: {mode_val}", flush=True)
-            self._send_cmd({"cmd": "set_param", "name": "steering_mode", "val": float(mode_val)})
 
     def _on_hysteresis_slider(self, val: int):
         self.lbl_hysteresis.setText(f"{val:.1f}")
@@ -1015,7 +1216,8 @@ class ComprehensivePlannerGUI(QMainWindow):
             tof = pkt.get("tof", {})
 
             # Update Labels
-            p_name = pkt.get("planner", "--")
+            p_name = pkt.get("planner", "Curvilinear SL-MPC")
+            mode = pkt.get("mode", "DRIVE")
             v_est = pkt.get("v_est", 0.0)
             v_tgt = pkt.get("v_tgt", 0.0)
             steer = pkt.get("steer_deg", 0.0)
@@ -1024,6 +1226,8 @@ class ComprehensivePlannerGUI(QMainWindow):
             m_ms = pkt.get("map_ms", 0.0)
             status = pkt.get("status", "--")
             surviving = pkt.get("surviving", 0)
+            rec_state = pkt.get("recovery_state", mode)
+            sim_time = pkt.get("sim_time", 0.0)
 
             self.canvas.set_data(
                 prob_map,
@@ -1035,30 +1239,51 @@ class ComprehensivePlannerGUI(QMainWindow):
                 targets=targets,
                 grid_bounds=grid_bounds,
                 steer_deg=steer,
+                recovery_state=rec_state,
             )
 
-            # Sync combobox if planner was switched remotely and no local switch is pending
-            idx = self.cb_planner.findData(p_name)
-            pending = getattr(self, "_pending_planner_switch", None)
-            if pending is not None:
-                if p_name == pending:
-                    self._pending_planner_switch = None
-            elif idx >= 0 and self.cb_planner.currentIndex() != idx:
-                self.cb_planner.blockSignals(True)
-                self.cb_planner.setCurrentIndex(idx)
-                self.cb_planner.blockSignals(False)
-
+            self.lbl_mode_badge.setText(f"Mode: {mode} | Sim Time: {sim_time:.1f}s")
             self.lbl_dyn.setText(f"Speed: {v_est:.2f} m/s (tgt: {v_tgt:.2f}) | Steer: {steer:+5.1f}°")
             if gap and len(gap) >= 3:
                 self.lbl_gap.setText(f"Gap: ({gap[0]:+.2f}, {gap[1]:.2f})m | Width: {gap[2]*100:.1f} cm")
             self.lbl_perf.setText(f"Plan: {p_ms:.2f}ms | Costmap: {m_ms:.2f}ms | Surviving: {surviving} | {status}")
-            self.lbl_dist.setText(f"Distance Traveled: {dist:.2f} m ({p_name})")
+            
+            # Recovery state label
+            if "RECOVERY" in str(rec_state).upper() or "PIVOT" in str(rec_state).upper():
+                self.lbl_recovery.setText(f"Recovery: ⚠️ {rec_state} (Active Escape Arc)")
+                self.lbl_recovery.setStyleSheet("color: #ff5252; font-weight: bold;")
+            elif "DECEL" in str(rec_state).upper():
+                self.lbl_recovery.setText(f"Recovery: 🔄 {rec_state} (Centering Steering)")
+                self.lbl_recovery.setStyleSheet("color: #ffd740; font-weight: bold;")
+            else:
+                self.lbl_recovery.setText(f"Recovery: 🟢 Normal Drive ({rec_state})")
+                self.lbl_recovery.setStyleSheet("color: #ce93d8;")
+
+            self.lbl_dist.setText(f"Distance Traveled: {dist:.2f} m")
             self._update_tof_dashboard(tof)
 
 
 def launch_gui():
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
+
+    # Force dark palette across entire Qt application
+    dark_palette = QPalette()
+    dark_palette.setColor(QPalette.Window, QColor(11, 14, 20))
+    dark_palette.setColor(QPalette.WindowText, QColor(230, 237, 243))
+    dark_palette.setColor(QPalette.Base, QColor(19, 23, 32))
+    dark_palette.setColor(QPalette.AlternateBase, QColor(28, 33, 44))
+    dark_palette.setColor(QPalette.ToolTipBase, QColor(230, 237, 243))
+    dark_palette.setColor(QPalette.ToolTipText, QColor(11, 14, 20))
+    dark_palette.setColor(QPalette.Text, QColor(230, 237, 243))
+    dark_palette.setColor(QPalette.Button, QColor(28, 33, 44))
+    dark_palette.setColor(QPalette.ButtonText, QColor(230, 237, 243))
+    dark_palette.setColor(QPalette.BrightText, QColor(255, 64, 129))
+    dark_palette.setColor(QPalette.Link, QColor(88, 166, 255))
+    dark_palette.setColor(QPalette.Highlight, QColor(0, 131, 143))
+    dark_palette.setColor(QPalette.HighlightedText, QColor(255, 255, 255))
+    app.setPalette(dark_palette)
+
     gui = ComprehensivePlannerGUI()
     gui.show()
     sys.exit(app.exec_())

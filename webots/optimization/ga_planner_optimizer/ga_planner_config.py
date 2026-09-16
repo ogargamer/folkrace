@@ -128,15 +128,16 @@ OPTION_2_SL_MPC_GENE_SPECS: List[Tuple[str, float, float, type, float, str]] = [
     ("straight_lock_dist",   1.70,   1.70,   float,  1.70,   "Forward clearance (m) to lock straight line acceleration"),
     ("straight_lock_speed",  5.50,   5.50,   float,  5.50,   "Speed ceiling (m/s) when straight-line locked"),
     # Straight Quieting & Anti-Oscillation Adaptive Steering Response
-    ("aggr_dist_far_m",      1.40,   1.80,   float,  1.70,   "Forward clearance distance (m) to engage max straight quieting"),
-    ("aggr_dist_close_m",    0.60,   1.60,   float,  1.00,   "Emergency distance threshold (m) below which 100% steering authority is engaged"),
-    ("aggr_min_scale",       0.20,   0.95,   float,  0.30,   "Minimal steering authority scale on open straights"),
-    ("steer_deadband_rad",   0.000,  0.005,  float,  0.002,  "Steering error deadband (rad) for sensor noise quieting"),
+    ("aggr_dist_far_m",      1.40,   1.80,   float,  1.72,   "Forward clearance distance (m) to engage max straight quieting"),
+    ("aggr_dist_close_m",    0.60,   1.60,   float,  1.10,   "Emergency distance threshold (m) below which 100% steering authority is engaged"),
+    ("aggr_min_scale",       0.20,   1.0,   float,  1.00,   "Minimal steering authority scale on open straights"),
+    ("steer_deadband_rad",   0.000,  0.005,  float,  0.001,  "Steering error deadband (rad) for sensor noise quieting"),
     # Stuck & Emergency Recovery
     ("emergency_backup_dist_m", 0.09, 0.15,  float,  0.09,   "Distance threshold (m) below which emergency reverse is triggered"),
     ("recovery_reverse_speed",  0.80, 2.00,  float,  1.30,   "Emergency reverse backing speed (m/s)"),
     ("recovery_clearance_exit_m", 0.25, 0.25, float, 0.25,   "Front clearance threshold (m) to conclude reverse and center steering"),
     ("recovery_steer_angle_rad",0.30, 0.698, float,  0.600,  "Recovery pivot steering angle (rad)"),
+    ("recovery_arc_lookahead_m",0.10, 0.19,  float,  0.13,   "Kinematic escape arc lookahead length (m) on costmap"),
 ]
 
 
@@ -231,6 +232,7 @@ def generate_logical_initial_population(genome_cls, pop_size: int) -> List[BaseP
             "steer_deadband_rad": 0.002,
             "emergency_backup_dist_m": 0.09, "recovery_reverse_speed": 1.30,
             "recovery_clearance_exit_m": 0.28, "recovery_steer_angle_rad": 0.600,
+            "recovery_arc_lookahead_m": 0.13,
         },
         # 1. High-Momentum Apex Striker
         {
@@ -251,6 +253,7 @@ def generate_logical_initial_population(genome_cls, pop_size: int) -> List[BaseP
             "steer_deadband_rad": 0.002,
             "emergency_backup_dist_m": 0.08, "recovery_reverse_speed": 1.40,
             "recovery_clearance_exit_m": 0.30, "recovery_steer_angle_rad": 0.600,
+            "recovery_arc_lookahead_m": 0.12,
         },
         # 2. Safe High-Clearance Sentinel
         {
@@ -271,6 +274,7 @@ def generate_logical_initial_population(genome_cls, pop_size: int) -> List[BaseP
             "steer_deadband_rad": 0.003,
             "emergency_backup_dist_m": 0.10, "recovery_reverse_speed": 1.20,
             "recovery_clearance_exit_m": 0.25, "recovery_steer_angle_rad": 0.550,
+            "recovery_arc_lookahead_m": 0.15,
         },
     ]
 

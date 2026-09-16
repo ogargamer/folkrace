@@ -50,7 +50,8 @@
     "emergency_backup_dist_m": 0.092,
     "recovery_reverse_speed": 1.575,
     "recovery_clearance_exit_m": 0.258,
-    "recovery_steer_angle_rad": 0.584
+    "recovery_steer_angle_rad": 0.584,
+    "recovery_arc_lookahead_m": 0.13
   },
   "generation": 195,
   "algorithm": "CMA_ES",

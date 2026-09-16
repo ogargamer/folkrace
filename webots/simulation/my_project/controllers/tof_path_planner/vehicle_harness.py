@@ -63,6 +63,7 @@ from planner_config import (
     RECOVERY_STEER_ANGLE_RAD,
     RECOVERY_FRONT_BLOCKED_M,
     RECOVERY_CLEARANCE_EXIT_M,
+    RECOVERY_ARC_LOOKAHEAD_M,
     ACCEL_FWD_MAX,
     BRAKE_DECEL_MAX,
     SERVO_MAX_SPEED_RAD_S,
@@ -213,6 +214,7 @@ class FolkraceVehicle:
             servo_slew_rad_s=SERVO_MAX_SPEED_RAD_S,
             brake_decel_max=BRAKE_DECEL_MAX,
             accel_fwd_max=ACCEL_FWD_MAX,
+            arc_lookahead_m=RECOVERY_ARC_LOOKAHEAD_M,
         )
 
         # Default Tuning Parameters
@@ -318,6 +320,7 @@ class FolkraceVehicle:
             servo_slew_rad_s=SERVO_MAX_SPEED_RAD_S,
             brake_decel_max=BRAKE_DECEL_MAX,
             accel_fwd_max=ACCEL_FWD_MAX,
+            arc_lookahead_m=float(genes.get("recovery_arc_lookahead_m", RECOVERY_ARC_LOOKAHEAD_M)),
         )
 
     def reset(self, start_pos: Optional[List[float]] = None, start_rot: Optional[List[float]] = None) -> None:

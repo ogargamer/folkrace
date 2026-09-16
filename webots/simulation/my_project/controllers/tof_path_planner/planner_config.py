@@ -248,5 +248,7 @@ RECOVERY_FRONT_BLOCKED_M = 0.25      # meters front clearance threshold to detec
 RECOVERY_REVERSE_STROKE_MAX_S = 0.6 # seconds maximum reverse stroke failsafe
 RECOVERY_TOTAL_TIMEOUT_S = 0.8      # seconds maximum total recovery duration before forced exit
 RECOVERY_CLEARANCE_EXIT_M = 0.28     # meters minimum front clearance to conclude reverse and center
-RECOVERY_EXIT_MIN_TIME_S = 0.08      # seconds minimum recovery stroke time before clearance check
+RECOVERY_EXIT_MIN_TIME_S = 0.0       # seconds minimum recovery stroke time before clearance check
 RECOVERY_SERVO_SLEW_RAD_S = SERVO_MAX_SPEED_RAD_S  # rad/s PTK 9497 8.4V centering slew rate (15.4 rad/s)
+RECOVERY_ARC_LOOKAHEAD_M = 0.13      # meters length of kinematic escape arcs projected on costmap
+

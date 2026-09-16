@@ -26,6 +26,7 @@ try:
         RECOVERY_CLEARANCE_EXIT_M,
         RECOVERY_EXIT_MIN_TIME_S,
         RECOVERY_SERVO_SLEW_RAD_S,
+        RECOVERY_ARC_LOOKAHEAD_M,
         BRAKE_DECEL_MAX,
         ACCEL_FWD_MAX,
         TOF_MAX_RANGE_M,
@@ -43,6 +44,7 @@ except ImportError:
         RECOVERY_CLEARANCE_EXIT_M,
         RECOVERY_EXIT_MIN_TIME_S,
         RECOVERY_SERVO_SLEW_RAD_S,
+        RECOVERY_ARC_LOOKAHEAD_M,
         BRAKE_DECEL_MAX,
         ACCEL_FWD_MAX,
         TOF_MAX_RANGE_M,
@@ -75,7 +77,7 @@ class StuckRecoveryManager:
         accel_fwd_max: float = ACCEL_FWD_MAX,
         wheelbase_m: float = WHEELBASE,
         max_steer_rad: float = MAX_STEERING_RAD,
-        arc_lookahead_m: float = 0.20,
+        arc_lookahead_m: float = RECOVERY_ARC_LOOKAHEAD_M,
         **kwargs,
     ):
         self.state = StuckRecoveryState.NORMAL_DRIVE
@@ -99,27 +101,28 @@ class StuckRecoveryManager:
         self.wheelbase = float(wheelbase_m)
         self.max_steer_rad = float(max_steer_rad)
         self.r_min_turn = self.wheelbase / max(1e-3, math.tan(self.max_steer_rad))
-        self.bumper_y = 0.095  # front bumper mount Y in vehicle frame
+        self.origin_y = 0.0   # Robot center origin (0.0, 0.0)
+        self.bumper_y = 0.095 # Front bumper mount Y in vehicle frame
 
         self.arc_lookahead_m = float(arc_lookahead_m)
         self.arc_step_ds = 0.015  # 15mm steps
         n_pts = max(3, int(self.arc_lookahead_m / self.arc_step_ds))
-        self._arc_s = np.linspace(self.arc_step_ds, self.arc_lookahead_m, n_pts, dtype=np.float32)
+        self._arc_s = np.linspace(0.0, self.arc_lookahead_m, n_pts, dtype=np.float32)
 
-        # Left Turn Arc (full left lock: sweeps left -X)
+        # Left Turn Arc (full left lock: sweeps left -X from robot center)
         self._arc_pts_left = np.zeros((n_pts, 2), dtype=np.float32)
         self._arc_pts_left[:, 0] = -self.r_min_turn * (1.0 - np.cos(self._arc_s / self.r_min_turn))
-        self._arc_pts_left[:, 1] = self.bumper_y + self.r_min_turn * np.sin(self._arc_s / self.r_min_turn)
+        self._arc_pts_left[:, 1] = self.origin_y + self.r_min_turn * np.sin(self._arc_s / self.r_min_turn)
 
-        # Right Turn Arc (full right lock: sweeps right +X)
+        # Right Turn Arc (full right lock: sweeps right +X from robot center)
         self._arc_pts_right = np.zeros((n_pts, 2), dtype=np.float32)
         self._arc_pts_right[:, 0] = self.r_min_turn * (1.0 - np.cos(self._arc_s / self.r_min_turn))
-        self._arc_pts_right[:, 1] = self.bumper_y + self.r_min_turn * np.sin(self._arc_s / self.r_min_turn)
+        self._arc_pts_right[:, 1] = self.origin_y + self.r_min_turn * np.sin(self._arc_s / self.r_min_turn)
 
-        # Center Straight Sightline
+        # Center Straight Sightline (from robot center)
         self._arc_pts_center = np.zeros((n_pts, 2), dtype=np.float32)
         self._arc_pts_center[:, 0] = 0.0
-        self._arc_pts_center[:, 1] = self.bumper_y + self._arc_s
+        self._arc_pts_center[:, 1] = self.origin_y + self._arc_s
 
     def evaluate_costmap_escape_arcs(
         self,
@@ -136,19 +139,20 @@ class StuckRecoveryManager:
 
         res = getattr(costmap_obj, "res", 0.015)
         x_min = getattr(costmap_obj, "x_min", -1.25)
-        y_min = getattr(costmap_obj, "y_min", 0.0)
+        y_min = getattr(costmap_obj, "y_min", -0.10)
         h, w = hazard_mask.shape
 
         def _trace(pts: np.ndarray) -> float:
             for i in range(len(pts)):
                 px = pts[i, 0]
                 py = pts[i, 1]
+                if py < self.bumper_y:
+                    continue
                 col = int(round((px - x_min) / res))
                 row = int(round((py - y_min) / res))
-                if row < 0 or row >= h or col < 0 or col >= w:
-                    return float(self._arc_s[max(0, i - 1)])
-                if hazard_mask[row, col] > 0:
-                    return float(self._arc_s[max(0, i - 1)])
+                if 0 <= row < h and 0 <= col < w:
+                    if hazard_mask[row, col] > 0:
+                        return float(self._arc_s[max(0, i - 1)])
             return float(self._arc_s[-1])
 
         d_left = _trace(self._arc_pts_left)
@@ -199,7 +203,13 @@ class StuckRecoveryManager:
         else:
             self.preferred_yaw_sign = 1.0
 
-        target_steer = -self.preferred_yaw_sign * self.steer_angle
+        if current_v > 0.5:
+            # Moving forward (> 0.5 m/s): steer away from obstacle so forward momentum doesn't dive into obstacle
+            target_steer = -self.preferred_yaw_sign * self.steer_angle
+        else:
+            # Speed <= 0.5 m/s or reversing: turn wheels towards obstacle so reverse motion swings nose away
+            target_steer = self.preferred_yaw_sign * self.steer_angle
+
         if instant_reverse:
             self.current_cmd_v = -self.reverse_speed
             self.current_cmd_steer = target_steer
@@ -236,10 +246,11 @@ class StuckRecoveryManager:
             d_straight_tof = min(float(d_l_41), float(d_r_41))
 
         # 2. Check if front ToFs are blocked (< 15cm):
-        # If front is blocked, check if either side escape curvature is free (>= 15cm).
+        # If front is blocked, check if either side escape curvature is free (>= arc_lookahead - 1cm).
         # Only trigger emergency reverse if BOTH front is blocked AND neither side curvature has a way out.
         front_blocked = (d_straight_tof < 0.15)
-        side_curvature_free = (d_esc_l >= 0.15 or d_esc_r >= 0.15)
+        side_free_thresh = max(0.08, self.arc_lookahead_m - 0.01)
+        side_curvature_free = (d_esc_l >= side_free_thresh or d_esc_r >= side_free_thresh)
         is_front_imminent_obstacle = front_blocked and (not side_curvature_free)
 
         # 3. Spinout / Facing Backwards check (110 degrees)
@@ -288,7 +299,12 @@ class StuckRecoveryManager:
         # PHASE 1: PIVOT REVERSE ARC
         if self.state == StuckRecoveryState.PIVOT_REVERSE:
             target_v = -self.reverse_speed
-            target_steer = -self.preferred_yaw_sign * self.steer_angle
+            if current_v > 0.5:
+                # Still moving forward (> 0.5 m/s): steer away from obstacle so forward momentum does not turn into obstacle
+                target_steer = -self.preferred_yaw_sign * self.steer_angle
+            else:
+                # Speed at or below 0.5 m/s: turn wheels towards obstacle so reverse motion swings nose away
+                target_steer = self.preferred_yaw_sign * self.steer_angle
 
             # Instantly apply full reverse speed and escape steering angle
             self.current_cmd_v = target_v

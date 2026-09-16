@@ -117,13 +117,18 @@ class IMUEncoderFusion:
         v_front = 0.5 * (v_fl + v_fr)
         self.v_wheels = 0.70 * v_rear + 0.30 * v_front
 
-        # 3. Read IMU Accelerometer (local robot body: +Y is Forward)
+        # 3. Read IMU Accelerometer (local robot body: +Y is Forward, +X is Right)
         a_fwd = 0.0
+        a_lat = 0.0
         if self.accel_dev is not None:
             raw_accel = self.accel_dev.getValues()
             if raw_accel and len(raw_accel) >= 3:
+                a_lat = float(raw_accel[0])
                 a_fwd = float(raw_accel[1])
         self.a_forward = a_fwd
+
+        # Crash Impact Check: Physical wall collision spikes well beyond tire grip (> 14 m/s^2 / ~1.5g)
+        is_crash_impact = (a_fwd < -14.0 or math.hypot(a_lat, a_fwd) > 20.0)
 
         # 4. Read Gyroscope (body Z-axis yaw rate)
         gyro_z = 0.0
@@ -142,7 +147,10 @@ class IMUEncoderFusion:
         # 6. Complementary Filter: Fuse dead-reckoned acceleration with encoder rolling speed
         # Prevents high-frequency wheel spin slip from corrupting velocity
         v_pred = self.v_est + self.a_forward * step_dt
-        if abs(self.v_wheels) < 0.03 and abs(self.a_forward) < 0.15:
+        if is_crash_impact:
+            # Crash impact instantly halts forward velocity; reset state and filter lag to 0.0
+            self.v_est = 0.0
+        elif abs(self.v_wheels) < 0.03 and abs(self.a_forward) < 0.15:
             # Standstill lock
             self.v_est = 0.0
         else:
