@@ -34,12 +34,19 @@ class ReverseObstacleEngine:
                 self.traj = arr[:, 0:2]
                 if arr.shape[1] >= 6:
                     self.dists = arr[:, 5]
-                    self.total_length = float(self.dists[-1])
                 else:
                     diffs = np.diff(self.traj, axis=0)
                     seg_dists = np.hypot(diffs[:, 0], diffs[:, 1])
                     self.dists = np.concatenate([[0.0], np.cumsum(seg_dists)])
-                    self.total_length = float(self.dists[-1])
+
+                # Ensure closed-loop trajectory continuity across the start/finish line (s=0)
+                if len(self.traj) > 1:
+                    closing_gap = float(np.hypot(self.traj[0, 0] - self.traj[-1, 0], self.traj[0, 1] - self.traj[-1, 1]))
+                    if closing_gap > 1e-4:
+                        self.traj = np.vstack([self.traj, self.traj[0:1]])
+                        self.dists = np.append(self.dists, self.dists[-1] + closing_gap)
+
+                self.total_length = float(self.dists[-1])
             except Exception as e:
                 print(f"[ReverseObstacleEngine] Failed to parse trajectory CSV: {e}", flush=True)
 

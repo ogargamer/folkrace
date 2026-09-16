@@ -63,6 +63,13 @@ def test_reverse_obstacle_engine():
             obs_s = (k * (engine.total_length / n_obs) - 0.50 * sim_t) % engine.total_length
             x, y = engine.get_position_at_s(obs_s)
             assert not np.isnan(x) and not np.isnan(y)
+
+    # Verify start/finish line (s=0) continuity without teleportation jump
+    p_pos = engine.get_position_at_s(0.001)
+    p_neg = engine.get_position_at_s(-0.001)
+    gap_across_start = np.hypot(p_pos[0] - p_neg[0], p_pos[1] - p_neg[1])
+    assert gap_across_start < 0.005, f"Discontinuity at start line: {gap_across_start:.4f} m"
+    print(f"  -> Start line s=0 continuity verified (gap for 2mm ds = {gap_across_start*1000:.3f} mm).")
     print("  -> Reverse progression test passed.")
 
 

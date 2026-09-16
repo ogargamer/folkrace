@@ -77,7 +77,12 @@ class WebotsTrackProgressTracker:
                     diffs = np.diff(self.traj_pts, axis=0)
                     seg_dists = np.hypot(diffs[:, 0], diffs[:, 1])
                     self.dists = np.concatenate([[0.0], np.cumsum(seg_dists)])
-                self.total_length = float(self.dists[-1])
+
+                if len(self.traj_pts) > 1:
+                    closing_gap = float(np.hypot(self.traj_pts[0, 0] - self.traj_pts[-1, 0], self.traj_pts[0, 1] - self.traj_pts[-1, 1]))
+                    self.total_length = float(self.dists[-1] + closing_gap)
+                else:
+                    self.total_length = float(self.dists[-1])
                 self.n_pts = len(self.dists)
             except Exception as e:
                 print(f"[ProgressTracker] Warning: Failed to load trajectory {traj_csv_path}: {e}", flush=True)
