@@ -235,6 +235,7 @@ class ToFGapScout:
                 alt_min_separation_m=self.alt_min_separation_m,
                 alt_aperture_bias=self.alt_aperture_bias,
                 top_k=top_k,
+                hazard_mask=hazard_mask,
             )
             return targets
 

@@ -69,14 +69,14 @@ class DynamicObstacleTracker:
 
     def __init__(
         self,
-        grid_bounds: Tuple[float, float, float, float] = (-1.0, 1.0, 0.0, 2.0),
+        grid_bounds: Tuple[float, float, float, float] = (-1.25, 1.25, -0.10, 2.0),
         resolution: float = 0.015,
         prob_threshold: float = 0.65,
         max_wall_dim_cells: int = 25,
         min_area_cells: int = 4,
         gating_radius_m: float = 0.20,
         persistence_frames: int = 5,
-        dynamic_threshold_mps: float = 0.40,
+        dynamic_threshold_mps: float = 0.30,
         lead_time_s: float = 0.20,
         max_lead_m: float = 0.25,
         tail_clear_m: float = 0.05,
@@ -92,7 +92,7 @@ class DynamicObstacleTracker:
         self.res = float(resolution)
         self.prob_threshold = float(prob_threshold)
 
-        # Standard 134x134 grid geometry
+        # Standard grid geometry (168x141 for (-1.25, 1.25, -0.10, 2.0))
         self.width = int(round((self.x_max - self.x_min) / self.res)) + 1
         self.height = int(round((self.y_max - self.y_min) / self.res)) + 1
         self.shape = (self.height, self.width)
@@ -106,7 +106,7 @@ class DynamicObstacleTracker:
         self.min_area_cells = int(min_area_cells)          # 4 cells
         self.gating_radius_m = float(gating_radius_m)      # 0.20 m association radius
         self.persistence_frames = int(persistence_frames)  # 5 consecutive frames
-        self.dynamic_threshold_mps = float(dynamic_threshold_mps)  # 0.40 m/s
+        self.dynamic_threshold_mps = float(dynamic_threshold_mps)  # 0.30 m/s
         self.max_lateral_m = float(max_lateral_m) if max_lateral_m is not None else None
         self.max_missed_frames = int(max_missed_frames)    # 2 frames coasting tolerance
 
@@ -192,21 +192,47 @@ class DynamicObstacleTracker:
     # --------------------------------------------------------------------------
     # PIPELINE STEP 2: Blob Extraction & Geometric Wall/Noise Filtering
     # --------------------------------------------------------------------------
-    def extract_obstacle_blobs(self, binary_mask: np.ndarray) -> List[ObstacleBlob]:
+    def extract_obstacle_blobs(
+        self, binary_mask: np.ndarray, cspace_mask: Optional[np.ndarray] = None
+    ) -> List[ObstacleBlob]:
         """
         Executes cv2.connectedComponentsWithStats on 134x134 binary costmap.
-        Rejects:
-          - Background (label 0)
-          - Wall blobs: touching grid boundaries OR bbox dimension > 25 cells (> 37.5 cm)
-          - Noise floor: area < 4 cells
-        Returns list of surviving compact candidate obstacle blobs.
+        Uses C-space (cspace_mask) to bridge spaced-out ToF hits along walls,
+        ensuring continuous wall chains are rejected as walls rather than isolated obstacles.
         """
+        h, w = binary_mask.shape
+        wall_occupancy = np.zeros((h, w), dtype=np.uint8)
+
+        # Step A: C-space Wall Component Detection
+        if cspace_mask is not None and cspace_mask.any():
+            cspace_bin = (cspace_mask > 0).astype(np.uint8)
+            n_c, l_c, s_c, _ = cv2.connectedComponentsWithStats(cspace_bin, connectivity=8)
+            for c_lbl in range(1, n_c):
+                c_left = int(s_c[c_lbl, cv2.CC_STAT_LEFT])
+                c_top = int(s_c[c_lbl, cv2.CC_STAT_TOP])
+                c_w = int(s_c[c_lbl, cv2.CC_STAT_WIDTH])
+                c_h = int(s_c[c_lbl, cv2.CC_STAT_HEIGHT])
+                c_area = int(s_c[c_lbl, cv2.CC_STAT_AREA])
+
+                # Wall criteria:
+                # 1. Spans > 25 cells (> 37.5 cm) in width or height (larger than any individual car/pillar)
+                # 2. Touches lateral grid boundaries (left/right side walls of corridor) with span > 18 cells
+                # 3. Has large connected area > 800 cells
+                touches_lateral = (c_left <= 1 or (c_left + c_w >= w - 1))
+                is_wall = (
+                    max(c_w, c_h) > self.max_wall_dim_cells
+                    or (touches_lateral and max(c_w, c_h) > 18)
+                    or c_area > 800
+                )
+                if is_wall:
+                    wall_occupancy[l_c == c_lbl] = 1
+
+        # Step B: Raw Obstacle Blob Extraction
         num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
             binary_mask, connectivity=8
         )
 
         surviving: List[ObstacleBlob] = []
-        h, w = binary_mask.shape
 
         for lbl in range(1, num_labels):
             left = int(stats[lbl, cv2.CC_STAT_LEFT])
@@ -217,8 +243,8 @@ class DynamicObstacleTracker:
             u_c = float(centroids[lbl, 0])
             v_c = float(centroids[lbl, 1])
 
-            # 1. Wall Rejection: Discard any blob touching grid boundaries
-            if left <= 0 or top <= 0 or (left + width >= w) or (top + height >= h):
+            # 1. Wall Rejection: Discard any blob touching lateral or bottom grid boundaries
+            if left <= 1 or (left + width >= w - 1) or (top + height >= h - 1):
                 continue
 
             # 2. Wall Rejection: Discard any blob with bounding box dimension > 25 cells (> 37.5 cm)
@@ -227,6 +253,12 @@ class DynamicObstacleTracker:
 
             # 3. Noise Floor: Discard tiny blobs with area < 4 cells
             if area < self.min_area_cells:
+                continue
+
+            # 4. C-Space Wall Association: Discard if blob pixels overlap a C-space connected wall
+            blob_roi_wall = wall_occupancy[top:top+height, left:left+width]
+            blob_roi_mask = (labels[top:top+height, left:left+width] == lbl)
+            if np.any(blob_roi_wall & blob_roi_mask):
                 continue
 
             # Aspect-invariant centroid stabilization:
@@ -242,7 +274,7 @@ class DynamicObstacleTracker:
             x_r = float((u_stable - self.u0) * self.res)
             y_r = float((v_stable - self.v0) * self.res)
 
-            # 4. Corridor Boundary: Discard blobs located beyond drivable track boundaries (track walls)
+            # 5. Corridor Boundary: Discard blobs located beyond drivable track boundaries (track walls)
             if self.max_lateral_m is not None and abs(x_r) > self.max_lateral_m:
                 continue
 
@@ -521,6 +553,7 @@ class DynamicObstacleTracker:
         base_hazard_mask: np.ndarray,
         dynamic_tracks: Optional[List[ObstacleTrack]] = None,
         stamp_radius_m: float = 0.075,
+        mask_bounds: Optional[Tuple[float, float, float, float]] = None,
     ) -> np.ndarray:
         """
         Enlarges confirmed dynamic obstacles towards their moving vector
@@ -540,13 +573,21 @@ class DynamicObstacleTracker:
         stamp_r_cells = max(1, int(round(stamp_radius_m / self.res)))
         tail_clear_cells = max(1, int(round(self.tail_clear_m / self.res)))
 
+        if mask_bounds is not None:
+            mb_xmin, mb_xmax, mb_ymin, mb_ymax = mask_bounds
+            u0 = -mb_xmin / self.res
+            v0 = -mb_ymin / self.res
+        else:
+            u0 = self.u0
+            v0 = self.v0
+
         for track in tracks_to_enlarge:
             if not track.is_dynamic or track.v_mag < 1e-4:
                 continue
 
-            # Centroid in grid coordinates
-            u_c = int(round(self.u0 + track.x_r / self.res))
-            v_c = int(round(self.v0 + track.y_r / self.res))
+            # Centroid in grid coordinates matching the mask coordinate system
+            u_c = int(round(u0 + track.x_r / self.res))
+            v_c = int(round(v0 + track.y_r / self.res))
 
             # Unit velocity vector in robot frame
             unit_vx = track.v_rx / track.v_mag
@@ -603,11 +644,16 @@ class DynamicObstacleTracker:
         Returns:
             Tuple[enlarged_hazard_mask, dynamic_tracks, telemetry_info]
         """
-        # Step 1: Binary occupied mask (134x134)
+        # Step 1: Binary occupied mask
         binary_mask = self.prepare_binary_costmap(prob_map, current_bounds=source_grid_bounds)
 
-        # Step 2: Blob extraction & geometric filtering
-        blobs = self.extract_obstacle_blobs(binary_mask)
+        # Prepare C-space hazard mask for wall bridging
+        cspace_mask = None
+        if base_hazard_mask is not None:
+            cspace_mask = self.prepare_binary_costmap(base_hazard_mask, current_bounds=source_grid_bounds)
+
+        # Step 2: Blob extraction & geometric filtering with C-space wall connection
+        blobs = self.extract_obstacle_blobs(binary_mask, cspace_mask=cspace_mask)
 
         # Step 3: World-frame projection
         world_pts = self.project_to_world_frame(blobs, robot_pose)
@@ -624,10 +670,14 @@ class DynamicObstacleTracker:
         # Step 6: Conservative vector enlargement
         if base_hazard_mask is not None:
             active_hazard = base_hazard_mask
+            mask_bounds = source_grid_bounds
         else:
             active_hazard = binary_mask
+            mask_bounds = None
 
-        enlarged_hazard = self.apply_conservative_enlargement(active_hazard, dynamic_tracks)
+        enlarged_hazard = self.apply_conservative_enlargement(
+            active_hazard, dynamic_tracks, mask_bounds=mask_bounds
+        )
 
         telemetry = {
             "surviving_blobs": len(blobs),

@@ -336,6 +336,21 @@ public:
                                 hazard_mask[nr * width + nc] = 1;
                             }
                         }
+
+                        // Perimeter Wall Longitudinal Bridging:
+                        // For confirmed hits along the outer track perimeter (|x| >= 0.35m),
+                        // bridge along Y (longitudinal corridor direction, ±10 cells = ±15 cm)
+                        // to ensure spaced-out ToF hits along side walls form an unbroken wall barrier.
+                        float cell_x = x_min + c * res + res * 0.5f;
+                        if (std::abs(cell_x) >= 0.35f) {
+                            constexpr int WALL_BRIDGE_CELLS = 10;
+                            for (int dy = -WALL_BRIDGE_CELLS; dy <= WALL_BRIDGE_CELLS; ++dy) {
+                                int nr = r + dy;
+                                if (nr >= 0 && nr < height) {
+                                    hazard_mask[nr * width + c] = 1;
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -352,7 +367,8 @@ public:
     }
 
     // Step 6: O(1) Instant Trajectory Probe (Zero Allocation)
-    bool probe_path(const float* xs, const float* ys, int count) const {
+    bool probe_path(const float* xs, const float* ys, int count, const uint8_t* custom_hazard_mask = nullptr) const {
+        const uint8_t* active_haz = custom_hazard_mask ? custom_hazard_mask : hazard_mask.data();
         for (int i = 0; i < count; ++i) {
             float x = xs[i];
             float y = ys[i];
@@ -362,7 +378,7 @@ public:
             int c = static_cast<int>(std::round((x - x_min) / res));
             int r = static_cast<int>(std::round((y - y_min) / res));
             if (c >= 0 && c < width && r >= 0 && r < height) {
-                if (hazard_mask[r * width + c] == 1) {
+                if (active_haz[r * width + c] == 1) {
                     return false; // Collision detected
                 }
             }
@@ -394,8 +410,10 @@ public:
         float* out_targets_x,
         float* out_targets_y,
         float* out_targets_aperture,
-        int max_targets
+        int max_targets,
+        const uint8_t* custom_hazard_mask = nullptr
     ) {
+        const uint8_t* active_haz = custom_hazard_mask ? custom_hazard_mask : hazard_mask.data();
         constexpr float GAP_MIN_LOOKAHEAD_M = 0.30f;
         constexpr float GAP_MAX_LOOKAHEAD_M = 1.70f;
         constexpr float GAP_MIN_WIDTH_M = 0.0f;
@@ -435,7 +453,7 @@ public:
                         clear_dist = std::max(0.0f, d - step_ds);
                         break;
                     }
-                    if (hazard_mask[row * width + col] > 0) {
+                    if (active_haz[row * width + col] > 0) {
                         clear_dist = std::max(0.0f, d - step_ds);
                         break;
                     }
@@ -494,7 +512,7 @@ public:
                         clear_dist = std::max(0.0f, d - step_ds);
                         break;
                     }
-                    if (hazard_mask[row * width + col] > 0) {
+                    if (active_haz[row * width + col] > 0) {
                         clear_dist = std::max(0.0f, d - step_ds);
                         break;
                     }
@@ -533,7 +551,7 @@ public:
             float py = 0.095f + d;
             int col = static_cast<int>(std::round((0.0f - x_min) / res));
             int row = static_cast<int>(std::round((py - y_min) / res));
-            if (col < 0 || col >= width || row < 0 || row >= height || hazard_mask[row * width + col] > 0) {
+            if (col < 0 || col >= width || row < 0 || row >= height || active_haz[row * width + col] > 0) {
                 d_center = std::max(0.0f, d - step_ds);
                 break;
             }
@@ -747,7 +765,8 @@ COSTMAP_API int costmap_scout_gaps(
     float* out_targets_x,
     float* out_targets_y,
     float* out_targets_aperture,
-    int max_targets
+    int max_targets,
+    const uint8_t* custom_hazard_mask
 ) {
     if (!handle) return 0;
     auto* cm = static_cast<SmartHybridCostmapFront*>(handle);
@@ -756,7 +775,8 @@ COSTMAP_API int costmap_scout_gaps(
         w_gap_distance, w_gap_width, w_align_steer, w_align_straight, w_side_clearance,
         gap_dist_exp_k, gap_progress_margin_m, alt_min_separation_m, alt_aperture_bias,
         out_targets_x, out_targets_y, out_targets_aperture,
-        max_targets
+        max_targets,
+        custom_hazard_mask
     );
 }
 
@@ -769,6 +789,18 @@ COSTMAP_API int costmap_probe_path(
     if (!handle) return 0;
     auto* cm = static_cast<SmartHybridCostmapFront*>(handle);
     return cm->probe_path(xs, ys, count) ? 1 : 0;
+}
+
+COSTMAP_API int costmap_probe_path_custom(
+    void* handle,
+    const float* xs,
+    const float* ys,
+    int count,
+    const uint8_t* custom_hazard_mask
+) {
+    if (!handle) return 0;
+    auto* cm = static_cast<SmartHybridCostmapFront*>(handle);
+    return cm->probe_path(xs, ys, count, custom_hazard_mask) ? 1 : 0;
 }
 
 COSTMAP_API int costmap_get_width(void* handle) {

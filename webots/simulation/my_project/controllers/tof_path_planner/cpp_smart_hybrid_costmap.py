@@ -73,8 +73,28 @@ if hasattr(_lib, "costmap_scout_gaps"):
         ctypes.c_float, ctypes.c_float,  # alt_min_separation_m, alt_aperture_bias
         ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), # out_targets_x, y, ap
         ctypes.c_int,                    # max_targets
+        ctypes.POINTER(ctypes.c_uint8),  # custom_hazard_mask (optional)
     ]
     _lib.costmap_scout_gaps.restype = ctypes.c_int
+
+if hasattr(_lib, "costmap_probe_path"):
+    _lib.costmap_probe_path.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_float),  # xs
+        ctypes.POINTER(ctypes.c_float),  # ys
+        ctypes.c_int,                    # count
+    ]
+    _lib.costmap_probe_path.restype = ctypes.c_int
+
+if hasattr(_lib, "costmap_probe_path_custom"):
+    _lib.costmap_probe_path_custom.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_float),  # xs
+        ctypes.POINTER(ctypes.c_float),  # ys
+        ctypes.c_int,                    # count
+        ctypes.POINTER(ctypes.c_uint8),  # custom_hazard_mask
+    ]
+    _lib.costmap_probe_path_custom.restype = ctypes.c_int
 
 # Standard sensor names order matching C++ array and only_front_tofs.proto
 SENSOR_NAMES = [
@@ -261,18 +281,29 @@ class CppSmartHybridCostmap:
 
         return p_map
 
-    def probe_path(self, xs: np.ndarray, ys: np.ndarray) -> bool:
+    def probe_path(self, xs: np.ndarray, ys: np.ndarray, hazard_mask: Optional[np.ndarray] = None) -> bool:
         """Instant collision check for an entire trajectory in local frame."""
         xs_c = np.ascontiguousarray(xs, dtype=np.float32)
         ys_c = np.ascontiguousarray(ys, dtype=np.float32)
         n = len(xs_c)
 
-        res = _lib.costmap_probe_path(
-            self._handle,
-            xs_c.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
-            ys_c.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
-            n,
-        )
+        if hazard_mask is not None and hasattr(_lib, "costmap_probe_path_custom"):
+            haz_c = np.ascontiguousarray(hazard_mask, dtype=np.uint8)
+            haz_ptr = haz_c.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8))
+            res = _lib.costmap_probe_path_custom(
+                self._handle,
+                xs_c.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+                ys_c.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+                n,
+                haz_ptr,
+            )
+        else:
+            res = _lib.costmap_probe_path(
+                self._handle,
+                xs_c.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+                ys_c.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+                n,
+            )
         return bool(res == 1)
 
     def scout_gaps_native(
@@ -289,11 +320,17 @@ class CppSmartHybridCostmap:
         alt_min_separation_m: float = 0.25,
         alt_aperture_bias: float = 1.80,
         top_k: int = 2,
+        hazard_mask: Optional[np.ndarray] = None,
     ) -> List[Tuple[float, float, float]]:
         """
         Executes C++ native gap scouting across the active hazard_mask.
         Returns: targets_list [(tx, ty, aperture), ...]
         """
+        haz_ptr = None
+        if hazard_mask is not None:
+            haz_c = np.ascontiguousarray(hazard_mask, dtype=np.uint8)
+            haz_ptr = haz_c.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8))
+
         n_found = _lib.costmap_scout_gaps(
             self._handle,
             self.raw_ranges_c,
@@ -312,6 +349,7 @@ class CppSmartHybridCostmap:
             self._out_targets_y,
             self._out_targets_ap,
             int(top_k),
+            haz_ptr,
         )
 
         targets = []

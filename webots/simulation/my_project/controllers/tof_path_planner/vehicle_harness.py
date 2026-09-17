@@ -213,7 +213,10 @@ class FolkraceVehicle:
             r_inflation_m=R_INFLATION_M,
         )
 
-        self.obstacle_tracker = DynamicObstacleTracker()
+        self.obstacle_tracker = DynamicObstacleTracker(
+            grid_bounds=(GRID_X_MIN, GRID_X_MAX, GRID_Y_MIN, GRID_Y_MAX),
+            resolution=GRID_RES,
+        )
         self.last_dynamic_tracks = []
         self.last_obs_telem = {}
         self.last_enlarged_hazard = None
@@ -593,31 +596,35 @@ class FolkraceVehicle:
             raw_target_steer = float(plan_res.get("cmd_steer_rad", 0.0))
             raw_target_speed = float(plan_res.get("cmd_speed_mps", self.v_cruise_min))
 
-            # Update Anti-Wrong-Way Watchdog
-            gx_curr, gy_curr, gyaw_curr = self.get_ground_truth_pose()
-            aww_status = self.watchdog.update(
-                x=gx_curr,
-                y=gy_curr,
-                yaw=gyaw_curr,
-                v_est=self.v_est,
-                yaw_rate=self.cached_yaw_rate,
-                cached_tofs=tof_readings,
-                now_s=sim_time,
-            )
-            self.last_aww_status = aww_status
-
-            # Trigger CORRECTIVE_180 if wrong-way is confirmed and not already performing corrective turn
-            if aww_status.is_wrong_way and self.recovery_manager.state != StuckRecoveryState.CORRECTIVE_180:
-                def wrap_to_pi(a):
-                    return math.atan2(math.sin(a), math.cos(a))
-                tgt_yaw = aww_status.target_recovery_yaw if aww_status.target_recovery_yaw is not None else wrap_to_pi(gyaw_curr + math.pi)
-                yaw_diff = wrap_to_pi(tgt_yaw - gyaw_curr)
-                steer_sign = 1.0 if yaw_diff >= 0.0 else -1.0
-                self.recovery_manager.trigger_corrective_180(
-                    target_yaw=tgt_yaw,
-                    steer_sign=steer_sign,
-                    current_yaw=gyaw_curr,
+            # Anti-Wrong-Way Watchdog (only if enabled)
+            if getattr(self.watchdog, "mode", "DISABLED") != "DISABLED":
+                gx_curr, gy_curr, gyaw_curr = self.get_ground_truth_pose()
+                aww_status = self.watchdog.update(
+                    x=gx_curr,
+                    y=gy_curr,
+                    yaw=gyaw_curr,
+                    v_est=self.v_est,
+                    yaw_rate=self.cached_yaw_rate,
+                    cached_tofs=tof_readings,
+                    now_s=sim_time,
                 )
+                self.last_aww_status = aww_status
+
+                # Trigger CORRECTIVE_180 if wrong-way is confirmed and not already performing corrective turn
+                if aww_status.is_wrong_way and self.recovery_manager.state != StuckRecoveryState.CORRECTIVE_180:
+                    def wrap_to_pi(a):
+                        return math.atan2(math.sin(a), math.cos(a))
+                    tgt_yaw = aww_status.target_recovery_yaw if aww_status.target_recovery_yaw is not None else wrap_to_pi(gyaw_curr + math.pi)
+                    yaw_diff = wrap_to_pi(tgt_yaw - gyaw_curr)
+                    steer_sign = 1.0 if yaw_diff >= 0.0 else -1.0
+                    self.recovery_manager.trigger_corrective_180(
+                        target_yaw=tgt_yaw,
+                        steer_sign=steer_sign,
+                        current_yaw=gyaw_curr,
+                    )
+            else:
+                gx_curr, gy_curr, gyaw_curr = self.get_ground_truth_pose()
+                self.last_aww_status = None
 
             # Recovery Manager at 60 Hz (Kinematic Escape Arc Costmap Evaluation & CORRECTIVE_180)
             is_recovering, rec_v, rec_steer = self.recovery_manager.update(
@@ -772,9 +779,31 @@ class FolkraceVehicle:
             }
             return telemetry, planner_ran
 
-        prob_down = (self.costmap.prob_map[::2, ::2] * 255.0).astype(np.uint8)
+        # 2x2 Max Pooling for Costmap Telemetry:
+        # Prevents small 1-2 cell obstacle hits from being skipped/aliased during decimation,
+        # ensuring the red obstacle core is always rendered within its C-space halo.
+        pm = self.costmap.prob_map
+        h_even = (pm.shape[0] // 2) * 2
+        w_even = (pm.shape[1] // 2) * 2
+        pm_even = pm[:h_even, :w_even]
+        prob_max = np.maximum.reduce([
+            pm_even[0::2, 0::2],
+            pm_even[0::2, 1::2],
+            pm_even[1::2, 0::2],
+            pm_even[1::2, 1::2]
+        ])
+        prob_down = (prob_max * 255.0).astype(np.uint8)
+
         active_hazard = self.last_enlarged_hazard if self.last_enlarged_hazard is not None else self.costmap.hazard_mask
-        hazard_down = active_hazard[::2, ::2].astype(np.uint8)
+        haz_even = active_hazard[:h_even, :w_even]
+        haz_max = np.maximum.reduce([
+            haz_even[0::2, 0::2],
+            haz_even[0::2, 1::2],
+            haz_even[1::2, 0::2],
+            haz_even[1::2, 1::2]
+        ])
+        hazard_down = (haz_max > 0).astype(np.uint8)
+
         grid_compressed = base64.b64encode(zlib.compress(prob_down.tobytes())).decode("ascii")
         hazard_compressed = base64.b64encode(zlib.compress(hazard_down.tobytes())).decode("ascii")
 

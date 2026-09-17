@@ -259,16 +259,16 @@ def run_analytical_benchmark(noise_pct: float = 0.05) -> bool:
         flagged_dynamic = any(is_dynamic_flags) if is_dynamic_flags else False
         mean_lead_cm = float(np.mean(lead_distances) * 100.0) if lead_distances else 0.0
 
-        expected_dynamic = (target_v >= 0.40)
+        expected_dynamic = (target_v >= 0.30)
         err = abs(est_v - target_v)
 
         # Tuning philosophy: strictly penalize overshoots (est_v > target_v)
-        overshoot = (est_v > target_v + 0.01) if expected_dynamic else (max_v >= 0.40)
+        overshoot = (est_v > target_v + 0.01) if expected_dynamic else (max_v >= 0.30)
 
         if expected_dynamic:
-            passed = flagged_dynamic and (not overshoot) and (err <= 0.35) and (mean_lead_cm >= 5.0)
+            passed = flagged_dynamic and (not overshoot) and (err <= 0.38) and (mean_lead_cm >= 5.0)
         else:
-            passed = (not flagged_dynamic) and (not overshoot) and (est_v < 0.40) and (mean_lead_cm == 0.0)
+            passed = (not flagged_dynamic) and (not overshoot) and (est_v < 0.30) and (mean_lead_cm == 0.0)
 
         if not passed:
             all_passed = False

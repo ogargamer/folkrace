@@ -57,7 +57,7 @@ except ImportError:
             AWW_LOOKAHEAD_M,
         )
     except ImportError:
-        ANTI_WRONG_WAY_MODE = "OPTION_COMBINED_HYBRID"
+        ANTI_WRONG_WAY_MODE = "DISABLED"
         AWW_BREADCRUMB_LOOKBACK_M = 4.0
         AWW_BREADCRUMB_SPACING_M = 0.05
         AWW_CORRIDOR_HALF_WIDTH_M = 0.25

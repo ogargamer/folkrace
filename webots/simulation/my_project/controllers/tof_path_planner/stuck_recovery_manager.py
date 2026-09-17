@@ -214,12 +214,8 @@ class StuckRecoveryManager:
         else:
             self.preferred_yaw_sign = 1.0
 
-        if current_v > 0.5:
-            # Moving forward (> 0.5 m/s): steer away from obstacle so forward momentum doesn't dive into obstacle
-            target_steer = -self.preferred_yaw_sign * self.steer_angle
-        else:
-            # Speed <= 0.5 m/s or reversing: turn wheels towards obstacle so reverse motion swings nose away
-            target_steer = self.preferred_yaw_sign * self.steer_angle
+        # Steer away from obstacle towards clear escape arc
+        target_steer = -self.preferred_yaw_sign * self.steer_angle
 
         if instant_reverse:
             self.current_cmd_v = -self.reverse_speed
@@ -360,12 +356,8 @@ class StuckRecoveryManager:
                 return False, 0.0, 0.0
 
             target_v = -self.reverse_speed
-            if current_v > 0.5:
-                # Still moving forward (> 0.5 m/s): steer away from obstacle so forward momentum does not turn into obstacle
-                target_steer = -self.preferred_yaw_sign * self.steer_angle
-            else:
-                # Speed at or below 0.5 m/s: turn wheels towards obstacle so reverse motion swings nose away
-                target_steer = self.preferred_yaw_sign * self.steer_angle
+            # Steer away from obstacle towards clear escape arc
+            target_steer = -self.preferred_yaw_sign * self.steer_angle
 
             # Instantly apply full reverse speed and escape steering angle
             self.current_cmd_v = target_v
