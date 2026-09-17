@@ -124,9 +124,85 @@ def run_racing_studio(robot: any, vehicle: FolkraceVehicle) -> None:
             return [to_py(v) for v in obj]
         return obj
 
+    # Discover Front and Back Pillars if present in the world (e.g. test_wrong_way.wbt)
+    front_pillar_node = robot.getFromDef("FRONT_PILLAR") if (vehicle.is_supervisor and hasattr(robot, "getFromDef")) else None
+    front_pillar_trans = front_pillar_node.getField("translation") if front_pillar_node else None
+    front_pillar_active = True
+    front_pillar_pos = [2.60, 0.40]
+
+    back_pillar_node = robot.getFromDef("BACK_PILLAR") if (vehicle.is_supervisor and hasattr(robot, "getFromDef")) else None
+    back_pillar_trans = back_pillar_node.getField("translation") if back_pillar_node else None
+    back_pillar_active = True
+    back_pillar_pos = [-0.2066, 0.39]
+
+    def toggle_front_pillar():
+        nonlocal front_pillar_active
+        if not front_pillar_trans:
+            return
+        front_pillar_active = not front_pillar_active
+        if front_pillar_active:
+            front_pillar_trans.setSFVec3f([front_pillar_pos[0], front_pillar_pos[1], 0.06])
+            print(f"\n>>> [PILLAR] FRONT PILLAR: RAISED (BLOCKING) at (2.60, 0.40, 0.06)", flush=True)
+        else:
+            front_pillar_trans.setSFVec3f([front_pillar_pos[0], front_pillar_pos[1], -5.0])
+            print(f"\n>>> [PILLAR] FRONT PILLAR: LOWERED (CLEARED) at (2.60, 0.40, -5.00)", flush=True)
+
+    def toggle_back_pillar():
+        nonlocal back_pillar_active
+        if not back_pillar_trans:
+            return
+        back_pillar_active = not back_pillar_active
+        if back_pillar_active:
+            back_pillar_trans.setSFVec3f([back_pillar_pos[0], back_pillar_pos[1], 0.06])
+            print(f"\n>>> [PILLAR] BACK PILLAR: RAISED (BLOCKING) at (-0.21, 0.39, 0.06)", flush=True)
+        else:
+            back_pillar_trans.setSFVec3f([back_pillar_pos[0], back_pillar_pos[1], -5.0])
+            print(f"\n>>> [PILLAR] BACK PILLAR: LOWERED (CLEARED) at (-0.21, 0.39, -5.00)", flush=True)
+
+    keyboard = robot.getKeyboard() if hasattr(robot, "getKeyboard") else None
+    if keyboard:
+        try:
+            keyboard.enable(TIME_STEP_MS)
+        except Exception:
+            pass
+
     while robot.step(TIME_STEP_MS) != -1:
         wall_start_t = time.perf_counter()
         sim_time += DT
+
+        if keyboard:
+            try:
+                k = keyboard.getKey()
+                while k > 0:
+                    if k in (ord('F'), ord('f')):
+                        toggle_front_pillar()
+                    elif k in (ord('B'), ord('b')):
+                        toggle_back_pillar()
+                    elif k == ord('1'):
+                        vehicle.watchdog.set_mode("OPTION_1_BREADCRUMB")
+                        print("\n>>> [KEYBOARD] AWW WATCHDOG: OPTION_1_BREADCRUMB", flush=True)
+                    elif k == ord('2'):
+                        vehicle.watchdog.set_mode("OPTION_2_KINEMATIC_ARC")
+                        print("\n>>> [KEYBOARD] AWW WATCHDOG: OPTION_2_KINEMATIC_ARC", flush=True)
+                    elif k == ord('3'):
+                        vehicle.watchdog.set_mode("OPTION_3_FLOW_COSTMAP")
+                        print("\n>>> [KEYBOARD] AWW WATCHDOG: OPTION_3_FLOW_COSTMAP", flush=True)
+                    elif k == ord('4'):
+                        vehicle.watchdog.set_mode("OPTION_4_LATERAL_SEPARATION")
+                        print("\n>>> [KEYBOARD] AWW WATCHDOG: OPTION_4_LATERAL_SEPARATION", flush=True)
+                    elif k == ord('5'):
+                        vehicle.watchdog.set_mode("OPTION_COMBINED_HYBRID")
+                        print("\n>>> [KEYBOARD] AWW WATCHDOG: OPTION_COMBINED_HYBRID", flush=True)
+                    elif k == ord('0'):
+                        vehicle.watchdog.set_mode("DISABLED")
+                        print("\n>>> [KEYBOARD] AWW WATCHDOG: DISABLED", flush=True)
+                    elif k in (ord('R'), ord('r')):
+                        vehicle.reset(start_pos=[0.0, 0.0, 0.04])
+                        track_tracker.reset([0.0, 0.0])
+                        print("\n>>> [KEYBOARD] ROBOT POSE RESET", flush=True)
+                    k = keyboard.getKey()
+            except Exception:
+                pass
 
         # 1. Check incoming live GUI commands on Port 9877
         try:
@@ -151,6 +227,18 @@ def run_racing_studio(robot: any, vehicle: FolkraceVehicle) -> None:
                 elif c == "set_telemetry_hz":
                     telemetry_hz = max(1, min(60, int(cmd_pkt.get("val", 60))))
                     print(f"[Racing Studio] Telemetry streaming rate set to: {telemetry_hz} Hz", flush=True)
+                elif c == "toggle_front_pillar":
+                    toggle_front_pillar()
+                elif c == "toggle_back_pillar":
+                    toggle_back_pillar()
+                elif c == "set_watchdog_mode":
+                    mode_name = cmd_pkt.get("mode", "OPTION_COMBINED_HYBRID")
+                    vehicle.watchdog.set_mode(mode_name)
+                    print(f"[Racing Studio] Watchdog mode set to: {mode_name}", flush=True)
+                elif c == "reset_robot":
+                    vehicle.reset(start_pos=[0.0, 0.0, 0.04])
+                    track_tracker.reset([0.0, 0.0])
+                    print("[Racing Studio] Robot reset requested by GUI", flush=True)
                 elif c == "set_param":
                     p_name = cmd_pkt.get("name", "")
                     p_val = cmd_pkt.get("val", None)
@@ -207,6 +295,9 @@ def run_racing_studio(robot: any, vehicle: FolkraceVehicle) -> None:
                 telemetry["active_planner"] = "OPTION2_SL_MPC"
                 telemetry["sim_time"] = round(sim_time, 2)
                 telemetry["telemetry_hz"] = telemetry_hz
+                telemetry["front_pillar"] = bool(front_pillar_active)
+                telemetry["back_pillar"] = bool(back_pillar_active)
+                telemetry["sim_speed"] = round(float(sim_speed_mult), 2)
                 try:
                     pkt_bytes = json.dumps(to_py(telemetry)).encode("utf-8")
                     gui_sock.sendto(pkt_bytes, ("127.0.0.1", 9876))

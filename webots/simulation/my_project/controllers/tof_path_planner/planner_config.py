@@ -253,3 +253,21 @@ RECOVERY_EXIT_MIN_TIME_S = 0.0       # seconds minimum recovery stroke time befo
 RECOVERY_SERVO_SLEW_RAD_S = SERVO_MAX_SPEED_RAD_S  # rad/s PTK 9497 8.4V centering slew rate (15.4 rad/s)
 RECOVERY_ARC_LOOKAHEAD_M = 0.13      # meters length of kinematic escape arcs projected on costmap
 
+# ==============================================================================
+# 8. ANTI-WRONG-WAY & U-TURN DISCRIMINATION WATCHDOG
+# ==============================================================================
+ANTI_WRONG_WAY_MODE = "OPTION_COMBINED_HYBRID"
+AWW_BREADCRUMB_LOOKBACK_M = 4.0      # meters of recent historical path retained
+AWW_BREADCRUMB_SPACING_M = 0.05      # meters minimum spatial spacing between breadcrumb nodes
+AWW_CORRIDOR_HALF_WIDTH_M = 0.25     # meters corridor half-width threshold for path overlap
+AWW_REVERSE_CONE_ANGLE_DEG = 45.0    # degrees heading divergence threshold for opposing alignment
+AWW_MIN_HAIRPIN_RADIUS_M = 0.32      # meters minimum kinematic radius of legitimate track hairpins
+AWW_FLOW_GRID_RES_M = 0.05           # meters grid cell resolution for directional flow costmap
+AWW_FLOW_DECAY_S = 4.0               # seconds lifetime of forward flow vectors
+AWW_LATERAL_SEPARATION_MIN_M = 0.40  # meters minimum corridor lateral shift across a 180° turn
+AWW_AUTO_CORRECT_180_ENABLED = True  # whether watchdog automatically triggers CORRECTIVE_180
+AWW_CORRECTIVE_180_SPEED_MPS = 1.20  # m/s target speed during corrective 180 spin
+AWW_CORRECTIVE_180_STEER_RAD = 0.60  # radians steering angle during corrective 180 spin
+AWW_HISTORY_WINDOW_S = 3.5           # seconds sliding time window for trajectory history
+AWW_LOOKAHEAD_M = 1.0                # meters forward projection for wrong-way checking
+

@@ -31,6 +31,7 @@ from imu_encoder_fusion import IMUEncoderFusion
 from tof_gap_scout import ToFGapScout
 from planner_option2_sl_mpc import CurvilinearSLMPC
 from stuck_recovery_manager import StuckRecoveryManager, StuckRecoveryState
+from anti_wrong_way_watchdog import AntiWrongWayWatchdog
 from planner_config import (
     TIME_STEP_MS,
     DT,
@@ -266,6 +267,10 @@ class FolkraceVehicle:
         self.last_plan_res = {}
         self.last_tofs = {name: TOF_MAX_RANGE_M for name in TOF_SENSOR_NAMES}
 
+        # Anti-Wrong-Way Watchdog
+        self.watchdog = AntiWrongWayWatchdog()
+        self.last_aww_status = None
+
         # Apply genes if provided
         if genes:
             self.configure(genes)
@@ -384,6 +389,8 @@ class FolkraceVehicle:
 
         self.fusion.reset()
         self.costmap.clear()
+        self.watchdog.reset()
+        self.last_aww_status = None
         if hasattr(self, "planner") and hasattr(self.planner, "reset_active_target"):
             self.planner.reset_active_target()
         self.step_counter = 0
@@ -542,7 +549,33 @@ class FolkraceVehicle:
             raw_target_steer = float(plan_res.get("cmd_steer_rad", 0.0))
             raw_target_speed = float(plan_res.get("cmd_speed_mps", self.v_cruise_min))
 
-            # Recovery Manager at 60 Hz (Kinematic Escape Arc Costmap Evaluation)
+            # Update Anti-Wrong-Way Watchdog
+            gx_curr, gy_curr, gyaw_curr = self.get_ground_truth_pose()
+            aww_status = self.watchdog.update(
+                x=gx_curr,
+                y=gy_curr,
+                yaw=gyaw_curr,
+                v_est=self.v_est,
+                yaw_rate=self.cached_yaw_rate,
+                cached_tofs=tof_readings,
+                now_s=sim_time,
+            )
+            self.last_aww_status = aww_status
+
+            # Trigger CORRECTIVE_180 if wrong-way is confirmed and not already performing corrective turn
+            if aww_status.is_wrong_way and self.recovery_manager.state != StuckRecoveryState.CORRECTIVE_180:
+                def wrap_to_pi(a):
+                    return math.atan2(math.sin(a), math.cos(a))
+                tgt_yaw = aww_status.target_recovery_yaw if aww_status.target_recovery_yaw is not None else wrap_to_pi(gyaw_curr + math.pi)
+                yaw_diff = wrap_to_pi(tgt_yaw - gyaw_curr)
+                steer_sign = 1.0 if yaw_diff >= 0.0 else -1.0
+                self.recovery_manager.trigger_corrective_180(
+                    target_yaw=tgt_yaw,
+                    steer_sign=steer_sign,
+                    current_yaw=gyaw_curr,
+                )
+
+            # Recovery Manager at 60 Hz (Kinematic Escape Arc Costmap Evaluation & CORRECTIVE_180)
             is_recovering, rec_v, rec_steer = self.recovery_manager.update(
                 dt=DT_PLANNER,
                 current_v=self.v_est,
@@ -552,6 +585,7 @@ class FolkraceVehicle:
                 active_steer=current_physical_steer,
                 hazard_mask=hazard_mask,
                 costmap_obj=self.costmap,
+                current_yaw=gyaw_curr,
             )
 
             if is_recovering:
@@ -653,6 +687,15 @@ class FolkraceVehicle:
         gx, gy, gyaw = self.get_ground_truth_pose()
         v_real = self.get_ground_truth_velocity()
 
+        aww_detailed = self.watchdog.get_detailed_telemetry(
+            x=gx,
+            y=gy,
+            yaw=gyaw,
+            v_est=self.v_est,
+            yaw_rate=self.cached_yaw_rate,
+            now_s=sim_time,
+        )
+
         if not full_telemetry:
             telemetry = {
                 "time_step": self.step_counter,
@@ -671,6 +714,8 @@ class FolkraceVehicle:
                 "plan_ms": round(float(self.cached_plan_ms), 2),
                 "map_ms": round(float(self.cached_map_ms), 2),
                 "recovery_state": str(getattr(self.recovery_manager.state, "name", self.recovery_manager.state)),
+                "watchdog_mode": str(getattr(self.watchdog.mode, "name", self.watchdog.mode)),
+                "aww": aww_detailed,
             }
             return telemetry, planner_ran
 
@@ -721,6 +766,8 @@ class FolkraceVehicle:
             "grid_data": grid_compressed,
             "hazard_data": hazard_compressed,
             "recovery_state": str(getattr(self.recovery_manager.state, "name", self.recovery_manager.state)),
+            "watchdog_mode": str(getattr(self.watchdog.mode, "name", self.watchdog.mode)),
+            "aww": aww_detailed,
             "plan": self.last_plan_res,
         }
 

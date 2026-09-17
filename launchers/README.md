@@ -22,3 +22,4 @@ All hardware-dependent launchers explicitly identify their target platform in th
 | **6** | **Pi 5** | [`6_pi_cartographer_slam.py`](./6_pi_cartographer_slam.py) | 1-click Raspberry Pi 5 SSH deployment for Google Cartographer 2D SLAM (LiDAR + IMU + Web dashboard). |
 | **7** | **Pi 5** | [`7_pi_imu_server.py`](./7_pi_imu_server.py) | ESP32 UART BNO08X IMU 3D visualizer server on Raspberry Pi 5 (Port 8000). |
 | **8** | Tool | [`8_track_studio.py`](./8_track_studio.py) | Modular 1200mm Race Track Designer Studio (Local Web UI on port 8088). |
+| **9** | Simulation | [`9_wrong_way_studio.py`](./9_wrong_way_studio.py) | Anti-Wrong-Way Watchdog & 180 Auto-Correction Studio (`test_wrong_way.wbt` + 2D Tactical Radar & Thought Matrix GUI). |

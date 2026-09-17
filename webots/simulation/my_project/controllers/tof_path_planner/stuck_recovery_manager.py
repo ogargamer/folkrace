@@ -57,6 +57,7 @@ class StuckRecoveryState:
     NORMAL_DRIVE = "DRIVE"
     PIVOT_REVERSE = "PIVOT_REVERSE"
     DECEL_AND_CENTER = "DECEL_AND_CENTER"
+    CORRECTIVE_180 = "CORRECTIVE_180"
 
 
 class StuckRecoveryManager:
@@ -100,6 +101,12 @@ class StuckRecoveryManager:
         # State tracking for smooth ramping
         self.current_cmd_v = 0.0
         self.current_cmd_steer = 0.0
+
+        # Anti-Wrong-Way CORRECTIVE_180 tracking
+        self.target_corrective_yaw: Optional[float] = None
+        self.corrective_start_yaw: float = 0.0
+        self.last_corrective_yaw: float = 0.0
+        self.corrective_accumulated_turn: float = 0.0
 
         # --- KINEMATIC ESCAPE ARCS PRECOMPUTATION ---
         self.wheelbase = float(wheelbase_m)
@@ -221,6 +228,25 @@ class StuckRecoveryManager:
             self.current_cmd_v = float(current_v)
             self.current_cmd_steer = float(current_steer)
 
+    def trigger_corrective_180(
+        self,
+        target_yaw: Optional[float] = None,
+        steer_sign: float = 1.0,
+        current_yaw: float = 0.0,
+    ):
+        """
+        Immediately engages Anti-Wrong-Way corrective turn.
+        Rotates the vehicle ~135 to 180 degrees back toward the valid forward corridor path.
+        """
+        self.state = StuckRecoveryState.CORRECTIVE_180
+        self.stroke_timer = 0.0
+        self.total_recovery_timer = 0.0
+        self.preferred_yaw_sign = 1.0 if steer_sign >= 0.0 else -1.0
+        self.target_corrective_yaw = target_yaw
+        self.corrective_start_yaw = current_yaw
+        self.last_corrective_yaw = current_yaw
+        self.corrective_accumulated_turn = 0.0
+
     def update(
         self,
         dt: float,
@@ -231,6 +257,7 @@ class StuckRecoveryManager:
         hazard_mask: Optional[np.ndarray] = None,
         costmap_obj: Optional[Any] = None,
         cached_tofs: Optional[Dict[str, float]] = None,
+        current_yaw: float = 0.0,
         **kwargs,
     ) -> Tuple[bool, float, float]:
         """
@@ -299,12 +326,14 @@ class StuckRecoveryManager:
         self.total_recovery_timer += dt
 
         # Global failsafe timeout: if recovery is stuck longer than timeout, force exit to drive
-        if self.total_recovery_timer >= RECOVERY_TOTAL_TIMEOUT_S and not is_front_imminent_obstacle and max_forward_escape > 0.12:
-            self.state = StuckRecoveryState.NORMAL_DRIVE
-            self.stall_timer = 0.0
-            self.stroke_timer = 0.0
-            self.total_recovery_timer = 0.0
-            return False, 0.0, 0.0
+        # Note: CORRECTIVE_180 has its own dedicated exit condition based on completed yaw rotation
+        if self.state != StuckRecoveryState.CORRECTIVE_180:
+            if self.total_recovery_timer >= RECOVERY_TOTAL_TIMEOUT_S and not is_front_imminent_obstacle and max_forward_escape > 0.12:
+                self.state = StuckRecoveryState.NORMAL_DRIVE
+                self.stall_timer = 0.0
+                self.stroke_timer = 0.0
+                self.total_recovery_timer = 0.0
+                return False, 0.0, 0.0
 
         # PHASE 1: PIVOT REVERSE ARC
         if self.state == StuckRecoveryState.PIVOT_REVERSE:
@@ -344,7 +373,57 @@ class StuckRecoveryManager:
 
             return True, self.current_cmd_v, self.current_cmd_steer
 
-        # PHASE 2: DECELERATE SPEED TO 0 WHILE CENTERING SERVO (Direct Handshake fallback)
+        # PHASE 2: CORRECTIVE 180 AUTO-CORRECTION ARC (Anti-Wrong-Way)
+        elif self.state == StuckRecoveryState.CORRECTIVE_180:
+            # Track accumulated yaw rotation to ensure at least 135-180 degrees of turn
+            def wrap_to_pi(a):
+                return math.atan2(math.sin(a), math.cos(a))
+
+            d_yaw = abs(wrap_to_pi(current_yaw - self.last_corrective_yaw))
+            self.corrective_accumulated_turn += d_yaw
+            self.last_corrective_yaw = current_yaw
+
+            has_turned_135 = (self.corrective_accumulated_turn >= math.radians(135.0))
+            yaw_aligned = False
+            if self.target_corrective_yaw is not None:
+                yaw_diff = abs(wrap_to_pi(self.target_corrective_yaw - current_yaw))
+                if yaw_diff <= math.radians(30.0):
+                    yaw_aligned = True
+
+            # Exit condition for CORRECTIVE_180:
+            # Must turn at least 135 deg (or >= 90 deg AND aligned with target yaw)
+            # AND forward escape path must be open (>= 0.22m) and not imminent obstacle
+            if (has_turned_135 or (yaw_aligned and self.corrective_accumulated_turn >= math.radians(90.0))) and max_forward_escape >= 0.22 and not is_front_imminent_obstacle:
+                self.state = StuckRecoveryState.NORMAL_DRIVE
+                self.stall_timer = 0.0
+                self.stroke_timer = 0.0
+                self.total_recovery_timer = 0.0
+                self.current_cmd_v = 0.0
+                self.current_cmd_steer = 0.0
+                return False, 0.0, 0.0
+
+            # Failsafe timeout for corrective 180 (e.g. 1.8 seconds)
+            if self.total_recovery_timer >= 1.8 and not is_front_imminent_obstacle:
+                self.state = StuckRecoveryState.NORMAL_DRIVE
+                self.stall_timer = 0.0
+                self.stroke_timer = 0.0
+                self.total_recovery_timer = 0.0
+                return False, 0.0, 0.0
+
+            # Turn direction towards target yaw or preferred yaw sign
+            if self.target_corrective_yaw is not None:
+                y_err = wrap_to_pi(self.target_corrective_yaw - current_yaw)
+                intended_steer_dir = 1.0 if y_err >= 0.0 else -1.0
+            else:
+                intended_steer_dir = self.preferred_yaw_sign
+
+            target_v = 1.20  # forward spinning speed
+            target_steer = intended_steer_dir * self.steer_angle
+            self.current_cmd_v = target_v
+            self.current_cmd_steer = target_steer
+            return True, self.current_cmd_v, self.current_cmd_steer
+
+        # PHASE 3: DECELERATE SPEED TO 0 WHILE CENTERING SERVO (Direct Handshake fallback)
         elif self.state == StuckRecoveryState.DECEL_AND_CENTER:
             self.state = StuckRecoveryState.NORMAL_DRIVE
             self.stall_timer = 0.0
