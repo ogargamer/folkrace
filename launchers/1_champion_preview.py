@@ -103,7 +103,7 @@ def _kill_proc(proc):
             pass
 
 
-def launch_webots(launch_gui: bool = True):
+def launch_webots(launch_gui: bool = True, telemetry_hz: int = 60):
     if not os.path.exists(WEBOTS_BIN):
         print(f"[Error] Webots executable not found at {WEBOTS_BIN}")
         return
@@ -128,14 +128,15 @@ def launch_webots(launch_gui: bool = True):
         ROOT_DIR,
     ])
     env["WEBOTS_CONTROLLER_MODE"] = "preview"
+    env["WEBOTS_TELEMETRY_HZ"] = str(telemetry_hz)
     env["PYTHONUNBUFFERED"] = "1"
 
     gui_proc = None
     if launch_gui:
         gui_script = os.path.join(PLANNERS_DIR, "planner_gui.py")
         if os.path.exists(gui_script):
-            print("[1/2] Spawning Live Telemetry Map GUI (Port 9876)...", flush=True)
-            gui_proc = subprocess.Popen([sys.executable, gui_script], cwd=PLANNERS_DIR, env=env)
+            print(f"[1/2] Spawning Live Telemetry Map GUI (Port 9876, Stream: {telemetry_hz} Hz)...", flush=True)
+            gui_proc = subprocess.Popen([sys.executable, gui_script, "--telemetry-hz", str(telemetry_hz)], cwd=PLANNERS_DIR, env=env)
             time.sleep(0.6)
 
     cmd = [
@@ -148,9 +149,10 @@ def launch_webots(launch_gui: bool = True):
 
     champ_title = ACTIVE_CHAMPION_INFO.get("title", "Best GA Champion")
     print("=" * 80)
-    print("  LAUNCHING REAL-TIME 3D WEBOTS CHAMPION PREVIEW + LIVE TELEMETRY GUI")
-    print(f"  World:    {WORLD_PATH}")
-    print(f"  Champion: {champ_title}")
+    print(f"  LAUNCHING REAL-TIME 3D WEBOTS CHAMPION PREVIEW + LIVE TELEMETRY GUI ({telemetry_hz} Hz)")
+    print(f"  World:        {WORLD_PATH}")
+    print(f"  Champion:     {champ_title}")
+    print(f"  Telemetry Hz: {telemetry_hz} Hz (Adjustable live via GUI slider 1-60 Hz)")
     print("=" * 80)
 
     print(f"[{'2/2' if gui_proc else '1/1'}] Launching Webots simulation...", flush=True)
@@ -186,14 +188,16 @@ def main():
     parser = argparse.ArgumentParser(description="Launch Webots Real-Time Preview with C++ SL-MPC Champion Config")
     parser.add_argument("--no-gui", action="store_true", help="Do not launch live 2D telemetry map GUI alongside Webots")
     parser.add_argument("--no-launch", action="store_true", help="Only set active config without launching Webots")
+    parser.add_argument("--telemetry-hz", "--hz", type=int, default=60, help="Initial streaming frequency for GUI and Webots terminal telemetry (1-60 Hz, default: 60)")
 
     args = parser.parse_args()
+    telem_hz = max(1, min(60, args.telemetry_hz))
 
     if not activate_champion_config():
         return
 
     if not args.no_launch:
-        launch_webots(launch_gui=not args.no_gui)
+        launch_webots(launch_gui=not args.no_gui, telemetry_hz=telem_hz)
 
 
 if __name__ == "__main__":

@@ -248,6 +248,10 @@ class PlannerCostmapCanvas(QtWidgets.QWidget):
 
         self.best_line: Optional[List[List[float]]] = None
         self.candidate_lines: Optional[List[List[List[float]]]] = None
+        self.guide_line: Optional[List[List[float]]] = None
+        self.corridor_left: Optional[List[List[float]]] = None
+        self.corridor_right: Optional[List[List[float]]] = None
+        self.shield_info: Optional[dict] = None
         self.gap_info: Optional[List[float]] = None  # [xg, yg, width]
         self.targets: Optional[List[List[float]]] = None  # [[tx, ty, ap], ...]
         self.steer_deg: float = 0.0
@@ -270,8 +274,11 @@ class PlannerCostmapCanvas(QtWidgets.QWidget):
         self.show_grid = True
         self.show_rays = True
         self.show_costmap = True
+        self.show_corridor = True
+        self.show_guide = True
         self.show_candidates = True
         self.show_best = True
+        self.show_shield = True
         self.show_gap = True
         self.show_hazard = True
         self.show_chassis = True
@@ -344,14 +351,37 @@ class PlannerCostmapCanvas(QtWidgets.QWidget):
         grid_bounds: Optional[List[float]] = None,
         steer_deg: float = 0.0,
         recovery_state: str = "DRIVE",
+        guide_line: Optional[List[List[float]]] = None,
+        corridor_left: Optional[List[List[float]]] = None,
+        corridor_right: Optional[List[List[float]]] = None,
+        shield_info: Optional[dict] = None,
     ):
         if prob_map is not None:
             self.prob_map = prob_map
         if hazard_mask is not None:
             self.hazard_mask = hazard_mask
-        self.tof_readings = tof_readings
-        self.best_line = best_line
-        self.candidate_lines = candidate_lines
+        if best_line and len(best_line) > 1:
+            self.best_line = best_line
+        elif best_line is not None:
+            self.best_line = best_line
+
+        if candidate_lines is not None:
+            self.candidate_lines = candidate_lines
+
+        if guide_line and len(guide_line) > 1:
+            self.guide_line = guide_line
+
+        if corridor_left and len(corridor_left) > 1:
+            self.corridor_left = corridor_left
+
+        if corridor_right and len(corridor_right) > 1:
+            self.corridor_right = corridor_right
+
+        if shield_info and any(len(shield_info.get(k, [])) > 1 for k in ("k1_left", "k1_right", "k2_left", "k2_right")):
+            self.shield_info = shield_info
+        elif shield_info is not None and not getattr(self, "shield_info", None):
+            self.shield_info = shield_info
+
         self.gap_info = gap
         self.targets = targets
         self.steer_deg = float(steer_deg)
@@ -512,18 +542,102 @@ class PlannerCostmapCanvas(QtWidgets.QWidget):
                         painter.setPen(QPen(QColor(255, 255, 255, 220)))
                         painter.drawText(QPointF(p_c.x() + 4, p_c.y() - 3), f"{disp_r*100:.0f}cm")
 
-        # 4. Candidate Trajectory Lines (Cyan Fan)
+        # 4. Curvilinear SL-MPC Dynamic Safety Corridor (Teal Ribbon & Boundaries)
+        if self.show_corridor and self.corridor_left and self.corridor_right and len(self.corridor_left) > 1 and len(self.corridor_right) > 1:
+            poly_pts = []
+            for pt in self.corridor_left:
+                poly_pts.append(self.world_to_screen(pt[0], pt[1]))
+            for pt in reversed(self.corridor_right):
+                poly_pts.append(self.world_to_screen(pt[0], pt[1]))
+
+            # Semi-transparent teal ribbon fill
+            corr_poly = QtGui.QPolygonF(poly_pts)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QBrush(QColor(0, 229, 255, 25)))
+            painter.drawPolygon(corr_poly)
+
+            # Corridor left boundary (Teal dashed)
+            pen_corr_left = QPen(QColor(0, 229, 255, 150), 1.3, Qt.DashLine)
+            painter.setPen(pen_corr_left)
+            for i in range(len(self.corridor_left) - 1):
+                p1 = self.world_to_screen(self.corridor_left[i][0], self.corridor_left[i][1])
+                p2 = self.world_to_screen(self.corridor_left[i + 1][0], self.corridor_left[i + 1][1])
+                painter.drawLine(p1, p2)
+
+            # Corridor right boundary (Teal dashed)
+            pen_corr_right = QPen(QColor(0, 229, 255, 150), 1.3, Qt.DashLine)
+            painter.setPen(pen_corr_right)
+            for i in range(len(self.corridor_right) - 1):
+                p1 = self.world_to_screen(self.corridor_right[i][0], self.corridor_right[i][1])
+                p2 = self.world_to_screen(self.corridor_right[i + 1][0], self.corridor_right[i + 1][1])
+                painter.drawLine(p1, p2)
+
+        # 5. Curvilinear SL-MPC Reference Guide Spline (Cyan Dotted / Dashed)
+        if self.show_guide and self.guide_line and len(self.guide_line) > 1:
+            guide_pen = QPen(QColor(80, 200, 255, 160), 1.4, Qt.DashLine)
+            painter.setPen(guide_pen)
+            for i in range(len(self.guide_line) - 1):
+                p1 = self.world_to_screen(self.guide_line[i][0], self.guide_line[i][1])
+                p2 = self.world_to_screen(self.guide_line[i + 1][0], self.guide_line[i + 1][1])
+                painter.drawLine(p1, p2)
+
+        # 6. Candidate Trajectory Lines (Cyan Fan & Challenger Line)
         if self.show_candidates and self.candidate_lines:
-            cand_pen = QPen(QColor(0, 200, 255, 75), 1.2, Qt.SolidLine)
-            painter.setPen(cand_pen)
-            for line in self.candidate_lines:
+            for idx, line in enumerate(self.candidate_lines):
                 if len(line) > 1:
+                    if idx == 0:
+                        cand_pen = QPen(QColor(0, 200, 255, 90), 1.2, Qt.SolidLine)
+                    else:
+                        cand_pen = QPen(QColor(180, 100, 255, 160), 1.6, Qt.DashLine)
+                    painter.setPen(cand_pen)
                     for i in range(len(line) - 1):
                         p1 = self.world_to_screen(line[i][0], line[i][1])
                         p2 = self.world_to_screen(line[i + 1][0], line[i + 1][1])
                         painter.drawLine(p1, p2)
 
-        # 5. Best / Winning Trajectory Line (Bright Gold Solid Line)
+        # 7. Emergency Shield Micro-Rollouts (2 Branches from Step 1, 2 Branches from Step 2)
+        if self.show_shield and self.shield_info:
+            s_active = self.shield_info.get("active", False)
+            chosen_id = self.shield_info.get("chosen_id", -1)
+
+            branches = [
+                # (pts, is_safe, is_chosen, label, step_num)
+                (self.shield_info.get("k1_left", []), self.shield_info.get("k1_left_safe", False), s_active and chosen_id == 2, "Step 1 Left", 1),
+                (self.shield_info.get("k1_right", []), self.shield_info.get("k1_right_safe", False), s_active and chosen_id == 3, "Step 1 Right", 1),
+                (self.shield_info.get("k2_left", []), self.shield_info.get("k2_left_safe", False), s_active and chosen_id == 0, "Step 2 Left", 2),
+                (self.shield_info.get("k2_right", []), self.shield_info.get("k2_right_safe", False), s_active and chosen_id == 1, "Step 2 Right", 2),
+            ]
+
+            for branch, is_safe, is_chosen, label, step_num in branches:
+                if len(branch) > 1:
+                    if is_chosen:
+                        pen = QPen(QColor(0, 255, 128, 255), 3.2, Qt.SolidLine)
+                    elif is_safe:
+                        col = QColor(0, 230, 160, 210) if step_num == 1 else QColor(0, 255, 200, 220)
+                        pen = QPen(col, 2.0, Qt.SolidLine)
+                    else:
+                        pen = QPen(QColor(255, 70, 70, 190), 1.6, Qt.DashLine)
+
+                    painter.setPen(pen)
+                    for i in range(len(branch) - 1):
+                        p1 = self.world_to_screen(branch[i][0], branch[i][1])
+                        p2 = self.world_to_screen(branch[i + 1][0], branch[i + 1][1])
+                        painter.drawLine(p1, p2)
+
+                    # Root dot at the MPC trajectory step origin
+                    p_root = self.world_to_screen(branch[0][0], branch[0][1])
+                    painter.setPen(Qt.NoPen)
+                    painter.setBrush(QBrush(QColor(255, 215, 0, 220)))
+                    painter.drawEllipse(p_root, 2.5, 2.5)
+
+                    # Tip dot & collision hit marker
+                    p_tip = self.world_to_screen(branch[-1][0], branch[-1][1])
+                    tip_col = QColor(0, 255, 128) if is_safe else QColor(255, 50, 50)
+                    painter.setPen(Qt.NoPen)
+                    painter.setBrush(QBrush(tip_col))
+                    painter.drawEllipse(p_tip, 4.0 if is_chosen else 2.6, 4.0 if is_chosen else 2.6)
+
+        # 8. Best / Winning Trajectory Line (Bright Gold Solid Line)
         if self.show_best and self.best_line and len(self.best_line) > 1:
             best_pen = QPen(QColor(255, 215, 0, 240), 3.0, Qt.SolidLine)
             painter.setPen(best_pen)
@@ -532,7 +646,7 @@ class PlannerCostmapCanvas(QtWidgets.QWidget):
                 p2 = self.world_to_screen(self.best_line[i + 1][0], self.best_line[i + 1][1])
                 painter.drawLine(p1, p2)
 
-        # 6. Reverse Backup Logic Checking Curves (Left Turn Arc, Right Turn Arc, Center Forward Sightline)
+        # 9. Reverse Backup Logic Checking Curves (Left Turn Arc, Right Turn Arc, Center Forward Sightline)
         if self.show_backup_curves:
             curves = [
                 ("Left Arc", self._arc_pts_left),
@@ -690,9 +804,10 @@ class PlannerCostmapCanvas(QtWidgets.QWidget):
 class ComprehensivePlannerGUI(QMainWindow):
     """Main Telemetry & Costmap GUI Window with Dark Theme Live Studio."""
 
-    def __init__(self):
+    def __init__(self, initial_telem_hz: int = 60):
         super().__init__()
-        self.setWindowTitle("Curvilinear SL-MPC Autonomous Racing Studio (60 Hz)")
+        self.initial_telem_hz = max(1, min(60, int(os.environ.get("WEBOTS_TELEMETRY_HZ", initial_telem_hz))))
+        self.setWindowTitle(f"Curvilinear SL-MPC Autonomous Racing Studio ({self.initial_telem_hz} Hz)")
         self.resize(1260, 820)
         self.setStyleSheet(DARK_THEME_QSS)
 
@@ -799,6 +914,21 @@ class ComprehensivePlannerGUI(QMainWindow):
         tune_group = QGroupBox("Live SL-MPC & Scout Parameter Tuner")
         tune_layout = QVBoxLayout(tune_group)
 
+        # Telemetry & Terminal Stream Rate (1-60 Hz)
+        tune_layout.addWidget(QLabel("Telemetry & Terminal Stream Rate (1-60 Hz):"))
+        telem_hz_row = QHBoxLayout()
+        self.slider_telem_hz = QSlider(Qt.Horizontal)
+        self.slider_telem_hz.setRange(1, 60)
+        self.slider_telem_hz.setValue(self.initial_telem_hz)
+        self.slider_telem_hz.valueChanged.connect(self._on_telem_hz_slider)
+        self.lbl_telem_hz = QLabel(f"{self.initial_telem_hz} Hz")
+        self.lbl_telem_hz.setFont(QFont("Consolas", 10, QFont.Bold))
+        self.lbl_telem_hz.setStyleSheet("color: #00e5ff;")
+        self.lbl_telem_hz.setToolTip("Adjusts telemetry streaming frequency to GUI and Webots terminal between 1 and 60 Hz.")
+        telem_hz_row.addWidget(self.slider_telem_hz)
+        telem_hz_row.addWidget(self.lbl_telem_hz)
+        tune_layout.addLayout(telem_hz_row)
+
         # Cruising Speed Ceiling
         tune_layout.addWidget(QLabel("Cruising Speed Target (m/s):"))
         spd_row = QHBoxLayout()
@@ -869,8 +999,8 @@ class ComprehensivePlannerGUI(QMainWindow):
         panel_layout.addWidget(tune_group)
 
         # 4. LIVE TELEMETRY
-        telemetry_group = QGroupBox("Live Controller Telemetry (120 Hz / 60 Hz)")
-        telem_layout = QVBoxLayout(telemetry_group)
+        self.telemetry_group = QGroupBox(f"Live Controller Telemetry ({self.initial_telem_hz} Hz)")
+        telem_layout = QVBoxLayout(self.telemetry_group)
         self.lbl_conn = QLabel("🔴 WAITING FOR WEBOTS...")
         self.lbl_conn.setStyleSheet("font-weight: bold; color: #ff5252;")
         self.lbl_dyn = QLabel("Speed: 0.00 m/s (tgt: 0.00) | Steer: +0.0°")
@@ -892,7 +1022,7 @@ class ComprehensivePlannerGUI(QMainWindow):
         telem_layout.addWidget(self.lbl_perf)
         telem_layout.addWidget(self.lbl_recovery)
         telem_layout.addWidget(self.lbl_dist)
-        panel_layout.addWidget(telemetry_group)
+        panel_layout.addWidget(self.telemetry_group)
 
         # 5. DISPLAY LAYER TOGGLES
         disp_group = QGroupBox("Layer Display Options")
@@ -903,46 +1033,62 @@ class ComprehensivePlannerGUI(QMainWindow):
         self.chk_best.toggled.connect(lambda v: setattr(self.canvas, "show_best", v) or self.canvas.update())
         disp_layout.addWidget(self.chk_best, 0, 0)
 
-        self.chk_cand = QCheckBox("Candidate Fan (Cyan)")
+        self.chk_cand = QCheckBox("Candidate / Alt Line (Cyan/Purp)")
         self.chk_cand.setChecked(True)
         self.chk_cand.toggled.connect(lambda v: setattr(self.canvas, "show_candidates", v) or self.canvas.update())
         disp_layout.addWidget(self.chk_cand, 0, 1)
+
+        self.chk_corridor = QCheckBox("MPC Corridor (Teal)")
+        self.chk_corridor.setChecked(True)
+        self.chk_corridor.toggled.connect(lambda v: setattr(self.canvas, "show_corridor", v) or self.canvas.update())
+        disp_layout.addWidget(self.chk_corridor, 1, 0)
+
+        self.chk_guide = QCheckBox("Spline Guide (Cyan Dash)")
+        self.chk_guide.setChecked(True)
+        self.chk_guide.toggled.connect(lambda v: setattr(self.canvas, "show_guide", v) or self.canvas.update())
+        disp_layout.addWidget(self.chk_guide, 1, 1)
+
+        self.chk_shield = QCheckBox("Emergency Shield (Green/Red)")
+        self.chk_shield.setChecked(True)
+        self.chk_shield.setToolTip("Dynamic micro-rollout emergency escape branches evaluated when path is blocked")
+        self.chk_shield.toggled.connect(lambda v: setattr(self.canvas, "show_shield", v) or self.canvas.update())
+        disp_layout.addWidget(self.chk_shield, 2, 0)
 
         self.chk_backup = QCheckBox("Backup Escape Curves (Magenta)")
         self.chk_backup.setChecked(True)
         self.chk_backup.setToolTip("Thin kinematic escape arcs evaluated against costmap to decide reverse direction")
         self.chk_backup.toggled.connect(lambda v: setattr(self.canvas, "show_backup_curves", v) or self.canvas.update())
-        disp_layout.addWidget(self.chk_backup, 1, 0)
+        disp_layout.addWidget(self.chk_backup, 2, 1)
 
         self.chk_gap = QCheckBox("Scouted Gap (Green)")
         self.chk_gap.setChecked(True)
         self.chk_gap.toggled.connect(lambda v: setattr(self.canvas, "show_gap", v) or self.canvas.update())
-        disp_layout.addWidget(self.chk_gap, 1, 1)
+        disp_layout.addWidget(self.chk_gap, 3, 0)
 
         self.chk_hazard = QCheckBox("Hazard Mask (Red)")
         self.chk_hazard.setChecked(True)
         self.chk_hazard.toggled.connect(lambda v: setattr(self.canvas, "show_hazard", v) or self.canvas.update())
-        disp_layout.addWidget(self.chk_hazard, 2, 0)
+        disp_layout.addWidget(self.chk_hazard, 3, 1)
 
         self.chk_costmap = QCheckBox("Costmap (15mm)")
         self.chk_costmap.setChecked(True)
         self.chk_costmap.toggled.connect(lambda v: setattr(self.canvas, "show_costmap", v) or self.canvas.update())
-        disp_layout.addWidget(self.chk_costmap, 2, 1)
+        disp_layout.addWidget(self.chk_costmap, 4, 0)
 
         self.chk_rays = QCheckBox("ToF Cones (16ch)")
         self.chk_rays.setChecked(True)
         self.chk_rays.toggled.connect(lambda v: setattr(self.canvas, "show_rays", v) or self.canvas.update())
-        disp_layout.addWidget(self.chk_rays, 3, 0)
+        disp_layout.addWidget(self.chk_rays, 4, 1)
 
         self.chk_chassis = QCheckBox("Chassis Footprint")
         self.chk_chassis.setChecked(True)
         self.chk_chassis.toggled.connect(lambda v: setattr(self.canvas, "show_chassis", v) or self.canvas.update())
-        disp_layout.addWidget(self.chk_chassis, 3, 1)
+        disp_layout.addWidget(self.chk_chassis, 5, 0)
 
         self.chk_grid = QCheckBox("Grid & Circles")
         self.chk_grid.setChecked(True)
         self.chk_grid.toggled.connect(lambda v: setattr(self.canvas, "show_grid", v) or self.canvas.update())
-        disp_layout.addWidget(self.chk_grid, 4, 0)
+        disp_layout.addWidget(self.chk_grid, 5, 1)
 
         panel_layout.addWidget(disp_group)
 
@@ -1199,6 +1345,12 @@ class ComprehensivePlannerGUI(QMainWindow):
             for _ in range(3):
                 self._send_cmd({"cmd": "set_speed", "val": float(speed_val)})
 
+    def _on_telem_hz_slider(self, val: int):
+        self.lbl_telem_hz.setText(f"{val} Hz")
+        self.telemetry_group.setTitle(f"Live Controller Telemetry ({val} Hz)")
+        self._send_cmd({"cmd": "set_telemetry_hz", "val": int(val)})
+        self._send_cmd({"cmd": "set_param", "name": "telemetry_hz", "val": int(val)})
+
     def _on_inflation_slider(self, val: int):
         r_m = val / 1000.0
         self.lbl_inflation.setText(f"{r_m*100:.1f} cm")
@@ -1239,13 +1391,23 @@ class ComprehensivePlannerGUI(QMainWindow):
             is_conn = self.udp_connected
 
         if is_conn:
-            self.lbl_conn.setText("🟢 LIVE WEBOTS 60Hz STREAM CONNECTED")
+            hz_val = self.slider_telem_hz.value()
+            self.lbl_conn.setText(f"🟢 LIVE WEBOTS {hz_val}Hz STREAM CONNECTED")
             self.lbl_conn.setStyleSheet("font-weight: bold; color: #00e676;")
         else:
             self.lbl_conn.setText("🔴 WAITING FOR WEBOTS: Run track_racing.wbt")
             self.lbl_conn.setStyleSheet("font-weight: bold; color: #ff5252;")
 
         if pkt is not None:
+            # Check for telemetry_hz in packet to sync slider if updated externally
+            pkt_hz = pkt.get("telemetry_hz", None)
+            if pkt_hz is not None and int(pkt_hz) != self.slider_telem_hz.value():
+                self.slider_telem_hz.blockSignals(True)
+                self.slider_telem_hz.setValue(int(pkt_hz))
+                self.lbl_telem_hz.setText(f"{int(pkt_hz)} Hz")
+                self.telemetry_group.setTitle(f"Live Controller Telemetry ({int(pkt_hz)} Hz)")
+                self.slider_telem_hz.blockSignals(False)
+
             # Decompress grid
             prob_map = None
             hazard_mask = None
@@ -1262,6 +1424,10 @@ class ComprehensivePlannerGUI(QMainWindow):
 
             best_line = pkt.get("best_line", [])
             cand_lines = pkt.get("candidate_lines", [])
+            guide_line = pkt.get("guide_line", [])
+            corridor_left = pkt.get("corridor_left", [])
+            corridor_right = pkt.get("corridor_right", [])
+            shield_info = pkt.get("shield", {})
             gap = pkt.get("gap", None)
             targets = pkt.get("targets", [])
             grid_bounds = pkt.get("grid_bounds", None)
@@ -1292,6 +1458,10 @@ class ComprehensivePlannerGUI(QMainWindow):
                 grid_bounds=grid_bounds,
                 steer_deg=steer,
                 recovery_state=rec_state,
+                guide_line=guide_line,
+                corridor_left=corridor_left,
+                corridor_right=corridor_right,
+                shield_info=shield_info,
             )
 
             self.lbl_mode_badge.setText(f"Mode: {mode} | Sim Time: {sim_time:.1f}s")
@@ -1300,8 +1470,12 @@ class ComprehensivePlannerGUI(QMainWindow):
                 self.lbl_gap.setText(f"Gap: ({gap[0]:+.2f}, {gap[1]:.2f})m | Width: {gap[2]*100:.1f} cm")
             self.lbl_perf.setText(f"Plan: {p_ms:.2f}ms | Costmap: {m_ms:.2f}ms | Surviving: {surviving} | {status}")
             
-            # Recovery state label
-            if "RECOVERY" in str(rec_state).upper() or "PIVOT" in str(rec_state).upper():
+            # Recovery & Shield state label
+            if shield_info and shield_info.get("active", False):
+                c_name = shield_info.get("chosen_name", "ACTIVE").replace("_", " ").upper()
+                self.lbl_recovery.setText(f"Shield: 🛡️ ACTIVE ESCAPE ({c_name})")
+                self.lbl_recovery.setStyleSheet("color: #00e676; font-weight: bold;")
+            elif "RECOVERY" in str(rec_state).upper() or "PIVOT" in str(rec_state).upper():
                 self.lbl_recovery.setText(f"Recovery: ⚠️ {rec_state} (Active Escape Arc)")
                 self.lbl_recovery.setStyleSheet("color: #ff5252; font-weight: bold;")
             elif "DECEL" in str(rec_state).upper():
@@ -1316,6 +1490,11 @@ class ComprehensivePlannerGUI(QMainWindow):
 
 
 def launch_gui():
+    import argparse
+    parser = argparse.ArgumentParser(description="Live Telemetry & Trajectory GUI")
+    parser.add_argument("--telemetry-hz", "--hz", type=int, default=int(os.environ.get("WEBOTS_TELEMETRY_HZ", 60)), help="Initial streaming frequency (1-60 Hz)")
+    args, _ = parser.parse_known_args()
+
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
 
@@ -1336,7 +1515,7 @@ def launch_gui():
     dark_palette.setColor(QPalette.HighlightedText, QColor(255, 255, 255))
     app.setPalette(dark_palette)
 
-    gui = ComprehensivePlannerGUI()
+    gui = ComprehensivePlannerGUI(initial_telem_hz=args.telemetry_hz)
     gui.show()
     sys.exit(app.exec_())
 

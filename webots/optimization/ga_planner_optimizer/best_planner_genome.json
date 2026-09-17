@@ -29,7 +29,7 @@
     "pp_blend_gain": 0.645,
     "lookahead_blend_m": 0.25,
     "target_lookahead_m": 1.7,
-    "w_gap_distance": 1.84,
+    "w_gap_distance": 3.6,
     "w_gap_width": 0.924,
     "w_gap_steer": 1.844,
     "w_gap_straight": 0.549,

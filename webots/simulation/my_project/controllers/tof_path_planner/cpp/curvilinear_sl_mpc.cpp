@@ -102,6 +102,30 @@ public:
     double corridor_right_x[MAX_TRAJ_POINTS];
     double corridor_right_y[MAX_TRAJ_POINTS];
 
+    // Emergency Shield trajectory recording (2 branches from Step 1, 2 branches from Step 2)
+    bool shield_active;
+    int shield_chosen_id; // -1 = None, 0 = k2_left, 1 = k2_right, 2 = k1_left, 3 = k1_right
+
+    int shield_k1_l_cnt;
+    double shield_k1_l_x[MAX_TRAJ_POINTS];
+    double shield_k1_l_y[MAX_TRAJ_POINTS];
+    bool shield_k1_l_safe;
+
+    int shield_k1_r_cnt;
+    double shield_k1_r_x[MAX_TRAJ_POINTS];
+    double shield_k1_r_y[MAX_TRAJ_POINTS];
+    bool shield_k1_r_safe;
+
+    int shield_k2_l_cnt;
+    double shield_k2_l_x[MAX_TRAJ_POINTS];
+    double shield_k2_l_y[MAX_TRAJ_POINTS];
+    bool shield_k2_l_safe;
+
+    int shield_k2_r_cnt;
+    double shield_k2_r_x[MAX_TRAJ_POINTS];
+    double shield_k2_r_y[MAX_TRAJ_POINTS];
+    bool shield_k2_r_safe;
+
     // Independent primal & dual warm-start cache per solver instance (prevents cross-contamination in dual-solve)
     bool has_solution;
     double saved_x[MPC_N_VARS];
@@ -150,6 +174,16 @@ public:
         best_line_count(0),
         guide_line_count(0),
         corridor_count(0),
+        shield_active(false),
+        shield_chosen_id(-1),
+        shield_k1_l_cnt(0),
+        shield_k1_l_safe(false),
+        shield_k1_r_cnt(0),
+        shield_k1_r_safe(false),
+        shield_k2_l_cnt(0),
+        shield_k2_l_safe(false),
+        shield_k2_r_cnt(0),
+        shield_k2_r_safe(false),
         has_solution(false)
     {
         // Copy constant structure of A_data
@@ -446,6 +480,187 @@ public:
     }
 
     // --------------------------------------------------------------------------
+    // Emergency Shield: Evaluates evasion primitives against the costmap
+    // --------------------------------------------------------------------------
+    bool simulate_and_probe_branch(
+        double x0, double y0, double v0, double psi0, double delta0,
+        double target_steer, double v_cmd, double lookahead_time, int lookahead_steps,
+        double* out_xs = nullptr, double* out_ys = nullptr, int* out_count = nullptr
+    ) {
+        double dt_sim = lookahead_time / static_cast<double>(lookahead_steps);
+        double x = x0;
+        double y = y0;
+        double psi = psi0;
+        double v = std::max(0.0, v0);
+        double delta = delta0;
+
+        if (out_count) *out_count = 0;
+        if (out_xs && out_ys && out_count) {
+            out_xs[0] = x;
+            out_ys[0] = y;
+            *out_count = 1;
+        }
+
+        bool is_safe = true;
+        for (int i = 0; i < lookahead_steps; ++i) {
+            double max_delta_change = MAX_SERVO_RATE_RAD_S_CONST * dt_sim;
+            if (target_steer > delta + max_delta_change) delta += max_delta_change;
+            else if (target_steer < delta - max_delta_change) delta -= max_delta_change;
+            else delta = target_steer;
+            
+            double lat_accel = (v * v) * std::abs(std::tan(delta)) / WHEELBASE_CONST;
+            double lat_accel_max = mu_friction * GRAVITY_G_CONST;
+            double avail_long_accel_sq = lat_accel_max * lat_accel_max - lat_accel * lat_accel;
+            double max_ax = (avail_long_accel_sq > 0.0) ? std::sqrt(avail_long_accel_sq) : 0.0;
+            
+            if (v_cmd < v) {
+                v = std::max(v_cmd, v - max_ax * dt_sim);
+            } else {
+                v = std::min(v_cmd, v + max_ax * dt_sim);
+            }
+            
+            // In robot frame: +Y forward, +X right, delta > 0 turns left (towards -X)
+            psi += (v / WHEELBASE_CONST) * std::tan(delta) * dt_sim;
+            x -= v * std::sin(psi) * dt_sim; // Leftward lateral displacement for psi > 0
+            y += v * std::cos(psi) * dt_sim; // Forward longitudinal displacement
+
+            if (out_xs && out_ys && out_count && *out_count < MAX_TRAJ_POINTS) {
+                out_xs[*out_count] = x;
+                out_ys[*out_count] = y;
+                (*out_count)++;
+            }
+            
+            float px = static_cast<float>(x);
+            float py = static_cast<float>(y);
+            if (costmap_probe_func && costmap_handle) {
+                if (costmap_probe_func(costmap_handle, &px, &py, 1) == 0) {
+                    is_safe = false; // Collision
+                }
+            }
+        }
+        return is_safe; // Safe
+    }
+
+    // --------------------------------------------------------------------------
+    // --------------------------------------------------------------------------
+    // Physical Trajectory & 4-Branch Escape Rollout (Step 1 Left/Right, Step 2 Left/Right)
+    // --------------------------------------------------------------------------
+    void run_shield_rollout_and_cascade(
+        double& cmd_steer, double& cmd_speed, double xg,
+        double v_bar, double delta_0
+    ) {
+        double dt_sim_step = dt_actuator > 0.005 ? dt_actuator : (1.0 / 60.0);
+        double max_delta_rate_step = MAX_SERVO_RATE_RAD_S_CONST * dt_sim_step;
+        double max_a_acc = 0.85 * mu_friction * GRAVITY_G_CONST;
+        double max_a_dec = 1.00 * mu_friction * GRAVITY_G_CONST;
+
+        // Actual State at t = 0 (vehicle frame origin: x=0, y=0, psi=0)
+        double act_x = 0.0;
+        double act_y = 0.0;
+        double act_psi = 0.0;
+        double act_v = std::max(0.0, v_bar);
+        double act_delta = delta_0;
+
+        // Advance to Step 1 (t = 1 * dt)
+        double d_delta_0 = std::max(-max_delta_rate_step, std::min(max_delta_rate_step, cmd_steer - act_delta));
+        double act_delta_1 = act_delta + d_delta_0;
+        double delta_mid_0 = act_delta + 0.5 * d_delta_0;
+
+        double act_v_1 = act_v;
+        if (cmd_speed < act_v) act_v_1 = std::max(cmd_speed, act_v - max_a_dec * dt_sim_step);
+        else act_v_1 = std::min(cmd_speed, act_v + max_a_acc * dt_sim_step);
+        double v_mid_0 = 0.5 * (act_v + act_v_1);
+
+        double d_psi_0 = (v_mid_0 / WHEELBASE_CONST) * std::tan(delta_mid_0) * dt_sim_step;
+        double psi_mid_0 = act_psi + 0.5 * d_psi_0;
+        double act_psi_1 = act_psi + d_psi_0;
+
+        // In vehicle local frame: +Y is forward, +X is right, delta > 0 turns left (towards -X)
+        double act_x_1 = act_x - v_mid_0 * std::sin(psi_mid_0) * dt_sim_step;
+        double act_y_1 = act_y + v_mid_0 * std::cos(psi_mid_0) * dt_sim_step;
+
+        // Advance to Step 2 (t = 2 * dt)
+        double d_delta_1 = std::max(-max_delta_rate_step, std::min(max_delta_rate_step, cmd_steer - act_delta_1));
+        double act_delta_2 = act_delta_1 + d_delta_1;
+        double delta_mid_1 = act_delta_1 + 0.5 * d_delta_1;
+
+        double act_v_2 = act_v_1;
+        if (cmd_speed < act_v_1) act_v_2 = std::max(cmd_speed, act_v_1 - max_a_dec * dt_sim_step);
+        else act_v_2 = std::min(cmd_speed, act_v_1 + max_a_acc * dt_sim_step);
+        double v_mid_1 = 0.5 * (act_v_1 + act_v_2);
+
+        double d_psi_1 = (v_mid_1 / WHEELBASE_CONST) * std::tan(delta_mid_1) * dt_sim_step;
+        double psi_mid_1 = act_psi_1 + 0.5 * d_psi_1;
+        double act_psi_2 = act_psi_1 + d_psi_1;
+
+        double act_x_2 = act_x_1 - v_mid_1 * std::sin(psi_mid_1) * dt_sim_step;
+        double act_y_2 = act_y_1 + v_mid_1 * std::cos(psi_mid_1) * dt_sim_step;
+
+        shield_active = false;
+        shield_chosen_id = -1;
+        shield_k1_l_cnt = 0;
+        shield_k1_r_cnt = 0;
+        shield_k1_l_safe = false;
+        shield_k1_r_safe = false;
+
+        shield_k2_l_cnt = 0;
+        shield_k2_r_cnt = 0;
+        shield_k2_l_safe = false;
+        shield_k2_r_safe = false;
+
+        double lookahead_time = 4.0 / 60.0; // 4 steps * 16.67ms = 66.7ms
+        int lookahead_steps = 4;
+        double escape_speed = 0.60; // Safe escape velocity
+
+        // 1. Step 1 (k=1) Evasion Micro-Rollouts from Actual State 1
+        shield_k1_l_safe = simulate_and_probe_branch(
+            act_x_1, act_y_1, act_v_1, act_psi_1, act_delta_1, +MAX_STEERING_RAD_CONST, escape_speed, lookahead_time, lookahead_steps,
+            shield_k1_l_x, shield_k1_l_y, &shield_k1_l_cnt
+        );
+        shield_k1_r_safe = simulate_and_probe_branch(
+            act_x_1, act_y_1, act_v_1, act_psi_1, act_delta_1, -MAX_STEERING_RAD_CONST, escape_speed, lookahead_time, lookahead_steps,
+            shield_k1_r_x, shield_k1_r_y, &shield_k1_r_cnt
+        );
+
+        // 2. Step 2 (k=2) Evasion Micro-Rollouts from Actual State 2
+        shield_k2_l_safe = simulate_and_probe_branch(
+            act_x_2, act_y_2, act_v_2, act_psi_2, act_delta_2, +MAX_STEERING_RAD_CONST, escape_speed, lookahead_time, lookahead_steps,
+            shield_k2_l_x, shield_k2_l_y, &shield_k2_l_cnt
+        );
+        shield_k2_r_safe = simulate_and_probe_branch(
+            act_x_2, act_y_2, act_v_2, act_psi_2, act_delta_2, -MAX_STEERING_RAD_CONST, escape_speed, lookahead_time, lookahead_steps,
+            shield_k2_r_x, shield_k2_r_y, &shield_k2_r_cnt
+        );
+
+        // 3. Safety Shield Cascade:
+        // Check 2nd step into the future. If EVERYTHING collides at Step 2 (both left and right blocked),
+        // then we cannot wait until Step 2 to evade. We MUST check Step 1 (1 step ahead) and override!
+        if (!shield_k2_l_safe && !shield_k2_r_safe) {
+            if (shield_k1_l_safe && shield_k1_r_safe) {
+                shield_active = true;
+                if (xg < 0.0) {
+                    cmd_steer = +MAX_STEERING_RAD_CONST; // Left
+                    shield_chosen_id = 2; // k1_left
+                } else {
+                    cmd_steer = -MAX_STEERING_RAD_CONST; // Right
+                    shield_chosen_id = 3; // k1_right
+                }
+                cmd_speed = escape_speed;
+            } else if (shield_k1_l_safe) {
+                shield_active = true;
+                cmd_steer = +MAX_STEERING_RAD_CONST; // Left
+                shield_chosen_id = 2; // k1_left
+                cmd_speed = escape_speed;
+            } else if (shield_k1_r_safe) {
+                shield_active = true;
+                cmd_steer = -MAX_STEERING_RAD_CONST; // Right
+                shield_chosen_id = 3; // k1_right
+                cmd_speed = escape_speed;
+            }
+        }
+    }
+
+    // --------------------------------------------------------------------------
     // MAIN OPTION 2 SL-MPC PLAN FUNCTION
     // --------------------------------------------------------------------------
     int plan(
@@ -457,14 +672,18 @@ public:
         int* out_osqp_iters,
         int* out_status_code
     ) {
-        double v_bar = std::max(v_current, V_MIN_CRUISE_CONST);
-        double delta_0 = std::max(-MAX_STEERING_RAD_CONST, std::min(MAX_STEERING_RAD_CONST, steer_current));
+        double v_bar = std::max(0.0, v_current);
+        double delta_0 = steer_current;
         double r_0 = yaw_rate_current;
 
         // 0. Fast Straight-Line Lock (Zero Compute Bypass when Corridor is Open Ahead >= 1.70m)
         if (yg >= straight_lock_dist_m && std::abs(xg) <= 0.20 && std::abs(theta_g) <= 0.22) {
-            *out_cmd_steer_rad = 0.0;
-            *out_cmd_speed_mps = straight_lock_speed_mps;
+            double cmd_steer = 0.0;
+            double cmd_speed = straight_lock_speed_mps;
+            run_shield_rollout_and_cascade(cmd_steer, cmd_speed, xg, v_bar, delta_0);
+
+            *out_cmd_steer_rad = cmd_steer;
+            *out_cmd_speed_mps = cmd_speed;
             *out_best_cost = 0.0;
             *out_osqp_iters = 0;
             *out_status_code = 1; // STRAIGHT_LOCKED
@@ -793,14 +1012,22 @@ public:
                 double max_accel = 0.85 * mu_friction * GRAVITY_G_CONST;
                 cmd_speed = std::max(v_cruise_min, std::min(v_cruise_max, std::min(v_ref, v_bar + max_accel * dt_actuator * 2.0)));
             }
+
+            run_shield_rollout_and_cascade(cmd_steer, cmd_speed, xg, v_bar, delta_0);
+
+            *out_cmd_steer_rad = cmd_steer;
             *out_cmd_speed_mps = cmd_speed;
             return 1;
         }
 
         // Fallback on solver error
         *out_status_code = -1; // FALLBACK_SL_MPC
-        *out_cmd_steer_rad = std::max(-MAX_STEERING_RAD_CONST, std::min(MAX_STEERING_RAD_CONST, -std::atan2(xg, std::max(0.40, yg))));
-        *out_cmd_speed_mps = v_cruise_min;
+        double fb_steer = std::max(-MAX_STEERING_RAD_CONST, std::min(MAX_STEERING_RAD_CONST, -std::atan2(xg, std::max(0.40, yg))));
+        double fb_speed = v_cruise_min;
+        run_shield_rollout_and_cascade(fb_steer, fb_speed, xg, v_bar, delta_0);
+
+        *out_cmd_steer_rad = fb_steer;
+        *out_cmd_speed_mps = fb_speed;
 
         best_line_count = 16;
         for (int i = 0; i < 16; ++i) {
@@ -930,4 +1157,62 @@ SL_MPC_API int sl_mpc_get_corridor(
     return count;
 }
 
+SL_MPC_API int sl_mpc_get_shield_branches(
+    void* handle,
+    double* out_k1_l_xs, double* out_k1_l_ys, int* out_k1_l_cnt, int* out_k1_l_safe,
+    double* out_k1_r_xs, double* out_k1_r_ys, int* out_k1_r_cnt, int* out_k1_r_safe,
+    double* out_k2_l_xs, double* out_k2_l_ys, int* out_k2_l_cnt, int* out_k2_l_safe,
+    double* out_k2_r_xs, double* out_k2_r_ys, int* out_k2_r_cnt, int* out_k2_r_safe,
+    int* out_active, int* out_chosen_id
+) {
+    if (!handle) return 0;
+    auto* planner = static_cast<CurvilinearSLMPCNative*>(handle);
+
+    // K1 Left
+    if (out_k1_l_xs && out_k1_l_ys && out_k1_l_cnt) {
+        *out_k1_l_cnt = std::min(MAX_TRAJ_POINTS, planner->shield_k1_l_cnt);
+        for (int i = 0; i < *out_k1_l_cnt; ++i) {
+            out_k1_l_xs[i] = planner->shield_k1_l_x[i];
+            out_k1_l_ys[i] = planner->shield_k1_l_y[i];
+        }
+    }
+    if (out_k1_l_safe) *out_k1_l_safe = planner->shield_k1_l_safe ? 1 : 0;
+
+    // K1 Right
+    if (out_k1_r_xs && out_k1_r_ys && out_k1_r_cnt) {
+        *out_k1_r_cnt = std::min(MAX_TRAJ_POINTS, planner->shield_k1_r_cnt);
+        for (int i = 0; i < *out_k1_r_cnt; ++i) {
+            out_k1_r_xs[i] = planner->shield_k1_r_x[i];
+            out_k1_r_ys[i] = planner->shield_k1_r_y[i];
+        }
+    }
+    if (out_k1_r_safe) *out_k1_r_safe = planner->shield_k1_r_safe ? 1 : 0;
+
+    // K2 Left
+    if (out_k2_l_xs && out_k2_l_ys && out_k2_l_cnt) {
+        *out_k2_l_cnt = std::min(MAX_TRAJ_POINTS, planner->shield_k2_l_cnt);
+        for (int i = 0; i < *out_k2_l_cnt; ++i) {
+            out_k2_l_xs[i] = planner->shield_k2_l_x[i];
+            out_k2_l_ys[i] = planner->shield_k2_l_y[i];
+        }
+    }
+    if (out_k2_l_safe) *out_k2_l_safe = planner->shield_k2_l_safe ? 1 : 0;
+
+    // K2 Right
+    if (out_k2_r_xs && out_k2_r_ys && out_k2_r_cnt) {
+        *out_k2_r_cnt = std::min(MAX_TRAJ_POINTS, planner->shield_k2_r_cnt);
+        for (int i = 0; i < *out_k2_r_cnt; ++i) {
+            out_k2_r_xs[i] = planner->shield_k2_r_x[i];
+            out_k2_r_ys[i] = planner->shield_k2_r_y[i];
+        }
+    }
+    if (out_k2_r_safe) *out_k2_r_safe = planner->shield_k2_r_safe ? 1 : 0;
+
+    if (out_active) *out_active = planner->shield_active ? 1 : 0;
+    if (out_chosen_id) *out_chosen_id = planner->shield_chosen_id;
+
+    return planner->shield_active ? 1 : 0;
+}
+
 } // extern "C"
+

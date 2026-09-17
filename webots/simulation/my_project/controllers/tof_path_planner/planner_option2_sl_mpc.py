@@ -140,6 +140,17 @@ if CPP_AVAILABLE and _lib is not None:
     ]
     _lib.sl_mpc_get_corridor.restype = ctypes.c_int
 
+    _lib.sl_mpc_get_shield_branches.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int),
+        ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int),
+        ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int),
+        ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int),
+        ctypes.POINTER(ctypes.c_int),
+        ctypes.POINTER(ctypes.c_int),
+    ]
+    _lib.sl_mpc_get_shield_branches.restype = ctypes.c_int
+
 
 class CppCurvilinearSLMPC:
     """
@@ -209,6 +220,23 @@ class CppCurvilinearSLMPC:
         self._buf_ys1 = (ctypes.c_double * self._max_pts)()
         self._buf_xs2 = (ctypes.c_double * self._max_pts)()
         self._buf_ys2 = (ctypes.c_double * self._max_pts)()
+        self._buf_xs3 = (ctypes.c_double * self._max_pts)()
+        self._buf_ys3 = (ctypes.c_double * self._max_pts)()
+        self._buf_xs4 = (ctypes.c_double * self._max_pts)()
+        self._buf_ys4 = (ctypes.c_double * self._max_pts)()
+
+        self._shield_k1_l_cnt = ctypes.c_int(0)
+        self._shield_k1_l_safe = ctypes.c_int(0)
+        self._shield_k1_r_cnt = ctypes.c_int(0)
+        self._shield_k1_r_safe = ctypes.c_int(0)
+
+        self._shield_k2_l_cnt = ctypes.c_int(0)
+        self._shield_k2_l_safe = ctypes.c_int(0)
+        self._shield_k2_r_cnt = ctypes.c_int(0)
+        self._shield_k2_r_safe = ctypes.c_int(0)
+
+        self._shield_active = ctypes.c_int(0)
+        self._shield_chosen = ctypes.c_int(-1)
 
         cm_handle, probe_fn_ptr = self._resolve_costmap()
 
@@ -442,6 +470,60 @@ class CppCurvilinearSLMPC:
             self._active_target = (prim_target[0], prim_target[1])
         self._last_winner = winner
 
+        win_handle = self._handle_alt if (winner == 1 and hasattr(self, "_handle_alt") and self._handle_alt) else self._handle
+
+        n_guide = _lib.sl_mpc_get_guide_line(win_handle, self._buf_xs1, self._buf_ys1, self._max_pts)
+        guide_line_win = [[float(self._buf_xs1[i]), float(self._buf_ys1[i])] for i in range(n_guide)] if n_guide > 0 else guide_line_prim
+
+        n_corr = _lib.sl_mpc_get_corridor(win_handle, self._buf_xs1, self._buf_ys1, self._buf_xs2, self._buf_ys2, self._max_pts)
+        corridor_left = [[float(self._buf_xs1[i]), float(self._buf_ys1[i])] for i in range(n_corr)]
+        corridor_right = [[float(self._buf_xs2[i]), float(self._buf_ys2[i])] for i in range(n_corr)]
+
+        # Extract Emergency Shield evasion branches (Step 1 Left/Right, Step 2 Left/Right)
+        _lib.sl_mpc_get_shield_branches(
+            win_handle,
+            self._buf_xs1, self._buf_ys1, ctypes.byref(self._shield_k1_l_cnt), ctypes.byref(self._shield_k1_l_safe),
+            self._buf_xs2, self._buf_ys2, ctypes.byref(self._shield_k1_r_cnt), ctypes.byref(self._shield_k1_r_safe),
+            self._buf_xs3, self._buf_ys3, ctypes.byref(self._shield_k2_l_cnt), ctypes.byref(self._shield_k2_l_safe),
+            self._buf_xs4, self._buf_ys4, ctypes.byref(self._shield_k2_r_cnt), ctypes.byref(self._shield_k2_r_safe),
+            ctypes.byref(self._shield_active), ctypes.byref(self._shield_chosen)
+        )
+
+        n_k1_l = int(self._shield_k1_l_cnt.value)
+        n_k1_r = int(self._shield_k1_r_cnt.value)
+        n_k2_l = int(self._shield_k2_l_cnt.value)
+        n_k2_r = int(self._shield_k2_r_cnt.value)
+
+        k1_left_branch = [[float(self._buf_xs1[i]), float(self._buf_ys1[i])] for i in range(n_k1_l)] if n_k1_l > 0 else []
+        k1_right_branch = [[float(self._buf_xs2[i]), float(self._buf_ys2[i])] for i in range(n_k1_r)] if n_k1_r > 0 else []
+        k2_left_branch = [[float(self._buf_xs3[i]), float(self._buf_ys3[i])] for i in range(n_k2_l)] if n_k2_l > 0 else []
+        k2_right_branch = [[float(self._buf_xs4[i]), float(self._buf_ys4[i])] for i in range(n_k2_r)] if n_k2_r > 0 else []
+
+        chosen_id = int(self._shield_chosen.value)
+        chosen_name = None
+        if chosen_id == 0:
+            chosen_name = "k2_left"
+        elif chosen_id == 1:
+            chosen_name = "k2_right"
+        elif chosen_id == 2:
+            chosen_name = "k1_left"
+        elif chosen_id == 3:
+            chosen_name = "k1_right"
+
+        shield_info = {
+            "active": bool(self._shield_active.value),
+            "chosen_id": chosen_id,
+            "chosen_name": chosen_name,
+            "k1_left": k1_left_branch,
+            "k1_left_safe": bool(self._shield_k1_l_safe.value),
+            "k1_right": k1_right_branch,
+            "k1_right_safe": bool(self._shield_k1_r_safe.value),
+            "k2_left": k2_left_branch,
+            "k2_left_safe": bool(self._shield_k2_l_safe.value),
+            "k2_right": k2_right_branch,
+            "k2_right_safe": bool(self._shield_k2_r_safe.value),
+        }
+
         # ----------------------------------------------------------------------
         # 4. PACKAGE ACTIVE CONTROL COMMANDS
         # ----------------------------------------------------------------------
@@ -481,10 +563,11 @@ class CppCurvilinearSLMPC:
             "winner_id": winner,
             "status": status_desc,
             "best_line": best_line,
-            "guide_line": guide_line_prim,
+            "guide_line": guide_line_win,
             "candidate_lines": candidate_lines,
             "corridor_left": corridor_left,
             "corridor_right": corridor_right,
+            "shield": shield_info,
         }
 
     def __del__(self):

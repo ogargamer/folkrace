@@ -512,18 +512,19 @@ class FolkraceVehicle:
             prob_map, hazard_mask, map_ms = self.costmap.process_tof_frame(tof_readings)
             self.cached_map_ms = map_ms
 
-            # Scout Forward Gaps
+            # Scout Forward Gaps using estimated actual physical wheel angle
+            current_physical_steer = float(self.ediff.current_steer_rad)
             xg, yg, width, theta_g = self.gap_scout.scout_gap(
                 tof_readings=tof_readings,
                 hazard_mask=hazard_mask,
                 costmap_obj=self.costmap,
                 target_lookahead_m=self.target_lookahead_m,
-                steer_current=self.active_steer,
+                steer_current=current_physical_steer,
                 prob_map=prob_map,
             )
             self.last_gap_info = (xg, yg, width, theta_g)
 
-            # Curvilinear SL-MPC Trajectory Optimization
+            # Curvilinear SL-MPC Trajectory Optimization using estimated actual physical wheel angle
             t_plan_0 = time.perf_counter()
             plan_res = self.planner.plan(
                 xg=xg,
@@ -531,7 +532,7 @@ class FolkraceVehicle:
                 theta_g=theta_g,
                 aperture_width=width,
                 v_current=self.v_est,
-                steer_current=self.active_steer,
+                steer_current=current_physical_steer,
                 yaw_rate_current=self.cached_yaw_rate,
                 extra_targets=getattr(self.gap_scout, "last_targets", None),
             )
@@ -548,7 +549,7 @@ class FolkraceVehicle:
                 commanded_v=raw_target_speed,
                 cached_tofs=tof_readings,
                 heading_err=float(theta_g),
-                active_steer=self.active_steer,
+                active_steer=current_physical_steer,
                 hazard_mask=hazard_mask,
                 costmap_obj=self.costmap,
             )
@@ -564,7 +565,7 @@ class FolkraceVehicle:
             else:
                 if self.was_recovering:
                     self.was_recovering = False
-                    self.active_steer = 0.0
+                    self.active_steer = current_physical_steer
 
                 # Fast Straight-Line Lock (unguarded by turn intent; engages purely on forward clearance)
                 d_fl_lock = tof_readings.get("tof_front_left_4.1deg", tof_readings.get("tof_fl_3", 0.0))
@@ -630,6 +631,7 @@ class FolkraceVehicle:
             target_v=self.rate_limited_speed,
             target_steer_rad=self.cached_target_steer,
             gyro_z_rad_s=live_gyro_z,
+            dt=dt,
         )
 
         # 5. Apply Actuator Commands
@@ -710,6 +712,10 @@ class FolkraceVehicle:
             "tof_ranges": [round(float(tof_readings.get(k, TOF_MAX_RANGE_M)), 3) for k in TOF_SENSOR_NAMES],
             "best_line": b_line,
             "candidate_lines": c_lines,
+            "guide_line": to_py(self.last_plan_res.get("guide_line", [])),
+            "corridor_left": to_py(self.last_plan_res.get("corridor_left", [])),
+            "corridor_right": to_py(self.last_plan_res.get("corridor_right", [])),
+            "shield": to_py(self.last_plan_res.get("shield", {})),
             "grid_shape": [int(s) for s in prob_down.shape],
             "grid_bounds": [float(GRID_X_MIN), float(GRID_X_MAX), float(GRID_Y_MIN), float(GRID_Y_MAX)],
             "grid_data": grid_compressed,

@@ -108,7 +108,8 @@ def run_racing_studio(robot: any, vehicle: FolkraceVehicle) -> None:
     sim_step_requested = False
     sim_speed_mult = 1.0
     sim_time = 0.0
-    last_print_time = 0.0
+    telemetry_hz = max(1, min(60, int(os.environ.get("WEBOTS_TELEMETRY_HZ", 60))))
+    last_telemetry_time = -1.0
 
     def to_py(obj):
         if isinstance(obj, (np.floating, float)):
@@ -147,11 +148,17 @@ def run_racing_studio(robot: any, vehicle: FolkraceVehicle) -> None:
                             robot.simulationSetMode(Supervisor.SIMULATION_MODE_FAST)
                         else:
                             robot.simulationSetMode(Supervisor.SIMULATION_MODE_REAL_TIME)
+                elif c == "set_telemetry_hz":
+                    telemetry_hz = max(1, min(60, int(cmd_pkt.get("val", 60))))
+                    print(f"[Racing Studio] Telemetry streaming rate set to: {telemetry_hz} Hz", flush=True)
                 elif c == "set_param":
                     p_name = cmd_pkt.get("name", "")
                     p_val = cmd_pkt.get("val", None)
                     if p_val is not None:
-                        if p_name == "r_inflation_m":
+                        if p_name == "telemetry_hz":
+                            telemetry_hz = max(1, min(60, int(p_val)))
+                            print(f"[Racing Studio] Telemetry streaming rate set to: {telemetry_hz} Hz", flush=True)
+                        elif p_name == "r_inflation_m":
                             vehicle.costmap.r_inflation_m = float(p_val)
                             vehicle.costmap._handle = vehicle.costmap._lib.costmap_create(
                                 vehicle.costmap.x_min, vehicle.costmap.x_max, vehicle.costmap.y_min, vehicle.costmap.y_max, vehicle.costmap.res, vehicle.costmap.r_inflation_m
@@ -187,41 +194,46 @@ def run_racing_studio(robot: any, vehicle: FolkraceVehicle) -> None:
         # 3. Vehicle Physics & Planner Step
         telemetry, planner_ran = vehicle.step(dt=DT)
 
-        # 4. Broadcast Telemetry & Update 60 Hz Webots World HUD when Planner Runs
+        # 4. Broadcast Telemetry & Update Webots World HUD / Terminal based on telemetry_hz
         if planner_ran:
             gx, gy, _ = vehicle.get_ground_truth_pose()
             track_dist = track_tracker.update([gx, gy])
 
-            telemetry["obstacles"] = [[round(ox, 3), round(oy, 3)] for (ox, oy) in obs_positions]
-            telemetry["active_planner"] = "OPTION2_SL_MPC"
-            telemetry["sim_time"] = round(sim_time, 2)
-            try:
-                pkt_bytes = json.dumps(to_py(telemetry)).encode("utf-8")
-                gui_sock.sendto(pkt_bytes, ("127.0.0.1", 9876))
-            except Exception:
-                pass
+            telem_period = 1.0 / float(telemetry_hz)
+            if (sim_time - last_telemetry_time) >= (telem_period - 0.001) or last_telemetry_time < 0:
+                last_telemetry_time = sim_time
 
-            # 60 Hz On-Screen HUD Overlay in Webots 3D World Viewport
-            if hasattr(robot, "setLabel"):
-                v_real = telemetry.get("v_real", 0.0)
-                v_cmd = telemetry.get("v_cmd", 0.0)
-                steer_deg = telemetry.get("steer_deg", 0.0)
-                mode_str = telemetry.get("mode", "DRIVE")
-                plan_ms = telemetry.get("plan_ms", 0.0)
-                lap_num = getattr(track_tracker, "current_lap", 0)
+                telemetry["obstacles"] = [[round(ox, 3), round(oy, 3)] for (ox, oy) in obs_positions]
+                telemetry["active_planner"] = "OPTION2_SL_MPC"
+                telemetry["sim_time"] = round(sim_time, 2)
+                telemetry["telemetry_hz"] = telemetry_hz
+                try:
+                    pkt_bytes = json.dumps(to_py(telemetry)).encode("utf-8")
+                    gui_sock.sendto(pkt_bytes, ("127.0.0.1", 9876))
+                except Exception:
+                    pass
 
-                color_mode = 0x00FF88 if "RECOVERY" not in mode_str else 0xFF3333
-                robot.setLabel(0, f"SL-MPC 60Hz | Mode: {mode_str:12s} | Time: {sim_time:5.1f}s | Lap: {lap_num}", 0.01, 0.01, 0.06, 0x00E5FF, 0.0, "Arial")
-                robot.setLabel(1, f"Speed: {v_real:4.2f} m/s (cmd: {v_cmd:4.2f}) | Steer: {steer_deg:+5.1f} deg | Plan: {plan_ms:4.2f}ms", 0.01, 0.04, 0.06, color_mode, 0.0, "Arial")
-                robot.setLabel(2, f"Track Progress: {track_dist:6.1f}m", 0.01, 0.07, 0.05, 0xFFFFFF, 0.0, "Arial")
+                # HUD Overlay in Webots 3D World Viewport
+                if hasattr(robot, "setLabel"):
+                    v_real = telemetry.get("v_real", 0.0)
+                    v_cmd = telemetry.get("v_cmd", 0.0)
+                    steer_deg = telemetry.get("steer_deg", 0.0)
+                    mode_str = telemetry.get("mode", "DRIVE")
+                    plan_ms = telemetry.get("plan_ms", 0.0)
+                    lap_num = getattr(track_tracker, "current_lap", 0)
 
-            # 60 Hz Terminal Telemetry Output
-            print(
-                f"[Telemetry] Mode: {telemetry['mode']:14s} | Time: {sim_time:5.2f}s | Lap: {track_tracker.current_lap:2d} | "
-                f"Dist: {track_dist:6.1f}m | Speed: {telemetry['v_real']:4.2f}m/s (cmd: {telemetry['v_cmd']:4.2f}) | "
-                f"Steer: {telemetry['steer_deg']:+5.1f} deg | Plan: {telemetry['plan_ms']:4.2f}ms",
-                flush=True,
-            )
+                    color_mode = 0x00FF88 if "RECOVERY" not in mode_str else 0xFF3333
+                    robot.setLabel(0, f"SL-MPC {telemetry_hz}Hz | Mode: {mode_str:12s} | Time: {sim_time:5.1f}s | Lap: {lap_num}", 0.01, 0.01, 0.06, 0x00E5FF, 0.0, "Arial")
+                    robot.setLabel(1, f"Speed: {v_real:4.2f} m/s (cmd: {v_cmd:4.2f}) | Steer: {steer_deg:+5.1f} deg | Plan: {plan_ms:4.2f}ms", 0.01, 0.04, 0.06, color_mode, 0.0, "Arial")
+                    robot.setLabel(2, f"Track Progress: {track_dist:6.1f}m", 0.01, 0.07, 0.05, 0xFFFFFF, 0.0, "Arial")
+
+                # Terminal Telemetry Output (throttled to telemetry_hz)
+                print(
+                    f"[Telemetry {telemetry_hz:2d}Hz] Mode: {telemetry['mode']:14s} | Time: {sim_time:5.2f}s | Lap: {track_tracker.current_lap:2d} | "
+                    f"Dist: {track_dist:6.1f}m | Speed: {telemetry['v_real']:4.2f}m/s (cmd: {telemetry['v_cmd']:4.2f}) | "
+                    f"Steer: {telemetry['steer_deg']:+5.1f} deg | Plan: {telemetry['plan_ms']:4.2f}ms",
+                    flush=True,
+                )
 
         # 5. Simulation Speed Throttling (only active when slow-motion < 1.0x is explicitly requested)
         if sim_speed_mult < 0.99:
@@ -301,7 +313,9 @@ def run_champion_preview(robot: any, vehicle: FolkraceVehicle) -> None:
     sim_paused = False
     sim_step_requested = False
     sim_speed_mult = 1.0
-    last_print_time = 0.0
+    sim_time = 0.0
+    telemetry_hz = max(1, min(60, int(os.environ.get("WEBOTS_TELEMETRY_HZ", 60))))
+    last_telemetry_time = -1.0
 
     def to_py(obj):
         if isinstance(obj, (np.floating, float)):
@@ -382,11 +396,17 @@ def run_champion_preview(robot: any, vehicle: FolkraceVehicle) -> None:
                             robot.simulationSetMode(Supervisor.SIMULATION_MODE_FAST)
                         else:
                             robot.simulationSetMode(Supervisor.SIMULATION_MODE_REAL_TIME)
+                elif c == "set_telemetry_hz":
+                    telemetry_hz = max(1, min(60, int(cmd_pkt.get("val", 60))))
+                    print(f"[Champion Preview] Telemetry streaming rate set to: {telemetry_hz} Hz", flush=True)
                 elif c == "set_param":
                     p_name = cmd_pkt.get("name", "")
                     p_val = cmd_pkt.get("val", None)
                     if p_val is not None:
-                        if p_name == "r_inflation_m":
+                        if p_name == "telemetry_hz":
+                            telemetry_hz = max(1, min(60, int(p_val)))
+                            print(f"[Champion Preview] Telemetry streaming rate set to: {telemetry_hz} Hz", flush=True)
+                        elif p_name == "r_inflation_m":
                             vehicle.costmap.r_inflation_m = float(p_val)
                             vehicle.costmap._handle = vehicle.costmap._lib.costmap_create(
                                 vehicle.costmap.x_min, vehicle.costmap.x_max, vehicle.costmap.y_min, vehicle.costmap.y_max, vehicle.costmap.res, vehicle.costmap.r_inflation_m
@@ -423,42 +443,47 @@ def run_champion_preview(robot: any, vehicle: FolkraceVehicle) -> None:
         track_dist = track_tracker.update([gx, gy])
 
         if planner_ran:
-            telemetry["obstacles"] = [[round(ox, 3), round(oy, 3)] for (ox, oy) in obs_positions]
-            telemetry["active_planner"] = "OPTION2_SL_MPC"
-            telemetry["sim_time"] = round(sim_time, 2)
-            telemetry["metrics"] = {
-                "track_dist_m": round(track_dist, 2),
-                "laps": int(track_tracker.current_lap),
-                "speed_mps": round(telemetry.get("v_fused", 0.0), 2),
-                "title": title,
-            }
-            try:
-                pkt_bytes = json.dumps(to_py(telemetry)).encode("utf-8")
-                gui_sock.sendto(pkt_bytes, ("127.0.0.1", 9876))
-            except Exception:
-                pass
+            telem_period = 1.0 / float(telemetry_hz)
+            if (sim_time - last_telemetry_time) >= (telem_period - 0.001) or last_telemetry_time < 0:
+                last_telemetry_time = sim_time
 
-            # 60 Hz On-Screen HUD Overlay in Webots 3D World Viewport
-            if hasattr(robot, "setLabel"):
-                v_real = telemetry.get("v_real", 0.0)
-                v_cmd = telemetry.get("v_cmd", 0.0)
-                steer_deg = telemetry.get("steer_deg", 0.0)
-                mode_str = telemetry.get("mode", "DRIVE")
-                plan_ms = telemetry.get("plan_ms", 0.0)
-                lap_num = getattr(track_tracker, "current_lap", 0)
+                telemetry["obstacles"] = [[round(ox, 3), round(oy, 3)] for (ox, oy) in obs_positions]
+                telemetry["active_planner"] = "OPTION2_SL_MPC"
+                telemetry["sim_time"] = round(sim_time, 2)
+                telemetry["telemetry_hz"] = telemetry_hz
+                telemetry["metrics"] = {
+                    "track_dist_m": round(track_dist, 2),
+                    "laps": int(track_tracker.current_lap),
+                    "speed_mps": round(telemetry.get("v_fused", 0.0), 2),
+                    "title": title,
+                }
+                try:
+                    pkt_bytes = json.dumps(to_py(telemetry)).encode("utf-8")
+                    gui_sock.sendto(pkt_bytes, ("127.0.0.1", 9876))
+                except Exception:
+                    pass
 
-                color_mode = 0x00FF88 if "RECOVERY" not in mode_str else 0xFF3333
-                robot.setLabel(0, f"CHAMPION PREVIEW 60Hz | Mode: {mode_str:12s} | Time: {sim_time:5.1f}s | Lap: {lap_num}", 0.01, 0.01, 0.06, 0x00E5FF, 0.0, "Arial")
-                robot.setLabel(1, f"Speed: {v_real:4.2f} m/s (cmd: {v_cmd:4.2f}) | Steer: {steer_deg:+5.1f} deg | Plan: {plan_ms:4.2f}ms", 0.01, 0.04, 0.06, color_mode, 0.0, "Arial")
-                robot.setLabel(2, f"Track Progress: {track_dist:6.1f}m | {title[:40]}", 0.01, 0.07, 0.05, 0xFFFFFF, 0.0, "Arial")
+                # HUD Overlay in Webots 3D World Viewport
+                if hasattr(robot, "setLabel"):
+                    v_real = telemetry.get("v_real", 0.0)
+                    v_cmd = telemetry.get("v_cmd", 0.0)
+                    steer_deg = telemetry.get("steer_deg", 0.0)
+                    mode_str = telemetry.get("mode", "DRIVE")
+                    plan_ms = telemetry.get("plan_ms", 0.0)
+                    lap_num = getattr(track_tracker, "current_lap", 0)
 
-            # 60 Hz Terminal Telemetry Output
-            print(
-                f"[Telemetry] Mode: {telemetry['mode']:14s} | Time: {sim_time:5.2f}s | Lap: {track_tracker.current_lap:2d} | "
-                f"Dist: {track_dist:6.1f}m | Speed: {telemetry['v_real']:4.2f}m/s (cmd: {telemetry['v_cmd']:4.2f}) | "
-                f"Steer: {telemetry['steer_deg']:+5.1f} deg | Plan: {telemetry['plan_ms']:4.2f}ms",
-                flush=True,
-            )
+                    color_mode = 0x00FF88 if "RECOVERY" not in mode_str else 0xFF3333
+                    robot.setLabel(0, f"CHAMPION PREVIEW {telemetry_hz}Hz | Mode: {mode_str:12s} | Time: {sim_time:5.1f}s | Lap: {lap_num}", 0.01, 0.01, 0.06, 0x00E5FF, 0.0, "Arial")
+                    robot.setLabel(1, f"Speed: {v_real:4.2f} m/s (cmd: {v_cmd:4.2f}) | Steer: {steer_deg:+5.1f} deg | Plan: {plan_ms:4.2f}ms", 0.01, 0.04, 0.06, color_mode, 0.0, "Arial")
+                    robot.setLabel(2, f"Track Progress: {track_dist:6.1f}m | {title[:40]}", 0.01, 0.07, 0.05, 0xFFFFFF, 0.0, "Arial")
+
+                # Terminal Telemetry Output (throttled to telemetry_hz)
+                print(
+                    f"[Telemetry {telemetry_hz:2d}Hz] Mode: {telemetry['mode']:14s} | Time: {sim_time:5.2f}s | Lap: {track_tracker.current_lap:2d} | "
+                    f"Dist: {track_dist:6.1f}m | Speed: {telemetry['v_real']:4.2f}m/s (cmd: {telemetry['v_cmd']:4.2f}) | "
+                    f"Steer: {telemetry['steer_deg']:+5.1f} deg | Plan: {telemetry['plan_ms']:4.2f}ms",
+                    flush=True,
+                )
 
         # Simulation Speed Throttling (only active when slow-motion < 1.0x is explicitly requested)
         if sim_speed_mult < 0.99:

@@ -509,11 +509,21 @@ public:
 
         // 3. Score Candidate Targets
         float max_clear_dist = 0.10f;
-        float d_center = 2.0f;
         for (int i = 0; i < n_cand; ++i) {
             if (candidates[i].dist > max_clear_dist) max_clear_dist = candidates[i].dist;
-            if (std::abs(candidates[i].rel_angle) < (18.0f * DEG2RAD)) {
-                if (candidates[i].dist < d_center) d_center = candidates[i].dist;
+        }
+
+        // Single direct raycast straight ahead (x = 0, +Y axis) on inflated costmap
+        float d_center = max_r;
+        int n_center_steps = static_cast<int>(max_r / step_ds);
+        for (int s = 1; s <= n_center_steps; ++s) {
+            float d = s * step_ds;
+            float py = 0.095f + d;
+            int col = static_cast<int>(std::round((0.0f - x_min) / res));
+            int row = static_cast<int>(std::round((py - y_min) / res));
+            if (col < 0 || col >= width || row < 0 || row >= height || hazard_mask[row * width + col] > 0) {
+                d_center = std::max(GAP_MIN_LOOKAHEAD_M, d - step_ds);
+                break;
             }
         }
 

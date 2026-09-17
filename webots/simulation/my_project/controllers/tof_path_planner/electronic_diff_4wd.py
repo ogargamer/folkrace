@@ -8,15 +8,31 @@
 
 import math
 
-# --- PHYSICAL VEHICLE PARAMETERS ---
-WHEELBASE = 0.1325          # meters (distance between front & rear axles)
-TRACK_REAR = 0.1000         # meters (lateral distance between rear wheel centers)
-TRACK_FRONT = 0.0822        # meters (lateral distance between front wheel centers)
-TRACK_KINGPIN = 0.0620      # meters (lateral distance between front steering pivots)
-WHEEL_RADIUS = 0.0275       # meters (27.5 mm rolling radius)
-MAX_STEERING_RAD = 0.6500   # +/- 37.2 degrees limit (leaves 2.8 deg safety buffer from 0.698132 hard stops)
-MOTOR_DIR = -1.0            # Webots motor rotational orientation (-1.0 pushes vehicle forward)
-V_MAX_WHEEL = 5.5000        # m/s physical ceiling (200.0 rad/s * 0.0275 m)
+try:
+    from .planner_config import (
+        WHEELBASE,
+        TRACK_REAR,
+        TRACK_FRONT,
+        TRACK_KINGPIN,
+        WHEEL_RADIUS,
+        MAX_STEERING_RAD,
+        MOTOR_DIR,
+        V_MAX_WHEEL,
+        SERVO_MAX_SPEED_RAD_S,
+    )
+except ImportError:
+    from planner_config import (
+        WHEELBASE,
+        TRACK_REAR,
+        TRACK_FRONT,
+        TRACK_KINGPIN,
+        WHEEL_RADIUS,
+        MAX_STEERING_RAD,
+        MOTOR_DIR,
+        V_MAX_WHEEL,
+        SERVO_MAX_SPEED_RAD_S,
+    )
+
 V_SLIP_GATE = 0.30          # m/s minimum speed to activate dynamic IMU slip detection
 THRESH_SPIN = 0.45          # rad/s gross yaw rate divergence threshold for oversteer
 
@@ -34,7 +50,7 @@ class ElectronicDifferential4WD:
     def __init__(self, wheelbase=WHEELBASE, track_rear=TRACK_REAR, track_front=TRACK_FRONT,
                  track_kingpin=TRACK_KINGPIN, wheel_radius=WHEEL_RADIUS,
                  max_steer=MAX_STEERING_RAD, motor_dir=MOTOR_DIR, v_max=V_MAX_WHEEL,
-                 thresh_spin=THRESH_SPIN):
+                 thresh_spin=THRESH_SPIN, max_servo_rate=SERVO_MAX_SPEED_RAD_S):
         self.L = wheelbase
         self.W_r = track_rear
         self.W_f = track_front
@@ -44,23 +60,36 @@ class ElectronicDifferential4WD:
         self.motor_dir = motor_dir
         self.v_max = v_max
         self.thresh_spin = thresh_spin
+        self.max_servo_rate = max_servo_rate
+        self.current_steer_rad = 0.0
 
-    def update(self, target_v, target_steer_rad, gyro_z_rad_s=0.0):
+    def update(self, target_v, target_steer_rad, gyro_z_rad_s=0.0, dt=1.0 / 120.0):
         """
         Calculates actuator setpoints given desired longitudinal velocity and virtual steering angle.
 
         Args:
             target_v (float): Desired forward linear velocity (m/s). Negative for reverse.
-            target_steer_rad (float): Virtual bicycle steering angle at center (rad).
+            target_steer_rad (float): Desired virtual bicycle steering angle at center (rad).
             gyro_z_rad_s (float): Measured body Z-axis yaw rate from IMU/gyro (rad/s).
+            dt (float): Timestep in seconds (default 1/120s for 120Hz update).
 
         Returns:
             dict: Actuator setpoints and telemetry.
         """
-        # 1. Clamp virtual center steering input to physical steering lock (40 deg = 0.698132 rad)
-        delta = max(-self.max_steer, min(target_steer_rad, self.max_steer))
+        # 1. Clamp target steering input to physical steering lock
+        target_delta = max(-self.max_steer, min(target_steer_rad, self.max_steer))
 
-        # 2. Kinematic yaw rate command (zero-singularity formulation)
+        # 2. Apply physical servo slew rate limit at 120 Hz
+        max_d_steer = self.max_servo_rate * dt
+        steer_diff = target_delta - self.current_steer_rad
+        if abs(steer_diff) <= max_d_steer:
+            self.current_steer_rad = target_delta
+        else:
+            self.current_steer_rad += math.copysign(max_d_steer, steer_diff)
+
+        delta = self.current_steer_rad
+
+        # 3. Kinematic yaw rate command from actual physical wheel angle
         sin_d = math.sin(delta)
         cos_d = math.cos(delta)
         tan_d = math.tan(delta)
@@ -84,6 +113,7 @@ class ElectronicDifferential4WD:
             return {
                 "steer_left": steer_left,
                 "steer_right": steer_right,
+                "steer_rad": delta,
                 "v_FL": 0.0, "v_FR": 0.0, "v_RL": 0.0, "v_RR": 0.0,
                 "omega_FL": 0.0, "omega_FR": 0.0, "omega_RL": 0.0, "omega_RR": 0.0,
                 "omega_cmd": 0.0,
@@ -150,6 +180,7 @@ class ElectronicDifferential4WD:
         return {
             "steer_left": steer_left,
             "steer_right": steer_right,
+            "steer_rad": delta,
             "v_FL": v_FL, "v_FR": v_FR, "v_RL": v_RL, "v_RR": v_RR,
             "omega_FL": omega_FL, "omega_FR": omega_FR,
             "omega_RL": omega_RL, "omega_RR": omega_RR,

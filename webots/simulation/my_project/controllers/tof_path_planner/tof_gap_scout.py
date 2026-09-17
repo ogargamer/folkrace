@@ -352,9 +352,23 @@ class ToFGapScout:
         # ----------------------------------------------------------------------
         # 3. SCORE CANDIDATE TARGETS
         # ----------------------------------------------------------------------
-        # Check forward clearance directly along vehicle centerline (|rel_angle| < 18 deg)
-        center_dists = [c["dist"] for c in candidates if abs(c["rel_angle"]) < math.radians(18)]
-        d_center = min(center_dists) if center_dists else max_clear_dist
+        # Check forward clearance directly along vehicle centerline (single raycast straight ahead)
+        d_center = max_clear_dist
+        if hazard_mask is not None:
+            n_center_steps = int(max_r / step_ds)
+            for s in range(1, n_center_steps + 1):
+                d = s * step_ds
+                py = 0.095 + d
+                col = int(round((0.0 - x_min) / res))
+                row = int(round((py - y_min) / res))
+                if row < 0 or row >= h or col < 0 or col >= w or hazard_mask[row, col] > 0:
+                    d_center = max(GAP_MIN_LOOKAHEAD_M, d - step_ds)
+                    break
+            else:
+                d_center = max_r
+        else:
+            center_cands = [c["dist"] for c in candidates if abs(c["rel_angle"]) < math.radians(6)]
+            d_center = max(center_cands) if center_cands else max_clear_dist
 
         # Compute side clearance asymmetry from lateral ToF sensors:
         side_diff = 0.0

@@ -127,8 +127,8 @@ class IMUEncoderFusion:
                 a_fwd = float(raw_accel[1])
         self.a_forward = a_fwd
 
-        # Crash Impact Check: Physical wall collision spikes well beyond tire grip (> 14 m/s^2 / ~1.5g)
-        is_crash_impact = (a_fwd < -14.0 or math.hypot(a_lat, a_fwd) > 20.0)
+        # Crash Impact Check: Real wall impact halts forward wheel motion and causes massive longitudinal decel
+        is_crash_impact = (abs(self.v_wheels) < 0.20 and a_fwd < -20.0)
 
         # 4. Read Gyroscope (body Z-axis yaw rate)
         gyro_z = 0.0
@@ -154,7 +154,10 @@ class IMUEncoderFusion:
             # Standstill lock
             self.v_est = 0.0
         else:
-            self.v_est = self.alpha_accel * v_pred + (1.0 - self.alpha_accel) * self.v_wheels
+            # Bound prediction within physical traction envelope of wheel rolling speed
+            v_pred_clamped = max(0.0, min(self.v_wheels + 1.2, max(self.v_wheels - 1.2, v_pred)))
+            self.v_est = self.alpha_accel * v_pred_clamped + (1.0 - self.alpha_accel) * self.v_wheels
+            self.v_est = max(0.0, self.v_est)
 
         # Distance integration
         self.total_distance_m += self.v_est * step_dt
