@@ -102,7 +102,7 @@ public:
     double corridor_right_x[MAX_TRAJ_POINTS];
     double corridor_right_y[MAX_TRAJ_POINTS];
 
-    // Emergency Shield trajectory recording (2 branches from Step 1, 2 branches from Step 2)
+    // Emergency Shield trajectory recording (2 branches from Step 2, 2 branches from Step 3)
     bool shield_active;
     int shield_chosen_id; // -1 = None, 0 = k2_left, 1 = k2_right, 2 = k1_left, 3 = k1_right
 
@@ -596,6 +596,23 @@ public:
         double act_x_2 = act_x_1 - v_mid_1 * std::sin(psi_mid_1) * dt_sim_step;
         double act_y_2 = act_y_1 + v_mid_1 * std::cos(psi_mid_1) * dt_sim_step;
 
+        // Advance to Step 3 (t = 3 * dt)
+        double d_delta_2 = std::max(-max_delta_rate_step, std::min(max_delta_rate_step, cmd_steer - act_delta_2));
+        double act_delta_3 = act_delta_2 + d_delta_2;
+        double delta_mid_2 = act_delta_2 + 0.5 * d_delta_2;
+
+        double act_v_3 = act_v_2;
+        if (cmd_speed < act_v_2) act_v_3 = std::max(cmd_speed, act_v_2 - max_a_dec * dt_sim_step);
+        else act_v_3 = std::min(cmd_speed, act_v_2 + max_a_acc * dt_sim_step);
+        double v_mid_2 = 0.5 * (act_v_2 + act_v_3);
+
+        double d_psi_2 = (v_mid_2 / WHEELBASE_CONST) * std::tan(delta_mid_2) * dt_sim_step;
+        double psi_mid_2 = act_psi_2 + 0.5 * d_psi_2;
+        double act_psi_3 = act_psi_2 + d_psi_2;
+
+        double act_x_3 = act_x_2 - v_mid_2 * std::sin(psi_mid_2) * dt_sim_step;
+        double act_y_3 = act_y_2 + v_mid_2 * std::cos(psi_mid_2) * dt_sim_step;
+
         shield_active = false;
         shield_chosen_id = -1;
         shield_k1_l_cnt = 0;
@@ -612,29 +629,29 @@ public:
         int lookahead_steps = 4;
         double escape_speed = 0.60; // Safe escape velocity
 
-        // 1. Step 1 (k=1) Evasion Micro-Rollouts from Actual State 1
+        // 1. Step 0 (k=0) Evasion Micro-Rollouts from Current State (immediate)
         shield_k1_l_safe = simulate_and_probe_branch(
-            act_x_1, act_y_1, act_v_1, act_psi_1, act_delta_1, +MAX_STEERING_RAD_CONST, escape_speed, lookahead_time, lookahead_steps,
+            act_x, act_y, act_v, act_psi, act_delta, +MAX_STEERING_RAD_CONST, escape_speed, lookahead_time, lookahead_steps,
             shield_k1_l_x, shield_k1_l_y, &shield_k1_l_cnt
         );
         shield_k1_r_safe = simulate_and_probe_branch(
-            act_x_1, act_y_1, act_v_1, act_psi_1, act_delta_1, -MAX_STEERING_RAD_CONST, escape_speed, lookahead_time, lookahead_steps,
+            act_x, act_y, act_v, act_psi, act_delta, -MAX_STEERING_RAD_CONST, escape_speed, lookahead_time, lookahead_steps,
             shield_k1_r_x, shield_k1_r_y, &shield_k1_r_cnt
         );
 
-        // 2. Step 2 (k=2) Evasion Micro-Rollouts from Actual State 2
+        // 2. Step 3 (k=3) Evasion Micro-Rollouts from Actual State 3
         shield_k2_l_safe = simulate_and_probe_branch(
-            act_x_2, act_y_2, act_v_2, act_psi_2, act_delta_2, +MAX_STEERING_RAD_CONST, escape_speed, lookahead_time, lookahead_steps,
+            act_x_3, act_y_3, act_v_3, act_psi_3, act_delta_3, +MAX_STEERING_RAD_CONST, escape_speed, lookahead_time, lookahead_steps,
             shield_k2_l_x, shield_k2_l_y, &shield_k2_l_cnt
         );
         shield_k2_r_safe = simulate_and_probe_branch(
-            act_x_2, act_y_2, act_v_2, act_psi_2, act_delta_2, -MAX_STEERING_RAD_CONST, escape_speed, lookahead_time, lookahead_steps,
+            act_x_3, act_y_3, act_v_3, act_psi_3, act_delta_3, -MAX_STEERING_RAD_CONST, escape_speed, lookahead_time, lookahead_steps,
             shield_k2_r_x, shield_k2_r_y, &shield_k2_r_cnt
         );
 
         // 3. Safety Shield Cascade:
-        // Check 2nd step into the future. If EVERYTHING collides at Step 2 (both left and right blocked),
-        // then we cannot wait until Step 2 to evade. We MUST check Step 1 (1 step ahead) and override!
+        // Check 3rd step into the future. If EVERYTHING collides at Step 3 (both left and right blocked),
+        // then we cannot wait until Step 3 to evade. We MUST check Step 1 (1 step ahead) and override!
         if (!shield_k2_l_safe && !shield_k2_r_safe) {
             if (shield_k1_l_safe && shield_k1_r_safe) {
                 shield_active = true;
@@ -733,6 +750,7 @@ public:
             double ds_step = v_nom * dt_val;
             double v_brake_limit = std::sqrt(v_ref_k[k + 1] * v_ref_k[k + 1] + 2.0 * a_decel * ds_step);
             v_ref_k[k] = std::min(v_ref_k[k], v_brake_limit);
+            v_ref_k[k] = std::max(v_ref_k[k], v_cruise_min); // Never go below minimum cruise speed
         }
         double v_ref = v_ref_k[0];
 
