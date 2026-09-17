@@ -29,119 +29,56 @@ ACTIVE_CONFIG_PATH = os.path.join(GA_OPTIMIZER_DIR, "active_preview_config.json"
 PLANNERS_DIR = os.path.join(MY_PROJECT_DIR, "controllers", "tof_path_planner")
 WEBOTS_BIN = r"C:\Program Files\Webots\msys64\mingw64\bin\webots.exe"
 
-def find_best_genome() -> dict:
-    """
-    Scans for all available GA/CMA-ES champion and checkpoint files, parses them,
-    and returns the genome configuration with the highest fitness.
-    """
-    candidates = []
-
-    # Potential champion/checkpoint files in the optimizer directory
-    candidate_patterns = [
-        os.path.join(GA_OPTIMIZER_DIR, "best_planner_genome.json"),
-        os.path.join(GA_OPTIMIZER_DIR, "ga_checkpoint.json"),
-    ]
-
-    # Also include any planner-specific champion or checkpoint files
-    if os.path.isdir(GA_OPTIMIZER_DIR):
-        for fname in os.listdir(GA_OPTIMIZER_DIR):
-            if (fname.startswith("best_genome") or fname.startswith("ga_checkpoint")) and fname.endswith(".json"):
-                full_p = os.path.join(GA_OPTIMIZER_DIR, fname)
-                if full_p not in candidate_patterns:
-                    candidate_patterns.append(full_p)
-
-    for filepath in candidate_patterns:
-        if not os.path.isfile(filepath):
-            continue
-        try:
-            with open(filepath, "r", encoding="utf-8") as f:
-                data = json.load(f)
-
-            genes = data.get("genes") or data.get("best_genome")
-            if not genes:
-                continue
-
-            # Resolve fitness score
-            fitness = None
-            if "fitness" in data and isinstance(data["fitness"], (int, float)):
-                fitness = float(data["fitness"])
-            elif "best_fitness" in data and isinstance(data["best_fitness"], (int, float)):
-                fitness = float(data["best_fitness"])
-            elif isinstance(data.get("metrics"), dict) and "fitness" in data["metrics"]:
-                fitness = float(data["metrics"]["fitness"])
-            elif isinstance(data.get("best_metrics"), dict) and "fitness" in data["best_metrics"]:
-                fitness = float(data["best_metrics"]["fitness"])
-
-            if fitness is None:
-                continue
-
-            metrics = data.get("metrics") or data.get("best_metrics") or {}
-            planner = data.get("planner", "OPTION_2_SL_MPC")
-            gen = data.get("generation", metrics.get("generation", "N/A"))
-            algo = data.get("algorithm", "CMA-ES")
-
-            title = data.get("title")
-            if not title:
-                title = f"{planner} Champion ({algo} Gen {gen}, Fitness {fitness:.2f})"
-
-            candidates.append({
-                "file": filepath,
-                "fitness": fitness,
-                "genes": genes,
-                "metrics": metrics,
-                "planner": planner,
-                "generation": gen,
-                "algorithm": algo,
-                "title": title,
-                "raw_data": data,
-            })
-        except Exception as e:
-            print(f"[Warning] Failed parsing {filepath}: {e}")
-
-    if not candidates:
-        return {}
-
-    # Sort descending by fitness
-    candidates.sort(key=lambda c: c["fitness"], reverse=True)
-    return candidates[0]
-
-
+BEST_GENOME_PATH = os.path.join(GA_OPTIMIZER_DIR, "best_planner_genome.json")
 ACTIVE_CHAMPION_INFO = {}
 
 
 def activate_champion_config() -> bool:
     global ACTIVE_CHAMPION_INFO
-    best_candidate = find_best_genome()
 
-    if not best_candidate:
-        print("[Error] No valid GA genome or checkpoint files found in optimization directory.")
+    if not os.path.isfile(BEST_GENOME_PATH):
+        print(f"[Error] Champion file does not exist: {BEST_GENOME_PATH}")
         return False
 
-    ACTIVE_CHAMPION_INFO = best_candidate
-    src_file = best_candidate["file"]
-    raw_data = best_candidate["raw_data"]
-
     try:
-        data = dict(raw_data)
-        data["genes"] = best_candidate["genes"]
-        data["title"] = best_candidate["title"]
-        data["fitness"] = best_candidate["fitness"]
-        data["metrics"] = best_candidate["metrics"]
-        data["source_file"] = os.path.basename(src_file)
+        with open(BEST_GENOME_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        genes = data.get("genes") or data.get("best_genome")
+        if not genes:
+            print(f"[Error] No 'genes' or 'best_genome' found in {BEST_GENOME_PATH}")
+            return False
+
+        fitness = data.get("fitness", data.get("best_fitness", 0.0))
+        metrics = data.get("metrics", data.get("best_metrics", {}))
+        planner = data.get("planner", "OPTION_2_SL_MPC")
+        title = data.get("title", f"{planner} Best Champion (Fitness {fitness})")
+
+        ACTIVE_CHAMPION_INFO = {
+            "file": BEST_GENOME_PATH,
+            "title": title,
+            "fitness": fitness,
+            "metrics": metrics,
+            "genes": genes,
+        }
+
+        preview_data = dict(data)
+        preview_data["genes"] = genes
+        preview_data["title"] = title
+        preview_data["source_file"] = os.path.basename(BEST_GENOME_PATH)
 
         os.makedirs(os.path.dirname(ACTIVE_CONFIG_PATH), exist_ok=True)
         with open(ACTIVE_CONFIG_PATH, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
+            json.dump(preview_data, f, indent=2)
 
-        m = best_candidate["metrics"]
-        dist = m.get("distance_m", "N/A")
-        speed = m.get("mean_speed_mps", "N/A")
-        laps = m.get("laps_completed", "N/A")
+        dist = metrics.get("distance_m", "N/A")
+        speed = metrics.get("mean_speed_mps", "N/A")
+        laps = metrics.get("laps_completed", "N/A")
 
         print(f"[Ready] Activated best GA champion genome:")
-        print(f"        Source:   {os.path.basename(src_file)}")
-        print(f"        Title:    {best_candidate['title']}")
-        print(f"        Fitness:  {best_candidate['fitness']:.2f}")
+        print(f"        Source:   {os.path.basename(BEST_GENOME_PATH)}")
+        print(f"        Title:    {title}")
+        print(f"        Fitness:  {fitness}")
         print(f"        Stats:    Dist: {dist}m | Speed: {speed}m/s | Laps: {laps}")
         print(f"[Ready] Written to: {ACTIVE_CONFIG_PATH}")
         return True

@@ -26,9 +26,12 @@ import numpy as np
 CURR_DIR = os.path.dirname(os.path.abspath(__file__))
 CONTROLLERS_DIR = os.path.dirname(CURR_DIR)
 MY_PROJECT_DIR = os.path.dirname(CONTROLLERS_DIR)
-WORKSPACE_ROOT = os.path.dirname(MY_PROJECT_DIR)
+SIMULATION_DIR = os.path.dirname(MY_PROJECT_DIR)
+WEBOTS_DIR = os.path.dirname(SIMULATION_DIR)
+WORKSPACE_ROOT = os.path.dirname(WEBOTS_DIR)
+GA_OPTIMIZER_DIR = os.path.join(WEBOTS_DIR, "optimization", "ga_planner_optimizer")
 
-for p in [WORKSPACE_ROOT, MY_PROJECT_DIR, CONTROLLERS_DIR, CURR_DIR]:
+for p in [WORKSPACE_ROOT, WEBOTS_DIR, GA_OPTIMIZER_DIR, MY_PROJECT_DIR, CONTROLLERS_DIR, CURR_DIR]:
     if p not in sys.path and os.path.exists(p):
         sys.path.insert(0, p)
 
@@ -250,15 +253,68 @@ class PlannerCostmapCanvas(QtWidgets.QWidget):
         self.steer_deg: float = 0.0
         self.recovery_state: str = "DRIVE"
 
-        # Precompute Kinematic Reverse Backup Logic Checking Curves (Origin at Robot Center (0.0, 0.0))
-        # Wheelbase = 0.1325m, Max Steer = 27.0 deg (0.471 rad), R_min ~ 0.260m, Lookahead = 0.45m
-        wheelbase = 0.1325
-        max_steer_rad = 0.47123889
-        self.r_min_turn = wheelbase / max(1e-3, math.tan(max_steer_rad))
+        # Load Kinematic Reverse Backup Logic parameters from active preview config / best genome
+        self.r_min_turn = 0.1325 / max(1e-3, math.tan(0.650))
         self.origin_y = 0.0   # Robot center (0.0, 0.0)
         self.bumper_y = 0.095 # Front bumper mount Y in vehicle frame
-        self.arc_lookahead_m = 0.45
-        n_pts = 45
+        self.arc_lookahead_m = 0.13
+        self._arc_s = np.zeros(3, dtype=np.float32)
+        self._arc_pts_left = np.zeros((3, 2), dtype=np.float32)
+        self._arc_pts_right = np.zeros((3, 2), dtype=np.float32)
+        self._arc_pts_center = np.zeros((3, 2), dtype=np.float32)
+
+        self._last_cfg_mtime: float = 0.0
+        self.reload_config()
+
+        # Display layer toggles
+        self.show_grid = True
+        self.show_rays = True
+        self.show_costmap = True
+        self.show_candidates = True
+        self.show_best = True
+        self.show_gap = True
+        self.show_hazard = True
+        self.show_chassis = True
+        self.show_backup_curves = True
+
+    def reload_config(self, force: bool = False) -> bool:
+        """Loads recovery arc kinematics and parameters from active_preview_config.json or best_planner_genome.json."""
+        wheelbase = 0.1325
+        max_steer_rad = 0.650  # Default ~37.2 deg (~0.65 rad)
+        arc_lookahead = 0.13   # Default 0.13 m
+
+        for cand_name in ["active_preview_config.json", "best_planner_genome.json", "ga_checkpoint.json"]:
+            cand_file = os.path.join(GA_OPTIMIZER_DIR, cand_name)
+            if os.path.isfile(cand_file):
+                try:
+                    mtime = os.path.getmtime(cand_file)
+                    if not force and mtime == self._last_cfg_mtime:
+                        return False
+                    self._last_cfg_mtime = mtime
+
+                    with open(cand_file, "r", encoding="utf-8") as f:
+                        cfg_data = json.load(f)
+                    cfg_genes = cfg_data.get("genes") or cfg_data.get("best_genome") or cfg_data
+                    if "recovery_steer_angle_rad" in cfg_genes:
+                        max_steer_rad = float(cfg_genes["recovery_steer_angle_rad"])
+                    if "recovery_arc_lookahead_m" in cfg_genes:
+                        arc_lookahead = float(cfg_genes["recovery_arc_lookahead_m"])
+                    break
+                except Exception:
+                    pass
+
+        self.update_kinematic_arcs(wheelbase=wheelbase, max_steer_rad=max_steer_rad, arc_lookahead_m=arc_lookahead)
+        return True
+
+    def update_kinematic_arcs(self, wheelbase: float = 0.1325, max_steer_rad: float = 0.650, arc_lookahead_m: float = 0.13):
+        self.wheelbase = float(wheelbase)
+        self.max_steer_rad = float(max_steer_rad)
+        self.arc_lookahead_m = float(arc_lookahead_m)
+        self.r_min_turn = self.wheelbase / max(1e-3, math.tan(self.max_steer_rad))
+        self.origin_y = 0.0   # Robot center (0.0, 0.0)
+        self.bumper_y = 0.095 # Front bumper mount Y in vehicle frame
+
+        n_pts = max(3, int(self.arc_lookahead_m / 0.015)) if self.arc_lookahead_m >= 0.045 else max(3, int(self.arc_lookahead_m * 100))
         self._arc_s = np.linspace(0.0, self.arc_lookahead_m, n_pts, dtype=np.float32)
 
         # Left Escape Arc (Full left lock: sweeps left -X from robot center)
@@ -275,17 +331,6 @@ class PlannerCostmapCanvas(QtWidgets.QWidget):
         self._arc_pts_center = np.zeros((n_pts, 2), dtype=np.float32)
         self._arc_pts_center[:, 0] = 0.0
         self._arc_pts_center[:, 1] = self.origin_y + self._arc_s
-
-        # Display layer toggles
-        self.show_grid = True
-        self.show_rays = True
-        self.show_costmap = True
-        self.show_candidates = True
-        self.show_best = True
-        self.show_gap = True
-        self.show_hazard = True
-        self.show_chassis = True
-        self.show_backup_curves = True
 
     def set_data(
         self,
@@ -1180,6 +1225,13 @@ class ComprehensivePlannerGUI(QMainWindow):
         self._send_cmd({"cmd": "set_param", "name": "alt_min_separation_m", "val": sep_m})
 
     def _update_gui(self):
+        # Periodic check for updated champion/active config file (e.g. every 0.5s)
+        self._cfg_check_counter = getattr(self, "_cfg_check_counter", 0) + 1
+        if self._cfg_check_counter >= 30:
+            self._cfg_check_counter = 0
+            if self.canvas.reload_config():
+                self.canvas.update()
+
         pkt = None
         is_conn = False
         with self._lock:
