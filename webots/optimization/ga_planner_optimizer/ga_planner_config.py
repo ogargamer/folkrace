@@ -31,7 +31,7 @@ NUM_GENERATIONS: int = 9999
 EVALUATION_DURATION_S: float = 30.0
 
 # Number of evaluation runs per candidate to average (1 for deterministic, >1 if noisy)
-RUNS_PER_EVALUATION: int = 1
+RUNS_PER_EVALUATION: int = 2
 
 # Optimization Algorithm: 'CMA_ES' (Covariance Matrix Adaptation), 'GA' (Genetic Algorithm)
 ALGORITHM: str = "CMA_ES"
@@ -53,7 +53,7 @@ ACTIVE_PLANNER: str = "OPTION_2_SL_MPC"
 # Headless Webots Simulation Settings
 WEBOTS_BINARY: str = r"C:\Program Files\Webots\msys64\mingw64\bin\webots.exe"
 BASE_WORKER_PORT: int = 10200
-TIMEOUT_PER_TRIAL_WALL_S: float = 90.0
+TIMEOUT_PER_TRIAL_WALL_S: float = 150.0
 
 # Moving Obstacle Parameters (moves AGAINST robot heading at 0.50 m/s along racing line)
 ENABLE_MOVING_OBSTACLES: bool = True
@@ -77,7 +77,7 @@ FITNESS_PROGRESS_WEIGHT: float = 150.0
 FITNESS_SPEED_WEIGHT: float = 30.0
 FITNESS_LAP_BONUS: float = 150.0
 FITNESS_COLLISION_PENALTY: float = 450.0
-FITNESS_STALL_PENALTY: float = 3000.0
+FITNESS_STALL_PENALTY: float = 900.0
 
 STALL_SPEED_THRESHOLD_MPS: float = 0.15
 STALL_MAX_DURATION_S: float = 1.50
@@ -133,7 +133,7 @@ OPTION_2_SL_MPC_GENE_SPECS: List[Tuple[str, float, float, type, float, str]] = [
     ("steer_deadband_rad",   0.000,  0.005,  float,  0.001,  "Steering error deadband (rad) for sensor noise quieting"),
     # Stuck & Emergency Recovery
     ("recovery_clearance_exit_m", 0.25, 0.25, float, 0.25,   "Front clearance threshold (m) to conclude reverse and center steering"),
-    ("recovery_steer_angle_rad",0.698, 0.698, float,  0.698,  "Recovery pivot steering angle (rad)"),
+    ("recovery_steer_angle_rad",0.650, 0.650, float,  0.650,  "Recovery pivot steering angle (rad)"),
     ("recovery_arc_lookahead_m",0.10, 0.17,  float,  0.13,   "Kinematic escape arc lookahead length (m) on costmap"),
 ]
 
@@ -322,8 +322,8 @@ def compute_scalar_fitness(metrics: Dict[str, Any], gene_dict: Optional[Dict[str
     base_score = (dist_m * FITNESS_PROGRESS_WEIGHT) + (mean_speed * FITNESS_SPEED_WEIGHT) + (laps * FITNESS_LAP_BONUS)
 
     if crashed:
-        return float(base_score - 50.0)
+        return float(base_score - FITNESS_COLLISION_PENALTY)
     elif stuck:
-        return float(base_score - FITNESS_STALL_PENALTY * 0.05)
+        return float(base_score - FITNESS_STALL_PENALTY)
     else:
         return float(base_score)

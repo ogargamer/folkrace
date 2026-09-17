@@ -528,7 +528,7 @@ def run_genetic_algorithm(
             if not populations[p] or not cma_loaded:
                 populations[p] = adapter.ask(inject_baseline=True)
             elif cma_loaded and not populations[p]:
-                populations[p] = adapter.ask()
+                populations[p] = adapter.ask(inject_baseline=True)
             elif cma_loaded and adapter.last_candidates_u is None and populations[p]:
                 adapter.set_current_population(populations[p])
 
@@ -677,6 +677,7 @@ def run_genetic_algorithm(
                             best_genomes[p].to_dict() if best_genomes[p] else {},
                             fitnesses,
                             t_p_elapsed,
+                            gen_crashes,
                         )
                     except Exception as cb_err:
                         print(f"[Optimizer] Callback error: {cb_err}", flush=True)

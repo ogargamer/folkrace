@@ -24,6 +24,7 @@ try:
         RECOVERY_REVERSE_STROKE_MAX_S,
         RECOVERY_TOTAL_TIMEOUT_S,
         RECOVERY_CLEARANCE_EXIT_M,
+        RECOVERY_ANY_TOF_EXIT_M,
         RECOVERY_EXIT_MIN_TIME_S,
         RECOVERY_SERVO_SLEW_RAD_S,
         RECOVERY_ARC_LOOKAHEAD_M,
@@ -42,6 +43,7 @@ except ImportError:
         RECOVERY_REVERSE_STROKE_MAX_S,
         RECOVERY_TOTAL_TIMEOUT_S,
         RECOVERY_CLEARANCE_EXIT_M,
+        RECOVERY_ANY_TOF_EXIT_M,
         RECOVERY_EXIT_MIN_TIME_S,
         RECOVERY_SERVO_SLEW_RAD_S,
         RECOVERY_ARC_LOOKAHEAD_M,
@@ -72,6 +74,7 @@ class StuckRecoveryManager:
         reverse_speed_m_s: float = RECOVERY_REVERSE_SPEED_MPS,
         steer_angle_rad: float = RECOVERY_STEER_ANGLE_RAD,
         clearance_exit_m: float = RECOVERY_CLEARANCE_EXIT_M,
+        any_tof_exit_m: float = RECOVERY_ANY_TOF_EXIT_M,
         servo_slew_rad_s: float = RECOVERY_SERVO_SLEW_RAD_S,
         brake_decel_max: float = BRAKE_DECEL_MAX,
         accel_fwd_max: float = ACCEL_FWD_MAX,
@@ -84,6 +87,7 @@ class StuckRecoveryManager:
         self.reverse_speed = float(reverse_speed_m_s)
         self.steer_angle = float(steer_angle_rad)
         self.clearance_exit_m = float(clearance_exit_m)
+        self.any_tof_exit_m = float(any_tof_exit_m)
         self.servo_slew_rad_s = float(servo_slew_rad_s)
         self.brake_decel_max = float(brake_decel_max)
         self.accel_fwd_max = float(accel_fwd_max)
@@ -238,12 +242,18 @@ class StuckRecoveryManager:
         d_esc_l, d_esc_r, d_esc_c = self.evaluate_costmap_escape_arcs(hazard_mask, costmap_obj)
         arc_clearance = (d_esc_l, d_esc_r, d_esc_c)
 
-        # 1. Direct physical sightline check: minimum of front 4.1 deg ToFs (straight ahead)
+        # 1. Direct physical sightline check & max ToF distance
         d_straight_tof = TOF_MAX_RANGE_M
+        max_any_tof = 0.0
         if cached_tofs:
-            d_l_41 = cached_tofs.get("tof_front_left_4.1deg", TOF_MAX_RANGE_M)
-            d_r_41 = cached_tofs.get("tof_front_right_4.1deg", TOF_MAX_RANGE_M)
-            d_straight_tof = min(float(d_l_41), float(d_r_41))
+            if isinstance(cached_tofs, dict):
+                d_l_41 = cached_tofs.get("tof_front_left_4.1deg", TOF_MAX_RANGE_M)
+                d_r_41 = cached_tofs.get("tof_front_right_4.1deg", TOF_MAX_RANGE_M)
+                d_straight_tof = min(float(d_l_41), float(d_r_41))
+                max_any_tof = max(cached_tofs.values()) if cached_tofs else 0.0
+            elif isinstance(cached_tofs, (list, tuple, np.ndarray)):
+                d_straight_tof = min(cached_tofs) if len(cached_tofs) > 0 else TOF_MAX_RANGE_M
+                max_any_tof = max(cached_tofs) if len(cached_tofs) > 0 else 0.0
 
         # 2. Check if front ToFs are blocked (< 15cm):
         # If front is blocked, check if either side escape curvature is free (>= arc_lookahead - 1cm).
@@ -298,6 +308,28 @@ class StuckRecoveryManager:
 
         # PHASE 1: PIVOT REVERSE ARC
         if self.state == StuckRecoveryState.PIVOT_REVERSE:
+            # Check stopping conditions for reverse backing:
+            forward_cleared = (max_forward_escape >= self.clearance_exit_m)
+            any_tof_cleared = (max_any_tof >= self.any_tof_exit_m)
+
+            has_sufficient_clearance = (
+                self.stroke_timer >= RECOVERY_EXIT_MIN_TIME_S
+                and forward_cleared
+                and any_tof_cleared
+                and not is_front_imminent_obstacle
+            )
+            is_stalled_reverse = (self.stroke_timer > 0.45 and current_v > -0.05 and not is_front_imminent_obstacle)
+            stroke_timeout = (self.stroke_timer >= RECOVERY_REVERSE_STROKE_MAX_S and not is_front_imminent_obstacle)
+
+            if has_sufficient_clearance or is_stalled_reverse or stroke_timeout:
+                self.state = StuckRecoveryState.NORMAL_DRIVE
+                self.stall_timer = 0.0
+                self.stroke_timer = 0.0
+                self.total_recovery_timer = 0.0
+                self.current_cmd_v = 0.0
+                self.current_cmd_steer = 0.0
+                return False, 0.0, 0.0
+
             target_v = -self.reverse_speed
             if current_v > 0.5:
                 # Still moving forward (> 0.5 m/s): steer away from obstacle so forward momentum does not turn into obstacle
@@ -310,63 +342,16 @@ class StuckRecoveryManager:
             self.current_cmd_v = target_v
             self.current_cmd_steer = target_steer
 
-            # Check stopping conditions for reverse backing:
-            forward_cleared = (max_forward_escape >= self.clearance_exit_m)
-
-            has_sufficient_clearance = (
-                self.stroke_timer >= RECOVERY_EXIT_MIN_TIME_S
-                and forward_cleared
-                and not is_front_imminent_obstacle
-            )
-            is_stalled_reverse = (self.stroke_timer > 0.45 and current_v > -0.05 and not is_front_imminent_obstacle)
-            stroke_timeout = (self.stroke_timer >= RECOVERY_REVERSE_STROKE_MAX_S and not is_front_imminent_obstacle)
-
-            if has_sufficient_clearance or is_stalled_reverse or stroke_timeout:
-                self.state = StuckRecoveryState.DECEL_AND_CENTER
-                self.stroke_timer = 0.0
-
             return True, self.current_cmd_v, self.current_cmd_steer
 
-        # PHASE 2: DECELERATE SPEED TO 0 WHILE CENTERING SERVO
+        # PHASE 2: DECELERATE SPEED TO 0 WHILE CENTERING SERVO (Direct Handshake fallback)
         elif self.state == StuckRecoveryState.DECEL_AND_CENTER:
-            # 1. Slew front steering back toward 0.0 radians
-            dsteer_step = self.servo_slew_rad_s * dt
-            if abs(self.current_cmd_steer) <= dsteer_step:
-                self.current_cmd_steer = 0.0
-            else:
-                self.current_cmd_steer -= math.copysign(dsteer_step, self.current_cmd_steer)
-
-            # 2. Synchronize deceleration to match remaining servo centering time
-            t_servo_remaining = abs(self.current_cmd_steer) / max(0.001, self.servo_slew_rad_s)
-            if t_servo_remaining > 0.005:
-                decel_needed = abs(self.current_cmd_v) / t_servo_remaining
-            else:
-                decel_needed = self.brake_decel_max
-
-            # Clamp decel rate so it never exceeds tire friction limit
-            decel_rate = min(self.brake_decel_max, max(0.40 * self.brake_decel_max, decel_needed))
-            dv_step = decel_rate * dt
-
-            # Ramp speed toward 0.0 m/s
-            if self.current_cmd_v < 0.0:
-                self.current_cmd_v = min(0.0, self.current_cmd_v + dv_step)
-            else:
-                self.current_cmd_v = max(0.0, self.current_cmd_v - dv_step)
-
-            # 3. Clean Handshake: When car is near standstill and wheels are centered, hand off to planner!
-            is_stopped = abs(self.current_cmd_v) <= 0.08
-            is_centered = abs(self.current_cmd_steer) <= 0.03
-            phase_timeout = (self.stroke_timer >= 0.28)
-
-            if (is_stopped and is_centered) or phase_timeout:
-                self.state = StuckRecoveryState.NORMAL_DRIVE
-                self.stall_timer = 0.0
-                self.stroke_timer = 0.0
-                self.total_recovery_timer = 0.0
-                self.current_cmd_v = 0.0
-                self.current_cmd_steer = 0.0
-                return False, 0.0, 0.0
-
-            return True, self.current_cmd_v, self.current_cmd_steer
+            self.state = StuckRecoveryState.NORMAL_DRIVE
+            self.stall_timer = 0.0
+            self.stroke_timer = 0.0
+            self.total_recovery_timer = 0.0
+            self.current_cmd_v = 0.0
+            self.current_cmd_steer = 0.0
+            return False, 0.0, 0.0
 
         return False, 0.0, 0.0

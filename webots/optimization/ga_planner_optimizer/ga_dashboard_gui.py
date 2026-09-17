@@ -93,7 +93,7 @@ PLANNER_COLORS = {
 
 class GAWorkerThread(QThread):
     """Background execution thread running the parallel GA / CMA-ES optimizer."""
-    gen_completed = pyqtSignal(int, str, dict, dict, list, float)
+    gen_completed = pyqtSignal(int, str, dict, dict, list, float, int)
     status_changed = pyqtSignal(str)
     finished_all = pyqtSignal()
 
@@ -121,8 +121,8 @@ class GAWorkerThread(QThread):
         self.controller.on_generation_done = self._on_gen_done
         self.controller.on_status_change = self._on_status_change
 
-    def _on_gen_done(self, gen: int, planner: str, metrics: dict, genome: dict, fits: list, elapsed: float):
-        self.gen_completed.emit(gen, planner, metrics, genome, fits, elapsed)
+    def _on_gen_done(self, gen: int, planner: str, metrics: dict, genome: dict, fits: list, elapsed: float, crashes: int = 0):
+        self.gen_completed.emit(gen, planner, metrics, genome, fits, elapsed, crashes)
 
     def _on_status_change(self, status: str):
         self.status_changed.emit(status)
@@ -201,7 +201,7 @@ class MatplotlibCanvas(FigureCanvas):
 
         # Titles
         self.axs[0, 0].set_title("Fitness Score Progression", color="#F8FAFC", fontsize=10, fontweight="bold")
-        self.axs[0, 1].set_title("Distance in 20.0s (m)", color="#F8FAFC", fontsize=10, fontweight="bold")
+        self.axs[0, 1].set_title("Distance in 30.0s (m)", color="#F8FAFC", fontsize=10, fontweight="bold")
         self.axs[1, 0].set_title("Average Velocity (m/s)", color="#F8FAFC", fontsize=10, fontweight="bold")
         self.axs[1, 1].set_title("Fatal Failure / Crash Count", color="#F8FAFC", fontsize=10, fontweight="bold")
 
@@ -788,7 +788,7 @@ class GADashboardGUI(QMainWindow):
         self.chk_preview.setEnabled(True)
         self.algo_combo.setEnabled(True)
 
-    def on_generation_update(self, gen: int, planner: str, metrics: dict, genome: dict, fits: list, elapsed: float):
+    def on_generation_update(self, gen: int, planner: str, metrics: dict, genome: dict, fits: list, elapsed: float, crashes: int = 0):
         # 1. Update Data Structure
         if planner not in self.data_by_planner:
             self.data_by_planner[planner] = {
@@ -804,14 +804,14 @@ class GADashboardGUI(QMainWindow):
         mean_fit = float(np.mean(fits)) if fits else 0.0
         dist_m = float(metrics.get("distance_m", 0.0))
         speed_mps = float(metrics.get("mean_speed_mps", 0.0))
-        crashes = sum(1 for f in fits if f < -2000.0)
+        crashes_count = int(crashes) if crashes > 0 else sum(1 for f in fits if f < -2000.0)
 
         self.data_by_planner[planner]["gen"].append(gen)
         self.data_by_planner[planner]["best_fit"].append(best_fit)
         self.data_by_planner[planner]["mean_fit"].append(mean_fit)
         self.data_by_planner[planner]["dist"].append(dist_m)
         self.data_by_planner[planner]["speed"].append(speed_mps)
-        self.data_by_planner[planner]["crashes"].append(crashes)
+        self.data_by_planner[planner]["crashes"].append(crashes_count)
 
         # 2. Update Table
         row_idx = self.table.rowCount()

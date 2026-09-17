@@ -31,7 +31,7 @@ LR = 0.06625                   # meters (rear axle to CoG)
 IZ = (1.0 / 12.0) * VEHICLE_MASS * (WHEELBASE**2 + ((TRACK_FRONT + TRACK_REAR) / 2.0)**2)  # kg * m^2
 
 # Actuator Limits (Virtual Bicycle Model)
-MAX_STEERING_RAD = 0.698132     # radians (+- 40.0 deg steering limit matching Webots servo limits)
+MAX_STEERING_RAD = 0.650000     # radians (+- 37.2 deg steering limit, buffered 2.8 deg inside Webots hard stops)
 MAX_SERVO_RATE_RAD_S = 10.5    # rad/s maximum steering slew rate
 MOTOR_DIR = -1.0               # Webots motor sign (-1.0 pushes vehicle forward)
 V_MAX_WHEEL = 5.500            # m/s physical maximum wheel velocity (200 rad/s * 0.0275m)
@@ -240,14 +240,15 @@ def compute_steering_aggressiveness(d_straight: float, steer_error_rad: float = 
 # ==============================================================================
 # 7. NON-BLOCKING STUCK & REVERSE RECOVERY MANAGER
 # ==============================================================================
-RECOVERY_STEER_ANGLE_RAD = 0.698    # radians (~40.0 deg) steering lock during reverse arc
+RECOVERY_STEER_ANGLE_RAD = 0.650    # radians (~37.2 deg) steering lock during reverse arc (buffered from stops)
 # Friction circle velocity limit for reverse pivot arc: v = sqrt(mu * g * (L / tan(delta)))
 RECOVERY_REVERSE_SPEED_MPS = float(math.sqrt(0.817 * 9.81 * (WHEELBASE / max(0.01, math.tan(RECOVERY_STEER_ANGLE_RAD))))) # ~1.23 m/s
 RECOVERY_STALL_CONFIRM_S = 0.15      # seconds of low forward speed before engaging recovery
 RECOVERY_FRONT_BLOCKED_M = 0.25      # meters front clearance threshold to detect forward stall
 RECOVERY_REVERSE_STROKE_MAX_S = 0.6 # seconds maximum reverse stroke failsafe
 RECOVERY_TOTAL_TIMEOUT_S = 0.8      # seconds maximum total recovery duration before forced exit
-RECOVERY_CLEARANCE_EXIT_M = 0.28     # meters minimum front clearance to conclude reverse and center
+RECOVERY_CLEARANCE_EXIT_M = 0.25     # meters (25cm) minimum forward clearance to conclude reverse
+RECOVERY_ANY_TOF_EXIT_M = 0.40       # meters (40cm) minimum clearance on at least one ToF sensor to conclude reverse
 RECOVERY_EXIT_MIN_TIME_S = 0.0       # seconds minimum recovery stroke time before clearance check
 RECOVERY_SERVO_SLEW_RAD_S = SERVO_MAX_SPEED_RAD_S  # rad/s PTK 9497 8.4V centering slew rate (15.4 rad/s)
 RECOVERY_ARC_LOOKAHEAD_M = 0.13      # meters length of kinematic escape arcs projected on costmap

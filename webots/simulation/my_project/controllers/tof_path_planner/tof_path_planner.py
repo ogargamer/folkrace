@@ -345,6 +345,18 @@ def run_champion_preview(robot: any, vehicle: FolkraceVehicle) -> None:
                         print(f"\n>>> [KEYBOARD] PAUSED: {sim_paused}", flush=True)
                     elif k in (ord('R'), ord('r')):
                         vehicle.reset(start_pos=start_pos, start_rot=start_rot)
+                        obs_manager.reset()
+                        if hasattr(robot, "simulationResetPhysics"):
+                            robot.simulationResetPhysics()
+                        for m in vehicle.motors.values():
+                            if m:
+                                m.setPosition(float("inf"))
+                                m.setVelocity(0.0)
+                        for s in vehicle.servos.values():
+                            if s:
+                                s.setPosition(0.0)
+                        for _ in range(3):
+                            robot.step(TIME_STEP_MS)
                         track_tracker.reset(start_pos[:2])
                         print("\n>>> [KEYBOARD] ROBOT POSE RESET TO TRACK START", flush=True)
                     k = keyboard.getKey()
@@ -501,12 +513,21 @@ def run_ga_worker(robot: any, vehicle: FolkraceVehicle) -> None:
             robot.simulationResetPhysics()
         vehicle.configure(gene_dict)
 
+        # Re-assert velocity mode and standstill after simulationResetPhysics
+        for m in vehicle.motors.values():
+            if m:
+                m.setPosition(float("inf"))
+                m.setVelocity(0.0)
+        for s in vehicle.servos.values():
+            if s:
+                s.setPosition(0.0)
+
+        # Step 3 frames to flush physics and settle contact points
+        for _ in range(3):
+            robot.step(TIME_STEP_MS)
+
         track_tracker = WebotsTrackProgressTracker(traj_csv)
         track_tracker.reset(start_pos[:2])
-
-        # Step 2 frames to flush physics
-        for _ in range(2):
-            robot.step(TIME_STEP_MS)
 
         sim_time = 0.0
         crashed = False

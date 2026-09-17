@@ -63,6 +63,7 @@ from planner_config import (
     RECOVERY_STEER_ANGLE_RAD,
     RECOVERY_FRONT_BLOCKED_M,
     RECOVERY_CLEARANCE_EXIT_M,
+    RECOVERY_ANY_TOF_EXIT_M,
     RECOVERY_ARC_LOOKAHEAD_M,
     ACCEL_FWD_MAX,
     BRAKE_DECEL_MAX,
@@ -138,6 +139,23 @@ class FolkraceVehicle:
             if s:
                 s.setPosition(0.0)
 
+        # Discover wheel endpoint Solid nodes for synchronized physics resets
+        self.wheel_nodes = []
+        if self.is_supervisor and self.robot_node:
+            try:
+                children = self.robot_node.getField("children")
+                if children:
+                    for i in range(children.getCount()):
+                        child = children.getMFNode(i)
+                        if child and child.getTypeName() in ("HingeJoint", "Hinge2Joint"):
+                            ep = child.getField("endPoint")
+                            if ep:
+                                ep_node = ep.getSFNode()
+                                if ep_node:
+                                    self.wheel_nodes.append(ep_node)
+            except Exception:
+                pass
+
         # 2. Discover Sensors
         self.tofs = {}
         self.tof_devices = []
@@ -210,6 +228,7 @@ class FolkraceVehicle:
             reverse_speed_m_s=RECOVERY_REVERSE_SPEED_MPS,
             steer_angle_rad=RECOVERY_STEER_ANGLE_RAD,
             clearance_exit_m=RECOVERY_CLEARANCE_EXIT_M,
+            any_tof_exit_m=RECOVERY_ANY_TOF_EXIT_M,
             servo_slew_rad_s=SERVO_MAX_SPEED_RAD_S,
             brake_decel_max=BRAKE_DECEL_MAX,
             accel_fwd_max=ACCEL_FWD_MAX,
@@ -324,7 +343,8 @@ class FolkraceVehicle:
         self.recovery_manager = StuckRecoveryManager(
             reverse_speed_m_s=rec_speed,
             steer_angle_rad=rec_steer,
-            clearance_exit_m=float(genes.get("recovery_clearance_exit_m", 0.28)),
+            clearance_exit_m=float(genes.get("recovery_clearance_exit_m", RECOVERY_CLEARANCE_EXIT_M)),
+            any_tof_exit_m=float(genes.get("recovery_any_tof_exit_m", RECOVERY_ANY_TOF_EXIT_M)),
             servo_slew_rad_s=SERVO_MAX_SPEED_RAD_S,
             brake_decel_max=BRAKE_DECEL_MAX,
             accel_fwd_max=ACCEL_FWD_MAX,
@@ -340,10 +360,23 @@ class FolkraceVehicle:
                 trans_field.setSFVec3f([float(start_pos[0]), float(start_pos[1]), float(start_pos[2])])
             if start_rot and rot_field:
                 rot_field.setSFRotation([float(start_rot[0]), float(start_rot[1]), float(start_rot[2]), float(start_rot[3])])
+            try:
+                self.robot_node.setVelocity([0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+            except Exception:
+                pass
             self.robot_node.resetPhysics()
+
+            # Synchronously zero velocities and reset physics on all wheel endpoint solids
+            for wn in self.wheel_nodes:
+                try:
+                    wn.setVelocity([0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+                    wn.resetPhysics()
+                except Exception:
+                    pass
 
         for m in self.motors.values():
             if m:
+                m.setPosition(float("inf"))
                 m.setVelocity(0.0)
         for s in self.servos.values():
             if s:

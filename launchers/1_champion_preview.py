@@ -29,35 +29,120 @@ ACTIVE_CONFIG_PATH = os.path.join(GA_OPTIMIZER_DIR, "active_preview_config.json"
 PLANNERS_DIR = os.path.join(MY_PROJECT_DIR, "controllers", "tof_path_planner")
 WEBOTS_BIN = r"C:\Program Files\Webots\msys64\mingw64\bin\webots.exe"
 
-CHAMPION_CONFIG = {
-    "id": "sl_mpc",
-    "title": "OPTION 2: Curvilinear SL-MPC Champion (CMA-ES Gen 195, Fitness 7170.03)",
-    "file": os.path.join(GA_OPTIMIZER_DIR, "best_genome_option_2_sl_mpc.json"),
-    "speed": "2.61 m/s",
-    "dist": "48.87 m",
-    "laps": "3 laps in 20.0s",
-    "status": "Convex quadratic Curvilinear SL-MPC over Frenet lattice with embedded OSQP solver.",
-}
+def find_best_genome() -> dict:
+    """
+    Scans for all available GA/CMA-ES champion and checkpoint files, parses them,
+    and returns the genome configuration with the highest fitness.
+    """
+    candidates = []
+
+    # Potential champion/checkpoint files in the optimizer directory
+    candidate_patterns = [
+        os.path.join(GA_OPTIMIZER_DIR, "best_planner_genome.json"),
+        os.path.join(GA_OPTIMIZER_DIR, "ga_checkpoint.json"),
+    ]
+
+    # Also include any planner-specific champion or checkpoint files
+    if os.path.isdir(GA_OPTIMIZER_DIR):
+        for fname in os.listdir(GA_OPTIMIZER_DIR):
+            if (fname.startswith("best_genome") or fname.startswith("ga_checkpoint")) and fname.endswith(".json"):
+                full_p = os.path.join(GA_OPTIMIZER_DIR, fname)
+                if full_p not in candidate_patterns:
+                    candidate_patterns.append(full_p)
+
+    for filepath in candidate_patterns:
+        if not os.path.isfile(filepath):
+            continue
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            genes = data.get("genes") or data.get("best_genome")
+            if not genes:
+                continue
+
+            # Resolve fitness score
+            fitness = None
+            if "fitness" in data and isinstance(data["fitness"], (int, float)):
+                fitness = float(data["fitness"])
+            elif "best_fitness" in data and isinstance(data["best_fitness"], (int, float)):
+                fitness = float(data["best_fitness"])
+            elif isinstance(data.get("metrics"), dict) and "fitness" in data["metrics"]:
+                fitness = float(data["metrics"]["fitness"])
+            elif isinstance(data.get("best_metrics"), dict) and "fitness" in data["best_metrics"]:
+                fitness = float(data["best_metrics"]["fitness"])
+
+            if fitness is None:
+                continue
+
+            metrics = data.get("metrics") or data.get("best_metrics") or {}
+            planner = data.get("planner", "OPTION_2_SL_MPC")
+            gen = data.get("generation", metrics.get("generation", "N/A"))
+            algo = data.get("algorithm", "CMA-ES")
+
+            title = data.get("title")
+            if not title:
+                title = f"{planner} Champion ({algo} Gen {gen}, Fitness {fitness:.2f})"
+
+            candidates.append({
+                "file": filepath,
+                "fitness": fitness,
+                "genes": genes,
+                "metrics": metrics,
+                "planner": planner,
+                "generation": gen,
+                "algorithm": algo,
+                "title": title,
+                "raw_data": data,
+            })
+        except Exception as e:
+            print(f"[Warning] Failed parsing {filepath}: {e}")
+
+    if not candidates:
+        return {}
+
+    # Sort descending by fitness
+    candidates.sort(key=lambda c: c["fitness"], reverse=True)
+    return candidates[0]
+
+
+ACTIVE_CHAMPION_INFO = {}
 
 
 def activate_champion_config() -> bool:
-    src_file = CHAMPION_CONFIG["file"]
-    if not os.path.exists(src_file):
-        print(f"Error: Genome file does not exist: {src_file}")
+    global ACTIVE_CHAMPION_INFO
+    best_candidate = find_best_genome()
+
+    if not best_candidate:
+        print("[Error] No valid GA genome or checkpoint files found in optimization directory.")
         return False
 
-    try:
-        with open(src_file, "r", encoding="utf-8") as f:
-            data = json.load(f)
+    ACTIVE_CHAMPION_INFO = best_candidate
+    src_file = best_candidate["file"]
+    raw_data = best_candidate["raw_data"]
 
-        data["config_id"] = CHAMPION_CONFIG["id"]
-        data["title"] = CHAMPION_CONFIG["title"]
+    try:
+        data = dict(raw_data)
+        data["genes"] = best_candidate["genes"]
+        data["title"] = best_candidate["title"]
+        data["fitness"] = best_candidate["fitness"]
+        data["metrics"] = best_candidate["metrics"]
+        data["source_file"] = os.path.basename(src_file)
 
         os.makedirs(os.path.dirname(ACTIVE_CONFIG_PATH), exist_ok=True)
         with open(ACTIVE_CONFIG_PATH, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
 
-        print(f"[Ready] Activated champion genome: {CHAMPION_CONFIG['title']}")
+        m = best_candidate["metrics"]
+        dist = m.get("distance_m", "N/A")
+        speed = m.get("mean_speed_mps", "N/A")
+        laps = m.get("laps_completed", "N/A")
+
+        print(f"[Ready] Activated best GA champion genome:")
+        print(f"        Source:   {os.path.basename(src_file)}")
+        print(f"        Title:    {best_candidate['title']}")
+        print(f"        Fitness:  {best_candidate['fitness']:.2f}")
+        print(f"        Stats:    Dist: {dist}m | Speed: {speed}m/s | Laps: {laps}")
         print(f"[Ready] Written to: {ACTIVE_CONFIG_PATH}")
         return True
     except Exception as e:
@@ -124,10 +209,11 @@ def launch_webots(launch_gui: bool = True):
         WORLD_PATH,
     ]
 
+    champ_title = ACTIVE_CHAMPION_INFO.get("title", "Best GA Champion")
     print("=" * 80)
     print("  LAUNCHING REAL-TIME 3D WEBOTS CHAMPION PREVIEW + LIVE TELEMETRY GUI")
     print(f"  World:    {WORLD_PATH}")
-    print(f"  Champion: {CHAMPION_CONFIG['title']}")
+    print(f"  Champion: {champ_title}")
     print("=" * 80)
 
     print(f"[{'2/2' if gui_proc else '1/1'}] Launching Webots simulation...", flush=True)
