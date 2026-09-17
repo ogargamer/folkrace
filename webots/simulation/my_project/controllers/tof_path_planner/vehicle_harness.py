@@ -320,6 +320,10 @@ class FolkraceVehicle:
             gap_progress_margin_m=float(genes.get("gap_progress_margin_m", 0.15)),
             alt_min_separation_m=float(genes.get("alt_min_separation_m", 0.25)),
             alt_aperture_bias=float(genes.get("alt_aperture_bias", 1.80)),
+            scout_obs_width_m=float(genes.get("scout_obs_width_m", 0.22)),
+            scout_block_dist_m=float(genes.get("scout_block_dist_m", 1.05)),
+            scout_straight_pen_k=float(genes.get("scout_straight_pen_k", 2.50)),
+            scout_straight_exp_k=float(genes.get("scout_straight_exp_k", 1.50)),
             ray_origin_offset_m=float(genes.get("ray_origin_offset_m", 0.070)),
         )
 

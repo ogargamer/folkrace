@@ -28,8 +28,8 @@ POPULATION_SIZE: int = 42
 # Maximum number of generations to run
 NUM_GENERATIONS: int = 9999
 
-# Evaluation duration per candidate in simulation seconds (strictly 20s)
-EVALUATION_DURATION_S: float = 30.0
+# Evaluation duration per candidate in simulation seconds (strictly 40s)
+EVALUATION_DURATION_S: float = 40.0
 
 # Number of evaluation runs per candidate to average (1 for deterministic, >1 if noisy)
 RUNS_PER_EVALUATION: int = 2
@@ -38,7 +38,7 @@ RUNS_PER_EVALUATION: int = 2
 ALGORITHM: str = "CMA_ES"
 
 # Seed initial search distribution/population from best_planner_genome.json instead of defaults
-SEED_FROM_BEST_GENOME_DEFAULT: bool = False
+SEED_FROM_BEST_GENOME_DEFAULT: bool = True
 BEST_GENOME_PATH: str = os.path.join(os.path.dirname(os.path.abspath(__file__)), "best_planner_genome.json")
 
 # CMA-ES Hyperparameters
@@ -58,7 +58,7 @@ ACTIVE_PLANNER: str = "OPTION_2_SL_MPC"
 # Headless Webots Simulation Settings
 WEBOTS_BINARY: str = r"C:\Program Files\Webots\msys64\mingw64\bin\webots.exe"
 BASE_WORKER_PORT: int = 10200
-TIMEOUT_PER_TRIAL_WALL_S: float = 150.0
+TIMEOUT_PER_TRIAL_WALL_S: float = 200.0
 
 # Moving Obstacle Parameters (moves AGAINST robot heading at 0.50 m/s along racing line)
 ENABLE_MOVING_OBSTACLES: bool = True
@@ -101,45 +101,49 @@ OPTION_2_SL_MPC_GENE_SPECS: List[Tuple[str, float, float, type, float, str]] = [
     ("horizon_N",           30.0,   30.0,    int,   30.0,    "MPC prediction horizon steps (fixed at 30 in native QP tables)"),
     ("dt",                   0.016667, 0.016667, float, 0.016667, "MPC prediction discretization timestep (s)"),
     # Tire Friction & Costmap Inflation
-    ("mu_friction",          0.80,   0.90,   float,  0.85,   "Tire friction coefficient governing steer vs brake loads"),
+    ("mu_friction",          0.80,   0.88,   float,  0.88,  "Tire friction coefficient governing steer vs brake loads"),
     ("r_inflation_m",        0.075,  0.075,  float,  0.075,  "ToF obstacle expansion / inflation radius (0.075m - 0.120m)"),
     # MPC Objective Weights
-    ("q_progress",           2.00,  25.00,   float, 15.00,   "Longitudinal progress reward weight"),
-    ("q_cte",                1.00,  45.00,   float, 18.00,   "Cross-track error penalty weight"),
-    ("q_heading",            2.00,  20.00,   float,  8.00,   "Heading error penalty weight"),
-    ("r_steer",              1.00,  15.00,   float,  5.00,   "Steering angle effort penalty weight"),
-    ("r_accel",              0.50,   8.00,   float,  2.00,   "Acceleration/braking effort penalty weight"),
-    ("r_steer_rate",         2.00,  30.00,   float, 10.00,   "Steering rate slew penalty weight"),
-    ("v_corner_factor",      0.60,   0.98,   float,  0.95,   "Friction circle speed scaling for curvature"),
-    ("pp_blend_gain",        0.00,   0.65,   float,  0.35,   "Pure pursuit lookahead blend ratio with MPC"),
-    ("lookahead_blend_m",    0.25,   0.75,   float,  0.45,   "Pure pursuit blend lookahead distance (m)"),
+    ("q_progress",           2.00,  30.00,   float, 16.372,  "Longitudinal progress reward weight"),
+    ("q_cte",                1.00,  60.00,   float, 39.540,  "Cross-track error penalty weight"),
+    ("q_heading",            2.00,  25.00,   float, 12.685,  "Heading error penalty weight"),
+    ("r_steer",              1.00,  15.00,   float,  6.174,  "Steering angle effort penalty weight"),
+    ("r_accel",              0.10,   6.00,   float,  0.641,  "Acceleration/braking effort penalty weight"),
+    ("r_steer_rate",         2.00,  35.00,   float, 17.749,  "Steering rate slew penalty weight"),
+    ("v_corner_factor",      0.60,   0.98,   float,  0.941,  "Friction circle speed scaling for curvature"),
+    ("pp_blend_gain",        0.00,   0.80,   float,  0.647,  "Pure pursuit lookahead blend ratio with MPC"),
+    ("lookahead_blend_m",    0.20,   0.80,   float,  0.462,  "Pure pursuit blend lookahead distance (m)"),
     # Gap Scout Parameters
-    ("target_lookahead_m",   1.70,   1.70,   float,  1.70,   "Scout lookahead target projection distance (m)"),
-    ("w_gap_distance",       1.00,   8.00,   float,  3.00,   "Gap scout distance reward weight"),
-    ("w_gap_width",          0.50,   5.00,   float,  1.50,   "Gap scout aperture width reward weight"),
-    ("w_gap_steer",          0.20,   3.00,   float,  1.00,   "Gap scout steering alignment penalty weight"),
-    ("w_gap_straight",       0.10,   2.00,   float,  0.50,   "Gap scout straight heading alignment reward weight"),
-    ("w_side_clearance",     0.00,   6.00,   float,  2.80,   "Gap scout side asymmetry clearance weight"),
-    ("gap_dist_exp_k",       0.20,   1.50,   float,  0.60,   "Gap scout exponential distance reward factor"),
-    ("gap_progress_margin_m",0.05,   0.35,   float,  0.15,   "Gap scout corridor margin over 1.0m track width (m)"),
-    ("gap_latch_hysteresis", 0.20,   3.50,   float,  1.25,   "Gap scout corridor latch score margin"),
-    ("gap_latch_dist_m",     0.12,   0.50,   float,  0.28,   "Gap scout corridor latch spatial association radius (m)"),
+    ("target_lookahead_m",   1.72,   1.72,   float,  1.72,   "Scout lookahead target projection distance (m)"),
+    ("w_gap_distance",       1.00,  10.00,   float,  5.800,  "Gap scout distance reward weight"),
+    ("w_gap_width",          0.20,   4.00,   float,  0.599,  "Gap scout aperture width reward weight"),
+    ("w_gap_steer",          0.20,   4.00,   float,  2.127,  "Gap scout steering alignment penalty weight"),
+    ("w_gap_straight",       0.05,   2.00,   float,  0.145,  "Gap scout straight heading alignment reward weight"),
+    ("w_side_clearance",     0.00,   6.00,   float,  3.840,  "Gap scout side asymmetry clearance weight"),
+    ("gap_dist_exp_k",       0.20,   1.50,   float,  0.813,  "Gap scout exponential distance reward factor"),
+    ("gap_progress_margin_m",0.05,   0.35,   float,  0.155,  "Gap scout corridor margin over 1.0m track width (m)"),
+    ("scout_obs_width_m",    0.10,   0.40,   float,  0.220,  "Effective obstacle width (m) for angular shadow projection"),
+    ("scout_block_dist_m",   0.60,   1.40,   float,  1.050,  "Center forward clearance distance (m) where obstacle penalty begins"),
+    ("scout_straight_pen_k", 0.50,   5.00,   float,  2.500,  "Base straight obstacle penalty scaling factor"),
+    ("scout_straight_exp_k", 0.50,   3.00,   float,  1.500,  "Exponential curvature factor peaking at dead center (0 deg)"),
+    ("gap_latch_hysteresis", 0.20,   3.50,   float,  1.769,  "Gap scout corridor latch score margin"),
+    ("gap_latch_dist_m",     0.12,   0.60,   float,  0.368,  "Gap scout corridor latch spatial association radius (m)"),
     # Dual-Path Line Choice & Challenger Selection (Primary vs Alternative)
-    ("alt_min_separation_m", 0.10,   0.50,   float,  0.15,   "Min lateral separation (m) between primary and challenger lines"),
-    ("alt_aperture_bias",    0.50,   4.00,   float,  1.80,   "Challenger aperture width bias multiplier"),
-    ("alt_switch_hysteresis",2.00,  80.00,   float,  8.00,   "MPC cost reduction threshold needed to switch lines"),
+    ("alt_min_separation_m", 0.05,   0.40,   float,  0.106,  "Min lateral separation (m) between primary and challenger lines"),
+    ("alt_aperture_bias",    0.50,   4.00,   float,  1.785,  "Challenger aperture width bias multiplier"),
+    ("alt_switch_hysteresis",1.00,  50.00,   float,  2.367,  "MPC cost reduction threshold needed to switch lines"),
     # Fast Straight-Line Lock
     ("straight_lock_dist",   1.70,   1.70,   float,  1.70,   "Forward clearance (m) to lock straight line acceleration"),
     ("straight_lock_speed",  5.50,   5.50,   float,  5.50,   "Speed ceiling (m/s) when straight-line locked"),
     # Straight Quieting & Anti-Oscillation Adaptive Steering Response
     ("aggr_dist_far_m",      1.72,   1.72,   float,  1.72,   "Forward clearance distance (m) to engage max straight quieting"),
-    ("aggr_dist_close_m",    1.00,   1.30,   float,  1.10,   "Emergency distance threshold (m) below which 100% steering authority is engaged"),
-    ("aggr_min_scale",       0.20,   1.0,   float,  1.00,   "Minimal steering authority scale on open straights"),
+    ("aggr_dist_close_m",    0.80,   1.30,   float,  1.064,  "Emergency distance threshold (m) below which 100% steering authority is engaged"),
+    ("aggr_min_scale",       0.70,   1.00,   float,  0.918,  "Minimal steering authority scale on open straights"),
     ("steer_deadband_rad",   0.000,  0.005,  float,  0.001,  "Steering error deadband (rad) for sensor noise quieting"),
     # Stuck & Emergency Recovery
     ("recovery_clearance_exit_m", 0.25, 0.25, float, 0.25,   "Front clearance threshold (m) to conclude reverse and center steering"),
     ("recovery_steer_angle_rad",0.650, 0.650, float,  0.650,  "Recovery pivot steering angle (rad)"),
-    ("recovery_arc_lookahead_m",0.10, 0.17,  float,  0.13,   "Kinematic escape arc lookahead length (m) on costmap"),
+    ("recovery_arc_lookahead_m",0.10, 0.15,  float,  0.150,  "Kinematic escape arc lookahead length (m) on costmap"),
 ]
 
 

@@ -147,6 +147,10 @@ class ToFGapScout:
         gap_progress_margin_m: float = GAP_PROGRESS_MARGIN_M,
         alt_min_separation_m: float = ALT_MIN_SEPARATION_M,
         alt_aperture_bias: float = ALT_APERTURE_BIAS,
+        scout_obs_width_m: float = 0.22,
+        scout_block_dist_m: float = 1.05,
+        scout_straight_pen_k: float = 2.50,
+        scout_straight_exp_k: float = 1.50,
         ray_origin_offset_m: float = 0.070,
         **kwargs,
     ):
@@ -159,6 +163,10 @@ class ToFGapScout:
         self.gap_progress_margin_m = float(gap_progress_margin_m)
         self.alt_min_separation_m = float(alt_min_separation_m)
         self.alt_aperture_bias = float(alt_aperture_bias)
+        self.scout_obs_width_m = float(scout_obs_width_m)
+        self.scout_block_dist_m = float(scout_block_dist_m)
+        self.scout_straight_pen_k = float(scout_straight_pen_k)
+        self.scout_straight_exp_k = float(scout_straight_exp_k)
         self.ray_origin_offset_m = float(ray_origin_offset_m)
         self.last_xg: float = 0.0
         self.last_yg: float = 1.20
@@ -234,6 +242,10 @@ class ToFGapScout:
                 gap_progress_margin_m=self.gap_progress_margin_m,
                 alt_min_separation_m=self.alt_min_separation_m,
                 alt_aperture_bias=self.alt_aperture_bias,
+                scout_obs_width_m=self.scout_obs_width_m,
+                scout_block_dist_m=self.scout_block_dist_m,
+                scout_straight_pen_k=self.scout_straight_pen_k,
+                scout_straight_exp_k=self.scout_straight_exp_k,
                 top_k=top_k,
                 hazard_mask=hazard_mask,
             )
@@ -388,14 +400,12 @@ class ToFGapScout:
             denom = max(0.25, 0.5 * (l_mean + r_mean))
             side_diff = (l_mean - r_mean) / denom
 
-        # When forward space is closing (d_center < 1.10m), suppress the straight preference!
-        # If d_center is very short (< 0.95m), heavily penalize straight targets to force committing to a turn
-        if d_center < 1.10:
-            w_straight = 0.0
-            straight_block_penalty = max(0.0, (0.95 - d_center) / 0.35) * 3.0
-        else:
-            w_straight = self.w_align_straight
-            straight_block_penalty = 0.0
+        w_straight = self.w_align_straight
+        straight_block_penalty = 0.0
+        theta_shadow = 0.0
+        if d_center < self.scout_block_dist_m:
+            theta_shadow = math.atan2(self.scout_obs_width_m * 0.5, max(d_center, 0.05))
+            straight_block_penalty = self.scout_straight_pen_k * max(0.0, (self.scout_block_dist_m - d_center) / self.scout_block_dist_m)
 
         # Relax steer alignment penalty when facing an obstacle or turn
         w_steer = self.w_align_steer if (abs(steer_current) > 0.08 and d_center >= 1.0) else 0.20
@@ -441,8 +451,11 @@ class ToFGapScout:
             # If side_diff > 0 (left has longer reading), left targets receive a strong bonus!
             side_bonus = self.w_side_clearance * side_diff * (-math.sin(c["rel_angle"]))
 
-            # Penalize center/straight targets if dead ahead is blocked by wall/obstacle
-            center_penalty = straight_block_penalty if abs(c["rel_angle"]) < math.radians(20) else 0.0
+            # Penalize center/straight targets within dynamic angular shadow cone
+            center_penalty = 0.0
+            if straight_block_penalty > 0.0 and theta_shadow > 0.001 and abs(c["rel_angle"]) < theta_shadow:
+                angle_ratio = 1.0 - (abs(c["rel_angle"]) / theta_shadow)
+                center_penalty = straight_block_penalty * math.exp(self.scout_straight_exp_k * angle_ratio)
 
             score = (
                 self.w_gap_distance * dist_factor
@@ -493,8 +506,10 @@ class ToFGapScout:
                         width_norm = ap / 1.00
                         steer_diff = abs(c["steer_equiv"] - steer_current)
                         straight_diff = abs(c["rel_angle"])
-                        side_bonus_alt = (self.w_side_clearance * 0.45) * side_diff * (-math.sin(c["rel_angle"]))
-                        center_penalty = straight_block_penalty if abs(c["rel_angle"]) < math.radians(20) else 0.0
+                        center_penalty = 0.0
+                        if straight_block_penalty > 0.0 and theta_shadow > 0.001 and abs(c["rel_angle"]) < theta_shadow:
+                            angle_ratio = 1.0 - (abs(c["rel_angle"]) / theta_shadow)
+                            center_penalty = straight_block_penalty * math.exp(self.scout_straight_exp_k * angle_ratio)
 
                         score_alt = (
                             self.w_gap_distance * dist_factor

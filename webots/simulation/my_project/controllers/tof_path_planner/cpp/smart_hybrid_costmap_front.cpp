@@ -84,17 +84,10 @@ public:
     // Static cone cells for each of the 16 sensors (precomputed once, sorted by r)
     std::vector<ConeCell> sensor_cones[16];
 
-    // 64 front cross-pointing sensor pairs (FL 0..7 with FR 8..15)
-    struct CrossPair {
-        int idx1;
-        int idx2;
-    };
-    std::vector<CrossPair> cross_pairs;
-
     SmartHybridCostmapFront(
         float x_min_ = -1.25f, float x_max_ = 1.25f,
         float y_min_ = 0.0f, float y_max_ = 2.0f,
-        float res_ = 0.015f, float r_inflation_m_ = 0.088f
+        float res_ = 0.015f, float r_inflation_m_ = 0.075f
     ) : x_min(x_min_), x_max(x_max_), y_min(y_min_), y_max(y_max_),
         res(res_), r_inflation_m(r_inflation_m_) {
 
@@ -121,28 +114,22 @@ public:
             }
         }
 
-        // Set up 64 front cross-pairs (FL_0..7 vs FR_8..15)
-        cross_pairs.clear();
-        for (int fl = 0; fl < 8; ++fl) {
-            for (int fr = 8; fr < 16; ++fr) {
-                cross_pairs.push_back({fl, fr});
-            }
-        }
-
         // Precompute static cone cells for each sensor (done ONCE at initialization)
         _precompute_sensor_cones();
     }
 
     void _precompute_sensor_cones() {
-        constexpr float L_OCC_CENTER = 5.0f;
-        constexpr float L_OCC_EDGE = 1.5f;
+        constexpr float L_OCC_CENTER = 5.5f;
+        // Winning sweet spot flank overlap weight: 2.9 (locks adjacent beams without bloat)
+        constexpr float L_OCC_EDGE = 2.9f;
 
         for (int s_idx = 0; s_idx < 16; ++s_idx) {
             const auto& s = SENSOR_RIG[s_idx];
             sensor_cones[s_idx].clear();
 
-            float half_fov = s.fov_rad * 0.5f + 0.02f;
-            float sigma_theta = half_fov / 2.145966f;
+            float half_fov = s.fov_rad * 0.5f;  // exact physical beam edge
+            // Optimal Gaussian standard deviation factor: 2.10
+            float sigma_theta = half_fov / 2.10f;
             float two_sigma_theta_sq = 2.0f * sigma_theta * sigma_theta;
 
             for (int r = 0; r < height; ++r) {
@@ -178,58 +165,6 @@ public:
         }
     }
 
-    // Closed-form circle-circle intersection filtered by dual sensor FOV
-    bool intersect_circles(
-        const ToFSensor& s1, float r1,
-        const ToFSensor& s2, float r2,
-        float& out_x, float& out_y
-    ) const {
-        float dx = s2.x0 - s1.x0;
-        float dy = s2.y0 - s1.y0;
-        float d = std::hypot(dx, dy);
-
-        if (d > (r1 + r2) || d < std::abs(r1 - r2) || d < 1e-5f) {
-            return false;
-        }
-
-        float a = (r1 * r1 - r2 * r2 + d * d) / (2.0f * d);
-        float h_sq = r1 * r1 - a * a;
-        if (h_sq < 0.0f) return false;
-        float h = std::sqrt(h_sq);
-
-        float xm = s1.x0 + a * (dx / d);
-        float ym = s1.y0 + a * (dy / d);
-
-        float rx = -dy * (h / d);
-        float ry = dx * (h / d);
-
-        float half_fov1 = s1.fov_rad * 0.5f + 0.035f;
-        float half_fov2 = s2.fov_rad * 0.5f + 0.035f;
-
-        float candidates[2][2] = {
-            {xm + rx, ym + ry},
-            {xm - rx, ym - ry}
-        };
-
-        for (int i = 0; i < 2; ++i) {
-            float px = candidates[i][0];
-            float py = candidates[i][1];
-
-            float th1 = std::atan2(py - s1.y0, px - s1.x0);
-            float dth1 = std::abs(wrap_angle(th1 - s1.heading));
-            if (dth1 > half_fov1) continue;
-
-            float th2 = std::atan2(py - s2.y0, px - s2.x0);
-            float dth2 = std::abs(wrap_angle(th2 - s2.heading));
-            if (dth2 <= half_fov2) {
-                out_x = px;
-                out_y = py;
-                return true;
-            }
-        }
-        return false;
-    }
-
     // MAIN PROCESS FUNCTION: EXACT CONTINUOUS MATH, ZERO RUNTIME ATAN2
     void process_frame(const float* ranges_16) {
         // Step 1: Flat buffer reset (< 1 microsecond)
@@ -256,9 +191,10 @@ public:
             float z = std::min(SENSOR_RIG[s_idx].max_range, std::max(SENSOR_RIG[s_idx].min_range, raw_z));
             bool is_hit = (z < SENSOR_RIG[s_idx].max_range - 0.01f);
 
-            float sigma_r = std::max(0.04f * z, res);
-            float r_hit_min = z - 0.5f * sigma_r;
-            float r_hit_max = z + 1.2f * sigma_r;
+            // Halved depth expansion into unobserved space behind detected obstacle (~7.5 cm)
+            float sigma_r = std::max(0.030f * z, res);
+            float r_hit_min = z - 0.12f * sigma_r;
+            float r_hit_max = z + std::max(0.075f, 1.25f * sigma_r);
 
             const auto& cells = sensor_cones[s_idx];
             size_t n = cells.size();
@@ -271,7 +207,7 @@ public:
                     } else if (r <= r_hit_max) {
                         log_odds[cells[i].cell_idx] += cells[i].hit_log_odds;
                     } else {
-                        // Beyond obstacle hit + margin: stop scanning shadow
+                        // Beyond obstacle hit depth: stop scanning shadow
                         break;
                     }
                 }
@@ -283,35 +219,7 @@ public:
             }
         }
 
-        // Step 3: Exact Geometric Cross-Beam Arc Triangulation (64 pairs)
-        for (const auto& cp : cross_pairs) {
-            float r1 = ranges_16[cp.idx1];
-            float r2 = ranges_16[cp.idx2];
-
-            if (r1 < SENSOR_RIG[cp.idx1].max_range - 0.05f &&
-                r2 < SENSOR_RIG[cp.idx2].max_range - 0.05f) {
-
-                float ix, iy;
-                if (intersect_circles(SENSOR_RIG[cp.idx1], r1, SENSOR_RIG[cp.idx2], r2, ix, iy)) {
-                    int c_col = static_cast<int>(std::round((ix - x_min) / res));
-                    int c_row = static_cast<int>(std::round((iy - y_min) / res));
-
-                    int stamp_rad = std::max(1, static_cast<int>(std::round(0.03f / res)));
-                    int r0 = std::max(0, c_row - stamp_rad);
-                    int r1_bound = std::min(height - 1, c_row + stamp_rad);
-                    int c0 = std::max(0, c_col - stamp_rad);
-                    int c1_bound = std::min(width - 1, c_col + stamp_rad);
-
-                    for (int rr = r0; rr <= r1_bound; ++rr) {
-                        for (int cc = c0; cc <= c1_bound; ++cc) {
-                            log_odds[rr * width + cc] = std::max(log_odds[rr * width + cc], 6.0f);
-                        }
-                    }
-                }
-            }
-        }
-
-        // Step 4: Sigmoid Probability Map, Confirmed Obstacle Threshold & Unknown Space
+        // Step 3: Sigmoid Probability Map, Confirmed Obstacle Threshold & Unknown Space
         for (int i = 0; i < total_cells; ++i) {
             float lo = std::max(-10.0f, std::min(10.0f, log_odds[i]));
             float p = 1.0f / (1.0f + std::exp(-lo));
@@ -322,7 +230,7 @@ public:
             unknown_mask[i] = (std::abs(lo) < 0.5f) ? 1 : 0;
         }
 
-        // Step 5: C-Space Morphological Dilation on Confirmed Obstacle Boundaries
+        // Step 4: Clean Circular C-Space Morphological Dilation on Confirmed Obstacle Boundaries
         std::fill(hazard_mask.begin(), hazard_mask.end(), 0);
         if (inflation_cells > 0) {
             for (int r = 0; r < height; ++r) {
@@ -334,21 +242,6 @@ public:
                             int nc = c + kernel_dx[k];
                             if (nr >= 0 && nr < height && nc >= 0 && nc < width) {
                                 hazard_mask[nr * width + nc] = 1;
-                            }
-                        }
-
-                        // Perimeter Wall Longitudinal Bridging:
-                        // For confirmed hits along the outer track perimeter (|x| >= 0.35m),
-                        // bridge along Y (longitudinal corridor direction, ±10 cells = ±15 cm)
-                        // to ensure spaced-out ToF hits along side walls form an unbroken wall barrier.
-                        float cell_x = x_min + c * res + res * 0.5f;
-                        if (std::abs(cell_x) >= 0.35f) {
-                            constexpr int WALL_BRIDGE_CELLS = 10;
-                            for (int dy = -WALL_BRIDGE_CELLS; dy <= WALL_BRIDGE_CELLS; ++dy) {
-                                int nr = r + dy;
-                                if (nr >= 0 && nr < height) {
-                                    hazard_mask[nr * width + c] = 1;
-                                }
                             }
                         }
                     }
@@ -407,6 +300,10 @@ public:
         float gap_progress_margin_m,
         float alt_min_separation_m,
         float alt_aperture_bias,
+        float scout_obs_width_m,
+        float scout_block_dist_m,
+        float scout_straight_pen_k,
+        float scout_straight_exp_k,
         float* out_targets_x,
         float* out_targets_y,
         float* out_targets_aperture,
@@ -571,9 +468,11 @@ public:
 
         float w_straight = w_align_straight;
         float straight_block_penalty = 0.0f;
-        if (d_center < 1.10f) {
-            w_straight = 0.0f;
-            straight_block_penalty = std::max(0.0f, (0.95f - d_center) / 0.35f) * 3.0f;
+        float theta_shadow = 0.0f;
+        if (d_center < scout_block_dist_m) {
+            // Distance-scaled angular shadow half-width (scales naturally as obstacle nears bumper)
+            theta_shadow = std::atan2(scout_obs_width_m * 0.5f, std::max(d_center, 0.05f));
+            straight_block_penalty = scout_straight_pen_k * std::max(0.0f, (scout_block_dist_m - d_center) / scout_block_dist_m);
         }
         float w_steer = (std::abs(steer_current) > 0.08f && d_center >= 1.0f) ? w_align_steer : 0.20f;
         float min_allowed_dist = (max_clear_dist > 0.85f) ? std::max(GAP_MIN_LOOKAHEAD_M, max_clear_dist * 0.45f) : GAP_MIN_LOOKAHEAD_M;
@@ -598,7 +497,11 @@ public:
             float steer_diff = std::abs(c.steer_equiv - steer_current);
             float straight_diff = std::abs(c.rel_angle);
             float side_bonus = w_side_clearance * side_diff * (-std::sin(c.rel_angle));
-            float center_penalty = (std::abs(c.rel_angle) < (20.0f * DEG2RAD)) ? straight_block_penalty : 0.0f;
+            float center_penalty = 0.0f;
+            if (straight_block_penalty > 0.0f && theta_shadow > 0.001f && std::abs(c.rel_angle) < theta_shadow) {
+                float angle_ratio = 1.0f - (std::abs(c.rel_angle) / theta_shadow);
+                center_penalty = straight_block_penalty * std::exp(scout_straight_exp_k * angle_ratio);
+            }
 
             // Neighboring ToF Zone Width Bonus (0.3x lowest cost / best neighboring zone clearance)
             float neighbor_bonus = 0.0f;
@@ -675,7 +578,11 @@ public:
                         float steer_diff = std::abs(c.steer_equiv - steer_current);
                         float straight_diff = std::abs(c.rel_angle);
                         float side_bonus_alt = (w_side_clearance * 0.45f) * side_diff * (-std::sin(c.rel_angle));
-                        float center_penalty = (std::abs(c.rel_angle) < (20.0f * DEG2RAD)) ? straight_block_penalty : 0.0f;
+                        float center_penalty = 0.0f;
+                        if (straight_block_penalty > 0.0f && theta_shadow > 0.001f && std::abs(c.rel_angle) < theta_shadow) {
+                            float angle_ratio = 1.0f - (std::abs(c.rel_angle) / theta_shadow);
+                            center_penalty = straight_block_penalty * std::exp(scout_straight_exp_k * angle_ratio);
+                        }
 
                         float score_alt = w_gap_distance * dist_factor
                                         + (w_gap_width * alt_aperture_bias) * width_norm
@@ -762,6 +669,10 @@ COSTMAP_API int costmap_scout_gaps(
     float gap_progress_margin_m,
     float alt_min_separation_m,
     float alt_aperture_bias,
+    float scout_obs_width_m,
+    float scout_block_dist_m,
+    float scout_straight_pen_k,
+    float scout_straight_exp_k,
     float* out_targets_x,
     float* out_targets_y,
     float* out_targets_aperture,
@@ -774,6 +685,7 @@ COSTMAP_API int costmap_scout_gaps(
         ranges_16, max_lookahead_m, steer_current,
         w_gap_distance, w_gap_width, w_align_steer, w_align_straight, w_side_clearance,
         gap_dist_exp_k, gap_progress_margin_m, alt_min_separation_m, alt_aperture_bias,
+        scout_obs_width_m, scout_block_dist_m, scout_straight_pen_k, scout_straight_exp_k,
         out_targets_x, out_targets_y, out_targets_aperture,
         max_targets,
         custom_hazard_mask

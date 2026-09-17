@@ -594,8 +594,81 @@ def run_champion_preview(robot: any, vehicle: FolkraceVehicle) -> None:
         if sim_speed_mult < 0.99:
             target_step_dt = (TIME_STEP_MS / 1000.0) / max(0.01, sim_speed_mult)
             elapsed_wall = time.perf_counter() - wall_start_t
-            if elapsed_wall < target_step_dt:
-                time.sleep(target_step_dt - elapsed_wall)
+
+# ==============================================================================
+# MODE 2B: FAST CHAMPION PURE DRIVE (MAX REAL-TIME PERFORMANCE)
+# ==============================================================================
+def run_fast_champion_drive(robot: any, vehicle: FolkraceVehicle) -> None:
+    """
+    Ultra-lean driving loop: full 3D simulation visualization with zero GUI/UDP/HUD overhead.
+    Evaluates at maximum native speed while preserving physics and C++ SL-MPC planning.
+    """
+    print("=" * 80, flush=True)
+    print("  FOLKRACE FAST CHAMPION PURE DRIVE (MAX PERFORMANCE)", flush=True)
+    print("=" * 80, flush=True)
+
+    # 1. Load active champion configuration
+    active_path = os.path.join(GA_OPTIMIZER_DIR, "active_preview_config.json")
+    ckpt_path = os.path.join(GA_OPTIMIZER_DIR, "ga_checkpoint.json")
+    best_path = os.path.join(GA_OPTIMIZER_DIR, "best_planner_genome.json")
+    genes: Dict[str, Any] = {}
+    title = "Champion SL-MPC"
+
+    for candidate_path in [active_path, ckpt_path, best_path]:
+        if os.path.exists(candidate_path):
+            try:
+                with open(candidate_path, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+                genes = cfg.get("genes") or cfg.get("best_genome") or cfg
+                title = cfg.get("title", cfg.get("meta", {}).get("title", os.path.basename(candidate_path)))
+                print(f"[Fast Drive] Loaded champion genome from {os.path.basename(candidate_path)}: {title}", flush=True)
+                break
+            except Exception as e:
+                print(f"[Fast Drive] Warning: Could not parse {candidate_path}: {e}", flush=True)
+
+    vehicle.configure(genes)
+
+    traj_csv = find_trajectory_csv()
+    obs_engine = ReverseObstacleEngine(traj_csv, speed_mps=MOVING_OBSTACLE_SPEED_MPS)
+    obs_manager = MovingObstacleManager(
+        robot=robot,
+        engine=obs_engine,
+        obstacle_names=MOVING_OBSTACLE_NAMES,
+        elevation_z=MOVING_OBSTACLE_Z_ELEVATION,
+        speed_mps=MOVING_OBSTACLE_SPEED_MPS,
+    )
+
+    track_tracker = WebotsTrackProgressTracker(traj_csv)
+
+    from ga_planner_config import ROBOT_START_POS, ROBOT_START_ROT
+    start_pos = list(ROBOT_START_POS)
+    start_rot = list(ROBOT_START_ROT)
+    vehicle.reset(start_pos=start_pos, start_rot=start_rot)
+    track_tracker.reset(start_pos[:2])
+
+    sim_time = 0.0
+    last_print_time = 0.0
+
+    print("[Fast Drive] Simulation started. Real-time driving active.", flush=True)
+
+    while robot.step(TIME_STEP_MS) != -1:
+        sim_time += DT
+        obs_manager.update(sim_time)
+        telemetry, planner_ran = vehicle.step(dt=DT, full_telemetry=False)
+
+        gx, gy, _ = vehicle.get_ground_truth_pose()
+        track_dist = track_tracker.update([gx, gy])
+
+        # Throttle console telemetry to 1 Hz so stdout pipe never stalls physics
+        if planner_ran and (sim_time - last_print_time >= 1.0):
+            last_print_time = sim_time
+            print(
+                f"[Drive] Time: {sim_time:5.1f}s | Lap: {track_tracker.current_lap:2d} | "
+                f"Dist: {track_dist:6.1f}m | Speed: {telemetry['v_real']:4.2f}m/s | "
+                f"Steer: {telemetry['steer_deg']:+5.1f}° | Plan: {telemetry['plan_ms']:4.2f}ms | Mode: {telemetry['mode']}",
+                flush=True,
+            )
+
 
 
 # ==============================================================================
@@ -1485,6 +1558,8 @@ def main():
         run_stationary_obstacle_test(robot, vehicle)
     elif mode in ("moving_obs_test", "moving_test", "dynamic_test"):
         run_moving_obstacle_test(robot, vehicle)
+    elif mode in ("fast_drive", "pure_drive", "realtime_drive", "fast_preview"):
+        run_fast_champion_drive(robot, vehicle)
     elif mode in ("preview", "champion_preview", "replay"):
         run_champion_preview(robot, vehicle)
     else:

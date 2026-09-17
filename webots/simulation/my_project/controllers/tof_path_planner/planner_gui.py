@@ -378,7 +378,7 @@ class PlannerCostmapCanvas(QtWidgets.QWidget):
         if corridor_right and len(corridor_right) > 1:
             self.corridor_right = corridor_right
 
-        if shield_info and any(len(shield_info.get(k, [])) > 1 for k in ("k1_left", "k1_right", "k2_left", "k2_right")):
+        if shield_info and any(len(shield_info.get(k, [])) > 1 for k in ("k1_left", "k1_right", "k2_left", "k2_right", "straight")):
             self.shield_info = shield_info
         elif shield_info is not None and not getattr(self, "shield_info", None):
             self.shield_info = shield_info
@@ -617,15 +617,20 @@ class PlannerCostmapCanvas(QtWidgets.QWidget):
 
             branches = [
                 # (pts, is_safe, is_chosen, label, step_num)
-                (self.shield_info.get("k1_left", []), self.shield_info.get("k1_left_safe", False), s_active and chosen_id == 2, "Step 1 Left", 1),
-                (self.shield_info.get("k1_right", []), self.shield_info.get("k1_right_safe", False), s_active and chosen_id == 3, "Step 1 Right", 1),
-                (self.shield_info.get("k2_left", []), self.shield_info.get("k2_left_safe", False), s_active and chosen_id == 0, "Step 2 Left", 2),
-                (self.shield_info.get("k2_right", []), self.shield_info.get("k2_right_safe", False), s_active and chosen_id == 1, "Step 2 Right", 2),
+                (self.shield_info.get("straight",  []), self.shield_info.get("straight_safe",  False), False, "Straight", 0),
+                (self.shield_info.get("k1_left",   []), self.shield_info.get("k1_left_safe",   False), s_active and chosen_id == 2, "Step 0 Left",  1),
+                (self.shield_info.get("k1_right",  []), self.shield_info.get("k1_right_safe",  False), s_active and chosen_id == 3, "Step 0 Right", 1),
+                (self.shield_info.get("k2_left",   []), self.shield_info.get("k2_left_safe",   False), s_active and chosen_id == 0, "Step 2 Left",  2),
+                (self.shield_info.get("k2_right",  []), self.shield_info.get("k2_right_safe",  False), s_active and chosen_id == 1, "Step 2 Right", 2),
             ]
 
             for branch, is_safe, is_chosen, label, step_num in branches:
                 if len(branch) > 1:
-                    if is_chosen:
+                    if step_num == 0:
+                        # Straight max-decel probe: white=clear, dark orange=blocked
+                        col = QColor(220, 220, 220, 180) if is_safe else QColor(255, 120, 40, 200)
+                        pen = QPen(col, 1.8, Qt.DashLine)
+                    elif is_chosen:
                         pen = QPen(QColor(0, 255, 128, 255), 3.2, Qt.SolidLine)
                     elif is_safe:
                         col = QColor(0, 230, 160, 210) if step_num == 1 else QColor(0, 255, 200, 220)
@@ -639,11 +644,12 @@ class PlannerCostmapCanvas(QtWidgets.QWidget):
                         p2 = self.world_to_screen(branch[i + 1][0], branch[i + 1][1])
                         painter.drawLine(p1, p2)
 
-                    # Root dot at the MPC trajectory step origin
-                    p_root = self.world_to_screen(branch[0][0], branch[0][1])
-                    painter.setPen(Qt.NoPen)
-                    painter.setBrush(QBrush(QColor(255, 215, 0, 220)))
-                    painter.drawEllipse(p_root, 2.5, 2.5)
+                    if step_num > 0:
+                        # Root dot at the MPC trajectory step origin
+                        p_root = self.world_to_screen(branch[0][0], branch[0][1])
+                        painter.setPen(Qt.NoPen)
+                        painter.setBrush(QBrush(QColor(255, 215, 0, 220)))
+                        painter.drawEllipse(p_root, 2.5, 2.5)
 
                     # Tip dot & collision hit marker
                     p_tip = self.world_to_screen(branch[-1][0], branch[-1][1])

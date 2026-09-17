@@ -126,6 +126,12 @@ public:
     double shield_k2_r_y[MAX_TRAJ_POINTS];
     bool shield_k2_r_safe;
 
+    // Straight-ahead max-decel probe (reference line for cascade gating)
+    int shield_straight_cnt;
+    double shield_straight_x[MAX_TRAJ_POINTS];
+    double shield_straight_y[MAX_TRAJ_POINTS];
+    bool shield_straight_safe;
+
     // Independent primal & dual warm-start cache per solver instance (prevents cross-contamination in dual-solve)
     bool has_solution;
     double saved_x[MPC_N_VARS];
@@ -184,6 +190,8 @@ public:
         shield_k2_l_safe(false),
         shield_k2_r_cnt(0),
         shield_k2_r_safe(false),
+        shield_straight_cnt(0),
+        shield_straight_safe(false),
         has_solution(false)
     {
         // Copy constant structure of A_data
@@ -624,10 +632,20 @@ public:
         shield_k2_r_cnt = 0;
         shield_k2_l_safe = false;
         shield_k2_r_safe = false;
+        shield_straight_cnt = 0;
+        shield_straight_safe = false;
 
         double lookahead_time = 4.0 / 60.0; // 4 steps * 16.67ms = 66.7ms
         int lookahead_steps = 4;
         double escape_speed = 0.60; // Safe escape velocity
+
+        // 0. Straight-ahead probe from Step 2 at 0.5x decel (gate for cascade swerve decision)
+        shield_straight_safe = simulate_and_probe_branch(
+            act_x_2, act_y_2, act_v_2, act_psi_2, act_delta_2, act_delta_2, // keep Step 2 steer — go straight
+            std::max(v_cruise_min, act_v_2 - 0.5 * max_a_dec * lookahead_time), // half decel over the window
+            lookahead_time, lookahead_steps,
+            shield_straight_x, shield_straight_y, &shield_straight_cnt
+        );
 
         // 1. Step 0 (k=0) Evasion Micro-Rollouts from Current State (immediate)
         shield_k1_l_safe = simulate_and_probe_branch(
@@ -639,40 +657,54 @@ public:
             shield_k1_r_x, shield_k1_r_y, &shield_k1_r_cnt
         );
 
-        // 2. Step 3 (k=3) Evasion Micro-Rollouts from Actual State 3
+        // 2. Step 2 (k=2) Evasion Micro-Rollouts from Actual State 2
         shield_k2_l_safe = simulate_and_probe_branch(
-            act_x_3, act_y_3, act_v_3, act_psi_3, act_delta_3, +MAX_STEERING_RAD_CONST, escape_speed, lookahead_time, lookahead_steps,
+            act_x_2, act_y_2, act_v_2, act_psi_2, act_delta_2, +MAX_STEERING_RAD_CONST, escape_speed, lookahead_time, lookahead_steps,
             shield_k2_l_x, shield_k2_l_y, &shield_k2_l_cnt
         );
         shield_k2_r_safe = simulate_and_probe_branch(
-            act_x_3, act_y_3, act_v_3, act_psi_3, act_delta_3, -MAX_STEERING_RAD_CONST, escape_speed, lookahead_time, lookahead_steps,
+            act_x_2, act_y_2, act_v_2, act_psi_2, act_delta_2, -MAX_STEERING_RAD_CONST, escape_speed, lookahead_time, lookahead_steps,
             shield_k2_r_x, shield_k2_r_y, &shield_k2_r_cnt
         );
 
         // 3. Safety Shield Cascade:
-        // Check 3rd step into the future. If EVERYTHING collides at Step 3 (both left and right blocked),
-        // then we cannot wait until Step 3 to evade. We MUST check Step 1 (1 step ahead) and override!
-        if (!shield_k2_l_safe && !shield_k2_r_safe) {
+        // Layer A: Step 2 one side blocked AND straight blocked → steer toward open side, no braking.
+        //          If straight is clear, hold course (straight probe safe = robot can stop in time).
+        // Layer B: Step 2 both sides blocked → emergency fallback to Step 0 safe branch,
+        //          gentle speed reduction only (focus on turning, not stopping).
+        double gentle_speed = std::max(v_cruise_min, act_v * 0.85); // Slight bleed, not a hard stop
+
+        if (!shield_k2_l_safe && shield_k2_r_safe && !shield_straight_safe) {
+            // Left blocked at Step 2 AND straight unsafe → bias right now, no braking
+            shield_active = true;
+            cmd_steer = -MAX_STEERING_RAD_CONST; // Right
+            shield_chosen_id = 1; // k2_right
+            // cmd_speed unchanged — steer only
+
+        } else if (shield_k2_l_safe && !shield_k2_r_safe && !shield_straight_safe) {
+            // Right blocked at Step 2 AND straight unsafe → bias left now, no braking
+            shield_active = true;
+            cmd_steer = +MAX_STEERING_RAD_CONST; // Left
+            shield_chosen_id = 0; // k2_left
+            // cmd_speed unchanged — steer only
+
+        } else if (!shield_k2_l_safe && !shield_k2_r_safe) {
+            // Both blocked at Step 2 → fall back to Step 0 immediate branch
             if (shield_k1_l_safe && shield_k1_r_safe) {
                 shield_active = true;
-                if (xg < 0.0) {
-                    cmd_steer = +MAX_STEERING_RAD_CONST; // Left
-                    shield_chosen_id = 2; // k1_left
-                } else {
-                    cmd_steer = -MAX_STEERING_RAD_CONST; // Right
-                    shield_chosen_id = 3; // k1_right
-                }
-                cmd_speed = escape_speed;
+                cmd_steer = (xg < 0.0) ? +MAX_STEERING_RAD_CONST : -MAX_STEERING_RAD_CONST;
+                shield_chosen_id = (xg < 0.0) ? 2 : 3; // k1_left or k1_right
+                cmd_speed = gentle_speed; // Gentle brake, focus on steering
             } else if (shield_k1_l_safe) {
                 shield_active = true;
                 cmd_steer = +MAX_STEERING_RAD_CONST; // Left
                 shield_chosen_id = 2; // k1_left
-                cmd_speed = escape_speed;
+                cmd_speed = gentle_speed;
             } else if (shield_k1_r_safe) {
                 shield_active = true;
                 cmd_steer = -MAX_STEERING_RAD_CONST; // Right
                 shield_chosen_id = 3; // k1_right
-                cmd_speed = escape_speed;
+                cmd_speed = gentle_speed;
             }
         }
     }
@@ -1181,6 +1213,7 @@ SL_MPC_API int sl_mpc_get_shield_branches(
     double* out_k1_r_xs, double* out_k1_r_ys, int* out_k1_r_cnt, int* out_k1_r_safe,
     double* out_k2_l_xs, double* out_k2_l_ys, int* out_k2_l_cnt, int* out_k2_l_safe,
     double* out_k2_r_xs, double* out_k2_r_ys, int* out_k2_r_cnt, int* out_k2_r_safe,
+    double* out_str_xs, double* out_str_ys, int* out_str_cnt, int* out_str_safe,
     int* out_active, int* out_chosen_id
 ) {
     if (!handle) return 0;
@@ -1225,6 +1258,16 @@ SL_MPC_API int sl_mpc_get_shield_branches(
         }
     }
     if (out_k2_r_safe) *out_k2_r_safe = planner->shield_k2_r_safe ? 1 : 0;
+
+    // Straight
+    if (out_str_xs && out_str_ys && out_str_cnt) {
+        *out_str_cnt = std::min(MAX_TRAJ_POINTS, planner->shield_straight_cnt);
+        for (int i = 0; i < *out_str_cnt; ++i) {
+            out_str_xs[i] = planner->shield_straight_x[i];
+            out_str_ys[i] = planner->shield_straight_y[i];
+        }
+    }
+    if (out_str_safe) *out_str_safe = planner->shield_straight_safe ? 1 : 0;
 
     if (out_active) *out_active = planner->shield_active ? 1 : 0;
     if (out_chosen_id) *out_chosen_id = planner->shield_chosen_id;

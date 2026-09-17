@@ -71,6 +71,8 @@ if hasattr(_lib, "costmap_scout_gaps"):
         ctypes.c_float,                  # w_side_clearance
         ctypes.c_float, ctypes.c_float,  # gap_dist_exp_k, gap_progress_margin_m
         ctypes.c_float, ctypes.c_float,  # alt_min_separation_m, alt_aperture_bias
+        ctypes.c_float, ctypes.c_float,  # scout_obs_width_m, scout_block_dist_m
+        ctypes.c_float, ctypes.c_float,  # scout_straight_pen_k, scout_straight_exp_k
         ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), # out_targets_x, y, ap
         ctypes.c_int,                    # max_targets
         ctypes.POINTER(ctypes.c_uint8),  # custom_hazard_mask (optional)
@@ -126,7 +128,7 @@ class CppSmartHybridCostmap:
         self,
         grid_bounds: Tuple[float, float, float, float] = (-1.25, 1.25, 0.0, 2.0),
         resolution: float = 0.015,
-        r_inflation_m: float = 0.088,
+        r_inflation_m: float = 0.075,
     ):
         self.x_min, self.x_max, self.y_min, self.y_max = grid_bounds
         self.res = float(resolution)
@@ -319,6 +321,10 @@ class CppSmartHybridCostmap:
         gap_progress_margin_m: float = 0.15,
         alt_min_separation_m: float = 0.25,
         alt_aperture_bias: float = 1.80,
+        scout_obs_width_m: float = 0.22,
+        scout_block_dist_m: float = 1.05,
+        scout_straight_pen_k: float = 2.50,
+        scout_straight_exp_k: float = 1.50,
         top_k: int = 2,
         hazard_mask: Optional[np.ndarray] = None,
     ) -> List[Tuple[float, float, float]]:
@@ -345,6 +351,10 @@ class CppSmartHybridCostmap:
             float(gap_progress_margin_m),
             float(alt_min_separation_m),
             float(alt_aperture_bias),
+            float(scout_obs_width_m),
+            float(scout_block_dist_m),
+            float(scout_straight_pen_k),
+            float(scout_straight_exp_k),
             self._out_targets_x,
             self._out_targets_y,
             self._out_targets_ap,

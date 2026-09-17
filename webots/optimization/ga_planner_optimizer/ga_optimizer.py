@@ -703,15 +703,15 @@ def run_genetic_algorithm(
                     adapter = cma_adapters[p]
                     adapter.tell(fitnesses)
 
-                    # Watchdog: detect complete generation collapse (e.g. 100% crashes / zero gradient)
-                    if gen_crashes >= pop_size:
+                    # Watchdog: detect complete generation collapse (e.g. all non-injected candidates crashed)
+                    if gen_crashes >= (pop_size - 1):
                         consecutive_crashes[p] = consecutive_crashes.get(p, 0) + 1
                     else:
                         consecutive_crashes[p] = 0
 
                     if consecutive_crashes.get(p, 0) >= 3 and best_genomes[p] is not None:
                         print(
-                            f"\n[Optimizer Watchdog] Detected {consecutive_crashes[p]} consecutive 100% crash generations for {p}!\n"
+                            f"\n[Optimizer Watchdog] Detected {consecutive_crashes[p]} consecutive high-crash generations for {p}!\n"
                             f"  -> Rescuing CMA distribution: force-restarting around top champion (Best Fit: {best_fitnesses[p]:.1f}) with tight sigma.",
                             flush=True,
                         )

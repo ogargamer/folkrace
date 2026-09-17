@@ -92,7 +92,7 @@ GRID_X_MAX = 1.25              # meters (right boundary)
 GRID_Y_MIN = -0.10             # meters (10 cm chassis clearance behind origin)
 GRID_Y_MAX = 2.00              # meters (forward preview range)
 GRID_RES = 0.015               # meters (15 mm grid resolution)
-R_INFLATION_M = 0.090          # meters (9.0 cm default dilation: bare minimum is 7.5cm for 15cm chassis width)
+R_INFLATION_M = 0.075          # meters (7.5 cm dilation: half chassis width, GA-optimized minimum)
 
 # Sensor device names: 16-Channel Front-Only ToF rig (only_front_tofs.proto)
 TOF_SENSOR_NAMES = [
