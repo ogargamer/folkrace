@@ -22,6 +22,9 @@ from ga_planner_config import (
     get_genome_class,
     compute_scalar_fitness,
     OPTION_2_SL_MPC_GENE_SPECS,
+    load_best_planner_genome,
+    generate_logical_initial_population,
+    BEST_GENOME_PATH,
 )
 from obstacle_engine import ReverseObstacleEngine
 
@@ -86,8 +89,29 @@ def test_fitness_computation():
     assert fit_crash < fit_clean and fit_crash > 0.0
 
 
+def test_load_best_genome_and_seeding():
+    print("Testing Best Genome Loading & Initial Population Seeding...")
+    assert os.path.exists(BEST_GENOME_PATH), f"File {BEST_GENOME_PATH} not found"
+    loaded_g, fit, metrics = load_best_planner_genome(BEST_GENOME_PATH)
+    assert loaded_g is not None, "Failed to load genome from best_planner_genome.json"
+    assert fit > 0.0, f"Expected positive fitness, got {fit}"
+    print(f"  -> Successfully loaded best genome: Fitness={fit:.2f}, Dist={metrics.get('distance_m', 0):.2f}m")
+
+    # Generate population seeded from best genome
+    pop = generate_logical_initial_population(Option2SLMPCGenome, pop_size=10, seed_genome=loaded_g)
+    assert len(pop) == 10
+    # Candidate 0 must match loaded genome
+    loaded_dict = loaded_g.to_dict()
+    cand0_dict = pop[0].to_dict()
+    for k in ["q_progress", "q_cte", "r_steer", "pp_blend_gain"]:
+        assert math.isclose(cand0_dict[k], loaded_dict[k], rel_tol=1e-3), f"Mismatch in gene {k}: {cand0_dict[k]} vs {loaded_dict[k]}"
+    print("  -> Verified Candidate 0 accurately seeded with best_planner_genome.json parameters.")
+
+
 if __name__ == "__main__":
+    import math
     test_genome_codecs()
     test_reverse_obstacle_engine()
     test_fitness_computation()
+    test_load_best_genome_and_seeding()
     print("\nALL GA OPTIMIZER OFFLINE TESTS PASSED!")

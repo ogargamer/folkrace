@@ -107,6 +107,8 @@ class GAWorkerThread(QThread):
         resume: bool,
         preview: bool = False,
         algorithm: str = ALGORITHM,
+        use_best_genome: bool = False,
+        seed_file: Optional[str] = None,
     ):
         super().__init__()
         self.planner_name = planner_name
@@ -117,6 +119,8 @@ class GAWorkerThread(QThread):
         self.resume = resume
         self.preview = preview
         self.algorithm = algorithm
+        self.use_best_genome = use_best_genome
+        self.seed_file = seed_file
         self.controller = GAController()
         self.controller.on_generation_done = self._on_gen_done
         self.controller.on_status_change = self._on_status_change
@@ -140,6 +144,8 @@ class GAWorkerThread(QThread):
                 preview_rendered=self.preview,
                 controller=self.controller,
                 algorithm=self.algorithm,
+                use_best_genome=self.use_best_genome,
+                seed_genome_file=self.seed_file,
             )
             if self.controller.abort_requested:
                 self.status_changed.emit("ABORTED")
@@ -504,6 +510,12 @@ class GADashboardGUI(QMainWindow):
         self.chk_resume.setStyleSheet("color: #CBD5E1; font-weight: bold;")
         header_layout.addWidget(self.chk_resume)
 
+        # Seed from Best Genome Checkbox
+        self.chk_seed_best = QCheckBox("Seed Best Genome")
+        self.chk_seed_best.setStyleSheet("color: #34D399; font-weight: bold;")
+        self.chk_seed_best.setToolTip("Seeds initial population and search distribution from best_planner_genome.json instead of planner defaults.")
+        header_layout.addWidget(self.chk_seed_best)
+
         # 20s Rendered Visual Preview Checkbox
         self.chk_preview = QCheckBox("20s Rendered Preview")
         self.chk_preview.setStyleSheet("color: #38BDF8; font-weight: bold;")
@@ -620,6 +632,7 @@ class GADashboardGUI(QMainWindow):
         generations = self.gen_spin.value()
         resume = self.chk_resume.isChecked()
         preview = self.chk_preview.isChecked()
+        seed_best = self.chk_seed_best.isChecked()
         algo_choice = str(self.algo_combo.currentData())
 
         self.data_by_planner.clear()
@@ -637,6 +650,7 @@ class GADashboardGUI(QMainWindow):
         self.pop_spin.setEnabled(False)
         self.gen_spin.setEnabled(False)
         self.chk_resume.setEnabled(False)
+        self.chk_seed_best.setEnabled(False)
         self.chk_preview.setEnabled(False)
 
         self.worker = GAWorkerThread(
@@ -648,6 +662,7 @@ class GADashboardGUI(QMainWindow):
             resume=resume,
             preview=preview,
             algorithm=algo_choice,
+            use_best_genome=seed_best,
         )
         self.worker.gen_completed.connect(self.on_generation_update)
         self.worker.status_changed.connect(self.on_status_change)
@@ -785,6 +800,7 @@ class GADashboardGUI(QMainWindow):
         self.pop_spin.setEnabled(True)
         self.gen_spin.setEnabled(True)
         self.chk_resume.setEnabled(True)
+        self.chk_seed_best.setEnabled(True)
         self.chk_preview.setEnabled(True)
         self.algo_combo.setEnabled(True)
 

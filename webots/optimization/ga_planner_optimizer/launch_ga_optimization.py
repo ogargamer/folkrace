@@ -40,6 +40,8 @@ def main():
     parser.add_argument("--generations", type=int, default=NUM_GENERATIONS, help="Generations")
     parser.add_argument("--duration", type=float, default=EVALUATION_DURATION_S, help="Trial evaluation duration in sim seconds (default: 20s)")
     parser.add_argument("--resume", action="store_true", help="Resume from last checkpoint")
+    parser.add_argument("--use-best-genome", "--use-best", "--seed-from-best", dest="use_best_genome", action="store_true", help="Seed optimizer using best_planner_genome.json instead of defaults")
+    parser.add_argument("--seed-file", type=str, default=None, help="Custom path to genome JSON file to seed from")
 
     args = parser.parse_args()
     planner_key = "OPTION_2_SL_MPC"
@@ -56,6 +58,10 @@ def main():
     ]
     if args.resume:
         cmd.append("--resume")
+    if args.use_best_genome:
+        cmd.append("--use-best-genome")
+    if args.seed_file:
+        cmd.extend(["--seed-file", args.seed_file])
 
     print("=" * 80, flush=True)
     print("  LAUNCHING HEADLESS GA OPTIMIZER", flush=True)

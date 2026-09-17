@@ -11,6 +11,7 @@
 import os
 import sys
 import math
+import json
 from typing import Dict, List, Tuple, Any, Optional
 import numpy as np
 
@@ -35,6 +36,10 @@ RUNS_PER_EVALUATION: int = 2
 
 # Optimization Algorithm: 'CMA_ES' (Covariance Matrix Adaptation), 'GA' (Genetic Algorithm)
 ALGORITHM: str = "CMA_ES"
+
+# Seed initial search distribution/population from best_planner_genome.json instead of defaults
+SEED_FROM_BEST_GENOME_DEFAULT: bool = False
+BEST_GENOME_PATH: str = os.path.join(os.path.dirname(os.path.abspath(__file__)), "best_planner_genome.json")
 
 # CMA-ES Hyperparameters
 CMA_SIGMA0: float = 0.20             # Initial search step size in normalized [0, 1] parameter space
@@ -199,10 +204,40 @@ def get_genome_class(planner_name: Optional[str] = None):
     return Option2SLMPCGenome
 
 
-def generate_logical_initial_population(genome_cls, pop_size: int) -> List[BasePlannerGenome]:
+def load_best_planner_genome(
+    filepath: Optional[str] = None,
+    genome_cls: Optional[Any] = None,
+) -> Tuple[Optional[BasePlannerGenome], float, Dict[str, Any]]:
+    """
+    Loads chromosome and metrics from best_planner_genome.json (or specified filepath).
+    Returns (genome_instance, fitness, metrics_dict).
+    """
+    path = filepath or BEST_GENOME_PATH
+    if not os.path.exists(path):
+        return None, -1e9, {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        genes = data.get("genes") or data.get("best_genome") or data
+        fitness = float(data.get("fitness", data.get("best_fitness", -1e9)))
+        metrics = data.get("metrics", data.get("best_metrics", {}))
+        cls = genome_cls or get_genome_class()
+        genome = cls(genes)
+        return genome, fitness, metrics
+    except Exception as e:
+        print(f"[Genome Loader] Warning: Failed to load genome from {path}: {e}", flush=True)
+        return None, -1e9, {}
+
+
+def generate_logical_initial_population(
+    genome_cls,
+    pop_size: int,
+    seed_genome: Optional[Any] = None,
+) -> List[BasePlannerGenome]:
     """
     Generates a structured, physically logical initial population (Gen 0)
     combining distinct driving archetypes with stratified Latin-hypercube sampling.
+    If seed_genome is provided, it is injected as Archetype 0 and perturbations center on it.
     """
     sample_inst = genome_cls()
     specs = sample_inst.specs
@@ -271,6 +306,14 @@ def generate_logical_initial_population(genome_cls, pop_size: int) -> List[BaseP
             "recovery_arc_lookahead_m": 0.15,
         },
     ]
+
+    # Inject seed genome as primary archetype if provided
+    if seed_genome is not None:
+        if isinstance(seed_genome, BasePlannerGenome):
+            archetypes[0] = seed_genome.to_dict()
+        elif isinstance(seed_genome, dict):
+            genes_dict = seed_genome.get("genes") or seed_genome.get("best_genome") or seed_genome
+            archetypes[0] = dict(genes_dict)
 
     population: List[BasePlannerGenome] = []
     for arch in archetypes:

@@ -76,8 +76,11 @@ from ga_planner_config import (
     ALGORITHM,
     CMA_SIGMA0,
     CMA_RESTART_ON_CONVERGENCE,
+    SEED_FROM_BEST_GENOME_DEFAULT,
+    BEST_GENOME_PATH,
     get_genome_class,
     generate_logical_initial_population,
+    load_best_planner_genome,
     BasePlannerGenome,
 )
 from ga_evaluator import ParallelWorkerPool, run_rendered_preview, BASE_WORKER_PORT
@@ -309,9 +312,9 @@ class GAController:
         return not self.pause_event.is_set()
 
 
-def initialize_population(genome_cls, pop_size: int) -> List[BasePlannerGenome]:
+def initialize_population(genome_cls, pop_size: int, seed_genome: Optional[Any] = None) -> List[BasePlannerGenome]:
     """Generates initial population using physically logical archetypes and stratified sampling."""
-    return generate_logical_initial_population(genome_cls, pop_size)
+    return generate_logical_initial_population(genome_cls, pop_size, seed_genome=seed_genome)
 
 
 def tournament_select(pop: List[BasePlannerGenome], fitnesses: List[float], k: int = TOURNAMENT_SIZE) -> BasePlannerGenome:
@@ -374,6 +377,8 @@ def run_genetic_algorithm(
     preview_rendered: bool = False,
     controller: Optional[GAController] = None,
     algorithm: str = ALGORITHM,
+    use_best_genome: bool = SEED_FROM_BEST_GENOME_DEFAULT,
+    seed_genome_file: Optional[str] = None,
 ):
     """
     Executes the optimization pipeline (Single Planner or All Planners Interleaved).
@@ -409,10 +414,10 @@ def run_genetic_algorithm(
                     pass
 
             if preview_genes is None:
-                bg_path = os.path.join(GA_OPTIMIZER_DIR, f"best_genome_{p.lower()}.json")
-                if os.path.exists(bg_path):
+                target_bg = seed_genome_file or (os.path.join(GA_OPTIMIZER_DIR, f"best_genome_{p.lower()}.json") if is_multi else BEST_GENOME_FILE)
+                if os.path.exists(target_bg):
                     try:
-                        with open(bg_path, "r", encoding="utf-8") as f:
+                        with open(target_bg, "r", encoding="utf-8") as f:
                             d = json.load(f)
                             preview_genes = d.get("genes") or d.get("best_genome")
                     except Exception:
@@ -507,6 +512,15 @@ def run_genetic_algorithm(
                 print(f"[Optimizer] Checkpoint load failed for {p} ({e}), starting fresh.", flush=True)
                 populations[p] = []
 
+        if not populations[p] and (use_best_genome or seed_genome_file):
+            target_seed_path = seed_genome_file or (os.path.join(CURR_DIR, f"best_genome_{p.lower()}.json") if is_multi else BEST_GENOME_FILE)
+            loaded_g, loaded_fit, loaded_met = load_best_planner_genome(target_seed_path, genome_cls)
+            if loaded_g is not None:
+                best_genomes[p] = loaded_g
+                best_fitnesses[p] = loaded_fit
+                best_metrics_map[p] = loaded_met
+                print(f"[Optimizer] Seeding {p} from best genome in {os.path.basename(target_seed_path)} (Fitness: {loaded_fit:.1f}) instead of defaults.", flush=True)
+
         if is_cma:
             init_g = best_genomes[p]
             if init_g is None:
@@ -535,7 +549,7 @@ def run_genetic_algorithm(
             cma_adapters[p] = adapter
         else:
             if not populations[p]:
-                populations[p] = initialize_population(genome_cls, pop_size)
+                populations[p] = initialize_population(genome_cls, pop_size, seed_genome=best_genomes[p])
 
     # Initialize CSV Log
     if not resume or not os.path.exists(HISTORY_CSV_FILE):
@@ -559,6 +573,8 @@ def run_genetic_algorithm(
     print(f"  - Planners: {', '.join(planners_to_run)}")
     print(f"  - Population: {pop_size} candidates per planner | Generations: {num_generations}")
     print(f"  - Workers: {num_cores} CPU Cores | Eval Timeframe: {eval_duration_s:.1f} s")
+    seed_str = f"Best Genome ({os.path.basename(seed_genome_file or BEST_GENOME_FILE)})" if (use_best_genome or seed_genome_file) else "Planner Config Defaults"
+    print(f"  - Seed Baseline: {seed_str}")
     if is_cma:
         print(f"  - CMA-ES Sigma0: {CMA_SIGMA0:.2f} | Restart on Convergence: {CMA_RESTART_ON_CONVERGENCE}")
     else:
@@ -777,6 +793,8 @@ if __name__ == "__main__":
     parser.add_argument("--duration", type=float, default=EVALUATION_DURATION_S, help="Simulation evaluation duration (s)")
     parser.add_argument("--resume", action="store_true", help="Resume from last checkpoint if available")
     parser.add_argument("--preview", action="store_true", help="Run 1 rendered 20s preview per planner in real-time Webots GUI before optimization")
+    parser.add_argument("--use-best-genome", "--use-best", "--seed-from-best", dest="use_best_genome", action="store_true", help="Seed optimizer using webots/optimization/ga_planner_optimizer/best_planner_genome.json instead of planner defaults")
+    parser.add_argument("--seed-file", "--genome-file", dest="seed_file", type=str, default=None, help="Custom path to best genome JSON file to seed from")
 
     args = parser.parse_args()
 
@@ -789,4 +807,6 @@ if __name__ == "__main__":
         resume=args.resume,
         preview_rendered=args.preview,
         algorithm=args.algorithm,
+        use_best_genome=args.use_best_genome,
+        seed_genome_file=args.seed_file,
     )
