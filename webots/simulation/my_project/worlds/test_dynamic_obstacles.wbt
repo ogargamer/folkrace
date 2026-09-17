@@ -1,0 +1,100 @@
+#VRML_SIM R2025a utf8
+
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/backgrounds/protos/TexturedBackground.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/backgrounds/protos/TexturedBackgroundLight.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/floors/protos/RectangleArena.proto"
+EXTERNPROTO "../protos/only_front_tofs.proto"
+
+WorldInfo {
+  info [
+    "Phase 3: Moving Robot & Dynamic Obstacle Test Arena"
+    "Coordinate System: ENU (East-North-Up Standard, Z is Elevation)"
+    "Vehicle: Local +Y is Forward, +X is Right, -X is Left"
+    "Global: Facing East (+X), Left is North (+Y)"
+  ]
+  title "Phase 3 Dynamic Obstacle Test"
+  basicTimeStep 8
+  contactProperties [
+    ContactProperties {
+      material1 "tire"
+      coulombFriction [
+        0.95, 0.9
+      ]
+      bounce 0
+      softERP 0.35
+    }
+    ContactProperties {
+      material1 "tire"
+      material2 "wall"
+      coulombFriction [
+        0.6
+      ]
+      bounce 0
+      softERP 0.3
+      softCFM 0.0005
+    }
+    ContactProperties {
+      material1 "chassis"
+      material2 "wall"
+      coulombFriction [
+        0.25
+      ]
+      bounce 0
+    }
+    ContactProperties {
+      material1 "chassis"
+      coulombFriction [
+        0.25
+      ]
+      bounce 0
+    }
+  ]
+}
+Viewpoint {
+  orientation -0.2688840393707199 0.26746976308810555 0.9252898460511051 1.6665688306369937
+  position 0.9095629339846749 -3.7564375175500193 2.4809336157995556
+}
+TexturedBackground {
+  texture "dusk"
+}
+TexturedBackgroundLight {
+  luminosity 1.2
+}
+RectangleArena {
+  floorSize 12 8
+  floorTileSize 1 1
+  floorAppearance PBRAppearance {
+    baseColor 0.12 0.14 0.18
+    roughness 0.8
+  }
+  wallHeight 0.15
+}
+only_front_tofs {
+  translation 0 0 0.0275
+  rotation 0 0 1 -1.5707953071795862
+  name "Folkrace"
+  controller "tof_path_planner"
+  supervisor TRUE
+}
+DEF MOVING_OBSTACLE Solid {
+  translation 1.6 0 0.075
+  children [
+    Shape {
+      appearance PBRAppearance {
+        baseColor 1 0.2 0.35
+        roughness 0.3
+        metalness 0.1
+      }
+      geometry Cylinder {
+        height 0.15
+        radius 0.075
+      }
+    }
+  ]
+  name "moving_obstacle_1"
+  contactMaterial "wall"
+  boundingObject Cylinder {
+    height 0.15
+    radius 0.075
+  }
+}

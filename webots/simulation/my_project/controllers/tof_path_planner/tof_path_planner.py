@@ -68,6 +68,20 @@ def find_trajectory_csv() -> str:
     return ""
 
 
+def to_py(obj):
+    if isinstance(obj, (np.floating, float)):
+        return float(obj)
+    elif isinstance(obj, (np.integer, int)):
+        return int(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, dict):
+        return {k: to_py(v) for k, v in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        return [to_py(v) for v in obj]
+    return obj
+
+
 # ==============================================================================
 # MODE 1: INTERACTIVE RACING STUDIO (Default)
 # ==============================================================================
@@ -798,6 +812,652 @@ def run_ga_worker(robot: any, vehicle: FolkraceVehicle) -> None:
 
 
 # ==============================================================================
+# MODE 4: STATIONARY ROBOT + DYNAMIC OBSTACLE TEST (PHASE 1)
+# ==============================================================================
+def run_stationary_obstacle_test(robot: any, vehicle: FolkraceVehicle) -> None:
+    print("=" * 80, flush=True)
+    print("  PHASE 1 TEST: STATIONARY ROBOT + DYNAMIC MOVING OBSTACLE VALIDATION", flush=True)
+    print("  Evaluating 16-channel ToF blob extraction, wall rejection, velocity tracking & gating", flush=True)
+    print("=" * 80, flush=True)
+
+    # 1. Supervisor handles for obstacle and extra obstacles
+    obs_node = robot.getFromDef("MOVING_OBSTACLE") if hasattr(robot, "getFromDef") else None
+    obs2_node = robot.getFromDef("MOVING_OBSTACLE_2") if hasattr(robot, "getFromDef") else None
+    obs3_node = robot.getFromDef("MOVING_OBSTACLE_3") if hasattr(robot, "getFromDef") else None
+
+    # Park secondary obstacles away from sensor view
+    for node in [obs2_node, obs3_node]:
+        if node:
+            f = node.getField("translation")
+            if f:
+                f.setSFVec3f([100.0, 100.0, -10.0])
+
+    obs_field = obs_node.getField("translation") if obs_node else None
+    if not obs_field:
+        print("[Test Warning] MOVING_OBSTACLE not found in world via getFromDef!", flush=True)
+
+    # Telemetry broadcast socket (port 9876)
+    gui_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    gui_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+
+    # Warm up physics (0.50 s) to settle ground contact
+    for _ in range(int(0.50 / (TIME_STEP_MS / 1000.0))):
+        if robot.step(TIME_STEP_MS) == -1:
+            return
+        for m in vehicle.motors.values():
+            if m:
+                m.setVelocity(0.0)
+        for s in vehicle.servos.values():
+            if s:
+                s.setPosition(0.0)
+
+    # Get baseline stationary pose
+    X0, Y0, theta0 = vehicle.get_ground_truth_pose()
+    print(f"[Stationary Robot] Locked at X={X0:.3f}m, Y={Y0:.3f}m, Yaw={theta0:.3f}rad", flush=True)
+
+    test_stages = [
+        # (name, speed_mps, duration_s, x_start, y_start, vx_r, vy_r)
+        ("Stage 1: Stationary Obstacle (0.0 m/s)", 0.00, 1.0, 0.00, 1.20, 0.00, 0.00),
+        ("Stage 2: Sub-threshold Slow Obstacle (0.20 m/s)", 0.20, 1.5, 0.00, 1.40, 0.00, -0.20),
+        ("Stage 3: Moderate Oncoming Obstacle (0.50 m/s)", 0.50, 1.5, 0.00, 1.50, 0.00, -0.50),
+        ("Stage 4: Fast Oncoming Obstacle (0.80 m/s)", 0.80, 1.2, 0.00, 1.60, 0.00, -0.80),
+        ("Stage 5: High-Speed Oncoming Obstacle (1.20 m/s)", 1.20, 0.8, 0.00, 1.70, 0.00, -1.20),
+        ("Stage 6: Lateral Crossing Obstacle (0.50 m/s)", 0.50, 1.5, -0.45, 0.90, 0.50, 0.00),
+    ]
+
+    results_summary = []
+    cos_th0 = math.cos(theta0)
+    sin_th0 = math.sin(theta0)
+
+    for stage_idx, (st_name, target_speed, duration_s, x_start, y_start, vx_r, vy_r) in enumerate(test_stages):
+        print(f"\n---> Starting {st_name} ...", flush=True)
+        vehicle.obstacle_tracker.reset()
+
+        dt_step = TIME_STEP_MS / 1000.0
+        n_steps = int(round(duration_s / dt_step))
+        stage_speeds = []
+        dynamic_detected = False
+
+        for step in range(n_steps):
+            t_stage = step * dt_step
+
+            # Update moving obstacle position relative to stationary robot
+            xr = x_start + vx_r * t_stage
+            yr = y_start + vy_r * t_stage
+            X_obs = float(X0 + cos_th0 * xr - sin_th0 * yr)
+            Y_obs = float(Y0 + sin_th0 * xr + cos_th0 * yr)
+
+            if obs_field:
+                obs_field.setSFVec3f([X_obs, Y_obs, 0.075])
+
+            # Lock vehicle stationary
+            for m in vehicle.motors.values():
+                if m:
+                    m.setVelocity(0.0)
+            for s in vehicle.servos.values():
+                if s:
+                    s.setPosition(0.0)
+
+            if robot.step(TIME_STEP_MS) == -1:
+                return
+
+            telemetry, planner_ran = vehicle.step(dt=DT)
+
+            # Record track data if planner ran (60 Hz)
+            if planner_ran and vehicle.last_dynamic_tracks:
+                for tr in vehicle.last_dynamic_tracks:
+                    stage_speeds.append(tr.v_mag)
+                    if tr.is_dynamic:
+                        dynamic_detected = True
+            elif planner_ran and vehicle.obstacle_tracker.tracks:
+                # If obstacle is static, check its estimated speed
+                for tr in vehicle.obstacle_tracker.tracks.values():
+                    if abs(tr.x_r - xr) < 0.35 and abs(tr.y_r - yr) < 0.35:
+                        if tr.consecutive_associations >= 5:
+                            stage_speeds.append(tr.v_mag)
+
+            # Send telemetry packet for live GUI visualization
+            if planner_ran:
+                telemetry["obstacles"] = [[round(X_obs, 3), round(Y_obs, 3)]]
+                telemetry["test_stage"] = st_name
+                try:
+                    pkt_bytes = json.dumps(to_py(telemetry)).encode("utf-8")
+                    gui_sock.sendto(pkt_bytes, ("127.0.0.1", 9876))
+                except Exception:
+                    pass
+
+        mean_est_speed = float(np.mean(stage_speeds)) if stage_speeds else 0.0
+        expected_dyn = (target_speed >= 0.40)
+        passed = (dynamic_detected == expected_dyn)
+
+        results_summary.append({
+            "stage": st_name,
+            "target_speed": target_speed,
+            "est_speed": round(mean_est_speed, 3),
+            "error_mps": round(abs(mean_est_speed - target_speed), 3),
+            "flagged_dynamic": dynamic_detected,
+            "expected_dynamic": expected_dyn,
+            "status": "PASS" if passed else "FAIL",
+        })
+
+        status_str = "PASS" if passed else "FAIL"
+        print(f"     Target: {target_speed:.2f} m/s | Est: {mean_est_speed:.3f} m/s | Dynamic: {dynamic_detected} (Expected: {expected_dyn}) -> [{status_str}]", flush=True)
+
+    # Print Final Summary Table
+    print("\n" + "=" * 80, flush=True)
+    print("  PHASE 1 STATIONARY OBSTACLE TEST RESULTS SUMMARY", flush=True)
+    print("=" * 80, flush=True)
+    print(f"{'Stage / Scenario':<45} | {'Target':<8} | {'Estimated':<9} | {'Error':<7} | {'Dynamic?':<8} | {'Result'}", flush=True)
+    print("-" * 95, flush=True)
+    for r in results_summary:
+        print(f"{r['stage']:<45} | {r['target_speed']:4.2f} m/s | {r['est_speed']:5.3f} m/s | {r['error_mps']:4.3f}m | {str(r['flagged_dynamic']):<8} | {r['status']}", flush=True)
+    print("=" * 80 + "\n", flush=True)
+
+    auto_exit = os.environ.get("WEBOTS_AUTO_QUIT", "1").lower() in ("1", "true", "yes")
+    if auto_exit and hasattr(robot, "simulationQuit"):
+        print("[Stationary Test] Auto-quitting simulation after test completion...", flush=True)
+        robot.simulationQuit(0)
+
+
+# ==============================================================================
+# MODE 5: MOVING ROBOT + DYNAMIC OBSTACLE TEST (PHASE 2 EGO-MOTION COMPENSATION)
+# ==============================================================================
+def run_moving_obstacle_test(robot: any, vehicle: FolkraceVehicle) -> None:
+    print("=" * 80, flush=True)
+    print("  PHASE 2 TEST: MOVING ROBOT + EGO-MOTION COMPENSATED OBSTACLE TRACKING", flush=True)
+    print("  Evaluating dynamic obstacle tracking with vehicle driving at race speeds", flush=True)
+    print("=" * 80, flush=True)
+
+    obs_node = robot.getFromDef("MOVING_OBSTACLE") if hasattr(robot, "getFromDef") else None
+    obs2_node = robot.getFromDef("MOVING_OBSTACLE_2") if hasattr(robot, "getFromDef") else None
+    obs3_node = robot.getFromDef("MOVING_OBSTACLE_3") if hasattr(robot, "getFromDef") else None
+
+    # Park secondary obstacles away
+    for node in [obs2_node, obs3_node]:
+        if node:
+            f = node.getField("translation")
+            if f:
+                f.setSFVec3f([100.0, 100.0, -10.0])
+
+    obs_field = obs_node.getField("translation") if obs_node else None
+    if not obs_field:
+        print("[Test Warning] MOVING_OBSTACLE not found in world via getFromDef!", flush=True)
+
+    gui_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    gui_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+
+    # Warm up physics (0.50 s)
+    for _ in range(int(0.50 / (TIME_STEP_MS / 1000.0))):
+        if robot.step(TIME_STEP_MS) == -1:
+            return
+        for m in vehicle.motors.values():
+            if m:
+                m.setVelocity(0.0)
+        for s in vehicle.servos.values():
+            if s:
+                s.setPosition(0.0)
+
+    start_pos = [0.0, 0.0, 0.0275]
+    start_rot = [0.0, 0.0, 1.0, -1.570795]
+
+    test_stages = [
+        # (name, ego_v, ego_steer, target_obs_v, duration_s, x0_rel, y0_rel, vx_obs_w, vy_obs_w)
+        ("Stage 1: Cruising (2.0 m/s) passing Stationary Obstacle", 2.0, 0.0, 0.00, 1.5, 0.00, 1.50, 0.00, 0.00),
+        ("Stage 2: Cruising (2.5 m/s) with Oncoming Obstacle (1.0 m/s)", 2.5, 0.0, 1.00, 1.2, 0.00, 1.60, 0.00, -1.00),
+        ("Stage 3: Cruising (2.0 m/s) with Leading Obstacle (1.5 m/s)", 2.0, 0.0, 1.50, 1.5, 0.00, 1.20, 0.00, 1.50),
+        ("Stage 4: Turning (Steer 0.25 rad) passing Stationary Wall", 1.8, 0.25, 0.00, 1.2, 0.00, 1.40, 0.00, 0.00),
+        ("Stage 5: Turning (Steer 0.25 rad) with Lateral Crossing Obstacle (0.6 m/s)", 1.8, 0.25, 0.60, 1.5, -0.40, 1.00, 0.60, 0.00),
+    ]
+
+    results_summary = []
+    dt_step = TIME_STEP_MS / 1000.0
+
+    def to_py(obj):
+        if isinstance(obj, (np.floating, float)):
+            return float(obj)
+        elif isinstance(obj, (np.integer, int)):
+            return int(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif isinstance(obj, dict):
+            return {k: to_py(v) for k, v in obj.items()}
+        elif isinstance(obj, (list, tuple)):
+            return [to_py(v) for v in obj]
+        return obj
+
+    for stage_idx, (st_name, ego_v, ego_steer, target_obs_v, duration_s, x0_rel, y0_rel, vx_obs_w, vy_obs_w) in enumerate(test_stages):
+        print(f"\n---> Starting {st_name} ...", flush=True)
+        vehicle.reset(start_pos=start_pos, start_rot=start_rot)
+        vehicle.obstacle_tracker.reset()
+
+        # Settle after reset (0.10 s)
+        for _ in range(int(0.10 / dt_step)):
+            if robot.step(TIME_STEP_MS) == -1:
+                return
+
+        X_ego0, Y_ego0, theta_ego0 = vehicle.get_ground_truth_pose()
+        cos_th = math.cos(theta_ego0)
+        sin_th = math.sin(theta_ego0)
+        X_obs0 = float(X_ego0 + cos_th * x0_rel - sin_th * y0_rel)
+        Y_obs0 = float(Y_ego0 + sin_th * x0_rel + cos_th * y0_rel)
+
+        n_steps = int(round(duration_s / dt_step))
+        stage_speeds = []
+        dynamic_detected = False
+
+        for step in range(n_steps):
+            t_stage = step * dt_step
+
+            # Update obstacle world position
+            X_obs = X_obs0 + vx_obs_w * t_stage
+            Y_obs = Y_obs0 + vy_obs_w * t_stage
+            if obs_field:
+                obs_field.setSFVec3f([X_obs, Y_obs, 0.075])
+
+            # Apply motor velocity and steering
+            wheel_omega = (ego_v / WHEEL_RADIUS) * MOTOR_DIR
+            for m in vehicle.motors.values():
+                if m:
+                    m.setVelocity(wheel_omega)
+            for s in vehicle.servos.values():
+                if s:
+                    s.setPosition(ego_steer)
+
+            # Step vehicle planner pipeline
+            telem, was_active = vehicle.step_planner(sim_time=t_stage)
+
+            if was_active and vehicle.last_dynamic_tracks:
+                for tr in vehicle.last_dynamic_tracks:
+                    if tr.is_dynamic:
+                        dynamic_detected = True
+                        stage_speeds.append(tr.v_mag)
+            elif was_active and vehicle.obstacle_tracker.tracks:
+                for tr in vehicle.obstacle_tracker.tracks.values():
+                    stage_speeds.append(tr.v_mag)
+
+            if telem:
+                try:
+                    payload = json.dumps(to_py(telem)).encode("utf-8")
+                    gui_sock.sendto(payload, ("127.0.0.1", 9876))
+                except Exception:
+                    pass
+
+            if robot.step(TIME_STEP_MS) == -1:
+                return
+
+        mean_est_speed = float(np.mean(stage_speeds[-10:])) if stage_speeds else 0.0
+        expected_dyn = (target_obs_v >= 0.40)
+        err = abs(mean_est_speed - target_obs_v)
+        passed = (dynamic_detected == expected_dyn) and (err < 0.25 or not expected_dyn)
+
+        results_summary.append({
+            "stage": st_name,
+            "target_speed": target_obs_v,
+            "est_speed": mean_est_speed,
+            "error_mps": err,
+            "flagged_dynamic": dynamic_detected,
+            "status": "PASS" if passed else "FAIL",
+        })
+
+        status_str = "PASS" if passed else "FAIL"
+        print(f"     Target: {target_obs_v:.2f} m/s | Est: {mean_est_speed:.3f} m/s | Dynamic: {dynamic_detected} (Expected: {expected_dyn}) -> [{status_str}]", flush=True)
+
+    print("\n" + "=" * 80, flush=True)
+    print("  PHASE 2 MOVING ROBOT OBSTACLE TEST RESULTS SUMMARY", flush=True)
+    print("=" * 80, flush=True)
+    print(f"{'Stage / Scenario':<55} | {'Target':<8} | {'Estimated':<9} | {'Error':<7} | {'Dynamic?':<8} | {'Result'}", flush=True)
+    print("-" * 105, flush=True)
+    for r in results_summary:
+        print(f"{r['stage']:<55} | {r['target_speed']:4.2f} m/s | {r['est_speed']:5.3f} m/s | {r['error_mps']:4.3f}m | {str(r['flagged_dynamic']):<8} | {r['status']}", flush=True)
+    print("=" * 80 + "\n", flush=True)
+
+    auto_exit = os.environ.get("WEBOTS_AUTO_QUIT", "1").lower() in ("1", "true", "yes")
+    if auto_exit and hasattr(robot, "simulationQuit"):
+        print("[Moving Test] Auto-quitting simulation after test completion...", flush=True)
+        robot.simulationQuit(0)
+
+
+# ==============================================================================
+# MODE 6: PHASE 3 LIVE WEBOTS RENDERED TEST (MOVING ROBOT & DYNAMIC OBSTACLES)
+# ==============================================================================
+def run_phase3_live_test(robot: any, vehicle: FolkraceVehicle) -> None:
+    log_file_path = os.path.join(MY_PROJECT_DIR, "phase3_telemetry.log")
+    try:
+        with open(log_file_path, "w", encoding="utf-8") as f:
+            f.write(f"=== PHASE 3 TELEMETRY LOG STARTED AT {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n")
+    except Exception:
+        pass
+
+    def log_line(msg: str):
+        print(msg, flush=True)
+        try:
+            with open(log_file_path, "a", encoding="utf-8") as f:
+                f.write(msg + "\n")
+        except Exception:
+            pass
+
+    log_line("=" * 80)
+    log_line("  PHASE 3 LIVE WEBOTS TEST: FULLY RENDERED 3D SIMULATION")
+    log_line("  Robot moves back-and-forth along X axis with ego-motion compensation.")
+    log_line("  Interactive Controls (Click 3D Webots window to focus):")
+    log_line("    [1] : Mode 1 - Obstacle Stationary (Test ego-motion rejection while robot oscillates)")
+    log_line("    [2] : Mode 2 - Obstacle Longitudinal Movement (Towards / away at ~0.63 m/s)")
+    log_line("    [3] : Mode 3 - Obstacle Lateral Crossing (Left / right across FOV at ~0.68 m/s)")
+    log_line("    [4] : Mode 4 - Robot Paused, Obstacle Longitudinal Movement")
+    log_line("    [5] : Mode 5 - Robot Paused, Obstacle Lateral Crossing")
+    log_line("    [6] : Mode 6 - Both Robot and Obstacle Stationary (Zero baseline)")
+    log_line("    [Space] : Toggle Robot back-and-forth movement")
+    log_line("    [R] : Reset Robot and Obstacle poses")
+    log_line("=" * 80)
+
+    obs_node = robot.getFromDef("MOVING_OBSTACLE") if hasattr(robot, "getFromDef") else None
+    obs_field = obs_node.getField("translation") if obs_node else None
+
+    # Enable keyboard
+    keyboard = robot.getKeyboard() if hasattr(robot, "getKeyboard") else None
+    if keyboard:
+        try:
+            keyboard.enable(TIME_STEP_MS)
+        except Exception:
+            pass
+
+    gui_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    gui_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+
+    cmd_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    cmd_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        cmd_sock.bind(("127.0.0.1", 9877))
+        cmd_sock.setblocking(False)
+        log_line("[Phase 3] Live GUI command receiver bound to port 9877")
+    except Exception as e:
+        log_line(f"[Phase 3] Note: Could not bind command port 9877: {e}")
+
+    start_pos = [0.0, 0.0, 0.0275]
+    start_rot = [0.0, 0.0, 1.0, -1.5707953]
+
+    # Warm up physics (0.50 s)
+    for _ in range(int(0.50 / (TIME_STEP_MS / 1000.0))):
+        if robot.step(TIME_STEP_MS) == -1:
+            return
+        for m in vehicle.motors.values():
+            if m:
+                m.setVelocity(0.0)
+        for s in vehicle.servos.values():
+            if s:
+                s.setPosition(0.0)
+
+    # Initial mode & sweep options
+    init_mode = int(os.environ.get("WEBOTS_PHASE3_MODE", "1"))
+    obs_mode = init_mode if init_mode in (1, 2, 3, 4, 5, 6) else 1
+    auto_sweep = os.environ.get("WEBOTS_AUTO_SWEEP", "0").lower() in ("1", "true", "yes")
+    sweep_interval = float(os.environ.get("WEBOTS_SWEEP_INTERVAL", "6.0"))
+    last_sweep_stage = -1
+
+    # Inject +-5% sensor noise by default in Phase 3
+    vehicle.tof_noise_pct = float(os.environ.get("TOF_NOISE_PCT", "0.05"))
+
+    robot_moving_enabled = True
+    sim_time = 0.0
+    dt_step = TIME_STEP_MS / 1000.0
+    last_print_time = 0.0
+
+    mode_names = {
+        1: "1-STATIC-EGO-REJECT",
+        2: "2-LONGITUDINAL",
+        3: "3-LATERAL-CROSS",
+        4: "4-DIAGONAL-PATH",
+        5: "5-ACCEL-DECEL-SURGE",
+        6: "6-S-CURVE-WEAVE",
+    }
+    mode_targets = {
+        1: 0.00,
+        2: 0.63,
+        3: 0.63,
+        4: 0.68,
+        5: 0.60,
+        6: 0.65,
+    }
+
+    # Tracking metrics per mode for automated summary
+    stage_metrics = {m: {"speeds": [], "dynamics": [], "leads": []} for m in range(1, 7)}
+
+    def to_py(obj):
+        if isinstance(obj, (np.floating, float)):
+            return float(obj)
+        elif isinstance(obj, (np.integer, int)):
+            return int(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif isinstance(obj, dict):
+            return {k: to_py(v) for k, v in obj.items()}
+        elif isinstance(obj, (list, tuple)):
+            return [to_py(v) for v in obj]
+        return obj
+
+    def print_summary_table():
+        log_line("\n" + "=" * 92)
+        log_line("  PHASE 3 DYNAMIC OBSTACLE TEST RESULTS SUMMARY (+/-5% SENSOR NOISE, ROBOT ALWAYS MOVING)")
+        log_line("=" * 92)
+        log_line(f"{'Mode / Scenario':<26} | {'Target':<8} | {'Estimated':<9} | {'Error':<7} | {'Dynamic?':<9} | {'Lead':<7} | {'Result'}")
+        log_line("-" * 92)
+        for m in range(1, 7):
+            m_info = stage_metrics[m]
+            tgt_v = mode_targets[m]
+            speeds = m_info["speeds"]
+            dyns = m_info["dynamics"]
+            leads = m_info["leads"]
+            if speeds:
+                est_v = float(np.mean(speeds[-20:])) if len(speeds) >= 20 else float(np.mean(speeds))
+                any_dyn = any(dyns)
+                avg_lead = float(np.mean(leads[-20:])) if leads else 0.0
+                err = abs(est_v - tgt_v)
+                expected_dyn = (tgt_v >= 0.40)
+                overshoot = (est_v > tgt_v + 0.01) if expected_dyn else (max(speeds) >= 0.40)
+                passed = (any_dyn == expected_dyn) and (not overshoot) and (err <= 0.35 or not expected_dyn)
+                res_str = "PASS" if passed else "FAIL"
+                log_line(f"{mode_names[m]:<26} | {tgt_v:4.2f} m/s | {est_v:5.2f} m/s | {err:4.2f} m | {str(any_dyn):<9} | {avg_lead:4.1f}cm | {res_str}")
+            else:
+                log_line(f"{mode_names[m]:<26} | {tgt_v:4.2f} m/s |   N/A     |   N/A   |   N/A     |   N/A   | UNTESTED")
+        log_line("=" * 92 + "\n")
+
+    while robot.step(TIME_STEP_MS) != -1:
+        sim_time += dt_step
+
+        # Check automated sweep progression
+        if auto_sweep:
+            curr_stage = int(sim_time // sweep_interval)
+            new_mode = (curr_stage % 6) + 1
+            if curr_stage != last_sweep_stage:
+                last_sweep_stage = curr_stage
+                obs_mode = new_mode
+                vehicle.obstacle_tracker.reset()
+                log_line(f">>> [Phase 3 Auto-Sweep] Advanced to Mode {obs_mode}: {mode_names[obs_mode]}")
+
+        # Check incoming UDP GUI commands on Port 9877
+        try:
+            while True:
+                cmd_data, _ = cmd_sock.recvfrom(4096)
+                cmd_pkt = json.loads(cmd_data.decode("utf-8"))
+                c = cmd_pkt.get("cmd", "")
+                if c == "set_phase3_mode":
+                    m_val = int(cmd_pkt.get("mode", 1))
+                    if m_val in (1, 2, 3, 4, 5, 6):
+                        auto_sweep = False
+                        obs_mode = m_val
+                        vehicle.obstacle_tracker.reset()
+                        log_line(f">>> [Phase 3 GUI Cmd] Switched to Mode {obs_mode}: {mode_names[obs_mode]}")
+                elif c == "toggle_sweep":
+                    auto_sweep = not auto_sweep
+                    log_line(f">>> [Phase 3 GUI Cmd] Auto Sweep: {'ENABLED' if auto_sweep else 'DISABLED'}")
+                elif c == "toggle_robot":
+                    robot_moving_enabled = not robot_moving_enabled
+                    log_line(f">>> [Phase 3 GUI Cmd] Robot Movement: {'ENABLED' if robot_moving_enabled else 'PAUSED'}")
+                elif c == "reset":
+                    vehicle.reset(start_pos=start_pos, start_rot=start_rot)
+                    vehicle.obstacle_tracker.reset()
+                    sim_time = 0.0
+                    last_sweep_stage = -1
+                    log_line(">>> [Phase 3 GUI Cmd] Reset to Initial Pose")
+        except (BlockingIOError, socket.error):
+            pass
+        except Exception:
+            pass
+
+        max_run_seconds = float(os.environ.get("WEBOTS_RUN_SECONDS", "0.0"))
+        if max_run_seconds > 0.0 and sim_time >= max_run_seconds:
+            print_summary_table()
+            log_line(f"[Phase 3] Target duration reached ({sim_time:.1f}s >= {max_run_seconds:.1f}s). Exiting Webots cleanly...")
+            if hasattr(robot, "simulationQuit"):
+                robot.simulationQuit(0)
+            return
+
+        # Read keyboard in Webots 3D view
+        if keyboard:
+            key = keyboard.getKey()
+            while key > 0:
+                if key == ord('1'):
+                    auto_sweep = False
+                    obs_mode = 1
+                    vehicle.obstacle_tracker.reset()
+                    log_line(">>> [Phase 3] Switched to Mode 1: Obstacle Stationary (Robot Moving)")
+                elif key == ord('2'):
+                    auto_sweep = False
+                    obs_mode = 2
+                    vehicle.obstacle_tracker.reset()
+                    log_line(">>> [Phase 3] Switched to Mode 2: Obstacle Longitudinal Motion")
+                elif key == ord('3'):
+                    auto_sweep = False
+                    obs_mode = 3
+                    vehicle.obstacle_tracker.reset()
+                    log_line(">>> [Phase 3] Switched to Mode 3: Obstacle Lateral Crossing")
+                elif key == ord('4'):
+                    auto_sweep = False
+                    obs_mode = 4
+                    vehicle.obstacle_tracker.reset()
+                    log_line(">>> [Phase 3] Switched to Mode 4: Obstacle Diagonal Path")
+                elif key == ord('5'):
+                    auto_sweep = False
+                    obs_mode = 5
+                    vehicle.obstacle_tracker.reset()
+                    log_line(">>> [Phase 3] Switched to Mode 5: Obstacle Accel/Decel Surge")
+                elif key == ord('6'):
+                    auto_sweep = False
+                    obs_mode = 6
+                    vehicle.obstacle_tracker.reset()
+                    log_line(">>> [Phase 3] Switched to Mode 6: Obstacle S-Curve Weave")
+                elif key in (ord('A'), ord('a')):
+                    auto_sweep = not auto_sweep
+                    log_line(f">>> [Phase 3] Auto Sweep: {'ENABLED' if auto_sweep else 'DISABLED'}")
+                elif key == ord(' '):
+                    robot_moving_enabled = not robot_moving_enabled
+                    state_str = "ENABLED" if robot_moving_enabled else "PAUSED"
+                    log_line(f">>> [Phase 3] Robot Movement: {state_str}")
+                elif key in (ord('R'), ord('r')):
+                    vehicle.reset(start_pos=start_pos, start_rot=start_rot)
+                    vehicle.obstacle_tracker.reset()
+                    sim_time = 0.0
+                    last_sweep_stage = -1
+                    log_line(">>> [Phase 3] Reset to Initial Pose")
+                key = keyboard.getKey()
+
+        # Update obstacle position based on current mode
+        # Mode 1: Stationary at X=1.25, Y=0.00
+        # Mode 2: Longitudinal motion along X (peak ~0.63 m/s)
+        # Mode 3: Lateral crossing along Y (peak ~0.63 m/s)
+        # Mode 4: Diagonal path (simultaneous X and Y motion, peak ~0.68 m/s)
+        # Mode 5: Accelerating & Decelerating Surge (harmonic pulse, peak ~0.60 m/s)
+        # Mode 6: S-Curve / Lissajous Weave in front of vehicle (peak ~0.65 m/s)
+        if obs_mode == 1:
+            X_obs = 1.25
+            Y_obs = 0.00
+        elif obs_mode == 2:
+            X_obs = 1.25 + 0.22 * math.sin(2.0 * math.pi * sim_time / 2.2)
+            Y_obs = 0.00
+        elif obs_mode == 3:
+            X_obs = 1.25
+            Y_obs = 0.22 * math.sin(2.0 * math.pi * sim_time / 2.2)
+        elif obs_mode == 4:
+            X_obs = 1.25 + 0.17 * math.sin(2.0 * math.pi * sim_time / 2.2)
+            Y_obs = 0.17 * math.sin(2.0 * math.pi * sim_time / 2.2)
+        elif obs_mode == 5:
+            X_obs = 1.25 + 0.18 * math.sin(2.0 * math.pi * sim_time / 2.2) + 0.08 * math.sin(4.0 * math.pi * sim_time / 2.2)
+            Y_obs = 0.00
+        elif obs_mode == 6:
+            X_obs = 1.25 + 0.10 * math.sin(4.0 * math.pi * sim_time / 2.2)
+            Y_obs = 0.18 * math.sin(2.0 * math.pi * sim_time / 2.2)
+        else:
+            X_obs = 1.25
+            Y_obs = 0.00
+
+        if obs_field:
+            obs_field.setSFVec3f([float(X_obs), float(Y_obs), 0.075])
+
+        # Robot movement: ALWAYS MOVING IN PHASE 3!
+        # High-dynamics slalom: peak speed 1.40 m/s with +/-0.10 rad active steering oscillating at 0.9s period
+        if robot_moving_enabled:
+            target_v = 1.40 * math.sin(2.0 * math.pi * sim_time / 2.0)
+            target_steer = 0.10 * math.sin(2.0 * math.pi * sim_time / 0.9)
+        else:
+            target_v = 0.0
+            target_steer = 0.0
+
+        # Step vehicle with speed and steer overrides
+        try:
+            telem, was_active = vehicle.step(
+                dt=dt_step,
+                full_telemetry=True,
+                override_speed=target_v,
+                override_steer=target_steer,
+            )
+        except Exception as step_err:
+            import traceback
+            log_line(f"[Phase 3] Step Exception: {step_err}\n{traceback.format_exc()}")
+            telem = None
+            was_active = False
+
+        # Extract current track metrics
+        obs_v_est = 0.0
+        is_dyn = False
+        lead_cm = 0.0
+        if vehicle.obstacle_tracker.tracks:
+            for tr in vehicle.obstacle_tracker.tracks.values():
+                obs_v_est = tr.v_mag
+                is_dyn = tr.is_dynamic
+                if is_dyn:
+                    lead_cm = min(0.25, tr.v_mag * 0.20) * 100.0
+                break
+
+        # Record metrics for summary
+        stage_metrics[obs_mode]["speeds"].append(obs_v_est)
+        stage_metrics[obs_mode]["dynamics"].append(is_dyn)
+        stage_metrics[obs_mode]["leads"].append(lead_cm)
+
+        # Enrich and send live telemetry to PyQt5 GUI
+        if telem:
+            m_str = mode_names.get(obs_mode, "UNKNOWN")
+            telem["mode"] = "PHASE3"
+            telem["test_stage"] = f"Mode {obs_mode}: {m_str}"
+            telem["obstacles"] = [[round(float(X_obs), 3), round(float(Y_obs), 3)]]
+            telem["auto_sweep"] = auto_sweep
+            telem["phase3_mode"] = obs_mode
+            try:
+                payload = json.dumps(to_py(telem)).encode("utf-8")
+                gui_sock.sendto(payload, ("127.0.0.1", 9876))
+            except Exception:
+                pass
+
+        # Print status at 2 Hz
+        if sim_time - last_print_time >= 0.50:
+            last_print_time = sim_time
+            m_str = mode_names.get(obs_mode, "UNKNOWN")
+            dyn_str = "DYNAMIC [YES]" if is_dyn else "STATIC  [NO ]"
+            v_ego_est = getattr(vehicle, "v_est", 0.0)
+            sweep_tag = "[AUTO]" if auto_sweep else "[MANUAL]"
+            log_line(f"[Phase 3] {sweep_tag} Mode: {m_str:<15} | Robot v: {v_ego_est:+5.2f}m/s | Obs Speed: {obs_v_est:5.2f}m/s | {dyn_str} | Lead: {lead_cm:4.1f}cm")
+
+
+# ==============================================================================
 # ENTRY POINT
 # ==============================================================================
 def main():
@@ -815,10 +1475,16 @@ def main():
 
     vehicle = FolkraceVehicle(robot, is_supervisor=is_supervisor)
 
-    # Determine mode: GA worker, Champion preview, or Racing studio
+    # Determine mode: GA worker, Champion preview, Stationary test, Moving test, Phase 3 live, or Racing studio
     mode = os.environ.get("WEBOTS_CONTROLLER_MODE", "").lower()
     if os.environ.get("GA_WORKER_PORT") or mode in ("ga_eval", "eval", "ga"):
         run_ga_worker(robot, vehicle)
+    elif mode in ("phase3", "phase3_live", "live_obs_test", "dynamic_obs_live"):
+        run_phase3_live_test(robot, vehicle)
+    elif mode in ("stationary_obs_test", "stationary_test", "obs_test"):
+        run_stationary_obstacle_test(robot, vehicle)
+    elif mode in ("moving_obs_test", "moving_test", "dynamic_test"):
+        run_moving_obstacle_test(robot, vehicle)
     elif mode in ("preview", "champion_preview", "replay"):
         run_champion_preview(robot, vehicle)
     else:
@@ -827,3 +1493,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

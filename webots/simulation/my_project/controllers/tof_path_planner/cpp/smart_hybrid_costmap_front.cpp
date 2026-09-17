@@ -77,6 +77,7 @@ public:
     std::vector<float> prob_map;
     std::vector<uint8_t> raw_hazard;
     std::vector<uint8_t> hazard_mask;
+    std::vector<uint8_t> unknown_mask;
     std::vector<int> kernel_dx;
     std::vector<int> kernel_dy;
 
@@ -105,6 +106,7 @@ public:
         prob_map.resize(total_cells, 0.50f);
         raw_hazard.resize(total_cells, 0);
         hazard_mask.resize(total_cells, 0);
+        unknown_mask.resize(total_cells, 1);
 
         // Precompute circular dilation structuring element
         inflation_cells = static_cast<int>(std::round(r_inflation_m / res));
@@ -309,12 +311,15 @@ public:
             }
         }
 
-        // Step 4: Sigmoid Probability Map & Raw Hazard Threshold
+        // Step 4: Sigmoid Probability Map, Confirmed Obstacle Threshold & Unknown Space
         for (int i = 0; i < total_cells; ++i) {
             float lo = std::max(-10.0f, std::min(10.0f, log_odds[i]));
             float p = 1.0f / (1.0f + std::exp(-lo));
             prob_map[i] = p;
-            raw_hazard[i] = (lo >= -0.5f) ? 1 : 0;
+            // Confirmed obstacle hits only (prob >= 0.65, log_odds >= 0.62)
+            raw_hazard[i] = (lo >= 0.62f) ? 1 : 0;
+            // Unobserved space: untouched / uncertain cells (std::abs(lo) < 0.5f, prob ~ 0.50)
+            unknown_mask[i] = (std::abs(lo) < 0.5f) ? 1 : 0;
         }
 
         // Step 5: C-Space Morphological Dilation on Confirmed Obstacle Boundaries
@@ -336,6 +341,13 @@ public:
             }
         } else {
             hazard_mask = raw_hazard;
+        }
+
+        // Confirmed obstacle boundaries take precedence over unknown space
+        for (int i = 0; i < total_cells; ++i) {
+            if (hazard_mask[i] == 1) {
+                unknown_mask[i] = 0;
+            }
         }
     }
 
@@ -710,6 +722,12 @@ COSTMAP_API void costmap_process_frame(
     if (out_hazard_mask) {
         std::memcpy(out_hazard_mask, cm->hazard_mask.data(), cm->total_cells * sizeof(uint8_t));
     }
+}
+
+COSTMAP_API void costmap_get_unknown_mask(void* handle, uint8_t* out_unknown_mask) {
+    if (!handle || !out_unknown_mask) return;
+    auto* cm = static_cast<SmartHybridCostmapFront*>(handle);
+    std::memcpy(out_unknown_mask, cm->unknown_mask.data(), cm->total_cells * sizeof(uint8_t));
 }
 
 COSTMAP_API int costmap_scout_gaps(

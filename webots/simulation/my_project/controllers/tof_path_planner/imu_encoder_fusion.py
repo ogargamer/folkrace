@@ -154,10 +154,9 @@ class IMUEncoderFusion:
             # Standstill lock
             self.v_est = 0.0
         else:
-            # Bound prediction within physical traction envelope of wheel rolling speed
-            v_pred_clamped = max(0.0, min(self.v_wheels + 1.2, max(self.v_wheels - 1.2, v_pred)))
+            # Bound prediction within physical traction envelope of wheel rolling speed (supports forward and reverse)
+            v_pred_clamped = min(self.v_wheels + 1.2, max(self.v_wheels - 1.2, v_pred))
             self.v_est = self.alpha_accel * v_pred_clamped + (1.0 - self.alpha_accel) * self.v_wheels
-            self.v_est = max(0.0, self.v_est)
 
         # Distance integration
         self.total_distance_m += self.v_est * step_dt

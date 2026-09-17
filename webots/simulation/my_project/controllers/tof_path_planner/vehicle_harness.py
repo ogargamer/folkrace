@@ -32,6 +32,7 @@ from tof_gap_scout import ToFGapScout
 from planner_option2_sl_mpc import CurvilinearSLMPC
 from stuck_recovery_manager import StuckRecoveryManager, StuckRecoveryState
 from anti_wrong_way_watchdog import AntiWrongWayWatchdog
+from dynamic_obstacle_tracker import DynamicObstacleTracker
 from planner_config import (
     TIME_STEP_MS,
     DT,
@@ -212,6 +213,11 @@ class FolkraceVehicle:
             r_inflation_m=R_INFLATION_M,
         )
 
+        self.obstacle_tracker = DynamicObstacleTracker()
+        self.last_dynamic_tracks = []
+        self.last_obs_telem = {}
+        self.last_enlarged_hazard = None
+
         self.gap_scout = ToFGapScout()
         self.planner = CurvilinearSLMPC(costmap_engine=self.costmap)
         self.planner.costmap = self.costmap
@@ -259,6 +265,8 @@ class FolkraceVehicle:
         self.mode_desc = "OPTION_2_SL_MPC"
         self.cached_plan_ms = 0.0
         self.cached_map_ms = 0.0
+        self.v_est = 0.0
+        self.cached_yaw_rate = 0.0
         self.x_est = 0.0
         self.y_est = 0.0
         self.yaw_est = 0.0
@@ -401,18 +409,28 @@ class FolkraceVehicle:
         self.was_recovering = False
         self.mode_desc = "OPTION_2_SL_MPC"
         self.stall_counter = 0
-        self.last_plan_res = {}
+        self.v_est = 0.0
+        self.cached_yaw_rate = 0.0
         self.x_est = float(start_pos[0]) if start_pos else 0.0
         self.y_est = float(start_pos[1]) if start_pos else 0.0
         self.yaw_est = 0.0
+        self.obstacle_tracker.reset()
+        self.last_dynamic_tracks = []
+        self.last_obs_telem = {}
+        self.last_enlarged_hazard = None
 
     def read_tof_sensors(self) -> Dict[str, float]:
         """Reads all 16 ToF range sensors and returns a dict mapping sensor name -> range in meters."""
         cached_tofs: Dict[str, float] = {}
+        noise_pct = getattr(self, "tof_noise_pct", float(os.environ.get("TOF_NOISE_PCT", 0.0)))
         for name in TOF_SENSOR_NAMES:
             dev = self.tofs.get(name)
             if dev is not None:
-                cached_tofs[name] = read_tof_device(dev)
+                val = read_tof_device(dev)
+                if noise_pct > 0.0 and val < (TOF_MAX_RANGE_M - 0.01):
+                    noise = float(np.random.uniform(-noise_pct, noise_pct)) * val
+                    val = float(np.clip(val + noise, 0.02, TOF_MAX_RANGE_M))
+                cached_tofs[name] = val
             else:
                 cached_tofs[name] = TOF_MAX_RANGE_M
         self.last_tofs = cached_tofs
@@ -443,7 +461,13 @@ class FolkraceVehicle:
                 pass
         return float(self.rate_limited_speed)
 
-    def step(self, dt: float = DT, full_telemetry: bool = True) -> Tuple[Dict[str, Any], bool]:
+    def step(
+        self,
+        dt: float = DT,
+        full_telemetry: bool = True,
+        override_speed: Optional[float] = None,
+        override_steer: Optional[float] = None,
+    ) -> Tuple[Dict[str, Any], bool]:
         """
         Executes one 120 Hz dynamics step with 60 Hz planner decimation.
         Returns: (telemetry_dict, planner_executed_boolean)
@@ -466,6 +490,7 @@ class FolkraceVehicle:
             gx, gy, gyaw = self.get_ground_truth_pose()
             telemetry = {
                 "time_step": self.step_counter,
+                "sim_time": round(float(sim_time), 3),
                 "mode": "WARMUP",
                 "planner": "OPTION2_SL_MPC",
                 "status": "WARMUP",
@@ -492,6 +517,8 @@ class FolkraceVehicle:
                 "grid_bounds": [float(GRID_X_MIN), float(GRID_X_MAX), float(GRID_Y_MIN), float(GRID_Y_MAX)],
                 "grid_data": "",
                 "hazard_data": "",
+                "dynamic_obstacles": [],
+                "obs_telem": {},
                 "recovery_state": "NORMAL",
                 "plan": {},
             }
@@ -508,22 +535,39 @@ class FolkraceVehicle:
             tof_readings = self.read_tof_sensors()
 
             # Sensor fusion at 60 Hz (Zero Cheating)
-            v_fused, yaw_fused, yaw_rate = self.fusion.update(dt=DT_PLANNER)
-            self.v_est = max(0.0, float(v_fused)) if not (math.isnan(v_fused) or math.isinf(v_fused)) else 0.0
+            # IMUEncoderFusion.update returns (v_est [m/s], yaw_rate [rad/s], yaw [rad])
+            v_fused, yaw_rate, yaw_fused = self.fusion.update(dt=DT_PLANNER)
+            self.v_est = float(v_fused) if not (math.isnan(v_fused) or math.isinf(v_fused)) else 0.0
             self.cached_yaw_rate = float(yaw_rate) if not (math.isnan(yaw_rate) or math.isinf(yaw_rate)) else 0.0
             self.yaw_est = float(yaw_fused) if not (math.isnan(yaw_fused) or math.isinf(yaw_fused)) else 0.0
 
-            self.x_est += self.v_est * math.cos(self.yaw_est) * (dt * PLANNER_DECIMATION)
-            self.y_est += self.v_est * math.sin(self.yaw_est) * (dt * PLANNER_DECIMATION)
+            # Odometry Dead Reckoning in world frame (Robot body: +Y is Forward, +X is Right)
+            dt_plan = dt * PLANNER_DECIMATION
+            self.x_est += -self.v_est * math.sin(self.yaw_est) * dt_plan
+            self.y_est +=  self.v_est * math.cos(self.yaw_est) * dt_plan
 
             prob_map, hazard_mask, map_ms = self.costmap.process_tof_frame(tof_readings)
             self.cached_map_ms = map_ms
+
+            # Dynamic Moving Obstacle Detection, Tracking & Vector Enlargement (Ego-Compensated)
+            enlarged_hazard_mask, dyn_tracks, obs_telem = self.obstacle_tracker.process_frame(
+                prob_map=prob_map,
+                robot_pose=(self.x_est, self.y_est, self.yaw_est),
+                now_s=sim_time,
+                base_hazard_mask=hazard_mask,
+                source_grid_bounds=(GRID_X_MIN, GRID_X_MAX, GRID_Y_MIN, GRID_Y_MAX),
+                v_ego=self.v_est,
+                yaw_rate=self.cached_yaw_rate,
+            )
+            self.last_dynamic_tracks = dyn_tracks
+            self.last_obs_telem = obs_telem
+            self.last_enlarged_hazard = enlarged_hazard_mask
 
             # Scout Forward Gaps using estimated actual physical wheel angle
             current_physical_steer = float(self.ediff.current_steer_rad)
             xg, yg, width, theta_g = self.gap_scout.scout_gap(
                 tof_readings=tof_readings,
-                hazard_mask=hazard_mask,
+                hazard_mask=enlarged_hazard_mask,
                 costmap_obj=self.costmap,
                 target_lookahead_m=self.target_lookahead_m,
                 steer_current=current_physical_steer,
@@ -588,7 +632,12 @@ class FolkraceVehicle:
                 current_yaw=gyaw_curr,
             )
 
-            if is_recovering:
+            if override_speed is not None:
+                target_speed = float(override_speed)
+                target_steer = float(override_steer) if override_steer is not None else 0.0
+                self.active_steer = target_steer
+                self.mode_desc = "OVERRIDE_TEST"
+            elif is_recovering:
                 target_speed = rec_v
                 target_steer = rec_steer
                 self.active_steer = rec_steer
@@ -649,16 +698,19 @@ class FolkraceVehicle:
             self.cached_target_steer = self.active_steer
 
         # 4. Friction Rate Limiter for speed command (120 Hz)
-        speed_err = self.cached_target_speed - self.rate_limited_speed
-        if (self.rate_limited_speed >= 0.0 and speed_err > 0.0) or (self.rate_limited_speed <= 0.0 and speed_err < 0.0):
-            max_dv = (0.85 * self.mu_val * 9.81) * dt
+        if override_speed is not None:
+            self.rate_limited_speed = float(override_speed)
         else:
-            max_dv = (1.00 * self.mu_val * 9.81) * dt
+            speed_err = self.cached_target_speed - self.rate_limited_speed
+            if (self.rate_limited_speed >= 0.0 and speed_err > 0.0) or (self.rate_limited_speed <= 0.0 and speed_err < 0.0):
+                max_dv = (0.85 * self.mu_val * 9.81) * dt
+            else:
+                max_dv = (1.00 * self.mu_val * 9.81) * dt
 
-        if abs(speed_err) <= max_dv:
-            self.rate_limited_speed = self.cached_target_speed
-        else:
-            self.rate_limited_speed += math.copysign(max_dv, speed_err)
+            if abs(speed_err) <= max_dv:
+                self.rate_limited_speed = self.cached_target_speed
+            else:
+                self.rate_limited_speed += math.copysign(max_dv, speed_err)
 
         live_gyro_z = float(self.gyro.getValues()[2]) if self.gyro else self.cached_yaw_rate
         diff_res = self.ediff.update(
@@ -699,6 +751,7 @@ class FolkraceVehicle:
         if not full_telemetry:
             telemetry = {
                 "time_step": self.step_counter,
+                "sim_time": round(float(sim_time), 3),
                 "mode": self.mode_desc,
                 "planner": "OPTION2_SL_MPC",
                 "status": self.last_plan_res.get("status", "OK"),
@@ -720,7 +773,8 @@ class FolkraceVehicle:
             return telemetry, planner_ran
 
         prob_down = (self.costmap.prob_map[::2, ::2] * 255.0).astype(np.uint8)
-        hazard_down = self.costmap.hazard_mask[::2, ::2].astype(np.uint8)
+        active_hazard = self.last_enlarged_hazard if self.last_enlarged_hazard is not None else self.costmap.hazard_mask
+        hazard_down = active_hazard[::2, ::2].astype(np.uint8)
         grid_compressed = base64.b64encode(zlib.compress(prob_down.tobytes())).decode("ascii")
         hazard_compressed = base64.b64encode(zlib.compress(hazard_down.tobytes())).decode("ascii")
 
@@ -735,6 +789,7 @@ class FolkraceVehicle:
 
         telemetry = {
             "time_step": self.step_counter,
+            "sim_time": round(float(sim_time), 3),
             "mode": self.mode_desc,
             "planner": "OPTION2_SL_MPC",
             "status": self.last_plan_res.get("status", "OK"),
@@ -765,6 +820,19 @@ class FolkraceVehicle:
             "grid_bounds": [float(GRID_X_MIN), float(GRID_X_MAX), float(GRID_Y_MIN), float(GRID_Y_MAX)],
             "grid_data": grid_compressed,
             "hazard_data": hazard_compressed,
+            "dynamic_obstacles": [
+                {
+                    "id": t.track_id,
+                    "x_r": round(float(t.x_r), 3),
+                    "y_r": round(float(t.y_r), 3),
+                    "v_mag": round(float(t.v_mag), 3),
+                    "v_rx": round(float(t.v_rx), 3),
+                    "v_ry": round(float(t.v_ry), 3),
+                    "is_dynamic": bool(t.is_dynamic),
+                }
+                for t in getattr(self, "last_dynamic_tracks", [])
+            ],
+            "obs_telem": getattr(self, "last_obs_telem", {}),
             "recovery_state": str(getattr(self.recovery_manager.state, "name", self.recovery_manager.state)),
             "watchdog_mode": str(getattr(self.watchdog.mode, "name", self.watchdog.mode)),
             "aww": aww_detailed,
@@ -772,3 +840,17 @@ class FolkraceVehicle:
         }
 
         return telemetry, planner_ran
+
+    def step_planner(
+        self,
+        sim_time: float = 0.0,
+        override_speed: Optional[float] = None,
+        override_steer: Optional[float] = None,
+    ) -> Tuple[Dict[str, Any], bool]:
+        """Convenience test wrapper for FolkraceVehicle.step()."""
+        return self.step(
+            dt=DT,
+            full_telemetry=True,
+            override_speed=override_speed,
+            override_steer=override_steer,
+        )

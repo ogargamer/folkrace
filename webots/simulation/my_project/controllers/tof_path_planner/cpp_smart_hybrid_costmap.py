@@ -57,6 +57,10 @@ _lib.costmap_get_width.restype = ctypes.c_int
 _lib.costmap_get_height.argtypes = [ctypes.c_void_p]
 _lib.costmap_get_height.restype = ctypes.c_int
 
+if hasattr(_lib, "costmap_get_unknown_mask"):
+    _lib.costmap_get_unknown_mask.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint8)]
+    _lib.costmap_get_unknown_mask.restype = None
+
 if hasattr(_lib, "costmap_scout_gaps"):
     _lib.costmap_scout_gaps.argtypes = [
         ctypes.c_void_p,
@@ -129,6 +133,7 @@ class CppSmartHybridCostmap:
         # Preallocated C-contiguous NumPy output buffers
         self.prob_map = np.zeros((self.height, self.width), dtype=np.float32)
         self.hazard_mask = np.zeros((self.height, self.width), dtype=np.uint8)
+        self.unknown_mask = np.zeros((self.height, self.width), dtype=np.uint8)
         self._lib = _lib
         self.raw_ranges_c = (ctypes.c_float * 16)()
 
@@ -148,6 +153,7 @@ class CppSmartHybridCostmap:
         """Clears probability and hazard output buffers."""
         self.prob_map.fill(0.0)
         self.hazard_mask.fill(0)
+        self.unknown_mask.fill(1)
 
     def update(self, readings: any, current_steer_rad: float = 0.0) -> Tuple[np.ndarray, np.ndarray, float]:
         """Convenience method accepting either list/array of 16 ranges or dict."""
@@ -203,6 +209,14 @@ class CppSmartHybridCostmap:
             self.prob_map.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
             self.hazard_mask.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
         )
+        if hasattr(_lib, "costmap_get_unknown_mask"):
+            _lib.costmap_get_unknown_mask(
+                self._handle,
+                self.unknown_mask.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
+            )
+        else:
+            self.unknown_mask = ((self.prob_map >= 0.38) & (self.prob_map <= 0.65) & (self.hazard_mask == 0)).astype(np.uint8)
+
         exec_ms = (time.perf_counter() - t0) * 1000.0
         return self.prob_map, self.hazard_mask, exec_ms
 
@@ -219,6 +233,13 @@ class CppSmartHybridCostmap:
             self.prob_map.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
             self.hazard_mask.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
         )
+        if hasattr(_lib, "costmap_get_unknown_mask"):
+            _lib.costmap_get_unknown_mask(
+                self._handle,
+                self.unknown_mask.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
+            )
+        else:
+            self.unknown_mask = ((self.prob_map >= 0.38) & (self.prob_map <= 0.65) & (self.hazard_mask == 0)).astype(np.uint8)
 
         return self.prob_map, self.hazard_mask
 
