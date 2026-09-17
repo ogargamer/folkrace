@@ -266,7 +266,10 @@ def run_racing_studio(robot: any, vehicle: FolkraceVehicle) -> None:
                                 vehicle.costmap.x_min, vehicle.costmap.x_max, vehicle.costmap.y_min, vehicle.costmap.y_max, vehicle.costmap.res, vehicle.costmap.r_inflation_m
                             )
                         elif p_name == "target_speed":
-                            vehicle.planner.v_cruise_max = float(p_val)
+                            val_f = float(p_val)
+                            vehicle.planner.v_cruise_max = val_f
+                            if hasattr(vehicle, "straight_lock_speed"):
+                                vehicle.straight_lock_speed = val_f
                         elif p_name == "alpha_peak":
                             vehicle.planner.alpha_peak = float(p_val)
                         elif p_name == "alt_switch_hysteresis" and hasattr(vehicle.planner, "alt_switch_hysteresis"):
@@ -517,7 +520,10 @@ def run_champion_preview(robot: any, vehicle: FolkraceVehicle) -> None:
                                 vehicle.costmap.x_min, vehicle.costmap.x_max, vehicle.costmap.y_min, vehicle.costmap.y_max, vehicle.costmap.res, vehicle.costmap.r_inflation_m
                             )
                         elif p_name == "target_speed":
-                            vehicle.planner.v_cruise_max = float(p_val)
+                            val_f = float(p_val)
+                            vehicle.planner.v_cruise_max = val_f
+                            if hasattr(vehicle, "straight_lock_speed"):
+                                vehicle.straight_lock_speed = val_f
                         elif p_name == "alpha_peak":
                             vehicle.planner.alpha_peak = float(p_val)
                         elif p_name == "alt_switch_hysteresis" and hasattr(vehicle.planner, "alt_switch_hysteresis"):
@@ -556,6 +562,7 @@ def run_champion_preview(robot: any, vehicle: FolkraceVehicle) -> None:
                 telemetry["active_planner"] = "OPTION2_SL_MPC"
                 telemetry["sim_time"] = round(sim_time, 2)
                 telemetry["telemetry_hz"] = telemetry_hz
+                telemetry["sim_speed"] = round(float(sim_speed_mult), 2)
                 telemetry["metrics"] = {
                     "track_dist_m": round(track_dist, 2),
                     "laps": int(track_tracker.current_lap),
@@ -594,6 +601,8 @@ def run_champion_preview(robot: any, vehicle: FolkraceVehicle) -> None:
         if sim_speed_mult < 0.99:
             target_step_dt = (TIME_STEP_MS / 1000.0) / max(0.01, sim_speed_mult)
             elapsed_wall = time.perf_counter() - wall_start_t
+            if elapsed_wall < target_step_dt:
+                time.sleep(target_step_dt - elapsed_wall)
 
 # ==============================================================================
 # MODE 2B: FAST CHAMPION PURE DRIVE (MAX REAL-TIME PERFORMANCE)
@@ -679,6 +688,8 @@ def run_ga_worker(robot: any, vehicle: FolkraceVehicle) -> None:
         BASE_WORKER_PORT,
         ROBOT_START_POS,
         ROBOT_START_ROT,
+        TRACK1_MOVING_OBSTACLE_SPEED_MPS,
+        TRACK2_MOVING_OBSTACLE_SPEED_MPS,
         compute_scalar_fitness,
         compute_efficiency_multiplier,
     )
@@ -687,13 +698,13 @@ def run_ga_worker(robot: any, vehicle: FolkraceVehicle) -> None:
     print(f"[GA Worker] Initializing on TCP port {worker_port}...", flush=True)
 
     traj_csv = find_trajectory_csv()
-    obs_engine = ReverseObstacleEngine(traj_csv, speed_mps=MOVING_OBSTACLE_SPEED_MPS)
+    obs_engine = ReverseObstacleEngine(traj_csv, speed_mps=TRACK1_MOVING_OBSTACLE_SPEED_MPS)
     obs_manager = MovingObstacleManager(
         robot=robot,
         engine=obs_engine,
         obstacle_names=MOVING_OBSTACLE_NAMES,
         elevation_z=MOVING_OBSTACLE_Z_ELEVATION,
-        speed_mps=MOVING_OBSTACLE_SPEED_MPS,
+        speed_mps=TRACK1_MOVING_OBSTACLE_SPEED_MPS,
     )
     track_left_wall, track_right_wall = load_track_walls()
 
@@ -708,8 +719,11 @@ def run_ga_worker(robot: any, vehicle: FolkraceVehicle) -> None:
 
     print(f"[GA Worker {worker_port}] Ready for evaluation requests.", flush=True)
 
-    def evaluate_candidate(gene_dict: Dict[str, Any], duration_s: float) -> Dict[str, Any]:
-        # Reset vehicle and obstacles
+    def _run_single_trial(gene_dict: Dict[str, Any], duration_s: float, obstacle_speed_mps: float) -> Dict[str, Any]:
+        # Reset vehicle and obstacles with specific speed
+        obs_engine.speed_mps = float(obstacle_speed_mps)
+        obs_manager.speed_mps = float(obstacle_speed_mps)
+
         vehicle.reset(start_pos=start_pos, start_rot=start_rot)
         obs_manager.reset()
         if hasattr(robot, "simulationResetPhysics"):
@@ -806,7 +820,7 @@ def run_ga_worker(robot: any, vehicle: FolkraceVehicle) -> None:
                 crashed = True
                 crash_reason = "negligible_distance"
 
-        metrics = {
+        trial_metrics = {
             "distance_m": round(total_dist, 3),
             "mean_speed_mps": round(mean_speed, 3),
             "laps_completed": int(track_tracker.current_lap),
@@ -814,10 +828,43 @@ def run_ga_worker(robot: any, vehicle: FolkraceVehicle) -> None:
             "crashed": bool(crashed),
             "crash_reason": crash_reason,
             "stalled": bool(stalled),
+            "obstacle_speed_mps": float(obstacle_speed_mps),
         }
-        metrics["compute_multiplier"] = round(compute_efficiency_multiplier(gene_dict), 4)
-        metrics["fitness"] = round(compute_scalar_fitness(metrics, gene_dict=gene_dict), 2)
-        return metrics
+        trial_metrics["compute_multiplier"] = round(compute_efficiency_multiplier(gene_dict), 4)
+        trial_metrics["fitness"] = round(compute_scalar_fitness(trial_metrics, gene_dict=gene_dict), 2)
+        return trial_metrics
+
+    def evaluate_candidate(gene_dict: Dict[str, Any], duration_s: float) -> Dict[str, Any]:
+        # Track 1: Primary track with moving obstacles at 1.00 m/s
+        m1 = _run_single_trial(gene_dict, duration_s, obstacle_speed_mps=TRACK1_MOVING_OBSTACLE_SPEED_MPS)
+        fit1 = float(m1.get("fitness", -5000.0))
+
+        # Track 2: Secondary track with moving obstacles at 0.50 m/s
+        m2 = _run_single_trial(gene_dict, duration_s, obstacle_speed_mps=TRACK2_MOVING_OBSTACLE_SPEED_MPS)
+        fit2 = float(m2.get("fitness", -5000.0))
+
+        # Fitness is lowest of those 2 so candidate must do well on both
+        composite_fitness = min(fit1, fit2)
+
+        # Composite metrics reporting conservative performance across both tracks
+        crashed = m1.get("crashed", False) or m2.get("crashed", False)
+        stalled = m1.get("stalled", False) or m2.get("stalled", False)
+        crash_reason = m1.get("crash_reason") if m1.get("crashed", False) else (m2.get("crash_reason") if m2.get("crashed", False) else "none")
+
+        composite_metrics = {
+            "distance_m": round(min(float(m1.get("distance_m", 0.0)), float(m2.get("distance_m", 0.0))), 3),
+            "mean_speed_mps": round(min(float(m1.get("mean_speed_mps", 0.0)), float(m2.get("mean_speed_mps", 0.0))), 3),
+            "laps_completed": int(min(int(m1.get("laps_completed", 0)), int(m2.get("laps_completed", 0)))),
+            "duration_s": round(float(m1.get("duration_s", 0.0)) + float(m2.get("duration_s", 0.0)), 2),
+            "crashed": bool(crashed),
+            "crash_reason": crash_reason,
+            "stalled": bool(stalled),
+            "compute_multiplier": round(min(float(m1.get("compute_multiplier", 1.0)), float(m2.get("compute_multiplier", 1.0))), 4),
+            "fitness": round(composite_fitness, 2),
+            "track1_metrics": m1,
+            "track2_metrics": m2,
+        }
+        return composite_metrics
 
     while True:
         conn = None

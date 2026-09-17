@@ -301,8 +301,12 @@ class HeadlessWebotsWorker:
                 resp = json.loads(buf.strip())
                 if resp.get("status") == "OK":
                     metrics = resp.get("metrics", {})
-                    fitness = compute_scalar_fitness(metrics, gene_dict=gene_dict)
-                    metrics["fitness"] = fitness
+                    # Worker computes composite fitness (min across Track 1 and Track 2)
+                    if "fitness" in metrics:
+                        fitness = float(metrics["fitness"])
+                    else:
+                        fitness = compute_scalar_fitness(metrics, gene_dict=gene_dict)
+                        metrics["fitness"] = fitness
                     return fitness, metrics
             except Exception as e:
                 if self._is_stopped or (self.controller and getattr(self.controller, "abort_requested", False)):

@@ -1606,24 +1606,16 @@ class ComprehensivePlannerGUI(QMainWindow):
             self.lbl_perf.setText(f"Plan: {p_ms:.2f}ms | Costmap: {m_ms:.2f}ms | Surviving: {surviving} | {status}")
             
             # Recovery & Shield state label (with dynamic obstacle tracker indicators)
-            if dynamic_obstacles and mode in ("OVERRIDE_TEST", "PHASE3", "DYNAMIC_OBS_TEST"):
+            if dynamic_obstacles:
                 any_dyn = any(obs.get("is_dynamic", False) for obs in dynamic_obstacles)
                 max_v = max((obs.get("v_mag", 0.0) for obs in dynamic_obstacles), default=0.0)
+                n_dyn = sum(1 for obs in dynamic_obstacles if obs.get("is_dynamic", False))
                 if any_dyn:
-                    self.lbl_recovery.setText(f"Obstacle: ⚠️ DYNAMIC ({max_v:.2f} m/s) - Hazard Enlarged")
+                    self.lbl_recovery.setText(f"Obstacle: ⚠️ {n_dyn} DYNAMIC ({max_v:.2f} m/s) - Enlarged")
                     self.lbl_recovery.setStyleSheet("color: #ff3df0; font-weight: bold;")
                 else:
-                    self.lbl_recovery.setText(f"Obstacle: ⚪ STATIC ({max_v:.2f} m/s) - Ego Rejection OK")
+                    self.lbl_recovery.setText(f"Obstacle: ⚪ {len(dynamic_obstacles)} TRACKED ({max_v:.2f} m/s)")
                     self.lbl_recovery.setStyleSheet("color: #80cbc4; font-weight: bold;")
-
-            # Update Phase 3 active badge in panel if present
-            p3_mode = pkt.get("phase3_mode", None)
-            is_auto_sweep = pkt.get("auto_sweep", False)
-            if p3_mode is not None and hasattr(self, "lbl_phase3_status"):
-                sweep_prefix = "[AUTO-SWEEP] " if is_auto_sweep else "[MANUAL] "
-                mode_desc = pkt.get("test_stage", f"Mode {p3_mode}")
-                self.lbl_phase3_status.setText(f"Active: {sweep_prefix}{mode_desc}")
-                self.lbl_phase3_status.setStyleSheet("color: #00e676; font-weight: bold; font-size: 11px;")
             elif shield_info and shield_info.get("active", False):
                 c_name = shield_info.get("chosen_name", "ACTIVE").replace("_", " ").upper()
                 self.lbl_recovery.setText(f"Shield: 🛡️ ACTIVE ESCAPE ({c_name})")
@@ -1637,6 +1629,15 @@ class ComprehensivePlannerGUI(QMainWindow):
             else:
                 self.lbl_recovery.setText(f"Recovery: 🟢 Normal Drive ({rec_state})")
                 self.lbl_recovery.setStyleSheet("color: #ce93d8;")
+
+            # Update Phase 3 active badge in panel if present
+            p3_mode = pkt.get("phase3_mode", None)
+            is_auto_sweep = pkt.get("auto_sweep", False)
+            if p3_mode is not None and hasattr(self, "lbl_phase3_status"):
+                sweep_prefix = "[AUTO-SWEEP] " if is_auto_sweep else "[MANUAL] "
+                mode_desc = pkt.get("test_stage", f"Mode {p3_mode}")
+                self.lbl_phase3_status.setText(f"Active: {sweep_prefix}{mode_desc}")
+                self.lbl_phase3_status.setStyleSheet("color: #00e676; font-weight: bold; font-size: 11px;")
 
             self.lbl_dist.setText(f"Distance Traveled: {dist:.2f} m")
             self._update_tof_dashboard(tof)

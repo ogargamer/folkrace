@@ -53,7 +53,21 @@
     "steer_deadband_rad": 0.0,
     "recovery_clearance_exit_m": 0.25,
     "recovery_steer_angle_rad": 0.65,
-    "recovery_arc_lookahead_m": 0.146
+    "recovery_arc_lookahead_m": 0.146,
+    "obs_prob_threshold": 0.65,
+    "obs_max_wall_dim_cells": 25,
+    "obs_min_area_cells": 4,
+    "obs_gating_radius_m": 0.20,
+    "obs_persistence_frames": 5,
+    "obs_dynamic_threshold_mps": 0.30,
+    "obs_dyn_confirm_frames": 2,
+    "obs_lead_time_s": 0.20,
+    "obs_max_lead_m": 0.25,
+    "obs_tail_clear_m": 0.05,
+    "obs_max_missed_frames": 2,
+    "obs_alpha_ab": 0.25,
+    "obs_beta_ab": 0.024,
+    "obs_vel_decay": 0.985
   },
   "timestamp": "2026-09-17 23:47:18"
 }

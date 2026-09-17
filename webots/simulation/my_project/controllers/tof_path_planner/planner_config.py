@@ -121,7 +121,7 @@ TOF_MIN_RANGE_M = 0.001        # meters min range
 
 # Moving Obstacles on Racing Line
 MOVING_OBSTACLE_NAMES = ["MOVING_OBSTACLE", "MOVING_OBSTACLE_2", "MOVING_OBSTACLE_3"]
-MOVING_OBSTACLE_SPEED_MPS = 0.50   # m/s backwards pace along racing line
+MOVING_OBSTACLE_SPEED_MPS = 1.00   # m/s backwards pace along racing line (Track 1 = 1.00 m/s, Track 2 = 0.50 m/s)
 MOVING_OBSTACLE_Z_ELEVATION = 0.075 # m elevation above track ground
 
 ENCODER_NAMES = {

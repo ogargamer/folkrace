@@ -18,7 +18,7 @@
 import math
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 
 import cv2
 import numpy as np
@@ -140,6 +140,54 @@ class DynamicObstacleTracker:
         self.frame_counter = 0
         self.last_surviving_blobs.clear()
         self.last_dynamic_tracks.clear()
+
+    def configure(
+        self,
+        prob_threshold: Optional[float] = None,
+        max_wall_dim_cells: Optional[int] = None,
+        min_area_cells: Optional[int] = None,
+        gating_radius_m: Optional[float] = None,
+        persistence_frames: Optional[int] = None,
+        dynamic_threshold_mps: Optional[float] = None,
+        lead_time_s: Optional[float] = None,
+        max_lead_m: Optional[float] = None,
+        tail_clear_m: Optional[float] = None,
+        max_missed_frames: Optional[int] = None,
+        alpha_ab: Optional[float] = None,
+        beta_ab: Optional[float] = None,
+        vel_decay: Optional[float] = None,
+        dyn_confirm_frames: Optional[int] = None,
+        **kwargs: Any,
+    ) -> None:
+        """Dynamically reconfigures tracking, detection, and enlargement parameters."""
+        if prob_threshold is not None:
+            self.prob_threshold = float(prob_threshold)
+        if max_wall_dim_cells is not None:
+            self.max_wall_dim_cells = int(max_wall_dim_cells)
+        if min_area_cells is not None:
+            self.min_area_cells = int(min_area_cells)
+        if gating_radius_m is not None:
+            self.gating_radius_m = float(gating_radius_m)
+        if persistence_frames is not None:
+            self.persistence_frames = int(persistence_frames)
+        if dynamic_threshold_mps is not None:
+            self.dynamic_threshold_mps = float(dynamic_threshold_mps)
+        if lead_time_s is not None:
+            self.lead_time_s = float(lead_time_s)
+        if max_lead_m is not None:
+            self.max_lead_m = float(max_lead_m)
+        if tail_clear_m is not None:
+            self.tail_clear_m = float(tail_clear_m)
+        if max_missed_frames is not None:
+            self.max_missed_frames = int(max_missed_frames)
+        if alpha_ab is not None:
+            self.alpha_ab = float(alpha_ab)
+        if beta_ab is not None:
+            self.beta_ab = float(beta_ab)
+        if vel_decay is not None:
+            self.vel_decay = float(vel_decay)
+        if dyn_confirm_frames is not None:
+            self.dyn_confirm_frames = int(dyn_confirm_frames)
 
     # --------------------------------------------------------------------------
     # PIPELINE STEP 1: Occupied Binary Mask & Crop to 134x134

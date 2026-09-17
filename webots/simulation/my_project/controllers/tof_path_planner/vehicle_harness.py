@@ -371,6 +371,25 @@ class FolkraceVehicle:
             arc_lookahead_m=float(genes.get("recovery_arc_lookahead_m", RECOVERY_ARC_LOOKAHEAD_M)),
         )
 
+        # Dynamic Obstacle Tracker Configuration
+        if hasattr(self, "obstacle_tracker") and self.obstacle_tracker is not None:
+            self.obstacle_tracker.configure(
+                prob_threshold=genes.get("obs_prob_threshold"),
+                max_wall_dim_cells=genes.get("obs_max_wall_dim_cells"),
+                min_area_cells=genes.get("obs_min_area_cells"),
+                gating_radius_m=genes.get("obs_gating_radius_m"),
+                persistence_frames=genes.get("obs_persistence_frames"),
+                dynamic_threshold_mps=genes.get("obs_dynamic_threshold_mps"),
+                dyn_confirm_frames=genes.get("obs_dyn_confirm_frames"),
+                lead_time_s=genes.get("obs_lead_time_s"),
+                max_lead_m=genes.get("obs_max_lead_m"),
+                tail_clear_m=genes.get("obs_tail_clear_m"),
+                max_missed_frames=genes.get("obs_max_missed_frames"),
+                alpha_ab=genes.get("obs_alpha_ab"),
+                beta_ab=genes.get("obs_beta_ab"),
+                vel_decay=genes.get("obs_vel_decay"),
+            )
+
     def reset(self, start_pos: Optional[List[float]] = None, start_rot: Optional[List[float]] = None) -> None:
         """Resets vehicle physics state, odometry, costmap, and controller memories."""
         if self.is_supervisor and self.robot_node:
