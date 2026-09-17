@@ -269,16 +269,16 @@ class ToFGapScout:
                     col = int(round((px - x_min) / res))
                     row = int(round((py - y_min) / res))
                     if row < 0 or row >= h or col < 0 or col >= w:
-                        clear_dist = max(GAP_MIN_LOOKAHEAD_M, d - step_ds)
+                        clear_dist = max(0.0, d - step_ds)
                         break
                     if hazard_mask[row, col] > 0:
-                        clear_dist = max(GAP_MIN_LOOKAHEAD_M, d - step_ds)
+                        clear_dist = max(0.0, d - step_ds)
                         break
 
                 # Target at maximum clear beam distance (backed off by 7.5cm safety margin)
-                eff_dist = max(GAP_MIN_LOOKAHEAD_M, clear_dist - 0.075)
+                eff_dist = max(0.05, clear_dist - 0.075)
                 tx = sx + eff_dist * cos_h
-                ty = max(0.18, sy + eff_dist * sin_h)
+                ty = max(0.08, sy + eff_dist * sin_h)
                 total_dist = math.hypot(tx, ty)
 
                 # Heading in steering coordinates (positive = left)
@@ -319,16 +319,16 @@ class ToFGapScout:
                     col = int(round((px - x_min) / res))
                     row = int(round((py - y_min) / res))
                     if row < 0 or row >= h or col < 0 or col >= w:
-                        clear_dist = max(GAP_MIN_LOOKAHEAD_M, d - step_ds)
+                        clear_dist = max(0.0, d - step_ds)
                         break
                     if hazard_mask[row, col] > 0:
-                        clear_dist = max(GAP_MIN_LOOKAHEAD_M, d - step_ds)
+                        clear_dist = max(0.0, d - step_ds)
                         break
 
-                eff_dist = max(GAP_MIN_LOOKAHEAD_M, clear_dist - 0.06)
+                eff_dist = max(0.05, clear_dist - 0.06)
                 # Physical target point in vehicle local coordinates (origin at vehicle center / rear axle)
                 tx = ox + eff_dist * cos_az
-                ty = max(0.18, oy + eff_dist * sin_az)
+                ty = max(0.08, oy + eff_dist * sin_az)
                 total_dist = math.hypot(tx, ty)
 
                 # True relative angle from vehicle origin (0, 0) to target (tx, ty)
@@ -347,7 +347,7 @@ class ToFGapScout:
 
         max_clear_dist = max([c["dist"] for c in candidates])
         has_far_path = max_clear_dist > 0.85
-        min_allowed_dist = max(GAP_MIN_LOOKAHEAD_M, max_clear_dist * 0.45) if has_far_path else GAP_MIN_LOOKAHEAD_M
+        min_allowed_dist = max(0.30, max_clear_dist * 0.45) if has_far_path else 0.30
 
         # ----------------------------------------------------------------------
         # 3. SCORE CANDIDATE TARGETS
@@ -362,7 +362,7 @@ class ToFGapScout:
                 col = int(round((0.0 - x_min) / res))
                 row = int(round((py - y_min) / res))
                 if row < 0 or row >= h or col < 0 or col >= w or hazard_mask[row, col] > 0:
-                    d_center = max(GAP_MIN_LOOKAHEAD_M, d - step_ds)
+                    d_center = max(0.0, d - step_ds)
                     break
             else:
                 d_center = max_r

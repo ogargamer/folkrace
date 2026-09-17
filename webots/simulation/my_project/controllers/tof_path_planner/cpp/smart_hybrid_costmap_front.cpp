@@ -384,7 +384,7 @@ public:
         float* out_targets_aperture,
         int max_targets
     ) {
-        constexpr float GAP_MIN_LOOKAHEAD_M = 0.35f;
+        constexpr float GAP_MIN_LOOKAHEAD_M = 0.30f;
         constexpr float GAP_MAX_LOOKAHEAD_M = 1.70f;
         constexpr float GAP_MIN_WIDTH_M = 0.0f;
         constexpr float TRACK_CORRIDOR_WIDTH_M = 1.00f;
@@ -420,18 +420,18 @@ public:
                     int col = static_cast<int>(std::round((px - x_min) / res));
                     int row = static_cast<int>(std::round((py - y_min) / res));
                     if (col < 0 || col >= width || row < 0 || row >= height) {
-                        clear_dist = std::max(GAP_MIN_LOOKAHEAD_M, d - step_ds);
+                        clear_dist = std::max(0.0f, d - step_ds);
                         break;
                     }
                     if (hazard_mask[row * width + col] > 0) {
-                        clear_dist = std::max(GAP_MIN_LOOKAHEAD_M, d - step_ds);
+                        clear_dist = std::max(0.0f, d - step_ds);
                         break;
                     }
                 }
 
-                float eff_dist = std::max(GAP_MIN_LOOKAHEAD_M, clear_dist - 0.075f);
+                float eff_dist = std::max(0.05f, clear_dist - 0.075f);
                 float tx = sx + eff_dist * cos_h;
-                float ty = std::max(0.18f, sy + eff_dist * sin_h);
+                float ty = std::max(0.08f, sy + eff_dist * sin_h);
                 float total_dist = std::hypot(tx, ty);
                 float rel_angle = std::atan2(tx, ty);
                 float steer_equiv = -rel_angle;
@@ -479,18 +479,18 @@ public:
                     int col = static_cast<int>(std::round((px - x_min) / res));
                     int row = static_cast<int>(std::round((py - y_min) / res));
                     if (col < 0 || col >= width || row < 0 || row >= height) {
-                        clear_dist = std::max(GAP_MIN_LOOKAHEAD_M, d - step_ds);
+                        clear_dist = std::max(0.0f, d - step_ds);
                         break;
                     }
                     if (hazard_mask[row * width + col] > 0) {
-                        clear_dist = std::max(GAP_MIN_LOOKAHEAD_M, d - step_ds);
+                        clear_dist = std::max(0.0f, d - step_ds);
                         break;
                     }
                 }
 
-                float eff_dist = std::max(GAP_MIN_LOOKAHEAD_M, clear_dist - 0.06f);
+                float eff_dist = std::max(0.05f, clear_dist - 0.06f);
                 float tx = ox + eff_dist * cos_az;
-                float ty = std::max(0.18f, oy + eff_dist * sin_az);
+                float ty = std::max(0.08f, oy + eff_dist * sin_az);
                 float total_dist = std::hypot(tx, ty);
                 float rel_angle = std::atan2(tx, ty);
                 float steer_equiv = -rel_angle;
@@ -522,7 +522,7 @@ public:
             int col = static_cast<int>(std::round((0.0f - x_min) / res));
             int row = static_cast<int>(std::round((py - y_min) / res));
             if (col < 0 || col >= width || row < 0 || row >= height || hazard_mask[row * width + col] > 0) {
-                d_center = std::max(GAP_MIN_LOOKAHEAD_M, d - step_ds);
+                d_center = std::max(0.0f, d - step_ds);
                 break;
             }
         }

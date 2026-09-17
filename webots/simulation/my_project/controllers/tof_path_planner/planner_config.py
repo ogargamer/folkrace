@@ -136,7 +136,7 @@ ENCODER_NAMES = {
 # ==============================================================================
 GAP_MIN_WIDTH_M = 0.0         # meters minimum passable aperture width
 GAP_MAX_LOOKAHEAD_M = 1.70     # meters maximum lookahead distance for gap target
-GAP_MIN_LOOKAHEAD_M = 0.35     # meters minimum lookahead distance
+GAP_MIN_LOOKAHEAD_M = 0.30     # meters minimum lookahead distance
 GAP_OFFSETS = [-0.10, -0.08, -0.05, -0.03, -0.01, 0.00, 0.01, 0.03, 0.05, 0.08, 0.10]  # meters lateral exploration offsets
 
 # Candidate Evaluation Weights:
