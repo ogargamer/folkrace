@@ -48,6 +48,8 @@ from planner_config import (
     WHEEL_RADIUS,
     V_MIN_CRUISE,
     V_MAX_CRUISE,
+    MAX_SERVO_RAD,
+    MAX_ACKERMANN_RAD,
     MAX_STEERING_RAD,
     WHEELBASE,
     TRACK_REAR,
@@ -204,7 +206,13 @@ class FolkraceVehicle:
                 self.encoders[wheel] = enc
 
         # 3. Core Vehicle Modules
-        self.fusion = IMUEncoderFusion(wheel_radius=WHEEL_RADIUS, dt=DT)
+        self.fusion = IMUEncoderFusion(
+            wheel_radius=WHEEL_RADIUS,
+            track_rear=TRACK_REAR,
+            track_front=TRACK_FRONT,
+            wheelbase=WHEELBASE,
+            dt=DT,
+        )
         self.fusion.attach_devices(self.encoders, imu_dev=self.imu_dev, gyro_dev=self.gyro, accel_dev=self.accel)
 
         self.costmap = CppSmartHybridCostmap(
@@ -230,7 +238,8 @@ class FolkraceVehicle:
             track_front=TRACK_FRONT,
             track_kingpin=TRACK_KINGPIN,
             wheel_radius=WHEEL_RADIUS,
-            max_steer=MAX_STEERING_RAD,
+            max_steer=MAX_ACKERMANN_RAD,
+            max_servo_angle=MAX_SERVO_RAD,
             motor_dir=MOTOR_DIR,
             v_max=V_MAX_WHEEL,
         )
@@ -550,6 +559,19 @@ class FolkraceVehicle:
             }
             return telemetry, False
 
+        # 120 Hz IMU + 4-Wheel Encoder Sensor Fusion & Odometry Dead Reckoning
+        active_steer = float(getattr(self.ediff, "current_steer_rad", self.active_steer))
+        v_fused, yaw_rate, yaw_fused = self.fusion.update(dt=dt, steer_rad=active_steer)
+        self.v_est = float(v_fused) if not (math.isnan(v_fused) or math.isinf(v_fused)) else 0.0
+        self.cached_yaw_rate = float(yaw_rate) if not (math.isnan(yaw_rate) or math.isinf(yaw_rate)) else 0.0
+        self.yaw_est = float(yaw_fused) if not (math.isnan(yaw_fused) or math.isinf(yaw_fused)) else 0.0
+
+        # Odometry Dead Reckoning in world frame (Robot body: +Y is Forward, +X is Right)
+        # Use mid-point heading for exact second-order curvature accuracy during sharp cornering
+        yaw_mid = self.yaw_est + 0.5 * self.cached_yaw_rate * dt
+        self.x_est += -self.v_est * math.sin(yaw_mid) * dt
+        self.y_est +=  self.v_est * math.cos(yaw_mid) * dt
+
         planner_ran = False
         tof_readings = self.last_tofs
 
@@ -559,18 +581,6 @@ class FolkraceVehicle:
 
             # Read ToF Sensor Array (16 channels at 60 Hz planner rate)
             tof_readings = self.read_tof_sensors()
-
-            # Sensor fusion at 60 Hz (Zero Cheating)
-            # IMUEncoderFusion.update returns (v_est [m/s], yaw_rate [rad/s], yaw [rad])
-            v_fused, yaw_rate, yaw_fused = self.fusion.update(dt=DT_PLANNER)
-            self.v_est = float(v_fused) if not (math.isnan(v_fused) or math.isinf(v_fused)) else 0.0
-            self.cached_yaw_rate = float(yaw_rate) if not (math.isnan(yaw_rate) or math.isinf(yaw_rate)) else 0.0
-            self.yaw_est = float(yaw_fused) if not (math.isnan(yaw_fused) or math.isinf(yaw_fused)) else 0.0
-
-            # Odometry Dead Reckoning in world frame (Robot body: +Y is Forward, +X is Right)
-            dt_plan = dt * PLANNER_DECIMATION
-            self.x_est += -self.v_est * math.sin(self.yaw_est) * dt_plan
-            self.y_est +=  self.v_est * math.cos(self.yaw_est) * dt_plan
 
             prob_map, hazard_mask, map_ms = self.costmap.process_tof_frame(tof_readings)
             self.cached_map_ms = map_ms
@@ -721,7 +731,10 @@ class FolkraceVehicle:
                         err_scale = float(0.90 + err_frac * (1.0 - 0.90))
 
                     steer_aggressiveness = float(max(0.85, min(1.0, dist_scale * err_scale)))
-                    self.active_steer = self.active_steer + steer_aggressiveness * steer_delta
+                    self.active_steer = max(
+                        -MAX_ACKERMANN_RAD,
+                        min(MAX_ACKERMANN_RAD, self.active_steer + steer_aggressiveness * steer_delta),
+                    )
                     self.mode_desc = "OPTION_2_SL_MPC"
 
             self.cached_target_speed = target_speed

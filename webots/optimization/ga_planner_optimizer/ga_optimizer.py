@@ -133,8 +133,8 @@ class CMAESOptimizerAdapter:
             seeds = generate_logical_initial_population(genome_cls, 1)
             x0 = seeds[0].to_array() if seeds else sample.to_array()
 
-        u0 = (x0 - self.lower) / self.span
-        u0 = np.clip(u0, 0.05, 0.95)
+        u0 = np.clip((x0 - self.lower) / self.span, 0.0, 1.0)
+        u0[self.span <= 1e-9] = 0.0
 
         self.opts = {
             "bounds": [[0.0] * self.D, [1.0] * self.D],
@@ -151,14 +151,16 @@ class CMAESOptimizerAdapter:
             # Candidate 0 is GUARANTEED to be the active all-time champion (Elitism guarantee)
             if self.initial_genome is not None:
                 x0 = self.initial_genome.to_array()
-                u0 = np.clip((x0 - self.lower) / self.span, 0.0, 1.0).tolist()
-                self.last_candidates_u[0] = u0
+                u0 = np.clip((x0 - self.lower) / self.span, 0.0, 1.0)
+                u0[self.span <= 1e-9] = 0.0
+                self.last_candidates_u[0] = u0.tolist()
             else:
                 seeds = generate_logical_initial_population(self.genome_cls, 1)
                 if seeds:
                     x0 = seeds[0].to_array()
-                    u0 = np.clip((x0 - self.lower) / self.span, 0.0, 1.0).tolist()
-                    self.last_candidates_u[0] = u0
+                    u0 = np.clip((x0 - self.lower) / self.span, 0.0, 1.0)
+                    u0[self.span <= 1e-9] = 0.0
+                    self.last_candidates_u[0] = u0.tolist()
 
         pop: List[BasePlannerGenome] = []
         for u in self.last_candidates_u:
@@ -193,7 +195,9 @@ class CMAESOptimizerAdapter:
             # Re-center around champion genome if available, otherwise xbest or xmean
             if self.initial_genome is not None:
                 x_anchor = self.initial_genome.to_array()
-                anchor_u = np.clip((x_anchor - self.lower) / self.span, 0.05, 0.95).tolist()
+                anchor_u = np.clip((x_anchor - self.lower) / self.span, 0.0, 1.0)
+                anchor_u[self.span <= 1e-9] = 0.0
+                anchor_u = anchor_u.tolist()
             elif self.es.result.xbest is not None:
                 anchor_u = self.es.result.xbest
             else:
@@ -205,7 +209,8 @@ class CMAESOptimizerAdapter:
         """Forces immediate re-centering of CMA-ES around the known best champion with a tight neighborhood."""
         self.initial_genome = champion_genome
         x0 = champion_genome.to_array()
-        u0 = np.clip((x0 - self.lower) / self.span, 0.05, 0.95)
+        u0 = np.clip((x0 - self.lower) / self.span, 0.0, 1.0)
+        u0[self.span <= 1e-9] = 0.0
         new_sigma = max(0.02, float(self.sigma0 * sigma_scale))
         print(f"[CMA-ES] Forcing distribution re-seed around champion with tight sigma={new_sigma:.3f}...", flush=True)
         self.es = cma.CMAEvolutionStrategy(u0.tolist(), new_sigma, self.opts)
@@ -703,19 +708,37 @@ def run_genetic_algorithm(
                     adapter = cma_adapters[p]
                     adapter.tell(fitnesses)
 
-                    # Watchdog: detect complete generation collapse (e.g. all non-injected candidates crashed)
-                    if gen_crashes >= (pop_size - 1):
+                    # Watchdog: detect true generation collapse (all candidates failed to drive >1m or negative fitness)
+                    is_collapse = (gen_best_fit <= 0.0) or (gen_best_metrics.get("distance_m", 0.0) < 1.0)
+                    if is_collapse:
                         consecutive_crashes[p] = consecutive_crashes.get(p, 0) + 1
                     else:
                         consecutive_crashes[p] = 0
 
-                    if consecutive_crashes.get(p, 0) >= 3 and best_genomes[p] is not None:
+                    if consecutive_crashes.get(p, 0) >= 5:
                         print(
-                            f"\n[Optimizer Watchdog] Detected {consecutive_crashes[p]} consecutive high-crash generations for {p}!\n"
-                            f"  -> Rescuing CMA distribution: force-restarting around top champion (Best Fit: {best_fitnesses[p]:.1f}) with tight sigma.",
+                            f"\n[Optimizer Watchdog] Detected {consecutive_crashes[p]} consecutive generation collapses for {p}!\n"
+                            f"  -> Verifying parallel worker pool responsiveness...",
                             flush=True,
                         )
-                        adapter.restart_around_champion(best_genomes[p], sigma_scale=0.2)
+                        healthy_workers = pool.health_check()
+                        print(f"  -> Worker pool health check: {healthy_workers}/{pool.num_workers} responsive.", flush=True)
+
+                        champ_to_restore = best_genomes[p]
+                        if champ_to_restore is None:
+                            loaded_champ, loaded_fit, loaded_met = load_best_planner_genome(BEST_GENOME_FILE, genome_cls)
+                            if loaded_champ is not None:
+                                best_genomes[p] = loaded_champ
+                                best_fitnesses[p] = loaded_fit
+                                best_metrics_map[p] = loaded_met
+                                champ_to_restore = loaded_champ
+
+                        if champ_to_restore is not None:
+                            print(
+                                f"  -> Rescuing CMA distribution: force-restarting around top champion (Best Fit: {best_fitnesses[p]:.1f}) with tight sigma.",
+                                flush=True,
+                            )
+                            adapter.restart_around_champion(champ_to_restore, sigma_scale=0.2)
                         consecutive_crashes[p] = 0
 
                     if gen < num_generations - 1:

@@ -1,7 +1,13 @@
 """
 ================================================================================
-  ZERO-CHEATING SENSOR FUSION: 4-WHEEL ENCODERS + BNO08X IMU (50 Hz)
+  ZERO-CHEATING SENSOR FUSION: 4-WHEEL ENCODERS + BNO08X IMU (120 Hz)
   Computes true forward velocity, yaw rate, and heading without Supervisor shortcuts.
+  Features:
+    - 4-Wheel Differential Kinematics with Ackermann Steer Projection
+    - Median-of-4 Outlier Rejection (robust against single-wheel spin / lift)
+    - Real-Time Wheel Slip Detection (Gyro vs Differential Cross-Check)
+    - Adaptive Traction-Aware Complementary Filter
+    - Standstill & Bidirectional Crash Impact Handlers
 ================================================================================
 """
 
@@ -12,18 +18,22 @@ from typing import Dict, Optional, Tuple
 class IMUEncoderFusion:
     """
     Fuses 4-wheel rotational encoders (PositionSensor) with BNO08x IMU
-    (accelerometer, gyroscope, and inertial unit) at 50 Hz.
+    (accelerometer, gyroscope, and inertial unit) at 120 Hz.
     """
 
     def __init__(
         self,
         wheel_radius: float = 0.0275,
-        dt: float = 0.02,
-        alpha_accel: float = 0.80,
+        track_rear: float = 0.1000,
+        track_front: float = 0.0822,
+        wheelbase: float = 0.1325,
+        dt: float = 1.0 / 120.0,
     ):
         self.wheel_radius = wheel_radius
+        self.track_rear = track_rear
+        self.track_front = track_front
+        self.wheelbase = wheelbase
         self.dt = dt
-        self.alpha_accel = alpha_accel
 
         # Encoder state tracking (radians)
         self._prev_pos: Dict[str, Optional[float]] = {
@@ -36,9 +46,13 @@ class IMUEncoderFusion:
         # Filtered kinematic state
         self.v_est: float = 0.0
         self.v_wheels: float = 0.0
+        self.v_rear: float = 0.0
+        self.v_front: float = 0.0
+        self.slip_ratio: float = 0.0
         self.yaw: float = 0.0
         self.yaw_rate: float = 0.0
         self.a_forward: float = 0.0
+        self.a_lateral: float = 0.0
         self.total_distance_m: float = 0.0
 
         # Hardware devices
@@ -57,9 +71,13 @@ class IMUEncoderFusion:
         }
         self.v_est = 0.0
         self.v_wheels = 0.0
+        self.v_rear = 0.0
+        self.v_front = 0.0
+        self.slip_ratio = 0.0
         self.yaw = 0.0
         self.yaw_rate = 0.0
         self.a_forward = 0.0
+        self.a_lateral = 0.0
         self.total_distance_m = 0.0
 
     def attach_devices(
@@ -75,9 +93,17 @@ class IMUEncoderFusion:
         self.gyro_dev = gyro_dev
         self.accel_dev = accel_dev
 
-    def update(self, dt: Optional[float] = None) -> Tuple[float, float, float]:
+    def update(
+        self,
+        dt: Optional[float] = None,
+        steer_rad: float = 0.0,
+    ) -> Tuple[float, float, float]:
         """
-        Executes one 50 Hz fusion cycle.
+        Executes one 120 Hz fusion cycle.
+
+        Args:
+            dt: Timestep duration (seconds)
+            steer_rad: Current active steering angle of the front wheels (radians)
 
         Returns:
             Tuple[float, float, float]: (v_est [m/s], yaw_rate [rad/s], yaw [rad])
@@ -93,8 +119,7 @@ class IMUEncoderFusion:
                 prev_p = self._prev_pos[key]
                 if prev_p is not None:
                     dp = curr_p - prev_p
-                    # Catch rare resets or anomalies
-                    if abs(dp) > 50.0:
+                    if abs(dp) > 50.0:  # Catch rare resets or anomalies
                         dp = 0.0
                     omega = dp / step_dt
                 else:
@@ -104,20 +129,28 @@ class IMUEncoderFusion:
             else:
                 wheel_omegas[key] = 0.0
 
-        # 2. Derive linear rolling speed from wheel encoders
-        # Webots Folkrace motor direction convention: negative motor angle pushes vehicle forward
-        # In our world: omega * MOTOR_DIR (-1.0) gives forward wheel speed
+        # 2. Derive linear rolling speed along wheel heading (m/s)
+        # Folkrace motor direction convention: negative motor angle pushes vehicle forward
         v_rl = -wheel_omegas["RL"] * self.wheel_radius
         v_rr = -wheel_omegas["RR"] * self.wheel_radius
         v_fl = -wheel_omegas["FL"] * self.wheel_radius
         v_fr = -wheel_omegas["FR"] * self.wheel_radius
 
-        # Rear axle is unsteered, providing purest forward rolling ground speed
-        v_rear = 0.5 * (v_rl + v_rr)
-        v_front = 0.5 * (v_fl + v_fr)
-        self.v_wheels = 0.70 * v_rear + 0.30 * v_front
+        # 3. Read IMU Gyroscope (body Z-axis yaw rate)
+        gyro_z = 0.0
+        if self.gyro_dev is not None:
+            raw_gyro = self.gyro_dev.getValues()
+            if raw_gyro and len(raw_gyro) >= 3:
+                gyro_z = float(raw_gyro[2])
+        self.yaw_rate = gyro_z
 
-        # 3. Read IMU Accelerometer (local robot body: +Y is Forward, +X is Right)
+        # 4. Read Inertial Unit (Yaw heading)
+        if self.imu_dev is not None:
+            rpy = self.imu_dev.getRollPitchYaw()
+            if rpy and len(rpy) >= 3:
+                self.yaw = float(rpy[2])
+
+        # 5. Read IMU Accelerometer (local robot body: +Y is Forward, +X is Right)
         a_fwd = 0.0
         a_lat = 0.0
         if self.accel_dev is not None:
@@ -126,37 +159,73 @@ class IMUEncoderFusion:
                 a_lat = float(raw_accel[0])
                 a_fwd = float(raw_accel[1])
         self.a_forward = a_fwd
+        self.a_lateral = a_lat
 
-        # Crash Impact Check: Real wall impact halts forward wheel motion and causes massive longitudinal decel
-        is_crash_impact = (abs(self.v_wheels) < 0.20 and a_fwd < -20.0)
+        # 6. Kinematic 4-Wheel Speed Calculation & Slip Detection
+        # Rear axle: Unsteered pure forward ground speed
+        v_rear_avg = 0.5 * (v_rl + v_rr)
+        self.v_rear = v_rear_avg
 
-        # 4. Read Gyroscope (body Z-axis yaw rate)
-        gyro_z = 0.0
-        if self.gyro_dev is not None:
-            raw_gyro = self.gyro_dev.getValues()
-            if raw_gyro and len(raw_gyro) >= 3:
-                gyro_z = float(raw_gyro[2])
-        self.yaw_rate = gyro_z
+        # Front axle: Steered wheels projected along vehicle longitudinal body axis (+Y)
+        cos_steer = math.cos(steer_rad)
+        v_fl_proj = v_fl * cos_steer
+        v_fr_proj = v_fr * cos_steer
+        v_front_avg = 0.5 * (v_fl_proj + v_fr_proj)
+        self.v_front = v_front_avg
 
-        # 5. Read Inertial Unit (Yaw heading)
-        if self.imu_dev is not None:
-            rpy = self.imu_dev.getRollPitchYaw()
-            if rpy and len(rpy) >= 3:
-                self.yaw = float(rpy[2])
+        # Individual wheel estimates corrected for turning differential using gyro yaw rate
+        # v = v_wheel -/+ (track/2) * yaw_rate
+        v_rl_body = v_rl + 0.5 * self.track_rear * self.yaw_rate
+        v_rr_body = v_rr - 0.5 * self.track_rear * self.yaw_rate
+        v_fl_body = v_fl_proj + 0.5 * self.track_front * self.yaw_rate
+        v_fr_body = v_fr_proj - 0.5 * self.track_front * self.yaw_rate
 
-        # 6. Complementary Filter: Fuse dead-reckoned acceleration with encoder rolling speed
-        # Prevents high-frequency wheel spin slip from corrupting velocity
+        # Yaw rate computed from rear wheel differential vs gyro
+        rear_diff_yaw_rate = (v_rr - v_rl) / max(0.01, self.track_rear)
+        diff_error = abs(rear_diff_yaw_rate - self.yaw_rate)
+
+        # Axle discrepancy
+        axle_discrepancy = abs(v_front_avg - v_rear_avg)
+
+        # Robust wheel speed consensus:
+        # Outlier-rejected median of all 4 wheels (rejects single-wheel spin or lift)
+        all_wheel_estimates = sorted([v_rl_body, v_rr_body, v_fl_body, v_fr_body])
+        v_wheels_robust = 0.5 * (all_wheel_estimates[1] + all_wheel_estimates[2])
+        self.v_wheels = v_wheels_robust
+
+        # 7. Inertial Prediction & Adaptive Slip Weighting
         v_pred = self.v_est + self.a_forward * step_dt
-        if is_crash_impact:
-            # Crash impact instantly halts forward velocity; reset state and filter lag to 0.0
+
+        # Crash Impact Check (handles both forward and reverse high-G impacts)
+        is_crash_impact = (abs(self.v_wheels) < 0.20 and abs(self.a_forward) > 20.0)
+
+        # Slip detection index [0.0, 1.0]
+        wheel_accel = (v_wheels_robust - self.v_est) / max(1e-4, step_dt)
+        accel_mismatch = abs(wheel_accel - self.a_forward)
+
+        slip_indicator = min(
+            1.0,
+            (diff_error / 4.0) * 0.40 +
+            (axle_discrepancy / 0.50) * 0.35 +
+            (accel_mismatch / 8.0) * 0.25,
+        )
+        self.slip_ratio = float(slip_indicator)
+
+        # Standstill lock
+        if abs(self.v_wheels) < 0.02 and abs(self.a_forward) < 0.20:
             self.v_est = 0.0
-        elif abs(self.v_wheels) < 0.03 and abs(self.a_forward) < 0.15:
-            # Standstill lock
+        elif is_crash_impact:
             self.v_est = 0.0
         else:
-            # Bound prediction within physical traction envelope of wheel rolling speed (supports forward and reverse)
-            v_pred_clamped = min(self.v_wheels + 1.2, max(self.v_wheels - 1.2, v_pred))
-            self.v_est = self.alpha_accel * v_pred_clamped + (1.0 - self.alpha_accel) * self.v_wheels
+            # Under clean traction, trust wheel encoders heavily (adaptive_alpha ~ 0.08)
+            # Under high slip / wheelspin, automatically shift weight to inertial prediction (adaptive_alpha ~ 0.85)
+            adaptive_alpha = 0.08 + 0.77 * slip_indicator
+
+            # Bound prediction within physical traction envelope
+            envelope_margin = 0.80 if slip_indicator < 0.30 else 1.50
+            v_pred_clamped = min(self.v_wheels + envelope_margin, max(self.v_wheels - envelope_margin, v_pred))
+
+            self.v_est = adaptive_alpha * v_pred_clamped + (1.0 - adaptive_alpha) * self.v_wheels
 
         # Distance integration
         self.total_distance_m += self.v_est * step_dt

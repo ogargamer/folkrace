@@ -30,8 +30,10 @@ LR = 0.06625                   # meters (rear axle to CoG)
 # Vehicle moment of inertia around vertical yaw axis (Iz = (1/12) * m * (L^2 + W^2))
 IZ = (1.0 / 12.0) * VEHICLE_MASS * (WHEELBASE**2 + ((TRACK_FRONT + TRACK_REAR) / 2.0)**2)  # kg * m^2
 
-# Actuator Limits (Virtual Bicycle Model)
-MAX_STEERING_RAD = 0.650000     # radians (+- 37.2 deg steering limit, buffered 2.8 deg inside Webots hard stops)
+# Actuator Limits (Virtual Bicycle Model & Servos)
+MAX_SERVO_RAD = 0.696386        # radians (+- 39.9 deg per-servo limit, buffered 0.1 deg inside Webots 40.0 deg hard stops)
+MAX_STEERING_RAD = 0.696386     # backward-compatible alias to MAX_SERVO_RAD
+MAX_ACKERMANN_RAD = 0.610273    # radians (+- 34.97 deg virtual center Ackermann limit yielding 39.9 deg inside servo)
 MAX_SERVO_RATE_RAD_S = 10.5    # rad/s maximum steering slew rate
 MOTOR_DIR = -1.0               # Webots motor sign (-1.0 pushes vehicle forward)
 V_MAX_WHEEL = 5.500            # m/s physical maximum wheel velocity (200 rad/s * 0.0275m)
@@ -40,7 +42,7 @@ V_MAX_CRUISE = 5.50            # m/s maximum straight-line cruising speed (match
 # ==============================================================================
 # 2. TIRE & VEHICLE DYNAMICS LIMITS
 # ==============================================================================
-TIRE_MU = 0.85                 # dimensionless tire-ground Coulomb friction coefficient
+TIRE_MU = 0.86                 # dimensionless tire-ground Coulomb friction coefficient (GA champion)
 GRAVITY_G = 9.81               # m/s^2 gravitational acceleration
 ALPHA_PEAK = 0.220             # radians (~12.6 degrees dynamic peak tire slip angle before severe washout)
 
@@ -55,13 +57,13 @@ ACCEL_FWD_MAX = ACCEL_FWD_RATIO * A_MAX_BASE      # ~7.09 m/s^2 forward motor ac
 BRAKE_DECEL_MAX = BRAKE_DECEL_RATIO * A_MAX_BASE  # ~8.34 m/s^2 braking / deceleration limit
 LAT_ACCEL_MAX = LAT_ACCEL_RATIO * A_MAX_BASE      # ~7.92 m/s^2 cornering lateral acceleration limit
 
-# Kinematic turning radius at inside wheel lock (40 deg mechanical lock -> ~35.05 deg Ackermann)
+# Kinematic turning radius at inside wheel lock (39.9 deg servo limit -> 34.97 deg Ackermann)
 # R_min = (L / tan(delta_in)) + (w / 2)
-R_MIN_TURN = (WHEELBASE / math.tan(MAX_STEERING_RAD)) + (TRACK_KINGPIN / 2.0)  # ~0.1889 m
-DELTA_ACKERMANN_MAX = math.atan(WHEELBASE / R_MIN_TURN)                        # ~0.6118 rad (~35.05 deg)
+R_MIN_TURN = (WHEELBASE / math.tan(MAX_SERVO_RAD)) + (TRACK_KINGPIN / 2.0)  # ~0.1895 m
+DELTA_ACKERMANN_MAX = math.atan(WHEELBASE / R_MIN_TURN)                        # ~0.6103 rad (~34.97 deg)
 
 # Friction-limited minimum crawl / tightest cornering speed: v = sqrt(a_lat_max * R_min)
-V_MIN_CRUISE = math.sqrt(LAT_ACCEL_MAX * R_MIN_TURN)                           # ~1.223 m/s dynamic cornering floor
+V_MIN_CRUISE = math.sqrt(LAT_ACCEL_MAX * R_MIN_TURN)                           # ~1.232 m/s dynamic cornering floor
 
 # PTK 9497 MG-D Digital Servo Specifications (at 8.4V HV)
 # Spec: ~0.068 s / 60 deg -> (pi/3) / 0.068 = ~15.4 rad/s slew rate
@@ -85,13 +87,13 @@ DT_PLANNER = 1.0 / 60.0        # Planner cycle duration in seconds (~0.01667 s)
 PLANNER_DECIMATION = 2         # Run planner every 2 physics steps (120 Hz / 2 = 60 Hz)
 TOF_TIME_STEP_MS = 16          # ToF sensor sampling interval in ms (60 Hz)
 
-# 15mm C++ Smart Hybrid Costmap bounds (local vehicle coordinates)
+# 10mm C++ Smart Hybrid Costmap bounds (local vehicle coordinates)
 # +Y is Forward, +X is Right
 GRID_X_MIN = -1.25             # meters (left boundary)
 GRID_X_MAX = 1.25              # meters (right boundary)
-GRID_Y_MIN = -0.10             # meters (10 cm chassis clearance behind origin)
-GRID_Y_MAX = 2.00              # meters (forward preview range)
-GRID_RES = 0.015               # meters (15 mm grid resolution)
+GRID_Y_MIN = 0.00              # meters (starting from robot center)
+GRID_Y_MAX = 1.90              # meters (forward preview range until 1.9m)
+GRID_RES = 0.010               # meters (10 mm grid resolution)
 R_INFLATION_M = 0.075          # meters (7.5 cm dilation: half chassis width, GA-optimized minimum)
 
 # Sensor device names: 16-Channel Front-Only ToF rig (only_front_tofs.proto)
@@ -141,25 +143,25 @@ GAP_OFFSETS = [-0.10, -0.08, -0.05, -0.03, -0.01, 0.00, 0.01, 0.03, 0.05, 0.08, 
 
 # Candidate Evaluation Weights:
 # Score = W_DIST * dist_weight_factor + W_WIDTH * (width/max_w) - W_DEV_STEER * |theta - current_steer| - W_DEV_STRAIGHT * |theta|
-WEIGHT_GAP_DISTANCE = 3.0      # Preference for longer/further clear gaps
-WEIGHT_GAP_WIDTH = 1.5         # Preference for wider open apertures
-WEIGHT_ALIGN_STEER = 1.0       # Preference for turning toward where servo is already aiming
-WEIGHT_ALIGN_STRAIGHT = 0.5    # Preference for going straight when openings are equal
-WEIGHT_SIDE_CLEARANCE = 2.8    # Preference for steering away from close walls / side asymmetry
+WEIGHT_GAP_DISTANCE = 7.026    # Preference for longer/further clear gaps (GA Champion)
+WEIGHT_GAP_WIDTH = 2.047       # Preference for wider open apertures
+WEIGHT_ALIGN_STEER = 1.681     # Preference for turning toward where servo is already aiming
+WEIGHT_ALIGN_STRAIGHT = 0.998  # Preference for going straight when openings are equal
+WEIGHT_SIDE_CLEARANCE = 2.547  # Preference for steering away from close walls / side asymmetry
 
 
 # Exponential Distance Preference (1.0m Walled Track Geometry):
 # Since the track is walled off and 1.0m wide, any sightline > 1.0m + margin is certainly the path towards progress.
 TRACK_CORRIDOR_WIDTH_M = 1.00  # meters standard walled race corridor width
-GAP_PROGRESS_MARGIN_M = 0.15   # meters: 1.0m + 0.15m = 1.15m threshold for definitive open corridor
-GAP_DIST_EXP_K = 0.60          # slight exponential growth scaling factor for distance beyond threshold (~48% boost at 1.80m)
+GAP_PROGRESS_MARGIN_M = 0.164  # meters: 1.0m + 0.164m = 1.164m threshold for definitive open corridor
+GAP_DIST_EXP_K = 0.717         # exponential growth scaling factor for distance beyond threshold
 STRAIGHT_LOCK_DIST_M = 1.70    # meters: forward clearance on both 4.1 deg ToFs to lock full speed straight
 STRAIGHT_LOCK_SPEED_MPS = 5.50 # m/s: top speed cruising when straight locked
 
 # Dual-Path Candidate Selection & Smart Challenger Arbitration (Option 2 SL-MPC)
-ALT_MIN_SEPARATION_M = 0.15      # meters: minimum lateral separation between primary and challenger target lines
-ALT_APERTURE_BIAS = 1.80         # multiplier on aperture width reward for challenger target (safety/opening priority)
-ALT_SWITCH_HYSTERESIS = 45.0     # objective cost reduction threshold needed for challenger to overthrow primary line
+ALT_MIN_SEPARATION_M = 0.052   # meters: minimum lateral separation between primary and challenger target lines
+ALT_APERTURE_BIAS = 1.553      # multiplier on aperture width reward for challenger target (safety/opening priority)
+ALT_SWITCH_HYSTERESIS = 24.484 # objective cost reduction threshold needed for challenger to overthrow primary line
 
 
 # ==============================================================================
@@ -167,30 +169,30 @@ ALT_SWITCH_HYSTERESIS = 45.0     # objective cost reduction threshold needed for
 # ==============================================================================
 # Prediction horizon & timestep
 OPT2_HORIZON_N = 30                 # prediction horizon steps (fixed at 30 in QP sparsity table)
-OPT2_DT = DT_PLANNER                # seconds per horizon step (matches 60 Hz loop ~0.01667 s)
+OPT2_DT = 0.017                     # seconds per horizon step (matches ~60 Hz loop)
 
 # Cost function weights (Quadratic & Linear OSQP penalties)
-OPT2_Q_PROGRESS = 8.0               # weight encouraging forward arc-length progress
-OPT2_Q_CTE = 18.0                   # weight penalizing lateral / cross-track deviation from guide line
-OPT2_Q_HEADING = 8.0                # weight penalizing heading error
-OPT2_R_STEER = 5.0                  # weight penalizing steering angle magnitude
-OPT2_R_ACCEL = 2.0                  # weight penalizing acceleration / deceleration effort
-OPT2_R_STEER_RATE = 10.0            # weight penalizing steering rate (slew)
+OPT2_Q_PROGRESS = 23.108            # weight encouraging forward arc-length progress (GA Champion)
+OPT2_Q_CTE = 54.342                 # weight penalizing lateral / cross-track deviation from guide line
+OPT2_Q_HEADING = 9.685              # weight penalizing heading error
+OPT2_R_STEER = 4.944                # weight penalizing steering angle magnitude
+OPT2_R_ACCEL = 3.507                # weight penalizing acceleration / deceleration effort
+OPT2_R_STEER_RATE = 12.310          # weight penalizing steering rate (slew)
 
 # Traction, cornering & guidance
-OPT2_MU_FRICTION = TIRE_MU          # tire friction coefficient governing grip envelope (0.85)
-OPT2_V_CORNER_FACTOR = 0.95         # friction circle cornering speed scaling factor
-OPT2_PP_BLEND_GAIN = 0.35           # pure pursuit entry blend gain
-OPT2_LOOKAHEAD_BLEND_M = 0.45       # pure pursuit lookahead blend distance (m)
+OPT2_MU_FRICTION = 0.86             # tire friction coefficient governing grip envelope
+OPT2_V_CORNER_FACTOR = 0.843        # friction circle cornering speed scaling factor
+OPT2_PP_BLEND_GAIN = 0.799          # pure pursuit entry blend gain
+OPT2_LOOKAHEAD_BLEND_M = 0.278      # pure pursuit lookahead blend distance (m)
 OPT2_V_CRUISE_MAX = V_MAX_CRUISE    # m/s top cruising speed limit (5.50 m/s)
 OPT2_V_CRUISE_MIN = V_MIN_CRUISE    # m/s cornering / crawl speed floor (~1.22 m/s)
 
 # Fast straight-line lock & dual-path challenger arbitration
 OPT2_STRAIGHT_LOCK_DIST_M = STRAIGHT_LOCK_DIST_M        # forward clearance to lock straight (1.70 m)
 OPT2_STRAIGHT_LOCK_SPEED_MPS = STRAIGHT_LOCK_SPEED_MPS  # top speed when straight-line locked (5.50 m/s)
-OPT2_ALT_SWITCH_HYSTERESIS = ALT_SWITCH_HYSTERESIS      # cost reduction needed for challenger overthrow (15.0)
-OPT2_ALT_MIN_SEPARATION_M = ALT_MIN_SEPARATION_M        # min lateral separation between paths (0.25 m)
-OPT2_ALT_APERTURE_BIAS = ALT_APERTURE_BIAS              # challenger aperture width bias multiplier (1.80)
+OPT2_ALT_SWITCH_HYSTERESIS = ALT_SWITCH_HYSTERESIS      # cost reduction needed for challenger overthrow
+OPT2_ALT_MIN_SEPARATION_M = ALT_MIN_SEPARATION_M        # min lateral separation between paths
+OPT2_ALT_APERTURE_BIAS = ALT_APERTURE_BIAS              # challenger aperture width bias multiplier
 
 # Target speed alias
 OPT2_TARGET_SPEED_MPS = OPT2_V_CRUISE_MAX
@@ -198,13 +200,13 @@ OPT2_TARGET_SPEED_MPS = OPT2_V_CRUISE_MAX
 # ==============================================================================
 # 6. ADAPTIVE STEERING AGGRESSIVENESS & SMOOTHING
 # ==============================================================================
-STEER_AGGR_DIST_FAR_M = 1.70      # meters: distance where steering quieting begins on open straights
-STEER_AGGR_DIST_CLOSE_M = 1.35    # meters: distance where full 100% steering aggressiveness is guaranteed
-STEER_AGGR_MIN_SCALE = 0.90       # conservative aggressiveness scale on straights (90% response preserves turning authority)
+STEER_AGGR_DIST_FAR_M = 1.72      # meters: distance where steering quieting begins on open straights
+STEER_AGGR_DIST_CLOSE_M = 1.067   # meters: distance where full 100% steering aggressiveness is guaranteed
+STEER_AGGR_MIN_SCALE = 0.933      # conservative aggressiveness scale on straights
 STEER_AGGR_MAX_SCALE = 1.00       # full aggressiveness scale (100% response)
 
 # Small Target Offset Steering Smoothing (tunes micro-adjustments on straights)
-STEER_ERROR_DEADBAND_RAD = 0.002       # radians (~0.11 deg): sub-degree deadband for sensor noise
+STEER_ERROR_DEADBAND_RAD = 0.0         # radians: deadband for sensor noise (0.0 rad in champion)
 STEER_SMALL_ERROR_THRESHOLD_RAD = 0.05 # radians (~2.86 deg): angle threshold above which full response is engaged
 STEER_SMALL_ERROR_MIN_GAIN = 0.90      # minimum gain applied near deadband (never freezes steering)
 
@@ -240,9 +242,9 @@ def compute_steering_aggressiveness(d_straight: float, steer_error_rad: float = 
 # ==============================================================================
 # 7. NON-BLOCKING STUCK & REVERSE RECOVERY MANAGER
 # ==============================================================================
-RECOVERY_STEER_ANGLE_RAD = 0.650    # radians (~37.2 deg) steering lock during reverse arc (buffered from stops)
+RECOVERY_STEER_ANGLE_RAD = MAX_ACKERMANN_RAD # radians (~34.97 deg) steering lock during reverse arc (maps to 39.9 deg servo)
 # Friction circle velocity limit for reverse pivot arc: v = sqrt(mu * g * (L / tan(delta)))
-RECOVERY_REVERSE_SPEED_MPS = float(math.sqrt(0.817 * 9.81 * (WHEELBASE / max(0.01, math.tan(RECOVERY_STEER_ANGLE_RAD))))) # ~1.23 m/s
+RECOVERY_REVERSE_SPEED_MPS = float(math.sqrt(0.86 * 9.81 * (WHEELBASE / max(0.01, math.tan(RECOVERY_STEER_ANGLE_RAD))))) # ~1.31 m/s
 RECOVERY_STALL_CONFIRM_S = 0.15      # seconds of low forward speed before engaging recovery
 RECOVERY_FRONT_BLOCKED_M = 0.25      # meters front clearance threshold to detect forward stall
 RECOVERY_REVERSE_STROKE_MAX_S = 0.6 # seconds maximum reverse stroke failsafe
@@ -251,7 +253,7 @@ RECOVERY_CLEARANCE_EXIT_M = 0.25     # meters (25cm) minimum forward clearance t
 RECOVERY_ANY_TOF_EXIT_M = 0.40       # meters (40cm) minimum clearance on at least one ToF sensor to conclude reverse
 RECOVERY_EXIT_MIN_TIME_S = 0.0       # seconds minimum recovery stroke time before clearance check
 RECOVERY_SERVO_SLEW_RAD_S = SERVO_MAX_SPEED_RAD_S  # rad/s PTK 9497 8.4V centering slew rate (15.4 rad/s)
-RECOVERY_ARC_LOOKAHEAD_M = 0.13      # meters length of kinematic escape arcs projected on costmap
+RECOVERY_ARC_LOOKAHEAD_M = 0.146     # meters length of kinematic escape arcs projected on costmap (GA Champion)
 
 # ==============================================================================
 # 8. ANTI-WRONG-WAY & U-TURN DISCRIMINATION WATCHDOG

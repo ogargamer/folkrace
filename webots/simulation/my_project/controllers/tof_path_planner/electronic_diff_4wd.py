@@ -15,6 +15,8 @@ try:
         TRACK_FRONT,
         TRACK_KINGPIN,
         WHEEL_RADIUS,
+        MAX_SERVO_RAD,
+        MAX_ACKERMANN_RAD,
         MAX_STEERING_RAD,
         MOTOR_DIR,
         V_MAX_WHEEL,
@@ -27,6 +29,8 @@ except ImportError:
         TRACK_FRONT,
         TRACK_KINGPIN,
         WHEEL_RADIUS,
+        MAX_SERVO_RAD,
+        MAX_ACKERMANN_RAD,
         MAX_STEERING_RAD,
         MOTOR_DIR,
         V_MAX_WHEEL,
@@ -49,7 +53,8 @@ class ElectronicDifferential4WD:
 
     def __init__(self, wheelbase=WHEELBASE, track_rear=TRACK_REAR, track_front=TRACK_FRONT,
                  track_kingpin=TRACK_KINGPIN, wheel_radius=WHEEL_RADIUS,
-                 max_steer=MAX_STEERING_RAD, motor_dir=MOTOR_DIR, v_max=V_MAX_WHEEL,
+                 max_steer=MAX_ACKERMANN_RAD, max_servo_angle=MAX_SERVO_RAD,
+                 motor_dir=MOTOR_DIR, v_max=V_MAX_WHEEL,
                  thresh_spin=THRESH_SPIN, max_servo_rate=SERVO_MAX_SPEED_RAD_S):
         self.L = wheelbase
         self.W_r = track_rear
@@ -57,6 +62,7 @@ class ElectronicDifferential4WD:
         self.W_k = track_kingpin
         self.R_w = wheel_radius
         self.max_steer = max_steer
+        self.max_servo_angle = max_servo_angle
         self.motor_dir = motor_dir
         self.v_max = v_max
         self.thresh_spin = thresh_spin
@@ -102,8 +108,8 @@ class ElectronicDifferential4WD:
             L_sin = self.L * sin_d
             steer_left = math.atan2(L_sin, L_cos - half_Wk_sin)
             steer_right = math.atan2(L_sin, L_cos + half_Wk_sin)
-            steer_left = max(-self.max_steer, min(steer_left, self.max_steer))
-            steer_right = max(-self.max_steer, min(steer_right, self.max_steer))
+            steer_left = max(-self.max_servo_angle, min(steer_left, self.max_servo_angle))
+            steer_right = max(-self.max_servo_angle, min(steer_right, self.max_servo_angle))
         else:
             steer_left = delta
             steer_right = delta

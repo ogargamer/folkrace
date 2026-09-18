@@ -308,6 +308,12 @@ class HeadlessWebotsWorker:
                         fitness = compute_scalar_fitness(metrics, gene_dict=gene_dict)
                         metrics["fitness"] = fitness
                     return fitness, metrics
+                else:
+                    err_msg = resp.get("error", "Unknown error from Webots worker")
+                    print(f"[Worker {self.worker_id}] Webots server error response: {err_msg}", flush=True)
+                    time.sleep(0.5)
+                    if not self._is_stopped and not (self.controller and getattr(self.controller, "abort_requested", False)):
+                        self.start_process()
             except Exception as e:
                 if self._is_stopped or (self.controller and getattr(self.controller, "abort_requested", False)):
                     break
@@ -433,6 +439,24 @@ class ParallelWorkerPool:
                     pass
 
         return [r for r in results if r is not None]
+
+    def health_check(self) -> int:
+        """Pings all workers in the pool; restarts any unresponsive workers. Returns healthy worker count."""
+        if self._shutdown_called or not self.workers:
+            return 0
+        healthy = 0
+        for w in self.workers:
+            if w and w.ping():
+                healthy += 1
+            elif w and not self._shutdown_called:
+                print(f"[WorkerPool HealthCheck] Worker {w.worker_id} (Port {w.port}) unresponsive. Auto-restarting...", flush=True)
+                try:
+                    w.start_process()
+                    if w.ping():
+                        healthy += 1
+                except Exception as e:
+                    print(f"[WorkerPool HealthCheck] Failed to restart Worker {w.worker_id}: {e}", flush=True)
+        return healthy
 
     def shutdown(self):
         """Stops all Webots worker processes."""

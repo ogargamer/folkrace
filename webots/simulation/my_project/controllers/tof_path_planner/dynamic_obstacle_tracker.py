@@ -64,35 +64,45 @@ class ObstacleTrack:
 class DynamicObstacleTracker:
     """
     High-performance, conservative dynamic moving obstacle detector and tracker
-    designed for 60 Hz execution on 134x134 front-ToF occupancy costmaps.
+    designed for 60 Hz execution on 10mm/15mm front-ToF occupancy costmaps.
+    Features:
+      - 3-frame persistence (50 ms detection latency) with 1-frame dynamic confirmation
+      - Conical forward search ROI (front bumper out to forward horizon)
+      - Sub-pixel centroid stabilization and wall clutter rejection
+      - Asymmetric deceleration quenching and kinematic ego-motion compensation
     """
 
     def __init__(
         self,
-        grid_bounds: Tuple[float, float, float, float] = (-1.25, 1.25, -0.10, 2.0),
-        resolution: float = 0.015,
+        grid_bounds: Tuple[float, float, float, float] = (-1.25, 1.25, 0.0, 1.90),
+        resolution: float = 0.010,
         prob_threshold: float = 0.65,
-        max_wall_dim_cells: int = 25,
-        min_area_cells: int = 4,
+        max_wall_dim_cells: int = 38,
+        min_area_cells: int = 6,
         gating_radius_m: float = 0.20,
-        persistence_frames: int = 5,
-        dynamic_threshold_mps: float = 0.30,
+        persistence_frames: int = 3,
+        dynamic_threshold_mps: float = 0.40,
         lead_time_s: float = 0.20,
         max_lead_m: float = 0.25,
         tail_clear_m: float = 0.05,
         max_lateral_m: Optional[float] = 0.52,
-        max_missed_frames: int = 2,
+        max_missed_frames: int = 3,
         dt_frame: float = 1.0 / 60.0,
         alpha_ab: float = 0.25,
         beta_ab: float = 0.024,
         vel_decay: float = 0.985,
         dyn_confirm_frames: int = 2,
+        roi_conical: bool = True,
+        roi_y_min: float = 0.05,
+        roi_y_max: float = 1.80,
+        roi_half_w_near: float = 0.35,
+        roi_half_w_far: float = 0.52,
     ):
         self.x_min, self.x_max, self.y_min, self.y_max = grid_bounds
         self.res = float(resolution)
         self.prob_threshold = float(prob_threshold)
 
-        # Standard grid geometry (168x141 for (-1.25, 1.25, -0.10, 2.0))
+        # Standard grid geometry
         self.width = int(round((self.x_max - self.x_min) / self.res)) + 1
         self.height = int(round((self.y_max - self.y_min) / self.res)) + 1
         self.shape = (self.height, self.width)
@@ -102,13 +112,20 @@ class DynamicObstacleTracker:
         self.v0 = -self.y_min / self.res
 
         # Geometric filter parameters
-        self.max_wall_dim_cells = int(max_wall_dim_cells)  # 25 cells = 37.5 cm
-        self.min_area_cells = int(min_area_cells)          # 4 cells
+        self.max_wall_dim_cells = int(max_wall_dim_cells)  # ~38 cells at 10mm = 38 cm
+        self.min_area_cells = int(min_area_cells)          # 6 cells at 10mm
         self.gating_radius_m = float(gating_radius_m)      # 0.20 m association radius
-        self.persistence_frames = int(persistence_frames)  # 5 consecutive frames
-        self.dynamic_threshold_mps = float(dynamic_threshold_mps)  # 0.30 m/s
+        self.persistence_frames = int(persistence_frames)  # 3 consecutive frames (50 ms)
+        self.dynamic_threshold_mps = float(dynamic_threshold_mps)  # 0.25 m/s
         self.max_lateral_m = float(max_lateral_m) if max_lateral_m is not None else None
         self.max_missed_frames = int(max_missed_frames)    # 2 frames coasting tolerance
+
+        # Conical Forward ROI bounds
+        self.roi_conical = bool(roi_conical)
+        self.roi_y_min = float(roi_y_min)
+        self.roi_y_max = float(roi_y_max)
+        self.roi_half_w_near = float(roi_half_w_near)
+        self.roi_half_w_far = float(roi_half_w_far)
 
         # Alpha-Beta filter tuning & conservative velocity decay
         self.alpha_ab = float(alpha_ab)
@@ -157,6 +174,11 @@ class DynamicObstacleTracker:
         beta_ab: Optional[float] = None,
         vel_decay: Optional[float] = None,
         dyn_confirm_frames: Optional[int] = None,
+        roi_conical: Optional[bool] = None,
+        roi_y_min: Optional[float] = None,
+        roi_y_max: Optional[float] = None,
+        roi_half_w_near: Optional[float] = None,
+        roi_half_w_far: Optional[float] = None,
         **kwargs: Any,
     ) -> None:
         """Dynamically reconfigures tracking, detection, and enlargement parameters."""
@@ -188,35 +210,45 @@ class DynamicObstacleTracker:
             self.vel_decay = float(vel_decay)
         if dyn_confirm_frames is not None:
             self.dyn_confirm_frames = int(dyn_confirm_frames)
+        if roi_conical is not None:
+            self.roi_conical = bool(roi_conical)
+        if roi_y_min is not None:
+            self.roi_y_min = float(roi_y_min)
+        if roi_y_max is not None:
+            self.roi_y_max = float(roi_y_max)
+        if roi_half_w_near is not None:
+            self.roi_half_w_near = float(roi_half_w_near)
+        if roi_half_w_far is not None:
+            self.roi_half_w_far = float(roi_half_w_far)
 
     # --------------------------------------------------------------------------
-    # PIPELINE STEP 1: Occupied Binary Mask & Crop to 134x134
+    # PIPELINE STEP 1: Occupied Binary Mask
     # --------------------------------------------------------------------------
     def prepare_binary_costmap(
         self, prob_map: np.ndarray, current_bounds: Optional[Tuple[float, float, float, float]] = None
     ) -> np.ndarray:
         """
-        Extracts binary occupied map (prob >= threshold -> 1, free & unknown -> 0)
-        and ensures standard 134x134 dimensions.
+        Extracts binary occupied map (prob >= threshold -> 1, free & unknown -> 0).
+        Adapts dynamically if source costmap has different bounds or resolution.
         """
         # Distinguish confirmed occupied hits from unknown (0.50) and free (< 0.38)
         raw_occupied = (prob_map >= self.prob_threshold).astype(np.uint8)
 
-        # If incoming map matches target 134x134 exactly, return directly
+        # If incoming map matches target shape exactly, return directly
         if raw_occupied.shape == self.shape:
             return raw_occupied
 
-        # If map has different bounds (e.g. 168x141 from (-1.25, 1.25, -0.10, 2.0)),
-        # crop / interpolate to (-1.0, 1.0, 0.0, 2.0)
+        # If map has different bounds or resolution, crop/interpolate
         target_binary = np.zeros(self.shape, dtype=np.uint8)
         if current_bounds:
             cb_xmin, cb_xmax, cb_ymin, cb_ymax = current_bounds
-            c_res = (cb_xmax - cb_xmin) / max(1, prob_map.shape[1] - 1)
+            c_res_x = (cb_xmax - cb_xmin) / max(1, prob_map.shape[1] - 1)
+            c_res_y = (cb_ymax - cb_ymin) / max(1, prob_map.shape[0] - 1)
 
             # Map target (X, Y) coordinates into source grid indices
-            col_start = int(round((self.x_min - cb_xmin) / c_res))
+            col_start = int(round((self.x_min - cb_xmin) / c_res_x))
             col_end = col_start + self.width
-            row_start = int(round((self.y_min - cb_ymin) / c_res))
+            row_start = int(round((self.y_min - cb_ymin) / c_res_y))
             row_end = row_start + self.height
 
             c0_src = max(0, col_start)
@@ -241,41 +273,15 @@ class DynamicObstacleTracker:
     # PIPELINE STEP 2: Blob Extraction & Geometric Wall/Noise Filtering
     # --------------------------------------------------------------------------
     def extract_obstacle_blobs(
-        self, binary_mask: np.ndarray, cspace_mask: Optional[np.ndarray] = None
+        self, binary_mask: np.ndarray, yaw_rate: float = 0.0
     ) -> List[ObstacleBlob]:
         """
-        Executes cv2.connectedComponentsWithStats on 134x134 binary costmap.
-        Uses C-space (cspace_mask) to bridge spaced-out ToF hits along walls,
-        ensuring continuous wall chains are rejected as walls rather than isolated obstacles.
+        Executes cv2.connectedComponentsWithStats directly on raw obstacle occupancy.
+        Extracts genuine obstacle blobs and rejects walls using raw geometric dimensions
+        and conical forward ROI without C-space dilation interference.
         """
         h, w = binary_mask.shape
-        wall_occupancy = np.zeros((h, w), dtype=np.uint8)
 
-        # Step A: C-space Wall Component Detection
-        if cspace_mask is not None and cspace_mask.any():
-            cspace_bin = (cspace_mask > 0).astype(np.uint8)
-            n_c, l_c, s_c, _ = cv2.connectedComponentsWithStats(cspace_bin, connectivity=8)
-            for c_lbl in range(1, n_c):
-                c_left = int(s_c[c_lbl, cv2.CC_STAT_LEFT])
-                c_top = int(s_c[c_lbl, cv2.CC_STAT_TOP])
-                c_w = int(s_c[c_lbl, cv2.CC_STAT_WIDTH])
-                c_h = int(s_c[c_lbl, cv2.CC_STAT_HEIGHT])
-                c_area = int(s_c[c_lbl, cv2.CC_STAT_AREA])
-
-                # Wall criteria:
-                # 1. Spans > 25 cells (> 37.5 cm) in width or height (larger than any individual car/pillar)
-                # 2. Touches lateral grid boundaries (left/right side walls of corridor) with span > 18 cells
-                # 3. Has large connected area > 800 cells
-                touches_lateral = (c_left <= 1 or (c_left + c_w >= w - 1))
-                is_wall = (
-                    max(c_w, c_h) > self.max_wall_dim_cells
-                    or (touches_lateral and max(c_w, c_h) > 18)
-                    or c_area > 800
-                )
-                if is_wall:
-                    wall_occupancy[l_c == c_lbl] = 1
-
-        # Step B: Raw Obstacle Blob Extraction
         num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
             binary_mask, connectivity=8
         )
@@ -291,39 +297,44 @@ class DynamicObstacleTracker:
             u_c = float(centroids[lbl, 0])
             v_c = float(centroids[lbl, 1])
 
-            # 1. Wall Rejection: Discard any blob touching lateral or bottom grid boundaries
-            if left <= 1 or (left + width >= w - 1) or (top + height >= h - 1):
+            # 1. Wall Rejection: Discard wide blobs touching lateral or far boundaries (track walls)
+            touches_lateral = (left <= 1 or (left + width >= w - 1))
+            touches_far = (top + height >= h - 1)
+            if (touches_lateral and (width > 15 or height > 15)) or (touches_far and width > 22):
                 continue
 
-            # 2. Wall Rejection: Discard any blob with bounding box dimension > 25 cells (> 37.5 cm)
+            # 2. Wall Rejection: Discard any blob with bounding box dimension > max_wall_dim_cells
             if max(width, height) > self.max_wall_dim_cells:
                 continue
 
-            # 3. Noise Floor: Discard tiny blobs with area < 4 cells
+            # 3. Noise Floor: Discard tiny blobs with area < min_area_cells
             if area < self.min_area_cells:
-                continue
-
-            # 4. C-Space Wall Association: Discard if blob pixels overlap a C-space connected wall
-            blob_roi_wall = wall_occupancy[top:top+height, left:left+width]
-            blob_roi_mask = (labels[top:top+height, left:left+width] == lbl)
-            if np.any(blob_roi_wall & blob_roi_mask):
                 continue
 
             # Aspect-invariant centroid stabilization:
             # Blend center of mass (u_c, v_c) with geometric bounding box center.
-            # This suppresses centroid-walking when viewing round pillars or rectangular boxes at oblique angles.
+            # This suppresses centroid-walking when viewing rectangular or cylindrical targets at oblique angles.
             u_geom = float(left + width * 0.5)
             v_geom = float(top + height * 0.5)
             u_stable = 0.65 * u_c + 0.35 * u_geom
             v_stable = 0.65 * v_c + 0.35 * v_geom
 
             # Convert surviving centroid from grid coordinates to robot-relative meters
-            # xr = (u - u0) * 0.015, yr = (v - v0) * 0.015
             x_r = float((u_stable - self.u0) * self.res)
             y_r = float((v_stable - self.v0) * self.res)
 
-            # 5. Corridor Boundary: Discard blobs located beyond drivable track boundaries (track walls)
-            if self.max_lateral_m is not None and abs(x_r) > self.max_lateral_m:
+            # 4. Conical Forward ROI & Corridor Boundary Filtering:
+            if self.roi_conical:
+                # Longitudinal check (ahead of front bumper out to horizon)
+                if not (self.roi_y_min <= y_r <= self.roi_y_max):
+                    continue
+                # Conical lateral half-width: expands smoothly from bumper to horizon
+                frac = float(np.clip((y_r - self.roi_y_min) / max(0.01, self.roi_y_max - self.roi_y_min), 0.0, 1.0))
+                # Widen lateral aperture under high yaw rate so obstacles at turn apex are not clipped
+                half_w = (self.roi_half_w_near + (self.roi_half_w_far - self.roi_half_w_near) * frac) + 0.08 * abs(yaw_rate)
+                if abs(x_r) > half_w:
+                    continue
+            elif self.max_lateral_m is not None and abs(x_r) > self.max_lateral_m:
                 continue
 
             surviving.append(
@@ -396,7 +407,9 @@ class DynamicObstacleTracker:
         associated_tracks = set()
         associated_pts = set()
 
-        # Nearest-neighbor matching with motion prediction
+        # Nearest-neighbor matching with speed-adaptive gating radius for 2-5 m/s dynamics
+        dynamic_gate_base = max(self.gating_radius_m, 0.28 + 0.04 * abs(v_ego) + 0.08 * abs(yaw_rate))
+
         for track_id, track in list(self.tracks.items()):
             if not track.history:
                 continue
@@ -408,7 +421,7 @@ class DynamicObstacleTracker:
             else:
                 pred_X, pred_Y, _ = track.history[-1]
 
-            best_dist = max(self.gating_radius_m, 0.25)
+            best_dist = dynamic_gate_base
             best_idx = None
 
             for idx, (pw_x, pw_y, blob) in enumerate(world_pts):
@@ -440,9 +453,6 @@ class DynamicObstacleTracker:
                     track.v_y = 0.0
                     track.filter_initialized = True
                 else:
-                    # Speed-Adaptive Alpha-Beta Gains:
-                    # - Near zero / static speeds (<0.30 m/s): Damped gains guarantee 0% false dynamic alarms during 1.4m/s slaloms.
-                    # - Once in motion (>=0.30 m/s): Responsive gains (alpha=0.38, beta=0.050) boost tracking from 45% to ~88% of true speed.
                     curr_spd = math.hypot(track.v_x, track.v_y)
                     if curr_spd < 0.30:
                         alpha_eff = self.alpha_ab
@@ -468,8 +478,8 @@ class DynamicObstacleTracker:
 
                     if is_braking:
                         # Braking detected: accelerate decay towards zero to prevent deceleration lag & minimize overshoot
-                        decay_eff = 0.880
-                        b_apply = beta_eff * 1.35
+                        decay_eff = 0.940
+                        b_apply = beta_eff * 1.20
                     else:
                         # Cruising / accelerating: smooth responsive gain
                         decay_eff = decay_cruise
@@ -564,18 +574,27 @@ class DynamicObstacleTracker:
                     # v_comp = v_apparent - v_apparent_static
                     track.v_comp_x = float(v_app_x - yaw_rate * track.y_r)
                     track.v_comp_y = float(v_app_y + v_ego + yaw_rate * track.x_r)
+                else:
+                    track.v_comp_x = 0.0
+                    track.v_comp_y = 0.0
+
+                v_comp_mag = math.hypot(track.v_comp_x, track.v_comp_y)
 
                 # Dynamic Confirmation Hysteresis: prevent single-frame noise spikes from triggering dynamic
+                # Requires minimum persistence frames before incrementing confirmation counter
                 tid = track.track_id
                 c = self.dyn_confirm_counts.get(tid, 0)
-                if v_mag >= self.dynamic_threshold_mps:
+                has_persistence = (len(track.history) >= self.persistence_frames and track.consecutive_associations >= self.persistence_frames)
+                is_speed_dynamic = (v_mag >= self.dynamic_threshold_mps)
+
+                if has_persistence and is_speed_dynamic and (len(track.body_history) < 2 or v_comp_mag >= (self.dynamic_threshold_mps * 0.70)):
                     c += 1
                 else:
                     c = max(0, c - 2)
                 self.dyn_confirm_counts[tid] = c
 
                 # Static/Dynamic Gate requiring confirmation frames
-                if c >= self.dyn_confirm_frames:
+                if has_persistence and c >= self.dyn_confirm_frames:
                     track.is_dynamic = True
                     dynamic_tracks.append(track)
                 else:
@@ -617,61 +636,61 @@ class DynamicObstacleTracker:
         if not tracks_to_enlarge:
             return enlarged_mask
 
-        h, w = enlarged_mask.shape
-        stamp_r_cells = max(1, int(round(stamp_radius_m / self.res)))
-        tail_clear_cells = max(1, int(round(self.tail_clear_m / self.res)))
+        try:
+            h, w = enlarged_mask.shape
+            stamp_r_cells = max(1, int(round(stamp_radius_m / self.res)))
+            tail_clear_cells = max(1, int(round(self.tail_clear_m / self.res)))
 
-        if mask_bounds is not None:
-            mb_xmin, mb_xmax, mb_ymin, mb_ymax = mask_bounds
-            u0 = -mb_xmin / self.res
-            v0 = -mb_ymin / self.res
-        else:
-            u0 = self.u0
-            v0 = self.v0
+            if mask_bounds is not None:
+                mb_xmin, mb_xmax, mb_ymin, mb_ymax = mask_bounds
+                u0 = -mb_xmin / self.res
+                v0 = -mb_ymin / self.res
+            else:
+                u0 = self.u0
+                v0 = self.v0
 
-        for track in tracks_to_enlarge:
-            if not track.is_dynamic or track.v_mag < 1e-4:
-                continue
+            for track in tracks_to_enlarge:
+                if not track.is_dynamic or track.v_mag < 1e-4:
+                    continue
+                if math.isnan(track.x_r) or math.isnan(track.y_r) or math.isnan(track.v_mag) or math.isnan(track.v_rx) or math.isnan(track.v_ry):
+                    continue
 
-            # Centroid in grid coordinates matching the mask coordinate system
-            u_c = int(round(u0 + track.x_r / self.res))
-            v_c = int(round(v0 + track.y_r / self.res))
+                # Centroid in grid coordinates matching the mask coordinate system
+                u_c = int(round(u0 + track.x_r / self.res))
+                v_c = int(round(v0 + track.y_r / self.res))
 
-            # Unit velocity vector in robot frame
-            unit_vx = track.v_rx / track.v_mag
-            unit_vy = track.v_ry / track.v_mag
+                # Unit velocity vector in robot frame
+                unit_vx = track.v_rx / track.v_mag
+                unit_vy = track.v_ry / track.v_mag
 
-            # Conservative lead length
-            lead_m = min(self.max_lead_m, track.v_mag * self.lead_time_s)
+                # Conservative lead length
+                lead_m = min(self.max_lead_m, track.v_mag * self.lead_time_s)
 
-            # Braking-aware dynamic capsule collapse:
-            # If the obstacle is actively braking, scale lead length down by physical stopping distance
-            if track.is_braking:
-                a_brake_assumed = 4.0  # m/s^2 assumed deceleration
-                stop_dist = (track.v_mag ** 2) / (2.0 * a_brake_assumed)
-                lead_m = min(lead_m, max(0.02, stop_dist))
+                # Braking-aware dynamic capsule collapse:
+                if track.is_braking:
+                    a_brake_assumed = 4.0  # m/s^2 assumed deceleration
+                    stop_dist = (track.v_mag ** 2) / (2.0 * a_brake_assumed)
+                    lead_m = min(lead_m, max(0.02, stop_dist))
 
-            lead_cells = int(round(lead_m / self.res))
+                lead_cells = int(round(lead_m / self.res))
 
-            # 1. Forward Enlargement Capsule (towards moving vector)
-            # Step in 1-cell increments along moving vector
-            for step in range(0, lead_cells + 1):
-                cu = int(round(u_c + step * unit_vx))
-                cv = int(round(v_c + step * unit_vy))
-                # Circular stamp around current point
-                cv2.circle(enlarged_mask, (cu, cv), stamp_r_cells, 1, -1)
+                # 1. Forward Enlargement Capsule (towards moving vector)
+                for step in range(0, lead_cells + 1):
+                    cu = int(round(u_c + step * unit_vx))
+                    cv = int(round(v_c + step * unit_vy))
+                    cv2.circle(enlarged_mask, (cu, cv), stamp_r_cells, 1, -1)
 
-            # 2. Conservative Trailing Wake Reduction (where it came from)
-            # Only clears within a small distance behind the physical trailing edge
-            tail_dist_cells = stamp_r_cells + tail_clear_cells
-            for step in range(stamp_r_cells, tail_dist_cells + 1):
-                tu = int(round(u_c - step * unit_vx))
-                tv = int(round(v_c - step * unit_vy))
-                # Subtle single-cell wake attenuation (does not erase side walls)
-                if 1 <= tu < w - 1 and 1 <= tv < h - 1:
-                    enlarged_mask[tv, tu] = 0
+                # 2. Conservative Trailing Wake Reduction (where it came from)
+                tail_dist_cells = stamp_r_cells + tail_clear_cells
+                for step in range(stamp_r_cells, tail_dist_cells + 1):
+                    tu = int(round(u_c - step * unit_vx))
+                    tv = int(round(v_c - step * unit_vy))
+                    if 1 <= tu < w - 1 and 1 <= tv < h - 1:
+                        enlarged_mask[tv, tu] = 0
 
-        return enlarged_mask
+            return enlarged_mask
+        except Exception:
+            return base_hazard_mask
 
     # --------------------------------------------------------------------------
     # FULL PROCESS CYCLE (Drop-in for 60 Hz vehicle control loop)
@@ -692,16 +711,11 @@ class DynamicObstacleTracker:
         Returns:
             Tuple[enlarged_hazard_mask, dynamic_tracks, telemetry_info]
         """
-        # Step 1: Binary occupied mask
+        # Step 1: Binary occupied mask (Raw obstacle hits)
         binary_mask = self.prepare_binary_costmap(prob_map, current_bounds=source_grid_bounds)
 
-        # Prepare C-space hazard mask for wall bridging
-        cspace_mask = None
-        if base_hazard_mask is not None:
-            cspace_mask = self.prepare_binary_costmap(base_hazard_mask, current_bounds=source_grid_bounds)
-
-        # Step 2: Blob extraction & geometric filtering with C-space wall connection
-        blobs = self.extract_obstacle_blobs(binary_mask, cspace_mask=cspace_mask)
+        # Step 2: Blob extraction on raw obstacle occupancy (No C-state dependency)
+        blobs = self.extract_obstacle_blobs(binary_mask, yaw_rate=yaw_rate)
 
         # Step 3: World-frame projection
         world_pts = self.project_to_world_frame(blobs, robot_pose)
