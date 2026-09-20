@@ -519,11 +519,14 @@ class CppCurvilinearSLMPC:
             chosen_name = "k1_left"
         elif chosen_id == 3:
             chosen_name = "k1_right"
+        elif chosen_id == 4:
+            chosen_name = "reverse"  # All evasion paths blocked — recovery manager should reverse
 
         shield_info = {
             "active": bool(self._shield_active.value),
             "chosen_id": chosen_id,
             "chosen_name": chosen_name,
+            "reverse_suggested": (chosen_id == 4),  # True when all 5-step evasion arcs are blocked
             "k1_left": k1_left_branch,
             "k1_left_safe": bool(self._shield_k1_l_safe.value),
             "k1_right": k1_right_branch,

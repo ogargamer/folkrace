@@ -610,10 +610,11 @@ class PlannerCostmapCanvas(QtWidgets.QWidget):
                         p2 = self.world_to_screen(line[i + 1][0], line[i + 1][1])
                         painter.drawLine(p1, p2)
 
-        # 7. Emergency Shield Micro-Rollouts (2 Branches from Step 1, 2 Branches from Step 2)
+        # 7. Emergency Shield Micro-Rollouts (2 Branches from Step 0, 2 Branches from Step 2)
         if self.show_shield and self.shield_info:
             s_active = self.shield_info.get("active", False)
             chosen_id = self.shield_info.get("chosen_id", -1)
+            all_blocked_reverse = s_active and chosen_id == 4  # All 5-step arcs exhausted → reverse
 
             branches = [
                 # (pts, is_safe, is_chosen, label, step_num)
@@ -630,6 +631,9 @@ class PlannerCostmapCanvas(QtWidgets.QWidget):
                         # Straight max-decel probe: white=clear, dark orange=blocked
                         col = QColor(220, 220, 220, 180) if is_safe else QColor(255, 120, 40, 200)
                         pen = QPen(col, 1.8, Qt.DashLine)
+                    elif all_blocked_reverse and step_num == 1:
+                        # Step-0 branches are the reverse trigger indicator — draw bold red/magenta
+                        pen = QPen(QColor(255, 30, 80, 240), 2.8, Qt.SolidLine)
                     elif is_chosen:
                         pen = QPen(QColor(0, 255, 128, 255), 3.2, Qt.SolidLine)
                     elif is_safe:
@@ -648,15 +652,29 @@ class PlannerCostmapCanvas(QtWidgets.QWidget):
                         # Root dot at the MPC trajectory step origin
                         p_root = self.world_to_screen(branch[0][0], branch[0][1])
                         painter.setPen(Qt.NoPen)
-                        painter.setBrush(QBrush(QColor(255, 215, 0, 220)))
+                        dot_col = QColor(255, 30, 80, 240) if all_blocked_reverse and step_num == 1 else QColor(255, 215, 0, 220)
+                        painter.setBrush(QBrush(dot_col))
                         painter.drawEllipse(p_root, 2.5, 2.5)
 
                     # Tip dot & collision hit marker
                     p_tip = self.world_to_screen(branch[-1][0], branch[-1][1])
                     tip_col = QColor(0, 255, 128) if is_safe else QColor(255, 50, 50)
+                    if all_blocked_reverse and step_num == 1:
+                        tip_col = QColor(255, 30, 80)  # Vivid red for reverse-trigger branch tips
                     painter.setPen(Qt.NoPen)
                     painter.setBrush(QBrush(tip_col))
                     painter.drawEllipse(p_tip, 4.0 if is_chosen else 2.6, 4.0 if is_chosen else 2.6)
+
+            # All-blocked reverse indicator: bright red ring at robot origin
+            if all_blocked_reverse:
+                p_origin = self.world_to_screen(0.0, 0.0)
+                painter.setPen(QPen(QColor(255, 30, 80, 230), 2.5, Qt.SolidLine))
+                painter.setBrush(Qt.NoBrush)
+                painter.drawEllipse(p_origin, 9.0, 9.0)
+                painter.setFont(QFont("Consolas", 7, QFont.Bold))
+                painter.setPen(QPen(QColor(255, 30, 80, 240)))
+                painter.drawText(QPointF(p_origin.x() + 11, p_origin.y() + 4), "◄ REV")
+
 
         # 8. Best / Winning Trajectory Line (Bright Gold Solid Line)
         if self.show_best and self.best_line and len(self.best_line) > 1:

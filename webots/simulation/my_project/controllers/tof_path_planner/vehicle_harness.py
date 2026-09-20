@@ -668,6 +668,23 @@ class FolkraceVehicle:
                 gx_curr, gy_curr, gyaw_curr = self.get_ground_truth_pose()
                 self.last_aww_status = None
 
+            # Shield Reverse Trigger: if all 5-step evasion arcs (Step-0 + Step-2) are blocked
+            # → pre-trigger emergency recovery before the normal update evaluates costmap arcs
+            _shield_cur = plan_res.get("shield", {})
+            if _shield_cur.get("reverse_suggested", False) and \
+               self.recovery_manager.state == StuckRecoveryState.NORMAL_DRIVE:
+                _arc_cl = self.recovery_manager.evaluate_costmap_escape_arcs(hazard_mask, self.costmap)
+                _side = self.recovery_manager.resolve_escape_steer_dir(
+                    arc_clearance=_arc_cl, heading_err=float(theta_g)
+                )
+                self.recovery_manager.trigger_emergency_recovery(
+                    heading_err=float(theta_g),
+                    steer_dir=_side,
+                    current_v=self.v_est,
+                    current_steer=current_physical_steer,
+                    instant_reverse=True,
+                )
+
             # Recovery Manager at 60 Hz (Kinematic Escape Arc Costmap Evaluation & CORRECTIVE_180)
             is_recovering, rec_v, rec_steer = self.recovery_manager.update(
                 dt=DT_PLANNER,

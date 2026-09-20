@@ -326,7 +326,7 @@ public:
         const uint8_t* custom_hazard_mask = nullptr
     ) {
         const uint8_t* active_haz = custom_hazard_mask ? custom_hazard_mask : hazard_mask.data();
-        constexpr float GAP_MIN_LOOKAHEAD_M = 0.30f;
+        constexpr float GAP_MIN_LOOKAHEAD_M = 0.20f;
         constexpr float GAP_MAX_LOOKAHEAD_M = 1.70f;
         constexpr float GAP_MIN_WIDTH_M = 0.0f;
         constexpr float TRACK_CORRIDOR_WIDTH_M = 1.00f;
