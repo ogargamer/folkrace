@@ -487,14 +487,21 @@ class FolkraceVehicle:
         return float(self.x_est), float(self.y_est), float(self.yaw_est)
 
     def get_ground_truth_velocity(self) -> float:
-        """Returns real linear velocity from supervisor if available, else fused estimate."""
+        """Returns real signed longitudinal velocity from supervisor if available, else fused estimate."""
         if self.is_supervisor and self.robot_node:
             try:
                 vel = self.robot_node.getVelocity()
+                rot = self.robot_node.getField("rotation")
+                if rot:
+                    r = rot.getSFRotation()
+                    yaw = float(r[3]) * (1.0 if r[2] >= 0.0 else -1.0)
+                    # Vehicle forward unit vector in Webots world frame: (-sin(yaw), cos(yaw))
+                    v_long = vel[0] * (-math.sin(yaw)) + vel[1] * math.cos(yaw)
+                    return float(v_long)
                 return float(math.hypot(vel[0], vel[1]))
             except Exception:
                 pass
-        return float(self.rate_limited_speed)
+        return float(self.v_est)
 
     def step(
         self,
@@ -680,6 +687,8 @@ class FolkraceVehicle:
                 self.active_steer = target_steer
                 self.mode_desc = "OVERRIDE_TEST"
             elif is_recovering:
+                if not self.was_recovering:
+                    self.rate_limited_speed = self.v_est
                 target_speed = rec_v
                 target_steer = rec_steer
                 self.active_steer = rec_steer
@@ -691,6 +700,7 @@ class FolkraceVehicle:
                 if self.was_recovering:
                     self.was_recovering = False
                     self.active_steer = current_physical_steer
+                    self.rate_limited_speed = self.v_est
 
                 # Fast Straight-Line Lock (unguarded by turn intent; engages purely on forward clearance)
                 d_fl_lock = tof_readings.get("tof_front_left_4.1deg", tof_readings.get("tof_fl_3", 0.0))
@@ -808,6 +818,7 @@ class FolkraceVehicle:
                 "v_cmd": round(float(self.cached_target_speed), 3),
                 "steer_deg": round(math.degrees(float(self.cached_target_steer)), 2),
                 "steer_rad": round(float(self.cached_target_steer), 4),
+                "steer_actual_deg": round(math.degrees(float(getattr(self.ediff, "current_steer_rad", self.active_steer))), 2),
                 "pose": [float(gx), float(gy), float(gyaw)],
                 "plan_ms": round(float(self.cached_plan_ms), 2),
                 "map_ms": round(float(self.cached_map_ms), 2),
@@ -868,6 +879,7 @@ class FolkraceVehicle:
             "v_cmd": round(float(self.cached_target_speed), 3),
             "steer_deg": round(math.degrees(float(self.cached_target_steer)), 2),
             "steer_rad": round(float(self.cached_target_steer), 4),
+            "steer_actual_deg": round(math.degrees(float(getattr(self.ediff, "current_steer_rad", self.active_steer))), 2),
             "pose": [float(gx), float(gy), float(gyaw)],
             "gap": g_gap,
             "targets": g_targets,

@@ -31,7 +31,7 @@ PROTO only_front_tofs [
           RotationalMotor {
             name "motor RL"
             maxVelocity 205
-            maxTorque 0.18
+            maxTorque 0.3
           }
           PositionSensor {
             name "encoder RL"
@@ -74,7 +74,7 @@ PROTO only_front_tofs [
           RotationalMotor {
             name "motor RR"
             maxVelocity 205
-            maxTorque 0.18
+            maxTorque 0.3
           }
           PositionSensor {
             name "encoder RR"
@@ -138,7 +138,7 @@ PROTO only_front_tofs [
           RotationalMotor {
             name "motor FR"
             maxVelocity 205
-            maxTorque 0.18
+            maxTorque 0.3
           }
           PositionSensor {
             name "encoder FR"
@@ -202,7 +202,7 @@ PROTO only_front_tofs [
           RotationalMotor {
             name "motor FL"
             maxVelocity 205
-            maxTorque 0.18
+            maxTorque 0.3
           }
           PositionSensor {
             name "encoder FL"

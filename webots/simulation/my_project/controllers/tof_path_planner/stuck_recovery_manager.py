@@ -280,10 +280,10 @@ class StuckRecoveryManager:
                 max_any_tof = max(cached_tofs) if len(cached_tofs) > 0 else 0.0
 
         # 2. Check if front ToFs are blocked (< 15cm):
-        # If front is blocked, check if either side escape curvature is free (>= arc_lookahead - 1cm).
+        # If front is blocked, check if either side escape curvature is free (>= arc_lookahead - 1.5cm).
         # Only trigger emergency reverse if BOTH front is blocked AND neither side curvature has a way out.
         front_blocked = (d_straight_tof < 0.15)
-        side_free_thresh = max(0.08, self.arc_lookahead_m - 0.01)
+        side_free_thresh = max(0.08, self.arc_lookahead_m - 0.015)
         side_curvature_free = (d_esc_l >= side_free_thresh or d_esc_r >= side_free_thresh)
         is_front_imminent_obstacle = front_blocked and (not side_curvature_free)
 
@@ -291,7 +291,8 @@ class StuckRecoveryManager:
         is_facing_backwards = abs(heading_err) > math.radians(110.0)
 
         max_forward_escape = max(d_esc_l, d_esc_r, d_esc_c)
-        is_stalled_forward = (commanded_v > 0.30 and abs(current_v) < 0.10 and max_forward_escape < RECOVERY_FRONT_BLOCKED_M)
+        is_forward_blocked = (d_straight_tof < RECOVERY_FRONT_BLOCKED_M) and (max_forward_escape < side_free_thresh)
+        is_stalled_forward = (commanded_v > 0.30 and abs(current_v) < 0.10 and is_forward_blocked)
 
         # Immediate override for imminent obstacle from any state
         if is_front_imminent_obstacle and self.state != StuckRecoveryState.PIVOT_REVERSE:
@@ -325,7 +326,7 @@ class StuckRecoveryManager:
         # Global failsafe timeout: if recovery is stuck longer than timeout, force exit to drive
         # Note: CORRECTIVE_180 has its own dedicated exit condition based on completed yaw rotation
         if self.state != StuckRecoveryState.CORRECTIVE_180:
-            if self.total_recovery_timer >= RECOVERY_TOTAL_TIMEOUT_S and not is_front_imminent_obstacle and max_forward_escape > 0.12:
+            if self.total_recovery_timer >= RECOVERY_TOTAL_TIMEOUT_S and not is_front_imminent_obstacle and (max_forward_escape >= side_free_thresh or d_straight_tof >= self.clearance_exit_m):
                 self.state = StuckRecoveryState.NORMAL_DRIVE
                 self.stall_timer = 0.0
                 self.stroke_timer = 0.0
@@ -335,7 +336,7 @@ class StuckRecoveryManager:
         # PHASE 1: PIVOT REVERSE ARC
         if self.state == StuckRecoveryState.PIVOT_REVERSE:
             # Check stopping conditions for reverse backing:
-            forward_cleared = (max_forward_escape >= self.clearance_exit_m)
+            forward_cleared = (max_forward_escape >= side_free_thresh) or (d_straight_tof >= self.clearance_exit_m)
             any_tof_cleared = (max_any_tof >= self.any_tof_exit_m)
 
             has_sufficient_clearance = (

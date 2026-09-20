@@ -328,18 +328,20 @@ def run_racing_studio(robot: any, vehicle: FolkraceVehicle) -> None:
                     steer_deg = telemetry.get("steer_deg", 0.0)
                     mode_str = telemetry.get("mode", "DRIVE")
                     plan_ms = telemetry.get("plan_ms", 0.0)
+                    steer_act = telemetry.get("steer_actual_deg", steer_deg)
                     lap_num = getattr(track_tracker, "current_lap", 0)
 
                     color_mode = 0x00FF88 if "RECOVERY" not in mode_str else 0xFF3333
                     robot.setLabel(0, f"SL-MPC {telemetry_hz}Hz | Mode: {mode_str:12s} | Time: {sim_time:5.1f}s | Lap: {lap_num}", 0.01, 0.01, 0.06, 0x00E5FF, 0.0, "Arial")
-                    robot.setLabel(1, f"Speed: {v_real:4.2f} m/s (cmd: {v_cmd:4.2f}) | Steer: {steer_deg:+5.1f} deg | Plan: {plan_ms:4.2f}ms", 0.01, 0.04, 0.06, color_mode, 0.0, "Arial")
+                    robot.setLabel(1, f"Speed: {v_real:+4.2f} m/s (cmd: {v_cmd:+4.2f}) | Steer: {steer_act:+5.1f}° (cmd: {steer_deg:+5.1f}°) | Plan: {plan_ms:4.2f}ms", 0.01, 0.04, 0.06, color_mode, 0.0, "Arial")
                     robot.setLabel(2, f"Track Progress: {track_dist:6.1f}m", 0.01, 0.07, 0.05, 0xFFFFFF, 0.0, "Arial")
 
                 # Terminal Telemetry Output (throttled to telemetry_hz)
+                steer_act_val = telemetry.get('steer_actual_deg', telemetry['steer_deg'])
                 print(
                     f"[Telemetry {telemetry_hz:2d}Hz] Mode: {telemetry['mode']:14s} | Time: {sim_time:5.2f}s | Lap: {track_tracker.current_lap:2d} | "
-                    f"Dist: {track_dist:6.1f}m | Speed: {telemetry['v_real']:4.2f}m/s (cmd: {telemetry['v_cmd']:4.2f}) | "
-                    f"Steer: {telemetry['steer_deg']:+5.1f} deg | Plan: {telemetry['plan_ms']:4.2f}ms",
+                    f"Dist: {track_dist:6.1f}m | Speed: {telemetry['v_real']:+5.2f}m/s (cmd: {telemetry['v_cmd']:+5.2f}) | "
+                    f"Steer: {steer_act_val:+5.1f} deg (cmd: {telemetry['steer_deg']:+5.1f} deg) | Plan: {telemetry['plan_ms']:4.2f}ms",
                     flush=True,
                 )
 
@@ -580,20 +582,22 @@ def run_champion_preview(robot: any, vehicle: FolkraceVehicle) -> None:
                     v_real = telemetry.get("v_real", 0.0)
                     v_cmd = telemetry.get("v_cmd", 0.0)
                     steer_deg = telemetry.get("steer_deg", 0.0)
+                    steer_act = telemetry.get("steer_actual_deg", steer_deg)
                     mode_str = telemetry.get("mode", "DRIVE")
                     plan_ms = telemetry.get("plan_ms", 0.0)
                     lap_num = getattr(track_tracker, "current_lap", 0)
 
                     color_mode = 0x00FF88 if "RECOVERY" not in mode_str else 0xFF3333
                     robot.setLabel(0, f"CHAMPION PREVIEW {telemetry_hz}Hz | Mode: {mode_str:12s} | Time: {sim_time:5.1f}s | Lap: {lap_num}", 0.01, 0.01, 0.06, 0x00E5FF, 0.0, "Arial")
-                    robot.setLabel(1, f"Speed: {v_real:4.2f} m/s (cmd: {v_cmd:4.2f}) | Steer: {steer_deg:+5.1f} deg | Plan: {plan_ms:4.2f}ms", 0.01, 0.04, 0.06, color_mode, 0.0, "Arial")
+                    robot.setLabel(1, f"Speed: {v_real:+4.2f} m/s (cmd: {v_cmd:+4.2f}) | Steer: {steer_act:+5.1f}° (cmd: {steer_deg:+5.1f}°) | Plan: {plan_ms:4.2f}ms", 0.01, 0.04, 0.06, color_mode, 0.0, "Arial")
                     robot.setLabel(2, f"Track Progress: {track_dist:6.1f}m | {title[:40]}", 0.01, 0.07, 0.05, 0xFFFFFF, 0.0, "Arial")
 
                 # Terminal Telemetry Output (throttled to telemetry_hz)
+                steer_act_val = telemetry.get('steer_actual_deg', telemetry['steer_deg'])
                 print(
                     f"[Telemetry {telemetry_hz:2d}Hz] Mode: {telemetry['mode']:14s} | Time: {sim_time:5.2f}s | Lap: {track_tracker.current_lap:2d} | "
-                    f"Dist: {track_dist:6.1f}m | Speed: {telemetry['v_real']:4.2f}m/s (cmd: {telemetry['v_cmd']:4.2f}) | "
-                    f"Steer: {telemetry['steer_deg']:+5.1f} deg | Plan: {telemetry['plan_ms']:4.2f}ms",
+                    f"Dist: {track_dist:6.1f}m | Speed: {telemetry['v_real']:+5.2f}m/s (cmd: {telemetry['v_cmd']:+5.2f}) | "
+                    f"Steer: {steer_act_val:+5.1f} deg (cmd: {telemetry['steer_deg']:+5.1f} deg) | Plan: {telemetry['plan_ms']:4.2f}ms",
                     flush=True,
                 )
 
