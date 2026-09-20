@@ -103,7 +103,7 @@ OPTION_2_SL_MPC_GENE_SPECS: List[Tuple[str, float, float, type, float, str]] = [
     ("horizon_N",           30.0,   30.0,    int,   30.0,    "MPC prediction horizon steps (fixed at 30 in native QP tables)"),
     ("dt",                   0.016667, 0.016667, float, 0.016667, "MPC prediction discretization timestep (s)"),
     # Tire Friction & Costmap Inflation
-    ("mu_friction",          0.80,   0.88,   float,  0.88,  "Tire friction coefficient governing steer vs brake loads"),
+    ("mu_friction",          0.80,   0.89,   float,  0.88,  "Tire friction coefficient governing steer vs brake loads"),
     ("r_inflation_m",        0.075,  0.075,  float,  0.075,  "ToF obstacle expansion / inflation radius (0.075m - 0.120m)"),
     # MPC Objective Weights
     ("q_progress",           2.00,  30.00,   float, 16.372,  "Longitudinal progress reward weight"),
@@ -113,8 +113,8 @@ OPTION_2_SL_MPC_GENE_SPECS: List[Tuple[str, float, float, type, float, str]] = [
     ("r_accel",              0.10,   6.00,   float,  0.641,  "Acceleration/braking effort penalty weight"),
     ("r_steer_rate",         2.00,  35.00,   float, 17.749,  "Steering rate slew penalty weight"),
     ("v_corner_factor",      0.60,   0.98,   float,  0.941,  "Friction circle speed scaling for curvature"),
-    ("pp_blend_gain",        0.00,   0.80,   float,  0.647,  "Pure pursuit lookahead blend ratio with MPC"),
-    ("lookahead_blend_m",    0.20,   0.80,   float,  0.462,  "Pure pursuit blend lookahead distance (m)"),
+    ("pp_blend_gain",        0.00,   0.00,   float,  0.000,  "Pure pursuit lookahead blend ratio with MPC"),
+    ("lookahead_blend_m",    0.00,   0.00,   float,  0.0,  "Pure pursuit blend lookahead distance (m)"),
     # Gap Scout Parameters
     ("target_lookahead_m",   1.72,   1.72,   float,  1.72,   "Scout lookahead target projection distance (m)"),
     ("w_gap_distance",       1.00,  10.00,   float,  5.800,  "Gap scout distance reward weight"),

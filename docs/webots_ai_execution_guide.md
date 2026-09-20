@@ -138,3 +138,33 @@ To evaluate the full autonomous racing pipeline (ToF Gap Scout + Curvilinear SL-
 python launchers/1_champion_preview.py
 ```
 
+---
+
+## 7. Webots Coordinate Systems & Steering Sign Conventions
+
+All controllers, C++ planners, MPC solvers, and recovery managers in this project strictly follow the standardized coordinate frame and sign conventions below:
+
+### A. Robot Body Frame (Vehicle Local Frame)
+* **$+Y$ Axis**: **Forward** (Longitudinal direction of motion)
+* **$-Y$ Axis**: **Backward** (Reverse motion)
+* **$+X$ Axis**: **Right** (Lateral displacement to the right of the vehicle)
+* **$-X$ Axis**: **Left** (Lateral displacement to the left of the vehicle)
+* **$+Z$ Axis**: **Up** (Normal to track surface)
+
+### B. Steering Angle Sign Convention (`cmd_steer_rad`, `steer_deg`)
+* **Positive ($+$)**: **Steer LEFT** (Counter-Clockwise / CCW yaw turn)
+* **Negative ($-$)**: **Steer RIGHT** (Clockwise / CW yaw turn)
+* **Steering Limits**: $\approx \pm 34.97^\circ$ ($\pm 0.610\text{ rad}$) virtual Ackermann bicycle limit $\rightarrow \pm 39.9^\circ$ ($\pm 0.697\text{ rad}$) servo angle.
+
+### C. Yaw & Angular Velocity (`yaw`, `gyro_z`, `theta_g`)
+* **Positive ($+$)**: **Turning Left** (CCW)
+* **Negative ($-$)**: **Turning Right** (CW)
+
+### D. Recovery Steering & Escape Arc Rules
+* **Clearance Opening on the LEFT ($X < 0$)**:
+  * **Forward Motion ($v > 0.1\text{ m/s}$)**: Steer **$+37.2^\circ$ (Left)** towards open space.
+  * **Reverse Backing ($v \le 0.1\text{ m/s}$)**: Steer **$-37.2^\circ$ (Right)** to swing the vehicle's front nose to the Left.
+* **Clearance Opening on the RIGHT ($X > 0$)**:
+  * **Forward Motion ($v > 0.1\text{ m/s}$)**: Steer **$-37.2^\circ$ (Right)** towards open space.
+  * **Reverse Backing ($v \le 0.1\text{ m/s}$)**: Steer **$+37.2^\circ$ (Left)** to swing the vehicle's front nose to the Right.
+
