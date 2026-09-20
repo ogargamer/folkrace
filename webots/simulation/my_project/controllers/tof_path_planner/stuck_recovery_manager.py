@@ -214,8 +214,9 @@ class StuckRecoveryManager:
         else:
             self.preferred_yaw_sign = 1.0
 
-        # Steer away from obstacle towards clear escape arc
-        target_steer = -self.preferred_yaw_sign * self.steer_angle
+        # When reversing (target_v < 0.5 m/s, e.g. -reverse_speed), the front wheels must steer towards
+        # the obstacle / side clearance to swing the vehicle's rear and pivot the front away from it.
+        target_steer = self.preferred_yaw_sign * self.steer_angle
 
         if instant_reverse:
             self.current_cmd_v = -self.reverse_speed
@@ -356,8 +357,8 @@ class StuckRecoveryManager:
                 return False, 0.0, 0.0
 
             target_v = -self.reverse_speed
-            # Steer away from obstacle towards clear escape arc
-            target_steer = -self.preferred_yaw_sign * self.steer_angle
+            # When reversing (target_v < 0.5 m/s), front wheels steer towards the escape side to pivot front away in reverse
+            target_steer = self.preferred_yaw_sign * self.steer_angle
 
             # Instantly apply full reverse speed and escape steering angle
             self.current_cmd_v = target_v

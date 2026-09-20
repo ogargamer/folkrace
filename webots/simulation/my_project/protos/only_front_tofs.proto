@@ -115,9 +115,11 @@ PROTO only_front_tofs [
           anchor 0.031 0.0625 0
           minStop -0.698132
           maxStop 0.698132
+          dampingConstant 0.05
         }
         jointParameters2 JointParameters {
           axis 1 0 0
+          dampingConstant 0.001
         }
         device [
           RotationalMotor {
@@ -177,9 +179,11 @@ PROTO only_front_tofs [
           anchor -0.031 0.0625 0
           minStop -0.698132
           maxStop 0.698132
+          dampingConstant 0.05
         }
         jointParameters2 JointParameters {
           axis 1 0 0
+          dampingConstant 0.001
         }
         device [
           RotationalMotor {
@@ -473,7 +477,7 @@ PROTO only_front_tofs [
     boundingObject Group {
       children [
         Pose {
-          translation 0 0.1 0.015
+          translation 0 0.101 0.015
           children [
             Box {
               size 0.15 0.004 0.025
