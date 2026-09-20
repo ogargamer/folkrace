@@ -2,6 +2,9 @@
 ================================================================================
   DYNAMIC MOVING OBSTACLE TRACKER & CONSERVATIVE VECTOR ENLARGER
 ================================================================================
+  NOTE: Moving obstacle detection is currently DISABLED because it is not
+        working properly (WIP).
+================================================================================
   Pipeline:
     1. Binary Costmap Extraction (separating occupied from unknown & free space)
     2. Blob Extraction & Geometric Filtering (cv2.connectedComponentsWithStats)
@@ -145,7 +148,9 @@ class DynamicObstacleTracker:
         roi_y_max: float = 1.80,
         roi_half_w_near: float = 0.35,
         roi_half_w_far: float = 0.52,
+        enabled: bool = False,  # Disabled because not working, WIP
     ):
+        self.enabled = bool(enabled)  # Disabled because not working, WIP
         self.x_min, self.x_max, self.y_min, self.y_max = grid_bounds
         self.res = float(resolution)
         self.prob_threshold = float(prob_threshold)
@@ -229,9 +234,12 @@ class DynamicObstacleTracker:
         roi_y_max: Optional[float] = None,
         roi_half_w_near: Optional[float] = None,
         roi_half_w_far: Optional[float] = None,
+        enabled: Optional[bool] = None,
         **kwargs: Any,
     ) -> None:
         """Dynamically reconfigures tracking, detection, and enlargement parameters."""
+        if enabled is not None:
+            self.enabled = bool(enabled)
         if prob_threshold is not None:
             self.prob_threshold = float(prob_threshold)
         if max_wall_dim_cells is not None:
@@ -958,9 +966,28 @@ class DynamicObstacleTracker:
         """
         Executes complete dynamic obstacle detection and tracking pipeline.
 
+        NOTE: Moving obstacle detection is currently DISABLED because it is not
+        working properly (WIP). When disabled, returns the unmodified base hazard
+        mask with empty dynamic tracks.
+
         Returns:
             Tuple[enlarged_hazard_mask, dynamic_tracks, telemetry_info]
         """
+        # NOTE: Disabled because moving obstacle detection is not working properly (WIP)
+        if not self.enabled:
+            self.tracks.clear()
+            self.last_confirmed_tracks = []
+            self.last_dynamic_tracks = []
+            self.last_surviving_blobs = []
+            active_hazard = base_hazard_mask if base_hazard_mask is not None else np.zeros_like(prob_map, dtype=np.uint8)
+            return active_hazard, [], {
+                "status": "disabled (not working, WIP)",
+                "surviving_blobs": 0,
+                "active_tracks": 0,
+                "dynamic_obstacles": 0,
+                "tracks_detail": [],
+            }
+
         # Step 1: Binary occupied mask (Raw obstacle hits)
         binary_mask = self.prepare_binary_costmap(prob_map, current_bounds=source_grid_bounds)
 

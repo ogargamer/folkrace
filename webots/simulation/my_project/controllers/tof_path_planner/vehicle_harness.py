@@ -221,9 +221,11 @@ class FolkraceVehicle:
             r_inflation_m=R_INFLATION_M,
         )
 
+        # Dynamic moving obstacle tracker (NOTE: Disabled because it is not working properly, WIP)
         self.obstacle_tracker = DynamicObstacleTracker(
             grid_bounds=(GRID_X_MIN, GRID_X_MAX, GRID_Y_MIN, GRID_Y_MAX),
             resolution=GRID_RES,
+            enabled=False,
         )
         self.last_dynamic_tracks = []
         self.last_obs_telem = {}
@@ -592,7 +594,8 @@ class FolkraceVehicle:
             prob_map, hazard_mask, map_ms = self.costmap.process_tof_frame(tof_readings)
             self.cached_map_ms = map_ms
 
-            # Dynamic Moving Obstacle Detection, Tracking & Vector Enlargement (Ego-Compensated & 1D Range-Rate)
+            # Dynamic Moving Obstacle Detection, Tracking & Vector Enlargement
+            # NOTE: Disabled because it is not working properly, WIP.
             enlarged_hazard_mask, dyn_tracks, obs_telem = self.obstacle_tracker.process_frame(
                 prob_map=prob_map,
                 robot_pose=(self.x_est, self.y_est, self.yaw_est),
