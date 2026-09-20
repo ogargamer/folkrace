@@ -778,13 +778,20 @@ class PlannerCostmapCanvas(QtWidgets.QWidget):
                     # Velocity vector arrow (0.40s forward projection)
                     scale = 0.40
                     p_arr = self.world_to_screen(ox + vrx * scale, oy + vry * scale)
-                    painter.setPen(QPen(QColor(255, 255, 0, 250), 2.5, Qt.SolidLine))
+                    state = obs.get("state", "APPROACHING" if vry < 0 else "RECEDING")
+                    arrow_col = QColor(255, 70, 70, 250) if vry < 0 else QColor(70, 255, 130, 250)
+                    painter.setPen(QPen(arrow_col, 2.5, Qt.SolidLine))
                     painter.drawLine(p_obs, p_arr)
 
-                    # Text label with estimated speed
+                    # Text label with estimated speed and 1D classification state
                     painter.setFont(QFont("Consolas", 8, QFont.Bold))
-                    painter.setPen(QPen(QColor(255, 255, 255, 250)))
-                    painter.drawText(QPointF(p_obs.x() + 10, p_obs.y() - 6), f"{v_mag:.2f} m/s")
+                    painter.setPen(QPen(arrow_col))
+                    tag = "APPR" if vry < 0 else "REC"
+                    painter.drawText(QPointF(p_obs.x() + 10, p_obs.y() - 6), f"{tag} {v_mag:.2f} m/s")
+                else:
+                    painter.setFont(QFont("Consolas", 8, QFont.Bold))
+                    painter.setPen(QPen(QColor(180, 180, 180, 220)))
+                    painter.drawText(QPointF(p_obs.x() + 10, p_obs.y() - 6), "STATIC")
 
         if self.show_gap and self.gap_info:
             xg, yg, width = self.gap_info

@@ -228,7 +228,7 @@ def run_analytical_benchmark(noise_pct: float = 0.05) -> bool:
             # Costmap update
             prob_map, hazard_mask, _ = cm.process_tof_frame(readings)
 
-            # Ego-compensated dynamic tracker update
+            # Ego-compensated dynamic tracker update (with direct raw ToF rays & 1D range-rate)
             enlarged_mask, dyn_tracks, telem = tracker.process_frame(
                 prob_map=prob_map,
                 robot_pose=(X_ego, Y_ego, theta_ego),
@@ -236,6 +236,7 @@ def run_analytical_benchmark(noise_pct: float = 0.05) -> bool:
                 base_hazard_mask=hazard_mask,
                 v_ego=v_ego,
                 yaw_rate=yaw_rate,
+                tof_readings=readings,
             )
 
             # Record metrics after warmup frames

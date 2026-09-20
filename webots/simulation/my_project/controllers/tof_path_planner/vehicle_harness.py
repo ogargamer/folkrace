@@ -585,7 +585,7 @@ class FolkraceVehicle:
             prob_map, hazard_mask, map_ms = self.costmap.process_tof_frame(tof_readings)
             self.cached_map_ms = map_ms
 
-            # Dynamic Moving Obstacle Detection, Tracking & Vector Enlargement (Ego-Compensated)
+            # Dynamic Moving Obstacle Detection, Tracking & Vector Enlargement (Ego-Compensated & 1D Range-Rate)
             enlarged_hazard_mask, dyn_tracks, obs_telem = self.obstacle_tracker.process_frame(
                 prob_map=prob_map,
                 robot_pose=(self.x_est, self.y_est, self.yaw_est),
@@ -594,8 +594,10 @@ class FolkraceVehicle:
                 source_grid_bounds=(GRID_X_MIN, GRID_X_MAX, GRID_Y_MIN, GRID_Y_MAX),
                 v_ego=self.v_est,
                 yaw_rate=self.cached_yaw_rate,
+                tof_readings=tof_readings,
             )
             self.last_dynamic_tracks = dyn_tracks
+            self.last_confirmed_tracks = getattr(self.obstacle_tracker, "last_confirmed_tracks", dyn_tracks)
             self.last_obs_telem = obs_telem
             self.last_enlarged_hazard = enlarged_hazard_mask
 
@@ -893,9 +895,11 @@ class FolkraceVehicle:
                     "v_mag": round(float(t.v_mag), 3),
                     "v_rx": round(float(t.v_rx), 3),
                     "v_ry": round(float(t.v_ry), 3),
+                    "v_longitudinal": round(float(getattr(t, "v_longitudinal", 0.0)), 3),
+                    "state": str(getattr(t, "state", "STATIC")),
                     "is_dynamic": bool(t.is_dynamic),
                 }
-                for t in getattr(self, "last_dynamic_tracks", [])
+                for t in getattr(self, "last_confirmed_tracks", getattr(self, "last_dynamic_tracks", []))
             ],
             "obs_telem": getattr(self, "last_obs_telem", {}),
             "recovery_state": str(getattr(self.recovery_manager.state, "name", self.recovery_manager.state)),

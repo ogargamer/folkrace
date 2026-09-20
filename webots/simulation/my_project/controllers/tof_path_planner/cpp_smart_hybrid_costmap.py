@@ -35,6 +35,10 @@ _lib.costmap_create.restype = ctypes.c_void_p
 _lib.costmap_destroy.argtypes = [ctypes.c_void_p]
 _lib.costmap_destroy.restype = None
 
+if hasattr(_lib, "costmap_clear"):
+    _lib.costmap_clear.argtypes = [ctypes.c_void_p]
+    _lib.costmap_clear.restype = None
+
 _lib.costmap_process_frame.argtypes = [
     ctypes.c_void_p,
     ctypes.POINTER(ctypes.c_float),
@@ -172,7 +176,9 @@ class CppSmartHybridCostmap:
             self._handle = None
 
     def clear(self) -> None:
-        """Clears probability and hazard output buffers."""
+        """Clears probability, hazard output, and persistence buffers."""
+        if hasattr(self, "_handle") and self._handle and hasattr(_lib, "costmap_clear"):
+            _lib.costmap_clear(self._handle)
         self.prob_map.fill(0.0)
         self.hazard_mask.fill(0)
         self.unknown_mask.fill(1)

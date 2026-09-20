@@ -8,10 +8,11 @@
        - Wall Rejection (touching boundaries or bounding box > 25 cells)
        - Noise Floor (area < 4 cells)
     3. World-Frame Coordinate Projection
-    4. 5-Frame Rolling History Buffer with Nearest-Neighbor Association (r_gate=0.15m)
-       - Persistence Check: 5 consecutive frames required
-    5. Velocity Calculation & Static/Dynamic Gating (threshold = 0.40 m/s)
-    6. Conservative Vector Enlargement towards motion vector & trailing tail reduction
+    4. Rolling History Buffer with Distance-Sorted Association
+       - Dual-Stage Gating: 3 consecutive association frames + 2 dynamic confirmation frames
+    5. Velocity Calculation & Strictly 1D Range-Rate Gating (threshold = 0.40 m/s)
+       - Pure 1D longitudinal consensus: APPROACHING, RECEDING, or STATIC
+    6. Conservative Vector Enlargement towards motion vector & guarded trailing tail reduction
 ================================================================================
 """
 
@@ -24,29 +25,75 @@ import cv2
 import numpy as np
 
 
+# 16-channel sensor rig coordinates and headings (matching only_front_tofs.proto)
+SENSOR_CONFIG = [
+    # FL 0..7 (X = -0.070, Y = +0.095, cross-pointing Right)
+    (-0.070, 0.095, 1.4987),
+    (-0.070, 0.095, 1.3024),
+    (-0.070, 0.095, 1.1060),
+    (-0.070, 0.095, 0.9097),
+    (-0.070, 0.095, 0.7134),
+    (-0.070, 0.095, 0.5170),
+    (-0.070, 0.095, 0.3207),
+    (-0.070, 0.095, 0.1243),
+    # FR 8..15 (X = +0.070, Y = +0.095, cross-pointing Left)
+    ( 0.070, 0.095, 1.6428),
+    ( 0.070, 0.095, 1.8391),
+    ( 0.070, 0.095, 2.0356),
+    ( 0.070, 0.095, 2.2318),
+    ( 0.070, 0.095, 2.4282),
+    ( 0.070, 0.095, 2.6245),
+    ( 0.070, 0.095, 2.8208),
+    ( 0.070, 0.095, 3.0172),
+]
+
+SENSOR_NAMES = [
+    "tof_front_left_4.1deg",
+    "tof_front_left_15.4deg",
+    "tof_front_left_26.6deg",
+    "tof_front_left_37.9deg",
+    "tof_front_left_49.1deg",
+    "tof_front_left_60.4deg",
+    "tof_front_left_71.6deg",
+    "tof_front_left_82.9deg",
+    "tof_front_right_4.1deg",
+    "tof_front_right_15.4deg",
+    "tof_front_right_26.6deg",
+    "tof_front_right_37.9deg",
+    "tof_front_right_49.1deg",
+    "tof_front_right_60.4deg",
+    "tof_front_right_71.6deg",
+    "tof_front_right_82.9deg",
+]
+
+
 @dataclass
 class ObstacleBlob:
-    """Surviving candidate obstacle blob from geometric filtering."""
+    """Surviving candidate obstacle contact from geometric or ray filtering."""
     blob_id: int
     u: float               # Centroid column index in grid
     v: float               # Centroid row index in grid
     x_r: float             # Centroid X in robot frame (meters, +X right)
     y_r: float             # Centroid Y in robot frame (meters, +Y forward)
-    area: int              # Cell area
-    bbox: Tuple[int, int, int, int]  # (left, top, width, height)
+    area: int = 1          # Cell area or ray cluster weight
+    bbox: Tuple[int, int, int, int] = (0, 0, 0, 0)  # (left, top, width, height)
 
 
 @dataclass
 class ObstacleTrack:
-    """Tracked obstacle over rolling 5-frame history window."""
+    """Tracked obstacle over rolling 5-frame history window with 1D range-rate estimation."""
     track_id: int
     history: deque = field(default_factory=lambda: deque(maxlen=5))       # [(X_w, Y_w, t_s), ...]
     body_history: deque = field(default_factory=lambda: deque(maxlen=5))  # [(x_r, y_r, t_s), ...]
     speed_history: deque = field(default_factory=lambda: deque(maxlen=6)) # [(v_x, v_y, is_braking), ...]
+    median_y_history: deque = field(default_factory=lambda: deque(maxlen=3)) # 3-frame median pre-filter on y_r
     consecutive_associations: int = 1
     last_frame_updated: int = 0
     is_dynamic: bool = False
     is_braking: bool = False
+    state: str = "STATIC"  # "APPROACHING", "RECEDING", "STATIC" (strictly 1D longitudinal)
+    consensus_count: int = 0
+    consensus_dir: str = "STATIC"
     v_x: float = 0.0       # Global X velocity (m/s)
     v_y: float = 0.0       # Global Y velocity (m/s)
     v_mag: float = 0.0     # Speed magnitude (m/s)
@@ -56,6 +103,7 @@ class ObstacleTrack:
     v_ry: float = 0.0      # Current robot-relative Y velocity (m/s)
     v_comp_x: float = 0.0  # Kinematically compensated X velocity (m/s)
     v_comp_y: float = 0.0  # Kinematically compensated Y velocity (m/s)
+    v_longitudinal: float = 0.0 # Range-rate along robot heading (+ = receding, - = approaching)
     x_filt: float = 0.0    # Alpha-Beta filtered world X (m)
     y_filt: float = 0.0    # Alpha-Beta filtered world Y (m)
     filter_initialized: bool = False
@@ -148,6 +196,7 @@ class DynamicObstacleTracker:
         # Cached outputs for live telemetry
         self.last_surviving_blobs: List[ObstacleBlob] = []
         self.last_dynamic_tracks: List[ObstacleTrack] = []
+        self.last_confirmed_tracks: List[ObstacleTrack] = []
 
     def reset(self) -> None:
         """Resets all active tracks, counters, and confirmation buffers."""
@@ -157,6 +206,7 @@ class DynamicObstacleTracker:
         self.frame_counter = 0
         self.last_surviving_blobs.clear()
         self.last_dynamic_tracks.clear()
+        self.last_confirmed_tracks.clear()
 
     def configure(
         self,
@@ -352,6 +402,124 @@ class DynamicObstacleTracker:
         self.last_surviving_blobs = surviving
         return surviving
 
+    def extract_corridor_contacts(
+        self,
+        tof_readings: Optional[Any] = None,
+        binary_mask: Optional[np.ndarray] = None,
+        yaw_rate: float = 0.0,
+    ) -> List[ObstacleBlob]:
+        """
+        Extracts obstacle contact points in the robot driving corridor.
+        Fast-paths directly from 16-channel ToF rays if provided,
+        falling back to costmap binary connected-components when rays are absent.
+        """
+        if tof_readings is not None and len(tof_readings) > 0:
+            # Wall Rejection Mask: identify large connected structures (walls, track boundaries)
+            # Walls are big objects that shouldn't even be checked as obstacle candidates
+            wall_mask = None
+            if binary_mask is not None:
+                h_m, w_m = binary_mask.shape
+                num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
+                    binary_mask, connectivity=8
+                )
+                if num_labels > 1:
+                    w_lbls = stats[1:, cv2.CC_STAT_WIDTH]
+                    h_lbls = stats[1:, cv2.CC_STAT_HEIGHT]
+                    area_lbls = stats[1:, cv2.CC_STAT_AREA]
+                    left_lbls = stats[1:, cv2.CC_STAT_LEFT]
+                    top_lbls = stats[1:, cv2.CC_STAT_TOP]
+
+                    touches_lateral = (left_lbls <= 1) | (left_lbls + w_lbls >= w_m - 1)
+                    touches_far = (top_lbls + h_lbls >= h_m - 1)
+                    is_wall = (
+                        (np.maximum(w_lbls, h_lbls) > self.max_wall_dim_cells)
+                        | (touches_lateral & ((w_lbls > 15) | (h_lbls > 15)))
+                        | (touches_far & (w_lbls > 22))
+                        | (area_lbls > 200)
+                    )
+                    wall_label_ids = np.where(is_wall)[0] + 1
+                    if len(wall_label_ids) > 0:
+                        wall_mask = np.isin(labels, wall_label_ids)
+
+            contacts = []
+            for idx, (name, (x0, y0, heading)) in enumerate(zip(SENSOR_NAMES, SENSOR_CONFIG)):
+                val = None
+                if isinstance(tof_readings, dict):
+                    val = tof_readings.get(name, tof_readings.get(f"tof_{idx}", None))
+                elif isinstance(tof_readings, (list, tuple, np.ndarray)) and idx < len(tof_readings):
+                    val = tof_readings[idx]
+
+                if val is None or val < 0.05 or val >= 1.75:
+                    continue
+
+                xr = float(x0 + val * math.cos(heading))
+                yr = float(y0 + val * math.sin(heading))
+
+                # Longitudinal & Lateral Corridor Checks
+                if not (self.roi_y_min <= yr <= self.roi_y_max):
+                    continue
+
+                frac = float(np.clip((yr - self.roi_y_min) / max(0.01, self.roi_y_max - self.roi_y_min), 0.0, 1.0))
+                half_w = (self.roi_half_w_near + (self.roi_half_w_far - self.roi_half_w_near) * frac) + 0.08 * abs(yaw_rate)
+                if abs(xr) > half_w:
+                    continue
+
+                u = float(self.u0 + xr / self.res)
+                v = float(self.v0 + yr / self.res)
+                iu = int(round(u))
+                iv = int(round(v))
+
+                # Wall Rejection: Discard contacts that belong to a large wall or track boundary
+                if wall_mask is not None and 0 <= iu < w_m and 0 <= iv < h_m:
+                    u_min = max(0, iu - 3)
+                    u_max = min(w_m, iu + 4)
+                    v_min = max(0, iv - 3)
+                    v_max = min(h_m, iv + 4)
+                    if wall_mask[v_min:v_max, u_min:u_max].any():
+                        continue  # Wall is a big object that shouldn't even be checked
+
+                contacts.append((xr, yr, u, v))
+
+            if contacts:
+                # Spatial cluster nearby ray hits within 0.18 m
+                clusters: List[List[Tuple[float, float, float, float]]] = []
+                for pt in contacts:
+                    matched = False
+                    for c in clusters:
+                        cx = sum(p[0] for p in c) / len(c)
+                        cy = sum(p[1] for p in c) / len(c)
+                        if math.hypot(pt[0] - cx, pt[1] - cy) < 0.18:
+                            c.append(pt)
+                            matched = True
+                            break
+                    if not matched:
+                        clusters.append([pt])
+
+                blobs = []
+                for cid, c in enumerate(clusters, start=1):
+                    mx = float(sum(p[0] for p in c) / len(c))
+                    my = float(sum(p[1] for p in c) / len(c))
+                    mu = float(sum(p[2] for p in c) / len(c))
+                    mv = float(sum(p[3] for p in c) / len(c))
+                    blobs.append(
+                        ObstacleBlob(
+                            blob_id=cid,
+                            u=mu,
+                            v=mv,
+                            x_r=mx,
+                            y_r=my,
+                            area=len(c),
+                            bbox=(int(mu), int(mv), 1, 1),
+                        )
+                    )
+                self.last_surviving_blobs = blobs
+                return blobs
+
+        # Fallback to morphological blob extractor
+        if binary_mask is not None:
+            return self.extract_obstacle_blobs(binary_mask, yaw_rate=yaw_rate)
+        return []
+
     # --------------------------------------------------------------------------
     # PIPELINE STEP 3: World-Frame Projection
     # --------------------------------------------------------------------------
@@ -388,14 +556,14 @@ class DynamicObstacleTracker:
         yaw_rate: float = 0.0,
     ) -> List[ObstacleTrack]:
         """
-        Maintains ring buffer of world-frame centroids for the last 5 frames.
-        Performs nearest-neighbor association across frames with gating radius r_gate = 0.15 m.
-        Persistence Check: Must associate across 5 consecutive frames to be dynamic.
-        Velocity Calculation:
-          v_x = (X_w^(t) - X_w^(t-4)) / (4 * dt)
-          v_y = (Y_w^(t) - Y_w^(t-4)) / (4 * dt)
-          v_mag = sqrt(v_x^2 + v_y^2)
-        Gate: v_mag >= 0.40 m/s -> Dynamic; v_mag < 0.40 m/s -> Static.
+        Maintains rolling buffer of world-frame centroids across consecutive frames.
+        Performs distance-sorted nearest-neighbor association.
+        Dual-Stage Gating:
+          - Stage 1: Persistence requirement (default 3 consecutive association frames)
+          - Stage 2: Dynamic confirmation hysteresis (default 2 confirmed frames)
+        Velocity Calculation & Pure 1D Range-Rate Gate:
+          Tracks classified strictly into APPROACHING, RECEDING, or STATIC.
+          Threshold = dynamic_threshold_mps (0.40 m/s default).
         """
         self.frame_counter += 1
         curr_frame = self.frame_counter
@@ -410,6 +578,9 @@ class DynamicObstacleTracker:
         # Nearest-neighbor matching with speed-adaptive gating radius for 2-5 m/s dynamics
         dynamic_gate_base = max(self.gating_radius_m, 0.28 + 0.04 * abs(v_ego) + 0.08 * abs(yaw_rate))
 
+        # Distance-sorted nearest-neighbor association:
+        # Prevent first-come-first-served bias by sorting all potential (track, blob) pairings by distance.
+        candidate_pairs = []
         for track_id, track in list(self.tracks.items()):
             if not track.history:
                 continue
@@ -421,83 +592,102 @@ class DynamicObstacleTracker:
             else:
                 pred_X, pred_Y, _ = track.history[-1]
 
-            best_dist = dynamic_gate_base
-            best_idx = None
-
             for idx, (pw_x, pw_y, blob) in enumerate(world_pts):
-                if idx in associated_pts:
-                    continue
                 d = math.hypot(pw_x - pred_X, pw_y - pred_Y)
-                if d <= best_dist:
-                    best_dist = d
-                    best_idx = idx
+                if d <= dynamic_gate_base:
+                    candidate_pairs.append((d, track_id, idx))
 
-            if best_idx is not None:
-                pw_x, pw_y, blob = world_pts[best_idx]
-                dt_step = (now_s - track.history[-1][2]) if track.history else self.dt_frame
-                if dt_step <= 1e-4:
-                    dt_step = self.dt_frame
+        candidate_pairs.sort(key=lambda x: x[0])
 
-                track.history.append((pw_x, pw_y, now_s))
-                track.body_history.append((blob.x_r, blob.y_r, now_s))
-                track.consecutive_associations += 1
-                track.last_frame_updated = curr_frame
-                track.x_r = blob.x_r
-                track.y_r = blob.y_r
+        for d, track_id, idx in candidate_pairs:
+            if track_id in associated_tracks or idx in associated_pts:
+                continue
 
-                # Alpha-Beta filter state estimation
-                if not track.filter_initialized:
-                    track.x_filt = pw_x
-                    track.y_filt = pw_y
-                    track.v_x = 0.0
-                    track.v_y = 0.0
-                    track.filter_initialized = True
+            track = self.tracks[track_id]
+            pw_x, pw_y, blob = world_pts[idx]
+            dt_step = (now_s - track.history[-1][2]) if track.history else self.dt_frame
+            if dt_step <= 1e-4:
+                dt_step = self.dt_frame
+
+            # 3-frame median pre-filter on longitudinal measurement (blob.y_r)
+            # Avoid in-place mutation of blob.y_r to prevent coordinate desynchronization
+            track.median_y_history.append(blob.y_r)
+            med_yr = float(np.median(track.median_y_history))
+            pw_x_filt = float(X + cos_th * blob.x_r - sin_th * med_yr)
+            pw_y_filt = float(Y + sin_th * blob.x_r + cos_th * med_yr)
+
+            track.history.append((pw_x_filt, pw_y_filt, now_s))
+            track.body_history.append((blob.x_r, med_yr, now_s))
+            track.consecutive_associations += 1
+            track.last_frame_updated = curr_frame
+            track.x_r = blob.x_r
+            track.y_r = med_yr
+
+            # Alpha-Beta filter state estimation
+            if not track.filter_initialized:
+                track.x_filt = pw_x_filt
+                track.y_filt = pw_y_filt
+                track.v_x = 0.0
+                track.v_y = 0.0
+                track.filter_initialized = True
+            elif len(track.history) == 2:
+                # Initialize velocity from the first 2-point difference to eliminate initial ramp-up lag
+                dt_init = max(1e-4, track.history[1][2] - track.history[0][2])
+                v_raw_x = (track.history[1][0] - track.history[0][0]) / dt_init
+                v_raw_y = (track.history[1][1] - track.history[0][1]) / dt_init
+                v_mag_raw = math.hypot(v_raw_x, v_raw_y)
+                if v_mag_raw > 0.15:
+                    scale = min(1.0, 3.0 / max(1e-4, v_mag_raw))
+                    track.v_x = v_raw_x * scale
+                    track.v_y = v_raw_y * scale
+                track.x_filt = pw_x_filt
+                track.y_filt = pw_y_filt
+            else:
+                curr_spd = math.hypot(track.v_x, track.v_y)
+                if curr_spd < 0.30:
+                    alpha_eff = self.alpha_ab
+                    beta_eff = self.beta_ab
+                    decay_cruise = self.vel_decay
                 else:
-                    curr_spd = math.hypot(track.v_x, track.v_y)
-                    if curr_spd < 0.30:
-                        alpha_eff = self.alpha_ab
-                        beta_eff = self.beta_ab
-                        decay_cruise = self.vel_decay
-                    else:
-                        alpha_eff = max(self.alpha_ab, 0.38)
-                        beta_eff = max(self.beta_ab, 0.050)
-                        decay_cruise = 0.998
+                    alpha_eff = max(self.alpha_ab, 0.38)
+                    beta_eff = max(self.beta_ab, 0.050)
+                    decay_cruise = 0.998
 
-                    px = track.x_filt + track.v_x * dt_step
-                    py = track.y_filt + track.v_y * dt_step
-                    rx = pw_x - px
-                    ry = pw_y - py
-                    track.x_filt = px + alpha_eff * rx
-                    track.y_filt = py + alpha_eff * ry
+                px = track.x_filt + track.v_x * dt_step
+                py = track.y_filt + track.v_y * dt_step
+                rx = pw_x_filt - px
+                ry = pw_y_filt - py
+                track.x_filt = px + alpha_eff * rx
+                track.y_filt = py + alpha_eff * ry
 
-                    # Asymmetric Deceleration Quenching:
-                    # Detect if position innovation opposes velocity vector (obstacle is braking)
-                    inno_dot_v = track.v_x * rx + track.v_y * ry
-                    is_braking = (inno_dot_v < 0.0)
-                    track.is_braking = is_braking
+                # Asymmetric Deceleration Quenching:
+                # Detect if position innovation opposes velocity vector (obstacle is genuinely braking, not just noise jitter)
+                inno_dot_v = track.v_x * rx + track.v_y * ry
+                is_braking = (inno_dot_v < -0.03 * max(0.20, curr_spd))
+                track.is_braking = is_braking
 
-                    if is_braking:
-                        # Braking detected: accelerate decay towards zero to prevent deceleration lag & minimize overshoot
-                        decay_eff = 0.940
-                        b_apply = beta_eff * 1.20
-                    else:
-                        # Cruising / accelerating: smooth responsive gain
-                        decay_eff = decay_cruise
-                        b_apply = beta_eff
+                if is_braking:
+                    # Braking detected: accelerate decay towards zero to prevent deceleration lag & minimize overshoot
+                    decay_eff = 0.940
+                    b_apply = beta_eff * 1.20
+                else:
+                    # Cruising / accelerating: smooth responsive gain
+                    decay_eff = decay_cruise
+                    b_apply = beta_eff
 
-                    track.v_x = (track.v_x * decay_eff) + (b_apply / dt_step) * rx
-                    track.v_y = (track.v_y * decay_eff) + (b_apply / dt_step) * ry
+                track.v_x = (track.v_x * decay_eff) + (b_apply / dt_step) * rx
+                track.v_y = (track.v_y * decay_eff) + (b_apply / dt_step) * ry
 
-                    # Standstill soft-snap: quench residual velocity when braking near zero speed
-                    if math.hypot(track.v_x, track.v_y) < 0.25 and is_braking:
-                        track.v_x *= 0.80
-                        track.v_y *= 0.80
+                # Standstill soft-snap: quench residual velocity when braking near zero speed
+                if math.hypot(track.v_x, track.v_y) < 0.25 and is_braking:
+                    track.v_x *= 0.80
+                    track.v_y *= 0.80
 
-                    # Dual-Window AMA buffer: record instantaneous post-update velocity sample
-                    track.speed_history.append((track.v_x, track.v_y, is_braking))
+                # Dual-Window AMA buffer: record instantaneous post-update velocity sample
+                track.speed_history.append((track.v_x, track.v_y, is_braking))
 
-                associated_tracks.add(track_id)
-                associated_pts.add(best_idx)
+            associated_tracks.add(track_id)
+            associated_pts.add(idx)
 
         # Handle unassociated candidate blobs -> spawn new tentative tracks
         for idx, (pw_x, pw_y, blob) in enumerate(world_pts):
@@ -516,6 +706,7 @@ class DynamicObstacleTracker:
                 new_track.history.append((pw_x, pw_y, now_s))
                 new_track.body_history.append((blob.x_r, blob.y_r, now_s))
                 new_track.speed_history.append((0.0, 0.0, False))
+                new_track.median_y_history.append(blob.y_r)
                 self.tracks[new_track.track_id] = new_track
 
         # Prune dead tracks not observed for more than max_missed_frames (coasting tolerance)
@@ -530,10 +721,12 @@ class DynamicObstacleTracker:
 
         # Velocity Calculation & Dynamic/Static Gate
         dynamic_tracks: List[ObstacleTrack] = []
+        confirmed_tracks: List[ObstacleTrack] = []
 
         for track in self.tracks.values():
             # Persistence Check: exactly 5 consecutive frames required
             if len(track.history) >= self.persistence_frames and track.consecutive_associations >= self.persistence_frames:
+                confirmed_tracks.append(track)
                 # Apply V3 Dual-Window AMA filtering on speed history:
                 if len(track.speed_history) >= 2:
                     if track.is_braking:
@@ -580,6 +773,28 @@ class DynamicObstacleTracker:
 
                 v_comp_mag = math.hypot(track.v_comp_x, track.v_comp_y)
 
+                # 1D Longitudinal Range-Rate & Consensus Classification (Strictly 1D: APPROACHING, RECEDING, STATIC)
+                v_long = float(track.v_comp_y) if abs(track.v_comp_y) > 1e-4 else float(track.v_ry)
+                track.v_longitudinal = v_long
+
+                if v_long < -0.25:
+                    current_dir = "APPROACHING"
+                elif v_long > 0.25:
+                    current_dir = "RECEDING"
+                else:
+                    current_dir = "STATIC"
+
+                if current_dir != "STATIC":
+                    if track.consensus_dir == current_dir:
+                        track.consensus_count += 1
+                    else:
+                        track.consensus_dir = current_dir
+                        track.consensus_count = 1
+                else:
+                    track.consensus_count = max(0, track.consensus_count - 1)
+                    if track.consensus_count == 0:
+                        track.consensus_dir = "STATIC"
+
                 # Dynamic Confirmation Hysteresis: prevent single-frame noise spikes from triggering dynamic
                 # Requires minimum persistence frames before incrementing confirmation counter
                 tid = track.track_id
@@ -593,14 +808,34 @@ class DynamicObstacleTracker:
                     c = max(0, c - 2)
                 self.dyn_confirm_counts[tid] = c
 
-                # Static/Dynamic Gate requiring confirmation frames
-                if has_persistence and c >= self.dyn_confirm_frames:
+                # Static/Dynamic Gate requiring confirmation frames & consensus
+                # Strictly 1D longitudinal: only APPROACHING or RECEDING tracks become dynamic
+                if has_persistence and c >= self.dyn_confirm_frames and track.consensus_count >= 2 and track.consensus_dir in ("APPROACHING", "RECEDING"):
                     track.is_dynamic = True
+                    track.state = track.consensus_dir
+                    # Pure 1D Longitudinal Range-Rate constraint:
+                    # Velocity vectors strictly point towards (-Y) or away (+Y) from the robot
+                    if track.state == "APPROACHING":
+                        v_1d = -abs(track.v_longitudinal)
+                    else:  # RECEDING
+                        v_1d = abs(track.v_longitudinal)
+
+                    track.v_rx = 0.0
+                    track.v_ry = float(v_1d)
+                    track.v_mag = float(abs(v_1d))
+                    track.v_comp_x = 0.0
+                    track.v_comp_y = float(v_1d)
+                    track.v_x = float(-sin_th * v_1d)
+                    track.v_y = float(cos_th * v_1d)
                     dynamic_tracks.append(track)
                 else:
                     track.is_dynamic = False
+                    track.state = "STATIC"
             else:
                 track.is_dynamic = False
+                track.state = "STATIC"
+                track.consensus_count = 0
+                track.consensus_dir = "STATIC"
                 track.v_x = 0.0
                 track.v_y = 0.0
                 track.v_mag = 0.0
@@ -608,8 +843,10 @@ class DynamicObstacleTracker:
                 track.v_ry = 0.0
                 track.v_comp_x = 0.0
                 track.v_comp_y = 0.0
+                track.v_longitudinal = 0.0
 
         self.last_dynamic_tracks = dynamic_tracks
+        self.last_confirmed_tracks = confirmed_tracks
         return dynamic_tracks
 
     # --------------------------------------------------------------------------
@@ -663,8 +900,14 @@ class DynamicObstacleTracker:
                 unit_vx = track.v_rx / track.v_mag
                 unit_vy = track.v_ry / track.v_mag
 
-                # Conservative lead length
-                lead_m = min(self.max_lead_m, track.v_mag * self.lead_time_s)
+                # Conservative lead length based on 1D classification state
+                if track.state == "APPROACHING":
+                    v_lead = abs(track.v_longitudinal) if abs(track.v_longitudinal) > 0.05 else track.v_mag
+                    lead_m = min(self.max_lead_m, max(0.05, v_lead * self.lead_time_s))
+                elif track.state == "RECEDING":
+                    lead_m = min(self.max_lead_m, track.v_mag * (self.lead_time_s * 0.5))
+                else:
+                    lead_m = min(self.max_lead_m, track.v_mag * self.lead_time_s)
 
                 # Braking-aware dynamic capsule collapse:
                 if track.is_braking:
@@ -675,18 +918,24 @@ class DynamicObstacleTracker:
                 lead_cells = int(round(lead_m / self.res))
 
                 # 1. Forward Enlargement Capsule (towards moving vector)
-                for step in range(0, lead_cells + 1):
-                    cu = int(round(u_c + step * unit_vx))
-                    cv = int(round(v_c + step * unit_vy))
-                    cv2.circle(enlarged_mask, (cu, cv), stamp_r_cells, 1, -1)
+                # Replaces slow Python circle loops with a single cv2.line + circular end-caps
+                lead_u = int(round(u_c + lead_cells * unit_vx))
+                lead_v = int(round(v_c + lead_cells * unit_vy))
+                cv2.line(enlarged_mask, (u_c, v_c), (lead_u, lead_v), color=1, thickness=stamp_r_cells * 2)
+                cv2.circle(enlarged_mask, (u_c, v_c), stamp_r_cells, 1, -1)
+                cv2.circle(enlarged_mask, (lead_u, lead_v), stamp_r_cells, 1, -1)
 
                 # 2. Conservative Trailing Wake Reduction (where it came from)
-                tail_dist_cells = stamp_r_cells + tail_clear_cells
-                for step in range(stamp_r_cells, tail_dist_cells + 1):
+                # Expand clearance when RECEDING so following vehicle can draft/overtake without phantom tail obstruction.
+                # CRITICAL: Never clear cells that are occupied in base_hazard_mask (static walls/boundaries).
+                extra_tail = tail_clear_cells if track.state == "RECEDING" else 0
+                tail_dist_cells = stamp_r_cells + tail_clear_cells + extra_tail
+                for step in range(stamp_r_cells + 1, tail_dist_cells + 1):
                     tu = int(round(u_c - step * unit_vx))
                     tv = int(round(v_c - step * unit_vy))
                     if 1 <= tu < w - 1 and 1 <= tv < h - 1:
-                        enlarged_mask[tv, tu] = 0
+                        if base_hazard_mask[tv, tu] == 0:
+                            enlarged_mask[tv, tu] = 0
 
             return enlarged_mask
         except Exception:
@@ -698,12 +947,13 @@ class DynamicObstacleTracker:
     def process_frame(
         self,
         prob_map: np.ndarray,
-        robot_pose: Tuple[float, float, float],
-        now_s: float,
+        robot_pose: Tuple[float, float, float] = (0.0, 0.0, 0.0),
+        now_s: float = 0.0,
         base_hazard_mask: Optional[np.ndarray] = None,
         source_grid_bounds: Optional[Tuple[float, float, float, float]] = None,
         v_ego: float = 0.0,
         yaw_rate: float = 0.0,
+        tof_readings: Optional[Any] = None,
     ) -> Tuple[np.ndarray, List[ObstacleTrack], Dict]:
         """
         Executes complete dynamic obstacle detection and tracking pipeline.
@@ -714,13 +964,15 @@ class DynamicObstacleTracker:
         # Step 1: Binary occupied mask (Raw obstacle hits)
         binary_mask = self.prepare_binary_costmap(prob_map, current_bounds=source_grid_bounds)
 
-        # Step 2: Blob extraction on raw obstacle occupancy (No C-state dependency)
-        blobs = self.extract_obstacle_blobs(binary_mask, yaw_rate=yaw_rate)
+        # Step 2: Extract candidate contacts in corridor (from ToF rays if available, else blob morphology)
+        blobs = self.extract_corridor_contacts(
+            tof_readings=tof_readings, binary_mask=binary_mask, yaw_rate=yaw_rate
+        )
 
         # Step 3: World-frame projection
         world_pts = self.project_to_world_frame(blobs, robot_pose)
 
-        # Step 4 & 5: Rolling buffer tracking & velocity gate (with ego-compensation)
+        # Step 4 & 5: Rolling buffer tracking & velocity gate (with ego-compensation & 1D range-rate)
         dynamic_tracks = self.update_tracks(
             world_pts=world_pts,
             robot_pose=robot_pose,
@@ -755,6 +1007,8 @@ class DynamicObstacleTracker:
                     "v_ry": round(t.v_ry, 3),
                     "v_comp_x": round(t.v_comp_x, 3),
                     "v_comp_y": round(t.v_comp_y, 3),
+                    "v_longitudinal": round(t.v_longitudinal, 3),
+                    "state": t.state,
                     "consecutive": t.consecutive_associations,
                     "is_dynamic": t.is_dynamic,
                 }

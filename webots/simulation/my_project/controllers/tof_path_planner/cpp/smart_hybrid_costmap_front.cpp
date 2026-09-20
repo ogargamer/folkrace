@@ -78,6 +78,7 @@ public:
     std::vector<uint8_t> raw_hazard;
     std::vector<uint8_t> hazard_mask;
     std::vector<uint8_t> unknown_mask;
+    std::vector<uint8_t> persistence_count;
     std::vector<int> kernel_dx;
     std::vector<int> kernel_dy;
 
@@ -100,6 +101,7 @@ public:
         raw_hazard.resize(total_cells, 0);
         hazard_mask.resize(total_cells, 0);
         unknown_mask.resize(total_cells, 1);
+        persistence_count.resize(total_cells, 0);
 
         // Precompute circular dilation structuring element
         inflation_cells = static_cast<int>(std::round(r_inflation_m / res));
@@ -224,10 +226,23 @@ public:
             float lo = std::max(-10.0f, std::min(10.0f, log_odds[i]));
             float p = 1.0f / (1.0f + std::exp(-lo));
             prob_map[i] = p;
+
             // Confirmed obstacle hits only (prob >= 0.65, log_odds >= 0.62)
-            raw_hazard[i] = (lo >= 0.62f) ? 1 : 0;
+            uint8_t raw = (lo >= 0.62f) ? 1 : 0;
+
+            if (raw == 1) {
+                persistence_count[i] = 3; // Hold confirmed hit for up to 3 frames (50 ms)
+            } else if (lo <= -2.0f) {
+                // Actively confirmed free by direct sensor cone: cancel persistence immediately
+                persistence_count[i] = 0;
+            } else if (persistence_count[i] > 0) {
+                persistence_count[i]--;
+                raw = 1; // Retain confirmed hit during transient dropout
+            }
+            raw_hazard[i] = raw;
+
             // Unobserved space: untouched / uncertain cells (std::abs(lo) < 0.5f, prob ~ 0.50)
-            unknown_mask[i] = (std::abs(lo) < 0.5f) ? 1 : 0;
+            unknown_mask[i] = (std::abs(lo) < 0.5f && raw == 0) ? 1 : 0;
         }
 
         // Step 4: Clean Circular C-Space Morphological Dilation on Confirmed Obstacle Boundaries
@@ -629,6 +644,17 @@ COSTMAP_API void costmap_destroy(void* handle) {
     if (handle) {
         delete static_cast<SmartHybridCostmapFront*>(handle);
     }
+}
+
+COSTMAP_API void costmap_clear(void* handle) {
+    if (!handle) return;
+    auto* cm = static_cast<SmartHybridCostmapFront*>(handle);
+    std::fill(cm->log_odds.begin(), cm->log_odds.end(), 0.0f);
+    std::fill(cm->prob_map.begin(), cm->prob_map.end(), 0.50f);
+    std::fill(cm->raw_hazard.begin(), cm->raw_hazard.end(), 0);
+    std::fill(cm->hazard_mask.begin(), cm->hazard_mask.end(), 0);
+    std::fill(cm->unknown_mask.begin(), cm->unknown_mask.end(), 1);
+    std::fill(cm->persistence_count.begin(), cm->persistence_count.end(), 0);
 }
 
 COSTMAP_API void costmap_process_frame(
