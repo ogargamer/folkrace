@@ -30,10 +30,14 @@
 #define DEFAULT_LPF_TF_SEC                                                     \
   0.0050f // Velocity Low-Pass Filter Tf (5 ms gives razor-sharp response)
 
-// 3. 256-POINT ENCODER FOURIER LINEARIZATION CONSTANTS
-#define ENCODER_LUT_SIZE 256 // 256-point calibration table
+// 3. 128-POINT ENCODER NON-LINEARITY LUT CONSTANTS
+#define ENCODER_LUT_SIZE 128 // 128-point calibration table
+// Maximum allowed single-point correction before pole-slip is declared:
+#define LUT_ANOMALY_THRESHOLD_RAD 0.25f // > 14.3 deg mech = pole jump
+// Maximum allowed peak-to-peak span across the whole table:
+#define LUT_PKPK_LIMIT_RAD 0.50f        // > 28.6 deg mech = bad sweep
 #define CALIB_SWEEP_STEPS                                                      \
-  512 // Number of micro-steps across 360 mechanical degrees
+  256 // Number of micro-steps across 360 mechanical degrees
 #define ALIGNMENT_OVERSAMPLE_COUNT                                             \
   128 // Samples per pole point during electrical zero alignment
 
@@ -470,7 +474,7 @@ bool loadConfigFromNVS() {
   Serial.print(sensor_lag_comp_us, 1);
   Serial.println(" us");
   Serial.print("  LUT Status : ");
-  Serial.println(encoder1.is_lut_calibrated ? "256-PT FOURIER ACTIVE" : "OFF");
+  Serial.println(encoder1.is_lut_calibrated ? "128-PT LUT ACTIVE" : "OFF");
   Serial.println(
       "-----------------------------------------------------------\n");
   return true;
@@ -740,13 +744,13 @@ void runSpeedLagOptimizer(float test_rpm) {
 }
 
 // ============================================================================
-// 256-POINT NON-LINEARITY LUT CALIBRATION (INITIAL IMPLEMENTATION)
+// 128-POINT NON-LINEARITY LUT CALIBRATION
 // ============================================================================
 bool calibrate256PointLUT(float align_voltage) {
   Serial.println("\n==========================================================="
                  "=====================");
   Serial.println(
-      ">>> 🔬 STARTING 256-POINT DUAL-PASS NON-LINEARITY LUT CALIBRATION <<<");
+      ">>> 🔬 STARTING 128-POINT DUAL-PASS NON-LINEARITY LUT CALIBRATION <<<");
   Serial.println("============================================================="
                  "===================");
   Serial.println("Target Motor       : GM3506 (11 Pole Pairs on ESP32-S3)");
@@ -754,9 +758,10 @@ bool calibrate256PointLUT(float align_voltage) {
   Serial.print(align_voltage, 2);
   Serial.println(" V");
   Serial.println(
-      "Methodology        : 256-Step Dual-Pass Bidirectional Mechanical Sweep");
+      "Methodology        : 128-Step Dual-Pass Bidirectional Mechanical Sweep");
   Serial.println("Oversampling       : 64 Samples / Step with Micro-Dither "
                  "(Stiction Cancellation)");
+  Serial.println("Anomaly Guard      : Any |err| > 0.25 rad -> FAIL (pole slip)");
   Serial.println("Press 'x' to STOP anytime");
   Serial.println("-------------------------------------------------------------"
                  "-------------------");
@@ -831,7 +836,7 @@ bool calibrate256PointLUT(float align_voltage) {
 
   // 2. High-Resolution Dual-Pass Spatial Error Accumulation
   Serial.println(
-      "\n2. Executing Bidirectional 256-Step Sweep Across 360° Mechanical:");
+      "\n2. Executing Bidirectional 128-Step Sweep Across 360° Mechanical:");
   const int TOTAL_STEPS = ENCODER_LUT_SIZE;
   const float step_mech_rad = _2PI / (float)TOTAL_STEPS;
 
@@ -856,17 +861,17 @@ bool calibrate256PointLUT(float align_voltage) {
         _3PI_2 + (float)dir_sign * (float)MOTOR_POLE_PAIRS * target_mech;
 
     motor1.setPhaseVoltage(align_voltage, 0, target_elec);
-    delayMicroseconds(3500);
+    delayMicroseconds(8000); // Rotor settle time (increased from 3.5ms → 8ms)
 
-    for (int d = 6; d >= 1; d--) {
-      float dither = 0.06f * ((float)d / 6.0f);
+    for (int d = 8; d >= 1; d--) {
+      float dither = 0.08f * ((float)d / 8.0f);
       motor1.setPhaseVoltage(align_voltage, 0, target_elec + dither);
-      delayMicroseconds(400);
+      delayMicroseconds(500);
       motor1.setPhaseVoltage(align_voltage, 0, target_elec - dither);
-      delayMicroseconds(400);
+      delayMicroseconds(500);
     }
     motor1.setPhaseVoltage(align_voltage, 0, target_elec);
-    delay(40);
+    delay(90); // Additional damp settle before sampling (increased from 40ms → 90ms)
 
     float sum_sin = 0.0f, sum_cos = 0.0f;
     for (int s = 0; s < 64; s++) {
@@ -877,7 +882,7 @@ bool calibrate256PointLUT(float align_voltage) {
     }
     fwd_measured[i] = _normalizeAngle(atan2f(sum_sin, sum_cos));
 
-    if ((i + 1) % 64 == 0) {
+    if ((i + 1) % 32 == 0) {
       Serial.print("   Forward Sweep: ");
       Serial.print((int)(((float)(i + 1) / (float)TOTAL_STEPS) * 100.0f));
       Serial.println("% Complete");
@@ -902,17 +907,17 @@ bool calibrate256PointLUT(float align_voltage) {
         _3PI_2 + (float)dir_sign * (float)MOTOR_POLE_PAIRS * target_mech;
 
     motor1.setPhaseVoltage(align_voltage, 0, target_elec);
-    delayMicroseconds(3500);
+    delayMicroseconds(8000); // Rotor settle time
 
-    for (int d = 6; d >= 1; d--) {
-      float dither = 0.06f * ((float)d / 6.0f);
+    for (int d = 8; d >= 1; d--) {
+      float dither = 0.08f * ((float)d / 8.0f);
       motor1.setPhaseVoltage(align_voltage, 0, target_elec + dither);
-      delayMicroseconds(400);
+      delayMicroseconds(500);
       motor1.setPhaseVoltage(align_voltage, 0, target_elec - dither);
-      delayMicroseconds(400);
+      delayMicroseconds(500);
     }
     motor1.setPhaseVoltage(align_voltage, 0, target_elec);
-    delay(40);
+    delay(90); // Additional damp settle before sampling
 
     float sum_sin = 0.0f, sum_cos = 0.0f;
     for (int s = 0; s < 64; s++) {
@@ -923,7 +928,7 @@ bool calibrate256PointLUT(float align_voltage) {
     }
     rev_measured[i] = _normalizeAngle(atan2f(sum_sin, sum_cos));
 
-    if (i % 64 == 0) {
+    if (i % 32 == 0) {
       Serial.print("   Reverse Sweep: ");
       Serial.print(
           (int)(((float)(TOTAL_STEPS - i) / (float)TOTAL_STEPS) * 100.0f));
@@ -931,12 +936,14 @@ bool calibrate256PointLUT(float align_voltage) {
     }
   }
 
-  // 3. Synthesize Midpoint & Residual Error Table
+  // 3. Synthesize Midpoint & Residual Error Table + Anomaly Detection
   float start_mid =
       _normalizeAngle(atan2f(sinf(fwd_measured[0]) + sinf(rev_measured[0]),
                              cosf(fwd_measured[0]) + cosf(rev_measured[0])));
   float max_err = -100.0f, min_err = 100.0f;
   float sum_sq_err = 0.0f;
+  float temp_errors[ENCODER_LUT_SIZE];
+  int anomaly_count = 0;
 
   for (int i = 0; i < TOTAL_STEPS; i++) {
     float mid_meas =
@@ -950,21 +957,35 @@ bool calibrate256PointLUT(float align_voltage) {
     while (err < -_PI)
       err += _2PI;
 
-    encoder1.lut_errors[i] = err;
+    temp_errors[i] = err;
     if (err > max_err)
       max_err = err;
     if (err < min_err)
       min_err = err;
     sum_sq_err += err * err;
+
+    // Anomaly check: report immediately if this point exceeds threshold
+    if (fabsf(err) > LUT_ANOMALY_THRESHOLD_RAD) {
+      anomaly_count++;
+      if (anomaly_count <= 8) { // Print first 8 bad entries
+        Serial.print("  ⚠️  ANOMALY idx[");
+        Serial.print(i);
+        Serial.print("] err=");
+        Serial.print(err, 4);
+        Serial.print(" rad (");
+        Serial.print(err * 57.2957795f, 2);
+        Serial.println(" deg) — POLE SLIP?");
+      }
+    }
   }
 
-  encoder1.is_lut_calibrated = true;
   float pk_pk_deg = (max_err - min_err) * 57.2957795f;
   float rms_deg = sqrtf(sum_sq_err / (float)TOTAL_STEPS) * 57.2957795f;
+  float pk_pk_rad = max_err - min_err;
 
   Serial.println("-------------------------------------------------------------"
                  "-------------------");
-  Serial.println("🏆 256-POINT NON-LINEARITY CORRECTION RESULTS:");
+  Serial.println("128-POINT NON-LINEARITY CORRECTION RESULTS:");
   Serial.print("  Peak-to-Peak Mechanical Error : ");
   Serial.print(pk_pk_deg, 3);
   Serial.print(" deg (±");
@@ -976,7 +997,45 @@ bool calibrate256PointLUT(float align_voltage) {
   Serial.print("  RMS Correction Error          : ");
   Serial.print(rms_deg, 3);
   Serial.println(" deg mech");
-  Serial.println("  Status                        : 256-Point LUT ACTIVE");
+  Serial.print("  Anomaly Points (>");
+  Serial.print(LUT_ANOMALY_THRESHOLD_RAD * 57.2957795f, 1);
+  Serial.print(" deg)     : ");
+  Serial.println(anomaly_count);
+
+  // ---- ANOMALY GATE: Reject LUT if pole-slip detected ----
+  bool lut_valid = (anomaly_count == 0) && (pk_pk_rad <= LUT_PKPK_LIMIT_RAD);
+
+  if (!lut_valid) {
+    Serial.println("-------------------------------------------------------------"
+                   "-------------------");
+    Serial.println("❌ LUT REJECTED — ANOMALIES DETECTED!");
+    if (anomaly_count > 0) {
+      Serial.print("   ");
+      Serial.print(anomaly_count);
+      Serial.println(" points exceeded ±0.25 rad threshold (pole slip or motor stall).");
+    }
+    if (pk_pk_rad > LUT_PKPK_LIMIT_RAD) {
+      Serial.print("   Peak-to-Peak span ");
+      Serial.print(pk_pk_rad, 4);
+      Serial.println(" rad exceeds 0.50 rad safety limit.");
+    }
+    Serial.println("   HINT: Check motor is free, try higher align voltage (w 4.0)");
+    Serial.println("         or run 'w' again after clearing the shaft of load.");
+    Serial.println("-------------------------------------------------------------"
+                   "-------------------");
+    encoder1.is_lut_calibrated = false;
+    motor1.setPhaseVoltage(0, 0, 0);
+    driver1.disable();
+    is_enabled = false;
+    return false;
+  }
+
+  // Apply verified table
+  for (int i = 0; i < TOTAL_STEPS; i++) {
+    encoder1.lut_errors[i] = temp_errors[i];
+  }
+  encoder1.is_lut_calibrated = true;
+  Serial.println("  Status                        : ✅ 128-Point LUT ACTIVE (all points valid)");
   Serial.println("-------------------------------------------------------------"
                  "-------------------");
 
@@ -1005,7 +1064,7 @@ bool calibrateComprehensiveFOC(float align_voltage) {
   Serial.print(ALIGNMENT_OVERSAMPLE_COUNT);
   Serial.println(" Samples / Point with 14-Bit MT6816 Resolution");
   Serial.print("LUT Linearization  : ");
-  Serial.println(encoder1.is_lut_calibrated ? "FOURIER HARMONIC 256-PT [ACTIVE]"
+  Serial.println(encoder1.is_lut_calibrated ? "NON-LINEARITY 128-PT [ACTIVE]"
                                             : "OFF [RAW SENSOR]");
   Serial.println("-------------------------------------------------------------"
                  "-------------------");
@@ -1585,9 +1644,13 @@ void processSerialCommand() {
   }
   case 'u':
   case 'U': {
+    if (!encoder1.is_lut_calibrated) {
+      Serial.println("[LUT_DUMP] No active LUT — run 'w' first.");
+      break;
+    }
     Serial.println(
-        "\n// --- 256-POINT FOURIER HARMONIC CORRECTION LUT (RADIANS) ---");
-    Serial.print("const float PROGMEM encoder_lut_256[256] = {");
+        "\n// --- 128-POINT NON-LINEARITY CORRECTION LUT (RADIANS) ---");
+    Serial.print("const float PROGMEM encoder_lut_128[128] = {");
     for (int i = 0; i < ENCODER_LUT_SIZE; i++) {
       if (i % 8 == 0)
         Serial.print("\n  ");
@@ -1813,7 +1876,7 @@ void processSerialCommand() {
         "  load          : 📂 Load Calibrated Profile from ESP32 Flash (NVS)");
     Serial.println("  export        : 📋 Dump Full JSON Configuration String");
     Serial.println(
-        "  u             : Dump 256-Point Fourier LUT Table to Serial");
+        "  u             : Dump 128-Point LUT Table to Serial");
     Serial.println("  t <rpm>       : Set Closed-Loop Target Velocity (RPM)");
     Serial.println("  v <volts>     : Set Direct Phase Voltage Uq (V)");
     Serial.println("  k             : Run Automated Closed-Loop KV Analyzer");
@@ -1985,7 +2048,7 @@ void loop() {
     Serial.print("/16383 | Mode: ");
     Serial.print(encoder1.use_3wire ? "3-Wire" : "4-Wire");
     if (encoder1.is_lut_calibrated) {
-      Serial.print("(FOURIER:256)");
+      Serial.print("(FOURIER:128)");
     }
     Serial.print(" | Mag: ");
     if (encoder1.last_raw_h == 0xFF && encoder1.last_raw_l == 0xFF) {

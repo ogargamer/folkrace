@@ -658,7 +658,7 @@ public:
     double lookahead_time = 5.0 / 60.0; // 5 steps * 16.67ms = 83.3ms
     int lookahead_steps = 5;
     double straight_lookahead_time =
-        5.5 / 60.0; // 10% longer per step (91.7ms total over 5 steps)
+        6.0 / 60.0; // 20% longer per step (100.0ms total over 5 steps)
     double escape_speed = 1.223; // Safe escape velocity
 
     // 0. Straight-ahead probe from Step 2 at 0.5x decel (gate for cascade

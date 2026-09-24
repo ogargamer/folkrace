@@ -28,8 +28,8 @@ POPULATION_SIZE: int = 42
 # Maximum number of generations to run
 NUM_GENERATIONS: int = 9999
 
-# Evaluation duration per candidate in simulation seconds (strictly 40s)
-EVALUATION_DURATION_S: float = 40.0
+# Evaluation duration per candidate in simulation seconds (scaled to 25.0s as population hardened)
+EVALUATION_DURATION_S: float = 25.0
 
 # Number of evaluation runs per candidate to average (1 for deterministic, >1 if noisy)
 RUNS_PER_EVALUATION: int = 2
@@ -41,8 +41,8 @@ ALGORITHM: str = "CMA_ES"
 SEED_FROM_BEST_GENOME_DEFAULT: bool = True
 BEST_GENOME_PATH: str = os.path.join(os.path.dirname(os.path.abspath(__file__)), "best_planner_genome.json")
 
-# CMA-ES Hyperparameters
-CMA_SIGMA0: float = 0.20             # Initial search step size in normalized [0, 1] parameter space
+# CMA-ES Hyperparameters (Tight exploration sigma = 0.05 around top performers)
+CMA_SIGMA0: float = 0.05             # Initial search step size in normalized [0, 1] parameter space
 CMA_RESTART_ON_CONVERGENCE: bool = True  # Automatically re-seed if search distribution collapses
 
 # Genetic Operator Rates (Used when ALGORITHM == 'GA')
@@ -146,21 +146,6 @@ OPTION_2_SL_MPC_GENE_SPECS: List[Tuple[str, float, float, type, float, str]] = [
     ("recovery_clearance_exit_m", 0.25, 0.25, float, 0.25,   "Front clearance threshold (m) to conclude reverse and center steering"),
     ("recovery_steer_angle_rad",0.650, 0.650, float,  0.650,  "Recovery pivot steering angle (rad)"),
     ("recovery_arc_lookahead_m",0.10, 0.15,  float,  0.150,  "Kinematic escape arc lookahead length (m) on costmap"),
-    # Dynamic Moving Obstacle Detection & Tracking
-    ("obs_prob_threshold",   0.50,   0.85,   float,  0.65,   "Costmap blob occupancy threshold"),
-    ("obs_max_wall_dim_cells", 15,     35,     int,    25,     "Max blob bounding box dimension in cells to reject wall chains"),
-    ("obs_min_area_cells",   2,      8,      int,    4,      "Min blob area in cells to filter noise floor"),
-    ("obs_gating_radius_m",  0.10,   0.35,   float,  0.20,   "Nearest-neighbor track association gate radius (m)"),
-    ("obs_persistence_frames", 3,    8,      int,    5,      "Consecutive association frames required for velocity calculation"),
-    ("obs_dynamic_threshold_mps", 0.15, 0.60, float, 0.30,   "Velocity threshold to classify obstacle as dynamic (m/s)"),
-    ("obs_dyn_confirm_frames", 1,    5,      int,    2,      "Hysteresis frame count to confirm dynamic state"),
-    ("obs_lead_time_s",      0.10,   0.40,   float,  0.20,   "Forward obstacle enlargement lookahead horizon (s)"),
-    ("obs_max_lead_m",       0.15,   0.45,   float,  0.25,   "Cap on forward obstacle enlargement length (m)"),
-    ("obs_tail_clear_m",     0.02,   0.12,   float,  0.05,   "Trailing wake attenuation clearance length behind obstacle (m)"),
-    ("obs_max_missed_frames", 1,     4,      int,    2,      "Coasting tolerance frames before dropping lost track"),
-    ("obs_alpha_ab",         0.15,   0.50,   float,  0.25,   "Alpha-Beta filter alpha position tracking gain"),
-    ("obs_beta_ab",          0.010,  0.080,  float,  0.024,  "Alpha-Beta filter beta velocity tracking gain"),
-    ("obs_vel_decay",        0.950,  0.999,  float,  0.985,  "Conservative velocity decay factor per step"),
 ]
 
 
@@ -285,11 +270,6 @@ def generate_logical_initial_population(
             "steer_deadband_rad": 0.002,
             "recovery_clearance_exit_m": 0.28, "recovery_steer_angle_rad": 0.600,
             "recovery_arc_lookahead_m": 0.13,
-            "obs_prob_threshold": 0.65, "obs_max_wall_dim_cells": 25, "obs_min_area_cells": 4,
-            "obs_gating_radius_m": 0.20, "obs_persistence_frames": 5, "obs_dynamic_threshold_mps": 0.30,
-            "obs_dyn_confirm_frames": 2, "obs_lead_time_s": 0.20, "obs_max_lead_m": 0.25,
-            "obs_tail_clear_m": 0.05, "obs_max_missed_frames": 2, "obs_alpha_ab": 0.25,
-            "obs_beta_ab": 0.024, "obs_vel_decay": 0.985,
         },
         # 1. High-Momentum Apex Striker
         {
@@ -310,11 +290,6 @@ def generate_logical_initial_population(
             "steer_deadband_rad": 0.002,
             "recovery_clearance_exit_m": 0.30, "recovery_steer_angle_rad": 0.600,
             "recovery_arc_lookahead_m": 0.12,
-            "obs_prob_threshold": 0.65, "obs_max_wall_dim_cells": 25, "obs_min_area_cells": 4,
-            "obs_gating_radius_m": 0.22, "obs_persistence_frames": 4, "obs_dynamic_threshold_mps": 0.28,
-            "obs_dyn_confirm_frames": 2, "obs_lead_time_s": 0.22, "obs_max_lead_m": 0.28,
-            "obs_tail_clear_m": 0.05, "obs_max_missed_frames": 2, "obs_alpha_ab": 0.28,
-            "obs_beta_ab": 0.028, "obs_vel_decay": 0.988,
         },
         # 2. Safe High-Clearance Sentinel
         {
@@ -335,11 +310,6 @@ def generate_logical_initial_population(
             "steer_deadband_rad": 0.003,
             "recovery_clearance_exit_m": 0.25, "recovery_steer_angle_rad": 0.550,
             "recovery_arc_lookahead_m": 0.15,
-            "obs_prob_threshold": 0.60, "obs_max_wall_dim_cells": 22, "obs_min_area_cells": 3,
-            "obs_gating_radius_m": 0.25, "obs_persistence_frames": 4, "obs_dynamic_threshold_mps": 0.25,
-            "obs_dyn_confirm_frames": 1, "obs_lead_time_s": 0.25, "obs_max_lead_m": 0.30,
-            "obs_tail_clear_m": 0.06, "obs_max_missed_frames": 3, "obs_alpha_ab": 0.30,
-            "obs_beta_ab": 0.030, "obs_vel_decay": 0.985,
         },
     ]
 

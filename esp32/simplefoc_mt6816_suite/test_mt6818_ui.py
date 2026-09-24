@@ -331,7 +331,7 @@ class ESP32SerialReader:
                     ctrl_mode = "CLOSED-LOOP VELOCITY"
 
                 bus_mode = "3-Wire" if "Mode: 3-Wire" in line else "4-Wire"
-                lut_active = "(LUT:256)" in line or "256-Point Active" in line
+                lut_active = "(FOURIER:128)" in line or "128-Point LUT" in line or "128-PT LUT" in line
                 mag_ok = "[ OK ]" in line or "[MAGNET OK]" in line
                 parity_ok = "[PASS]" in line or "Parity: [ PASS ]" in line
 
@@ -635,7 +635,7 @@ class MT6818DashboardGUI:
 
         ttk.Label(btn_frame, text="⚡ MOTOR CONTROL & BENCH ACTIONS", style="CardTitle.TLabel").grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 6))
 
-        self._create_btn(btn_frame, "🔬 256-PT LUT (w)", "w", "#E040FB", 1, 0)
+        self._create_btn(btn_frame, "🔬 128-PT LUT (w)", "w", "#E040FB", 1, 0)
         self._create_btn(btn_frame, "⚡ 11-Pole Align (c)", "c", "#7C4DFF", 1, 1)
         self._create_btn(btn_frame, "🟢 Enable (e)", "e", "#00E676", 1, 2)
         self._create_btn(btn_frame, "🛑 STOP / Dis (x)", "x", "#D50000", 1, 3)
@@ -643,7 +643,7 @@ class MT6818DashboardGUI:
         self._create_btn(btn_frame, "🏎️ RPM +10 (+)", "+", "#00E676", 2, 0)
         self._create_btn(btn_frame, "🏎️ RPM -10 (-)", "-", "#FF5252", 2, 1)
         self._create_btn(btn_frame, "🎯 Zero / Tare (z)", "z", "#FFD600", 2, 2)
-        self._create_btn(btn_frame, "🔌 3W/4W SPI (b)", "b", "#00B0FF", 2, 3)
+        self._create_btn(btn_frame, "🔬 Full Calib (w)", "w", "#00B0FF", 2, 3)
 
         self._create_btn(btn_frame, "🎲 Re-Roll Zero (c)", "c", "#FF6D00", 3, 0)
         self._create_btn(btn_frame, "⚡ Trim Lag (n1000)", "n1000", "#FFD600", 3, 1)
@@ -1849,7 +1849,7 @@ class MT6818DashboardGUI:
         with self.reader.lock:
             lut_is_active = self.reader.last_lut_active
         if lut_is_active:
-            self.lbl_lut.config(text="LUT: 256-PT [ACTIVE]", bg="#7C4DFF", fg="#FFFFFF")
+            self.lbl_lut.config(text="LUT: 128-PT [ACTIVE]", bg="#7C4DFF", fg="#FFFFFF")
         else:
             self.lbl_lut.config(text="LUT: RAW", bg="#455A64", fg="#B0BEC5")
 
