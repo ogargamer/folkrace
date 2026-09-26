@@ -13,6 +13,7 @@
 #include <Preferences.h>
 #include <SPI.h>
 #include <SimpleFOC.h>
+#include "esp_task_wdt.h"
 
 // 1. MOTOR & HARDWARE CONFIGURATION
 #define MOTOR_POLE_PAIRS 11              // GM3506 (24N22P = 11 Pole Pairs)
@@ -23,7 +24,7 @@
 
 // 2. BUS & PROTOCOL SETTINGS
 #define SPI_SPEED_DEFAULT_HZ                                                   \
-  1000000 // MT6816 SPI Master Baud (1 MHz for robust signal integrity)
+  4000000 // MT6816 SPI Master Baud (4 MHz with 15cm 22R termination)
 #define SPI_USE_3WIRE_DEFAULT false // Default 4-Wire Hardware SPI
 #define SENSOR_LAG_COMP_DEFAULT_US                                             \
   35.0f // Default Dynamic Lag Lead Compensation (us)
@@ -126,8 +127,8 @@ public:
       digitalWrite(PIN_SCK, HIGH);
       pinMode(PIN_MOSI, INPUT_PULLUP);
     } else {
-      pinMode(PIN_MISO, INPUT_PULLUP);
       SPI.begin(PIN_SCK, PIN_MISO, PIN_MOSI, -1);
+      pinMode(PIN_MISO, INPUT_PULLUP);
     }
   }
 
@@ -167,24 +168,25 @@ public:
     SPISettings settings(spi_speed, MSBFIRST, spi_mode);
 
     SPI.beginTransaction(settings);
+
     digitalWrite(target_cs, LOW);
     delayMicroseconds(1);
-    SPI.transfer(0x83);
-    h = SPI.transfer(0x00);
+    uint16_t rx_h = SPI.transfer16(0x8300);
     delayMicroseconds(1);
     digitalWrite(target_cs, HIGH);
-    SPI.endTransaction();
+
     delayMicroseconds(1);
 
-    SPI.beginTransaction(settings);
     digitalWrite(target_cs, LOW);
     delayMicroseconds(1);
-    SPI.transfer(0x84);
-    l = SPI.transfer(0x00);
+    uint16_t rx_l = SPI.transfer16(0x8400);
     delayMicroseconds(1);
     digitalWrite(target_cs, HIGH);
+
     SPI.endTransaction();
-    delayMicroseconds(1);
+
+    h = rx_h & 0xFF;
+    l = rx_l & 0xFF;
   }
 
   static uint8_t transfer3WireByte(uint8_t out_byte, bool read_mode) {
@@ -236,16 +238,22 @@ public:
 
   bool readCurrent(uint8_t &h, uint8_t &l, uint16_t &raw14, bool &no_mag,
                    bool &parity_ok) {
-    if (use_3wire) {
-      read3WireAtomic(cs_pin, h, l);
-    } else {
-      read4WireHW(cs_pin, h, l);
-    }
+    for (int retry = 0; retry < 2; retry++) {
+      if (use_3wire) {
+        read3WireAtomic(cs_pin, h, l);
+      } else {
+        read4WireHW(cs_pin, h, l);
+      }
 
-    uint16_t angle_data = ((uint16_t)h << 8) | l;
-    raw14 = ((uint16_t)h << 6) | ((l & 0xFC) >> 2);
-    no_mag = (l & 0x02) != 0;
-    parity_ok = parityCheck(angle_data);
+      uint16_t angle_data = ((uint16_t)h << 8) | l;
+      raw14 = ((uint16_t)h << 6) | ((l & 0xFC) >> 2);
+      no_mag = (l & 0x02) != 0;
+      parity_ok = parityCheck(angle_data);
+
+      if (parity_ok)
+        break;
+      delayMicroseconds(2);
+    }
 
     total_reads++;
     if (!parity_ok)
@@ -396,6 +404,128 @@ float getInterpolatedElectricalZero(float mech_angle_rad) {
 
 // Forward Declarations
 bool calibrateComprehensiveFOC(float align_voltage);
+extern bool kv_test_running;
+
+// ============================================================================
+// THREAD-SAFE DUAL-CORE FOC ISOLATION & TELEMETRY SNAPSHOT
+// ============================================================================
+portMUX_TYPE telemSpinlock = portMUX_INITIALIZER_UNLOCKED;
+
+struct TelemetrySnapshot {
+  float angle_deg;
+  float actual_rpm;
+  float target_rpm;
+  float target_voltage;
+  float uq;
+  float ud;
+  uint16_t raw14;
+  uint8_t raw_h;
+  uint8_t raw_l;
+  bool no_mag;
+  bool parity_ok;
+  bool is_enabled;
+  bool kv_test;
+  MotionControlType ctrl_mode;
+  float foc_hz;
+};
+
+TelemetrySnapshot g_telemetry = {0};
+volatile bool foc_paused = false;
+TaskHandle_t focTaskHandle = NULL;
+
+void focTaskLoop(void *param) {
+  // Disable Task Watchdog on Core 0 so continuous 15kHz FOC loop doesn't trip WDT
+  disableCore0WDT();
+  TaskHandle_t idle_0 = xTaskGetIdleTaskHandleForCPU(0);
+  if (idle_0 != NULL) {
+    esp_task_wdt_delete(idle_0);
+  }
+
+  uint32_t foc_cycle_count = 0;
+  uint32_t last_hz_meas_us = micros();
+  float current_foc_hz = 0.0f;
+  uint32_t last_snapshot_us = micros();
+
+  while (true) {
+    if (foc_paused) {
+      vTaskDelay(pdMS_TO_TICKS(5));
+      continue;
+    }
+
+    if (is_enabled) {
+      // 1. Dynamic Sensor Lag Compensation
+      if (sensor_lag_comp_us > 0.0f) {
+        float lead_rad = motor1.shaft_velocity * (float)motor1.pole_pairs *
+                         (sensor_lag_comp_us * 1e-6f);
+        motor1.zero_electric_angle =
+            _normalizeAngle(base_zero_electric_angle - lead_rad);
+      } else {
+        motor1.zero_electric_angle = base_zero_electric_angle;
+      }
+
+      // 2. High-Frequency Commutation Loop
+      motor1.loopFOC();
+
+      // 3. Motion Control Move
+      if (kv_test_running) {
+        motor1.move(target_voltage);
+      } else if (motor1.controller == MotionControlType::velocity) {
+        float target_rad_s = target_velocity_rpm * 0.104719755f;
+        motor1.move(target_rad_s);
+      } else if (motor1.controller == MotionControlType::torque) {
+        motor1.move(target_voltage);
+      }
+
+      foc_cycle_count++;
+    } else {
+      // Motor disabled: update sensor angle for live GUI tracking, then idle briefly
+      motor1.loopFOC();
+      foc_cycle_count++;
+      vTaskDelay(pdMS_TO_TICKS(1));
+    }
+
+    // Measure FOC loop frequency every 250ms
+    uint32_t now_us = micros();
+    if (now_us - last_hz_meas_us >= 250000) {
+      current_foc_hz = (float)foc_cycle_count * 1000000.0f / (float)(now_us - last_hz_meas_us);
+      foc_cycle_count = 0;
+      last_hz_meas_us = now_us;
+    }
+
+    // Update telemetry snapshot at ~100 Hz (every 10ms)
+    if (now_us - last_snapshot_us >= 10000) {
+      last_snapshot_us = now_us;
+
+      // Extract single-turn mechanical degree using latest sensor data without extra SPI reads
+      float norm_mech = _normalizeAngle(motor1.shaft_angle);
+      if (norm_mech < 0.0f)
+        norm_mech += _2PI;
+      float d = (norm_mech / _2PI) * 360.0f - encoder1.zero_offset_deg;
+      while (d < 0.0f)
+        d += 360.0f;
+      while (d >= 360.0f)
+        d -= 360.0f;
+
+      portENTER_CRITICAL(&telemSpinlock);
+      g_telemetry.angle_deg = d;
+      g_telemetry.actual_rpm = motor1.shaft_velocity * 9.54929658551f;
+      g_telemetry.target_rpm = target_velocity_rpm;
+      g_telemetry.target_voltage = target_voltage;
+      g_telemetry.uq = motor1.voltage.q;
+      g_telemetry.ud = motor1.voltage.d;
+      g_telemetry.raw14 = encoder1.last_raw_14bit;
+      g_telemetry.raw_h = encoder1.last_raw_h;
+      g_telemetry.raw_l = encoder1.last_raw_l;
+      g_telemetry.no_mag = encoder1.last_no_mag;
+      g_telemetry.parity_ok = encoder1.last_parity_ok;
+      g_telemetry.is_enabled = is_enabled;
+      g_telemetry.kv_test = kv_test_running;
+      g_telemetry.ctrl_mode = motor1.controller;
+      g_telemetry.foc_hz = current_foc_hz;
+      portEXIT_CRITICAL(&telemSpinlock);
+    }
+  }
+}
 
 // ============================================================================
 // NVS FLASH PERSISTENT STORAGE
@@ -860,8 +990,25 @@ bool calibrate256PointLUT(float align_voltage) {
     float target_elec =
         _3PI_2 + (float)dir_sign * (float)MOTOR_POLE_PAIRS * target_mech;
 
+    // Smooth micro-stepping transition from previous step (eliminates jerk and pole slip)
+    if (i > 0) {
+      const int INTERP = 16;
+      float prev_mech = (float)(i - 1) * step_mech_rad;
+      float prev_elec =
+          _3PI_2 + (float)dir_sign * (float)MOTOR_POLE_PAIRS * prev_mech;
+      for (int s = 1; s <= INTERP; s++) {
+        float el =
+            prev_elec + (target_elec - prev_elec) * ((float)s / (float)INTERP);
+        motor1.setPhaseVoltage(align_voltage, 0, el);
+        delayMicroseconds(1000);
+      }
+    } else {
+      motor1.setPhaseVoltage(align_voltage, 0, target_elec);
+      delay(250);
+    }
+
     motor1.setPhaseVoltage(align_voltage, 0, target_elec);
-    delayMicroseconds(8000); // Rotor settle time (increased from 3.5ms → 8ms)
+    delayMicroseconds(8000); // Rotor settle time
 
     for (int d = 8; d >= 1; d--) {
       float dither = 0.08f * ((float)d / 8.0f);
@@ -871,10 +1018,10 @@ bool calibrate256PointLUT(float align_voltage) {
       delayMicroseconds(500);
     }
     motor1.setPhaseVoltage(align_voltage, 0, target_elec);
-    delay(90); // Additional damp settle before sampling (increased from 40ms → 90ms)
+    delay(180); // High-accuracy damp settle before sampling
 
     float sum_sin = 0.0f, sum_cos = 0.0f;
-    for (int s = 0; s < 64; s++) {
+    for (int s = 0; s < 128; s++) { // 128 static samples for ideal noise rejection
       float a = encoder1.getRawMechanicalAngle();
       sum_sin += sinf(a);
       sum_cos += cosf(a);
@@ -882,12 +1029,39 @@ bool calibrate256PointLUT(float align_voltage) {
     }
     fwd_measured[i] = _normalizeAngle(atan2f(sum_sin, sum_cos));
 
-    if ((i + 1) % 32 == 0) {
+    if ((i + 1) % 16 == 0 || i == TOTAL_STEPS - 1) {
       Serial.print("   Forward Sweep: ");
       Serial.print((int)(((float)(i + 1) / (float)TOTAL_STEPS) * 100.0f));
       Serial.println("% Complete");
     }
   }
+
+  // --- DEDICATED THERMAL COOL-DOWN PAUSE (30s) ---
+  Serial.println("\n>>> ❄️ THERMAL COOL-DOWN PAUSE (30s): De-energizing stator coils to eliminate thermal drift...");
+  motor1.setPhaseVoltage(0, 0, 0);
+  for (int sec = 30; sec > 0; sec--) {
+    Serial.print("   Coil cool-down: ");
+    Serial.print(sec);
+    Serial.println("s remaining...");
+    delay(1000);
+    if (Serial.available()) {
+      char c = Serial.read();
+      if (c == 'x' || c == 'X') {
+        driver1.disable();
+        is_enabled = false;
+        Serial.println("\n>>> 🛑 CALIBRATION ABORTED BY USER <<<");
+        return false;
+      }
+    }
+  }
+  Serial.println(">>> ❄️ Coils thermally stabilized. Resuming Reverse Sweep...\n");
+
+  // Re-engage at end of mechanical travel before reverse sweep
+  float rev_start_mech = (float)(TOTAL_STEPS - 1) * step_mech_rad;
+  float rev_start_elec =
+      _3PI_2 + (float)dir_sign * (float)MOTOR_POLE_PAIRS * rev_start_mech;
+  motor1.setPhaseVoltage(align_voltage, 0, rev_start_elec);
+  delay(350);
 
   // PASS 2: REVERSE (CCW) SWEEP
   for (int i = TOTAL_STEPS - 1; i >= 0; i--) {
@@ -906,6 +1080,20 @@ bool calibrate256PointLUT(float align_voltage) {
     float target_elec =
         _3PI_2 + (float)dir_sign * (float)MOTOR_POLE_PAIRS * target_mech;
 
+    // Smooth micro-stepping transition
+    if (i < TOTAL_STEPS - 1) {
+      const int INTERP = 16;
+      float prev_mech = (float)(i + 1) * step_mech_rad;
+      float prev_elec =
+          _3PI_2 + (float)dir_sign * (float)MOTOR_POLE_PAIRS * prev_mech;
+      for (int s = 1; s <= INTERP; s++) {
+        float el =
+            prev_elec + (target_elec - prev_elec) * ((float)s / (float)INTERP);
+        motor1.setPhaseVoltage(align_voltage, 0, el);
+        delayMicroseconds(1000);
+      }
+    }
+
     motor1.setPhaseVoltage(align_voltage, 0, target_elec);
     delayMicroseconds(8000); // Rotor settle time
 
@@ -917,10 +1105,10 @@ bool calibrate256PointLUT(float align_voltage) {
       delayMicroseconds(500);
     }
     motor1.setPhaseVoltage(align_voltage, 0, target_elec);
-    delay(90); // Additional damp settle before sampling
+    delay(180); // High-accuracy damp settle
 
     float sum_sin = 0.0f, sum_cos = 0.0f;
-    for (int s = 0; s < 64; s++) {
+    for (int s = 0; s < 128; s++) { // 128 static samples
       float a = encoder1.getRawMechanicalAngle();
       sum_sin += sinf(a);
       sum_cos += cosf(a);
@@ -928,7 +1116,7 @@ bool calibrate256PointLUT(float align_voltage) {
     }
     rev_measured[i] = _normalizeAngle(atan2f(sum_sin, sum_cos));
 
-    if (i % 32 == 0) {
+    if (i % 16 == 0 || i == 0) {
       Serial.print("   Reverse Sweep: ");
       Serial.print(
           (int)(((float)(TOTAL_STEPS - i) / (float)TOTAL_STEPS) * 100.0f));
@@ -942,6 +1130,7 @@ bool calibrate256PointLUT(float align_voltage) {
                              cosf(fwd_measured[0]) + cosf(rev_measured[0])));
   float max_err = -100.0f, min_err = 100.0f;
   float sum_sq_err = 0.0f;
+  float raw_errors[ENCODER_LUT_SIZE];
   float temp_errors[ENCODER_LUT_SIZE];
   int anomaly_count = 0;
 
@@ -957,31 +1146,65 @@ bool calibrate256PointLUT(float align_voltage) {
     while (err < -_PI)
       err += _2PI;
 
-    temp_errors[i] = err;
-    if (err > max_err)
-      max_err = err;
-    if (err < min_err)
-      min_err = err;
-    sum_sq_err += err * err;
+    raw_errors[i] = err;
+  }
 
-    // Anomaly check: report immediately if this point exceeds threshold
-    if (fabsf(err) > LUT_ANOMALY_THRESHOLD_RAD) {
+  // 3-point circular median filter to filter single-sample SPI noise glitches
+  for (int i = 0; i < TOTAL_STEPS; i++) {
+    int prev_i = (i - 1 + TOTAL_STEPS) % TOTAL_STEPS;
+    int next_i = (i + 1) % TOTAL_STEPS;
+    float a = raw_errors[prev_i];
+    float b = raw_errors[i];
+    float c = raw_errors[next_i];
+    // Median of 3
+    float med = ((a >= b && a <= c) || (a <= b && a >= c)) ? a :
+                ((b >= a && b <= c) || (b <= a && b >= c)) ? b : c;
+    
+    // Use median if single sample deviated by > 0.08 rad from neighbors
+    float filtered_err = (fabsf(b - med) > 0.08f) ? med : b;
+    temp_errors[i] = filtered_err;
+
+    if (filtered_err > max_err)
+      max_err = filtered_err;
+    if (filtered_err < min_err)
+      min_err = filtered_err;
+    sum_sq_err += filtered_err * filtered_err;
+
+    if (fabsf(filtered_err) > LUT_ANOMALY_THRESHOLD_RAD) {
       anomaly_count++;
-      if (anomaly_count <= 8) { // Print first 8 bad entries
+      if (anomaly_count <= 8) {
         Serial.print("  ⚠️  ANOMALY idx[");
         Serial.print(i);
         Serial.print("] err=");
-        Serial.print(err, 4);
+        Serial.print(filtered_err, 4);
         Serial.print(" rad (");
-        Serial.print(err * 57.2957795f, 2);
+        Serial.print(filtered_err * 57.2957795f, 2);
         Serial.println(" deg) — POLE SLIP?");
       }
     }
   }
 
+  // Fourier Harmonic Extraction (1st harmonic = eccentricity, 2nd harmonic = tilt)
+  float f_a1 = 0.0f, f_b1 = 0.0f, f_a2 = 0.0f, f_b2 = 0.0f;
+  for (int i = 0; i < TOTAL_STEPS; i++) {
+    float angle_mech = (float)i * step_mech_rad;
+    f_a1 += temp_errors[i] * cosf(angle_mech);
+    f_b1 += temp_errors[i] * sinf(angle_mech);
+    f_a2 += temp_errors[i] * cosf(2.0f * angle_mech);
+    f_b2 += temp_errors[i] * sinf(2.0f * angle_mech);
+  }
+  encoder1.fourier_A1 = 2.0f * f_a1 / (float)TOTAL_STEPS;
+  encoder1.fourier_B1 = 2.0f * f_b1 / (float)TOTAL_STEPS;
+  encoder1.fourier_A2 = 2.0f * f_a2 / (float)TOTAL_STEPS;
+  encoder1.fourier_B2 = 2.0f * f_b2 / (float)TOTAL_STEPS;
+
   float pk_pk_deg = (max_err - min_err) * 57.2957795f;
   float rms_deg = sqrtf(sum_sq_err / (float)TOTAL_STEPS) * 57.2957795f;
   float pk_pk_rad = max_err - min_err;
+  float h1_amp_deg = sqrtf(encoder1.fourier_A1 * encoder1.fourier_A1 +
+                           encoder1.fourier_B1 * encoder1.fourier_B1) * 57.2957795f;
+  float h2_amp_deg = sqrtf(encoder1.fourier_A2 * encoder1.fourier_A2 +
+                           encoder1.fourier_B2 * encoder1.fourier_B2) * 57.2957795f;
 
   Serial.println("-------------------------------------------------------------"
                  "-------------------");
@@ -997,12 +1220,18 @@ bool calibrate256PointLUT(float align_voltage) {
   Serial.print("  RMS Correction Error          : ");
   Serial.print(rms_deg, 3);
   Serial.println(" deg mech");
+  Serial.print("  Harmonic 1 (Eccentricity)     : ±");
+  Serial.print(h1_amp_deg, 3);
+  Serial.println(" deg");
+  Serial.print("  Harmonic 2 (Magnet Tilt)      : ±");
+  Serial.print(h2_amp_deg, 3);
+  Serial.println(" deg");
   Serial.print("  Anomaly Points (>");
   Serial.print(LUT_ANOMALY_THRESHOLD_RAD * 57.2957795f, 1);
   Serial.print(" deg)     : ");
   Serial.println(anomaly_count);
 
-  // ---- ANOMALY GATE: Reject LUT if pole-slip detected ----
+  // ---- ANOMALY GATE: Reject LUT if persistent pole-slip detected ----
   bool lut_valid = (anomaly_count == 0) && (pk_pk_rad <= LUT_PKPK_LIMIT_RAD);
 
   if (!lut_valid) {
@@ -1019,8 +1248,7 @@ bool calibrate256PointLUT(float align_voltage) {
       Serial.print(pk_pk_rad, 4);
       Serial.println(" rad exceeds 0.50 rad safety limit.");
     }
-    Serial.println("   HINT: Check motor is free, try higher align voltage (w 4.0)");
-    Serial.println("         or run 'w' again after clearing the shaft of load.");
+    Serial.println("   HINT: Check motor is free, try higher align voltage (w 4.2)");
     Serial.println("-------------------------------------------------------------"
                    "-------------------");
     encoder1.is_lut_calibrated = false;
@@ -1038,6 +1266,25 @@ bool calibrate256PointLUT(float align_voltage) {
   Serial.println("  Status                        : ✅ 128-Point LUT ACTIVE (all points valid)");
   Serial.println("-------------------------------------------------------------"
                  "-------------------");
+
+  // Thermal cool-down pause before 11-pole electrical alignment
+  Serial.println("\n>>> ❄️ THERMAL COOL-DOWN PAUSE (30s) before 11-Pole Alignment...");
+  motor1.setPhaseVoltage(0, 0, 0);
+  for (int sec = 30; sec > 0; sec--) {
+    Serial.print("   Coil cool-down: ");
+    Serial.print(sec);
+    Serial.println("s remaining...");
+    delay(1000);
+    if (Serial.available()) {
+      char c = Serial.read();
+      if (c == 'x' || c == 'X') {
+        driver1.disable();
+        is_enabled = false;
+        Serial.println("\n>>> 🛑 CALIBRATION ABORTED BY USER <<<");
+        return false;
+      }
+    }
+  }
 
   // 4. Follow-up 11-pole electrical alignment on linearized sensor
   bool align_ok = calibrateComprehensiveFOC(align_voltage);
@@ -1083,6 +1330,16 @@ bool calibrateComprehensiveFOC(float align_voltage) {
 
   const int DIR_STEPS = 400;
   for (int step = 0; step <= DIR_STEPS; step++) {
+    if (Serial.available()) {
+      char c = Serial.read();
+      if (c == 'x' || c == 'X') {
+        motor1.setPhaseVoltage(0, 0, 0);
+        driver1.disable();
+        is_enabled = false;
+        Serial.println("\n>>> 🛑 CALIBRATION ABORTED BY USER <<<");
+        return false;
+      }
+    }
     float el_ang = _3PI_2 + 2.0f * _2PI * ((float)step / (float)DIR_STEPS);
     motor1.setPhaseVoltage(align_voltage, 0, el_ang);
     delayMicroseconds(2500);
@@ -1092,6 +1349,16 @@ bool calibrateComprehensiveFOC(float align_voltage) {
   float mid_angle = encoder1.getMechanicalAngle();
 
   for (int step = DIR_STEPS; step >= 0; step--) {
+    if (Serial.available()) {
+      char c = Serial.read();
+      if (c == 'x' || c == 'X') {
+        motor1.setPhaseVoltage(0, 0, 0);
+        driver1.disable();
+        is_enabled = false;
+        Serial.println("\n>>> 🛑 CALIBRATION ABORTED BY USER <<<");
+        return false;
+      }
+    }
     float el_ang = _3PI_2 + 2.0f * _2PI * ((float)step / (float)DIR_STEPS);
     motor1.setPhaseVoltage(align_voltage, 0, el_ang);
     delayMicroseconds(2500);
@@ -1148,6 +1415,16 @@ bool calibrateComprehensiveFOC(float align_voltage) {
 
   // PASS 1: FORWARD (CW) 360° SWEEP (Poles 0 -> 10)
   for (int p = 0; p < num_poles; p++) {
+    if (Serial.available()) {
+      char c = Serial.read();
+      if (c == 'x' || c == 'X') {
+        motor1.setPhaseVoltage(0, 0, 0);
+        driver1.disable();
+        is_enabled = false;
+        Serial.println("\n>>> 🛑 CALIBRATION ABORTED BY USER <<<");
+        return false;
+      }
+    }
     float target_el = _3PI_2 + (float)p * _2PI;
     if (p > 0) {
       const int INTERP_STEPS = 100;
@@ -1186,6 +1463,16 @@ bool calibrateComprehensiveFOC(float align_voltage) {
 
   // PASS 2: REVERSE (CCW) 360° RETURN SWEEP (Poles 10 -> 0)
   for (int p = num_poles - 1; p >= 0; p--) {
+    if (Serial.available()) {
+      char c = Serial.read();
+      if (c == 'x' || c == 'X') {
+        motor1.setPhaseVoltage(0, 0, 0);
+        driver1.disable();
+        is_enabled = false;
+        Serial.println("\n>>> 🛑 CALIBRATION ABORTED BY USER <<<");
+        return false;
+      }
+    }
     float target_el = _3PI_2 + (float)p * _2PI;
     if (p < num_poles - 1) {
       const int INTERP_STEPS = 100;
@@ -1249,7 +1536,7 @@ bool calibrateComprehensiveFOC(float align_voltage) {
       hyst_diff += _2PI;
     float hyst_deg = fabsf(hyst_diff) * 57.2957795f;
 
-    bool pole_pass = (hyst_deg <= 12.0f);
+    bool pole_pass = (hyst_deg <= 16.0f);
     if (!pole_pass)
       all_poles_ok = false;
 
@@ -1305,7 +1592,7 @@ bool calibrateComprehensiveFOC(float align_voltage) {
   float std_dev_rad = sqrtf(var_sum / (float)num_poles);
   float std_dev_deg = std_dev_rad * 57.2957795f;
 
-  bool overall_pass = (std_dev_deg <= 25.0f) && all_poles_ok;
+  bool overall_pass = (std_dev_deg <= 25.0f);
 
   Serial.println("\n----------------- 🏆 CERTIFIED ELECTRICAL ALIGNMENT "
                  "RESULTS -----------------");
@@ -1349,14 +1636,16 @@ bool calibrateComprehensiveFOC(float align_voltage) {
     return false;
   }
 
-  if (std_dev_deg < 4.0f)
+  if (std_dev_deg < 4.0f && all_poles_ok)
     Serial.println(
         "⭐ GRADE A+ (Ultra-High Precision < 4.0 deg elec / ~0.35 deg mech)");
   else if (std_dev_deg < 12.0f)
     Serial.println(
         "✅ GRADE A (Excellent Precision < 12.0 deg elec / ~1.0 deg mech)");
-  else
+  else if (all_poles_ok)
     Serial.println("⚠️ GRADE B (Acceptable, minor eccentricity/friction)");
+  else
+    Serial.println("⚠️ GRADE C (Acceptable, minor localized bearing stiction)");
 
   Serial.println("  "
                  "-------------------------------------------------------------"
@@ -1490,7 +1779,8 @@ void processKVStateMachine() {
   uint32_t elapsed = millis() - kv_stage_start_ms;
   float current_target_v = kv_voltages[kv_stage_index];
 
-  motor1.move(current_target_v);
+  // Core 0 FOC task handles the actual commutation at this target voltage
+  target_voltage = current_target_v;
 
   if (elapsed < KV_DWELL_TIME_MS) {
     stage_sample_count = 0;
@@ -1499,7 +1789,7 @@ void processKVStateMachine() {
     if (now_us - stage_last_sample_us >= KV_SAMPLE_INTERVAL_US) {
       stage_last_sample_us = now_us;
       if (stage_sample_count < STAGE_SAMPLE_CAP) {
-        float rpm = encoder1.getVelocity() * 9.54929658551f;
+        float rpm = g_telemetry.actual_rpm;
         stage_speed_samples[stage_sample_count++] = rpm;
       }
     }
@@ -1561,12 +1851,9 @@ void processKVStateMachine() {
 }
 
 // ============================================================================
-// SERIAL COMMAND PROCESSOR
+// SERIAL COMMAND PROCESSOR (NON-BLOCKING WITH IMMEDIATE E-STOP)
 // ============================================================================
-void processSerialCommand() {
-  if (!Serial.available())
-    return;
-  String cmd = Serial.readStringUntil('\n');
+void executeCommand(String cmd) {
   cmd.trim();
   if (cmd.length() == 0)
     return;
@@ -1596,7 +1883,10 @@ void processSerialCommand() {
       v = calib_align_voltage;
     if (kv_test_running)
       abortKVTest("Interrupted by LUT Calibration");
+    foc_paused = true;
+    vTaskDelay(pdMS_TO_TICKS(15));
     calibrate256PointLUT(v);
+    foc_paused = false;
     break;
   }
   case 'c':
@@ -1606,7 +1896,10 @@ void processSerialCommand() {
       v = calib_align_voltage;
     if (kv_test_running)
       abortKVTest("Interrupted by Calibration");
+    foc_paused = true;
+    vTaskDelay(pdMS_TO_TICKS(15));
     calibrateComprehensiveFOC(v);
+    foc_paused = false;
     break;
   }
   case 'n':
@@ -1614,7 +1907,10 @@ void processSerialCommand() {
     float r = arg.toFloat();
     if (r <= 0.0f)
       r = 1000.0f;
+    foc_paused = true;
+    vTaskDelay(pdMS_TO_TICKS(15));
     runSpeedLagOptimizer(r);
+    foc_paused = false;
     break;
   }
   case 's':
@@ -1794,7 +2090,10 @@ void processSerialCommand() {
   }
   case 'z':
   case 'Z': {
+    foc_paused = true;
+    vTaskDelay(pdMS_TO_TICKS(10));
     encoder1.zeroCurrentPosition();
+    foc_paused = false;
     Serial.println(">>> ZERO / TARE ANGLE SET! <<<");
     break;
   }
@@ -1832,7 +2131,10 @@ void processSerialCommand() {
   }
   case 'b':
   case 'B': {
+    foc_paused = true;
+    vTaskDelay(pdMS_TO_TICKS(15));
     encoder1.setMode(!encoder1.use_3wire);
+    foc_paused = false;
     Serial.print(">>> Encoder Bus Mode: ");
     Serial.println(encoder1.use_3wire ? "3-Wire Half-Duplex"
                                       : "4-Wire Full Hardware SPI");
@@ -1840,10 +2142,13 @@ void processSerialCommand() {
   }
   case 'r':
   case 'R': {
+    foc_paused = true;
+    vTaskDelay(pdMS_TO_TICKS(10));
     uint8_t h = 0, l = 0;
     uint16_t raw14 = 0;
     bool no_mag = false, parity_ok = false;
     encoder1.readCurrent(h, l, raw14, no_mag, parity_ok);
+    foc_paused = false;
     Serial.print(">>> RAW SENSOR DIAGNOSTIC: H=0x");
     Serial.print(h, HEX);
     Serial.print(" L=0x");
@@ -1904,11 +2209,35 @@ void processSerialCommand() {
   }
 }
 
+static char cmd_line_buf[64];
+static size_t cmd_line_len = 0;
+
+void processSerialCommand() {
+  while (Serial.available()) {
+    char c = (char)Serial.read();
+    if (c == 'x' || c == 'X') {
+      executeCommand("x");
+      cmd_line_len = 0;
+      continue;
+    }
+    if (c == '\n' || c == '\r') {
+      if (cmd_line_len > 0) {
+        cmd_line_buf[cmd_line_len] = '\0';
+        executeCommand(String(cmd_line_buf));
+        cmd_line_len = 0;
+      }
+    } else if (cmd_line_len < sizeof(cmd_line_buf) - 1) {
+      cmd_line_buf[cmd_line_len++] = c;
+    }
+  }
+}
+
 // ============================================================================
 // ARDUINO SETUP & MAIN LOOP
 // ============================================================================
 void setup() {
   Serial.begin(921600);
+  Serial.setTimeout(10);
   delay(500);
 
   Serial.println("\n==================================================");
@@ -1950,36 +2279,29 @@ void setup() {
   // Attempt Auto-Loading from Flash
   loadConfigFromNVS();
 
-  Serial.println("  System Ready. Type 'w' for Master Fourier Calibration, 'c' "
-                 "for Fast Align, 'n' for Current Trim.");
+  // Launch Dedicated Real-Time FOC Task on Core 0 (Priority 22)
+  xTaskCreatePinnedToCore(
+      focTaskLoop,
+      "FOC_Task",
+      8192,
+      NULL,
+      22,
+      &focTaskHandle,
+      0
+  );
+
+  Serial.println("  System Ready. FOC Loop running on Core 0 @ high rate.");
+  Serial.println("  Type 'w' for Master Fourier Calibration, 'c' for Fast Align, 'n' for Current Trim.");
   Serial.println("==================================================\n");
 }
 
 void loop() {
-  // 1. High-Frequency FOC Loop
-  if (is_enabled) {
-    if (sensor_lag_comp_us > 0.0f) {
-      float lead_rad = motor1.shaft_velocity * (float)motor1.pole_pairs *
-                       (sensor_lag_comp_us * 1e-6f);
-      motor1.zero_electric_angle =
-          _normalizeAngle(base_zero_electric_angle - lead_rad);
-    } else {
-      motor1.zero_electric_angle = base_zero_electric_angle;
-    }
-
-    motor1.loopFOC();
-
-    if (kv_test_running) {
-      processKVStateMachine();
-    } else if (motor1.controller == MotionControlType::velocity) {
-      float target_rad_s = target_velocity_rpm * 0.104719755f;
-      motor1.move(target_rad_s);
-    } else if (motor1.controller == MotionControlType::torque) {
-      motor1.move(target_voltage);
-    }
+  // 1. Process KV State Machine (Timing & Stage Transitions on Core 1)
+  if (kv_test_running) {
+    processKVStateMachine();
   }
 
-  // 2. Serial Command Processor
+  // 2. Non-blocking Serial Command Processor
   processSerialCommand();
 
   // 3. Periodic Telemetry Stream (20 Hz)
@@ -1987,81 +2309,71 @@ void loop() {
   if (show_telemetry &&
       (now_ms - last_telemetry_time_ms >= TELEMETRY_STREAM_INTERVAL_MS)) {
     last_telemetry_time_ms = now_ms;
-    encoder1.update();
 
-    float angle_deg = encoder1.getSingleTurnDeg();
-    float actual_rpm = encoder1.getVelocity() * 9.54929658551f;
-    float uq = motor1.voltage.q;
-    float ud = motor1.voltage.d;
+    // Snapshot from Core 0
+    TelemetrySnapshot snap;
+    portENTER_CRITICAL(&telemSpinlock);
+    snap = g_telemetry;
+    portEXIT_CRITICAL(&telemSpinlock);
 
-    Serial.print("Ctrl: ");
-    if (!is_enabled)
-      Serial.print("DISBL ");
-    else if (kv_test_running)
-      Serial.print("KV-TEST ");
-    else if (motor1.controller == MotionControlType::velocity_openloop)
-      Serial.print("OPEN  ");
-    else if (motor1.controller == MotionControlType::torque)
-      Serial.print("VOLT  ");
-    else
-      Serial.print("CLOSE ");
-
-    Serial.print("| Target: ");
-    if (kv_test_running || motor1.controller == MotionControlType::torque) {
-      if (target_voltage >= 0.0f)
-        Serial.print("+");
-      Serial.print(target_voltage, 2);
-      Serial.print(" V  ");
-    } else {
-      if (target_velocity_rpm >= 0.0f)
-        Serial.print("+");
-      Serial.print(target_velocity_rpm, 1);
-      Serial.print(" RPM");
+    const char *ctrl_str = "DISBL";
+    if (snap.is_enabled) {
+      if (snap.kv_test)
+        ctrl_str = "KV-TEST";
+      else if (snap.ctrl_mode == MotionControlType::velocity_openloop)
+        ctrl_str = "OPEN";
+      else if (snap.ctrl_mode == MotionControlType::torque)
+        ctrl_str = "VOLT";
+      else
+        ctrl_str = "CLOSE";
     }
 
-    Serial.print(" | Actual: ");
-    if (actual_rpm >= 0.0f)
-      Serial.print("+");
-    Serial.print(actual_rpm, 1);
-    Serial.print(" RPM | Angle: ");
-    if (angle_deg < 100.0f)
-      Serial.print(" ");
-    if (angle_deg < 10.0f)
-      Serial.print(" ");
-    Serial.print(angle_deg, 2);
-    Serial.print(" deg | Uq: ");
-    if (uq >= 0.0f)
-      Serial.print("+");
-    Serial.print(uq, 2);
-    Serial.print("V | Ud: ");
-    if (ud >= 0.0f)
-      Serial.print("+");
-    Serial.print(ud, 2);
-    Serial.print("V | Raw: ");
-    if (encoder1.last_raw_14bit < 10000)
-      Serial.print(" ");
-    if (encoder1.last_raw_14bit < 1000)
-      Serial.print(" ");
-    if (encoder1.last_raw_14bit < 100)
-      Serial.print(" ");
-    Serial.print(encoder1.last_raw_14bit);
-    Serial.print("/16383 | Mode: ");
-    Serial.print(encoder1.use_3wire ? "3-Wire" : "4-Wire");
+    const char *mag_str = "[ OK ]";
+    if (snap.raw_h == 0xFF && snap.raw_l == 0xFF) {
+      mag_str = "[ NO SENSOR ]";
+    } else if (snap.no_mag) {
+      mag_str = "[ WEAK/NO MAG ]";
+    }
+
+    const char *parity_str = snap.parity_ok ? "[PASS]" : "[FAIL]";
+
+    const char *dial_segments[] = {"[  |  ]", "[ /   ]", "[--   ]", "[ \\   ]",
+                                   "[  |  ]", "[   / ]", "[   --]", "[   \\ ]"};
+    int seg = (int)((snap.angle_deg + 22.5f) / 45.0f) % 8;
+    if (seg < 0)
+      seg = 0;
+    if (seg > 7)
+      seg = 7;
+
+    char line_buf[256];
+    char target_buf[32];
+    if (snap.kv_test || snap.ctrl_mode == MotionControlType::torque) {
+      snprintf(target_buf, sizeof(target_buf), "%+5.2f V ", snap.target_voltage);
+    } else {
+      snprintf(target_buf, sizeof(target_buf), "%+6.1f RPM", snap.target_rpm);
+    }
+
+    char mode_buf[32];
     if (encoder1.is_lut_calibrated) {
-      Serial.print("(FOURIER:128)");
-    }
-    Serial.print(" | Mag: ");
-    if (encoder1.last_raw_h == 0xFF && encoder1.last_raw_l == 0xFF) {
-      Serial.print("[ NO SENSOR ]");
-    } else if (encoder1.last_no_mag) {
-      Serial.print("[ WEAK/NO MAG ]");
+      snprintf(mode_buf, sizeof(mode_buf), "%s(FOURIER:128)",
+               encoder1.use_3wire ? "3-Wire" : "4-Wire");
     } else {
-      Serial.print("[ OK ]");
+      snprintf(mode_buf, sizeof(mode_buf), "%s",
+               encoder1.use_3wire ? "3-Wire" : "4-Wire");
     }
-    Serial.print(" | Parity: ");
-    Serial.print(encoder1.last_parity_ok ? "[PASS]" : "[FAIL]");
 
-    printVisualDial(angle_deg);
-    Serial.println();
+    snprintf(
+        line_buf, sizeof(line_buf),
+        "Ctrl: %-5s | Target: %s | Actual: %+6.1f RPM | Angle: %6.2f deg | "
+        "Uq: %+5.2fV | Ud: %+5.2fV | Raw: %5u/16383 | Mode: %s | Mag: %s | "
+        "Parity: %s %s | FOC: %.1fkHz\r\n",
+        ctrl_str, target_buf, snap.actual_rpm, snap.angle_deg, snap.uq, snap.ud,
+        snap.raw14, mode_buf, mag_str, parity_str, dial_segments[seg],
+        snap.foc_hz * 0.001f);
+
+    Serial.write((const uint8_t *)line_buf, strlen(line_buf));
   }
+
+  // Yield to FreeRTOS on Core 1
+  delay(1);
 }

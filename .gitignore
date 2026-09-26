@@ -25,3 +25,4 @@ scratch/
 temp/
 *.bak
 *.tmp
+compile_commands.json

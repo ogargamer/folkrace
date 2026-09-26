@@ -96,8 +96,18 @@ class ESP32SerialReader:
         self.last_parity_ok = True
         self.last_stall_alarm = False
         self.last_stall_guard = False
+        self.last_foc_khz = 0.0
         self.calibrating = False
+        self.calib_stage_name = "Ready"
+        self.calib_progress_pct = 0.0
+        self.calib_cooldown_sec = 0
         self.last_calib_zero_angle = None
+        self.last_zero_electric_angle = 0.11275
+        self.last_calib_success = False
+        self.last_calib_failed = False
+        self.last_calib_grade = ""
+        self.last_calib_error = ""
+        self.last_sensor_direction = -1
         self.msg_count = 0
 
         # KV Test Streaming & Results State
@@ -151,12 +161,46 @@ class ESP32SerialReader:
             except Exception:
                 self.connected = False
 
+    def send_emergency_stop(self):
+        """High-priority emergency stop burst that guarantees packet delivery even with dirty RX buffer."""
+        with self.lock:
+            self.kv_test_active = False
+            self.calibrating = False
+        if self.ser and self.ser.is_open:
+            try:
+                # Transmit a clean newline break followed by multiple 'x' commands
+                burst = b"\n\nx\nx\nx\n"
+                self.ser.write(burst)
+                try:
+                    self.ser.flush()
+                except Exception:
+                    pass
+                self.connected = True
+            except Exception:
+                self.connected = False
+        else:
+            # If temporarily marked disconnected, attempt quick connect and send
+            try:
+                if self.port:
+                    self.ser = serial.Serial(self.port, self.baud, timeout=0.05, write_timeout=0.2)
+                    self.ser.write(b"\n\nx\nx\nx\n")
+                    self.ser.flush()
+                    self.connected = True
+            except Exception:
+                pass
+
     def _read_loop(self):
         buffer = ""
         while self.running:
             if not self.ser or not self.ser.is_open or not self.connected:
                 time.sleep(0.5)
                 try:
+                    if self.ser:
+                        try:
+                            self.ser.close()
+                        except Exception:
+                            pass
+                        self.ser = None
                     port = self.port or find_esp32_port()
                     if port:
                         self.port = port
@@ -252,11 +296,79 @@ class ESP32SerialReader:
                 self.kv_test_active = False
             return
 
+        if "STARTING 128-POINT DUAL-PASS NON-LINEARITY LUT CALIBRATION" in line:
+            with self.lock:
+                self.calibrating = True
+                self.calib_stage_name = "128-Point LUT: Settling start..."
+                self.calib_progress_pct = 5.0
+                self.last_calib_failed = False
+                self.last_calib_success = False
+                self.last_calib_grade = ""
+                self.last_calib_error = ""
+            return
+
+        if "Forward Sweep:" in line:
+            m_fwd = re.search(r'Forward Sweep:\s*(\d+)%', line)
+            if m_fwd:
+                pct = int(m_fwd.group(1))
+                with self.lock:
+                    self.calib_stage_name = f"LUT Pass 1: Forward Sweep ({pct}%)..."
+                    self.calib_progress_pct = 5.0 + 0.35 * pct
+            return
+
+        if "THERMAL COOL-DOWN PAUSE" in line:
+            with self.lock:
+                self.calib_stage_name = "❄️ Thermal Cool-Down: De-energizing coils..."
+            return
+
+        if "Coil cool-down:" in line:
+            m_cd = re.search(r'Coil cool-down:\s*(\d+)s', line)
+            if m_cd:
+                sec = int(m_cd.group(1))
+                with self.lock:
+                    self.calib_cooldown_sec = sec
+                    self.calib_stage_name = f"❄️ Thermal Cool-Down ({sec}s remaining)..."
+            return
+
+        if "Reverse Sweep:" in line:
+            m_rev = re.search(r'Reverse Sweep:\s*(\d+)%', line)
+            if m_rev:
+                pct = int(m_rev.group(1))
+                with self.lock:
+                    self.calib_stage_name = f"LUT Pass 2: Reverse Sweep ({pct}%)..."
+                    self.calib_progress_pct = 45.0 + 0.35 * pct
+            return
+
+        if "128-Point LUT ACTIVE" in line:
+            with self.lock:
+                self.last_lut_active = True
+                self.calib_stage_name = "✅ 128-Point LUT Calibrated & Active!"
+                self.calib_progress_pct = 82.0
+            return
+
+        if "LUT REJECTED" in line:
+            with self.lock:
+                self.last_lut_active = False
+                self.last_calib_failed = True
+                self.calibrating = False
+                self.last_calib_error = "LUT Rejected: Anomalies/Pole-Slip Detected"
+                self.calib_stage_name = "❌ LUT Rejected (Anomalies/Pole-Slip)"
+            return
+
         if "STARTING COMPREHENSIVE MULTI-POINT ELECTRICAL ZERO CALIBRATION" in line:
             with self.lock:
                 self.calibrating = True
-                self.last_calib_zero_angle = None
+                self.calib_stage_name = "Scanning 11 Electrical Poles..."
+                self.calib_progress_pct = max(self.calib_progress_pct, 82.0)
             return
+
+        if "Pole #" in line or ("#" in line and "deg" in line and "rad" in line):
+            m_pole = re.search(r'#(\d+)\s+\|\s*([0-9\.]+)\s*deg', line)
+            if m_pole:
+                p_idx = int(m_pole.group(1))
+                with self.lock:
+                    self.calib_stage_name = f"11-Pole Sweep: Pole #{p_idx}/11..."
+                    self.calib_progress_pct = 82.0 + (p_idx / 11.0) * 16.0
 
         if "motor.zero_electric_angle =" in line:
             m = re.search(r'motor\.zero_electric_angle\s*=\s*([0-9]+\.[0-9]+)', line)
@@ -264,7 +376,42 @@ class ESP32SerialReader:
                 with self.lock:
                     self.last_calib_zero_angle = float(m.group(1))
                     self.last_zero_electric_angle = float(m.group(1))
+                    self.last_calib_success = True
+                    self.last_calib_failed = False
                     self.calibrating = False
+                    self.calib_progress_pct = 100.0
+
+        if "motor.sensor_direction" in line:
+            m_dir = re.search(r'Direction::(CW|CCW)', line)
+            if m_dir:
+                with self.lock:
+                    self.last_sensor_direction = 1 if m_dir.group(1) == "CW" else -1
+
+        if "GRADE A+" in line or "GRADE A" in line or "GRADE B" in line or "GRADE C" in line:
+            with self.lock:
+                if "GRADE A+" in line:
+                    self.last_calib_grade = "GRADE A+ (Ultra-High Precision)"
+                elif "GRADE A" in line:
+                    self.last_calib_grade = "GRADE A (Excellent)"
+                elif "GRADE B" in line:
+                    self.last_calib_grade = "GRADE B (Good)"
+                elif "GRADE C" in line:
+                    self.last_calib_grade = "GRADE C (Acceptable)"
+
+        if "CALIBRATION REJECTED" in line or "GRADE F" in line:
+            with self.lock:
+                self.last_calib_failed = True
+                self.calibrating = False
+                self.last_calib_grade = "GRADE F (FAILED)"
+                self.last_calib_error = "11-Pole Alignment Consistency Failed (>25 deg elec)"
+                self.calib_stage_name = "❌ Calibration Rejected by Gate"
+
+        if "FAILED! ERROR: Motor failed to move" in line or "Motor failed to move" in line:
+            with self.lock:
+                self.last_calib_failed = True
+                self.calibrating = False
+                self.last_calib_error = "Motor failed to move (check power/wiring)"
+                self.calib_stage_name = "❌ Motor Failed to Move"
 
         if "Updated Base Electrical Zero Angle:" in line:
             m = re.search(r'([0-9]+\.[0-9]+)\s*rad', line)
@@ -335,7 +482,10 @@ class ESP32SerialReader:
                 mag_ok = "[ OK ]" in line or "[MAGNET OK]" in line
                 parity_ok = "[PASS]" in line or "Parity: [ PASS ]" in line
 
-                if "DISBL" in ctrl_mode and self.last_stall_alarm and target_val == 0.0:
+                m_foc = re.search(r'FOC:\s*([+-]?\d+\.?\d*)\s*kHz', line)
+                foc_khz = float(m_foc.group(1)) if m_foc else 0.0
+
+                if "DISBL" in ctrl_mode:
                     pass
                 else:
                     self.last_stall_alarm = False
@@ -354,6 +504,8 @@ class ESP32SerialReader:
                     self.last_lut_active = lut_active
                     self.last_mag_ok = mag_ok
                     self.last_parity_ok = parity_ok
+                    if foc_khz > 0.0:
+                        self.last_foc_khz = foc_khz
                     self.msg_count += 1
 
                     self.history_time.append(t_now)
@@ -400,6 +552,16 @@ class MT6818DashboardGUI:
         self.kv_progress_var = tk.DoubleVar(value=0.0)
         self.kv_status_var = tk.StringVar(value="Ready for Closed-Loop KV Sweep Test.")
 
+        # Master Auto-Calibration Engine State (Multi-Method with Accuracy-First Fallback)
+        self.calib_running = False
+        self.calib_thread = None
+        self.calib_progress_var = tk.DoubleVar(value=0.0)
+        self.calib_status_var = tk.StringVar(value="Ready for High-Precision Auto-Calibration.")
+        self.calib_grade_var = tk.StringVar(value="NOT CALIBRATED")
+        self.calib_align_volt_var = tk.StringVar(value="3.5")
+        self.calib_boost_retry_var = tk.BooleanVar(value=False)
+        self.calib_verify_var = tk.BooleanVar(value=True)
+
         self._setup_styles()
         self._build_ui()
         self._schedule_update()
@@ -437,6 +599,16 @@ class MT6818DashboardGUI:
         self.btn_connect = tk.Button(header_frame, text="Connect", font=("Segoe UI", 9, "bold"), bg="#00E5FF", fg="#000",
                                      activebackground="#00B4D8", command=self._toggle_connect, relief="flat", padx=8)
         self.btn_connect.pack(side="right", padx=4)
+
+        # Big Red Global Emergency Stop in Top Bar
+        self.btn_top_estop = tk.Button(header_frame, text="🛑 E-STOP / DISABLE (Esc)", font=("Segoe UI", 10, "bold"),
+                                       bg="#D50000", fg="#FFFFFF", activebackground="#FF1744", activeforeground="#FFFFFF",
+                                       relief="flat", padx=12, pady=2, command=self.emergency_stop)
+        self.btn_top_estop.pack(side="right", padx=10)
+
+        # Keyboard shortcuts: Escape or Space (when not typing in an entry) always triggers E-Stop
+        self.root.bind_all("<Escape>", lambda e: self.emergency_stop())
+        self.root.bind_all("<Key-space>", self._on_space_pressed)
 
         # 2. Main Notebook Tabs
         self.notebook = ttk.Notebook(self.root)
@@ -501,6 +673,9 @@ class MT6818DashboardGUI:
 
         self.lbl_stall = tk.Label(badge_bar, text="STALL: OK", font=("Segoe UI", 9, "bold"), bg="#455A64", fg="#B0BEC5", padx=6, pady=2)
         self.lbl_stall.pack(side="left", padx=3)
+
+        self.lbl_foc = tk.Label(badge_bar, text="FOC: -- kHz", font=("Segoe UI", 9, "bold"), bg="#1B5E20", fg="#69F0AE", padx=6, pady=2)
+        self.lbl_foc.pack(side="left", padx=3)
 
         # -------------------------------------------------------------
         # ⚙️ LIVE REAL-TIME PARAMETER TUNING PANEL (REAL-TIME OVER SERIAL)
@@ -587,7 +762,7 @@ class MT6818DashboardGUI:
         for spd in [0, 50, 100, 200, 400]:
             btn_col = "#D50000" if spd == 0 else "#2979FF"
             tk.Button(preset_bar, text=f"{spd} RPM", font=("Segoe UI", 8, "bold"), bg=btn_col, fg="#FFF", relief="flat",
-                      command=lambda s=spd: self._set_param("t", str(s))).pack(side="left", fill="x", expand=True, padx=2)
+                      command=lambda s=spd: self._set_speed_preset(s)).pack(side="left", fill="x", expand=True, padx=2)
 
         # -------------------------------------------------------------
         # 🔒 COMPILE-TIME HARDWARE & INVERTER CONFIGURATION INFO
@@ -596,7 +771,7 @@ class MT6818DashboardGUI:
         hw_info_card.pack(fill="x", pady=4)
 
         ttk.Label(hw_info_card, text="🔒 COMPILE-TIME HARDWARE CONSTANTS (EDIT IN MAIN.CPP)", style="CardTitle.TLabel").pack(anchor="w", pady=(0, 2))
-        info_txt = "PWM Carrier: 25.0 kHz | Pole Pairs: 11 (GM3506) | Align Volt: 3.0V | SPI Baud: 4.0 MHz | Pins: PA8,PA9,PA10,PB3 EN"
+        info_txt = "PWM Carrier: 25.0 kHz | Pole Pairs: 11 (GM3506) | Align Volt: 3.5V | SPI Baud: 1.0 MHz | Driver: GPIO 15,16,17,2 EN | Sensor: GPIO 12,11,13,10 CS"
         tk.Label(hw_info_card, text=info_txt, font=("Segoe UI", 8), bg="#1A2230", fg="#8A99AD", anchor="w").pack(fill="x")
 
         # 2-Minute PID Benchmark Card
@@ -628,6 +803,46 @@ class MT6818DashboardGUI:
         # RIGHT COLUMN: Motor Controls, Oscilloscope Chart, & Interactive Serial Console
         right_col = ttk.Frame(main_paned)
         main_paned.add(right_col, minsize=520)
+
+        # -------------------------------------------------------------
+        # 🎯 HIGH-PRECISION AUTO-CALIBRATION HUB (ACCURACY FIRST)
+        # -------------------------------------------------------------
+        cal_hub = ttk.Frame(right_col, style="Card.TFrame", padding=10)
+        cal_hub.pack(fill="x", pady=4)
+
+        cal_hdr = ttk.Frame(cal_hub)
+        cal_hdr.pack(fill="x", pady=(0, 4))
+        ttk.Label(cal_hdr, text="🎯 HIGH-PRECISION AUTO-CALIBRATION HUB", style="CardTitle.TLabel").pack(side="left")
+
+        self.lbl_calib_grade_badge = tk.Label(cal_hdr, textvariable=self.calib_grade_var, font=("Segoe UI", 8, "bold"),
+                                              bg="#263238", fg="#B0BEC5", padx=6, pady=1)
+        self.lbl_calib_grade_badge.pack(side="right")
+
+        # Config Row
+        cal_cfg_row = ttk.Frame(cal_hub)
+        cal_cfg_row.pack(fill="x", pady=(2, 4))
+        ttk.Label(cal_cfg_row, text="Align Volt (V):", font=("Segoe UI", 9, "bold"), background="#1A2230", foreground="#00E5FF").pack(side="left", padx=2)
+        self.entry_cal_v = tk.Entry(cal_cfg_row, width=5, font=("Segoe UI", 9), textvariable=self.calib_align_volt_var, bg="#222D3E", fg="#00E5FF", insertbackground="#FFF")
+        self.entry_cal_v.pack(side="left", padx=4)
+
+        ttk.Checkbutton(cal_cfg_row, text="Boost V on Stall", variable=self.calib_boost_retry_var).pack(side="left", padx=4)
+        ttk.Checkbutton(cal_cfg_row, text="Verify Closed-Loop", variable=self.calib_verify_var).pack(side="left", padx=4)
+
+        # Master Action Button Row
+        cal_act_row = ttk.Frame(cal_hub)
+        cal_act_row.pack(fill="x", pady=(4, 4))
+
+        self.btn_master_calib = tk.Button(cal_act_row, text="🚀 1-CLICK MASTER AUTO-CALIBRATE (MULTI-METHOD)", font=("Segoe UI", 10, "bold"),
+                                          bg="#00E676", fg="#000", activebackground="#69F0AE", relief="flat", pady=6,
+                                          command=self._toggle_master_calibration)
+        self.btn_master_calib.pack(side="left", fill="x", expand=True, padx=2)
+
+        self.cal_prog_bar = ttk.Progressbar(cal_hub, variable=self.calib_progress_var, maximum=100.0)
+        self.cal_prog_bar.pack(fill="x", pady=(4, 2))
+
+        self.lbl_cal_status = tk.Label(cal_hub, textvariable=self.calib_status_var, font=("Segoe UI", 8),
+                                       bg="#1A2230", fg="#8A99AD", anchor="w")
+        self.lbl_cal_status.pack(fill="x")
 
         # Control Action Buttons Grid
         btn_frame = ttk.Frame(right_col, style="Card.TFrame", padding=10)
@@ -743,7 +958,7 @@ class MT6818DashboardGUI:
         btn_row1 = ttk.Frame(ctrl_card)
         btn_row1.pack(fill="x", pady=3)
 
-        self.btn_run_kv = tk.Button(btn_row1, text="🚀 START 18-Stage KV Sweep (v)", font=("Segoe UI", 9, "bold"),
+        self.btn_run_kv = tk.Button(btn_row1, text="🚀 START 18-Stage KV Sweep (k)", font=("Segoe UI", 9, "bold"),
                                     bg="#00E676", fg="#000", activebackground="#69F0AE", relief="flat", padx=10, pady=5,
                                     command=self._start_firmware_kv_test)
         self.btn_run_kv.pack(side="left", fill="x", expand=True, padx=2)
@@ -880,7 +1095,7 @@ class MT6818DashboardGUI:
         tk.Button(vtest_row, text="◀️ Reverse (-V)", font=("Segoe UI", 8, "bold"), bg="#FF4081", fg="#FFF", relief="flat",
                   command=self._spin_reverse_test).pack(side="left", padx=3)
         tk.Button(vtest_row, text="⏹️ Stop (0V)", font=("Segoe UI", 8, "bold"), bg="#D50000", fg="#FFF", relief="flat",
-                  command=lambda: self.reader.send_cmd("u0.0")).pack(side="left", padx=3)
+                  command=lambda: self.reader.send_cmd("v0.0")).pack(side="left", padx=3)
 
         # Calibration Options Checkbox
         self.chk_recalib_var = tk.BooleanVar(value=False)
@@ -994,23 +1209,219 @@ class MT6818DashboardGUI:
     def _spin_forward_test(self):
         try:
             v = abs(float(self.entry_sym_v.get().strip()))
-            self.reader.send_cmd(f"u{v:.2f}")
+            self.reader.send_cmd(f"v{v:.2f}")
         except ValueError:
             pass
 
     def _spin_reverse_test(self):
         try:
             v = abs(float(self.entry_sym_v.get().strip()))
-            self.reader.send_cmd(f"u-{v:.2f}")
+            self.reader.send_cmd(f"v-{v:.2f}")
         except ValueError:
             pass
 
+    # =========================================================================
+    # MASTER AUTO-CALIBRATION ORCHESTRATOR (ACCURACY FIRST & MULTI-METHOD FALLBACK)
+    # =========================================================================
+    def _toggle_master_calibration(self):
+        if self.calib_running:
+            self.calib_running = False
+            self.btn_master_calib.config(text="🚀 1-CLICK MASTER AUTO-CALIBRATE (MULTI-METHOD)", bg="#00E676", fg="#000")
+            self.calib_status_var.set("Calibration Aborted by User.")
+            self.reader.send_cmd("x")
+        else:
+            if not self.reader.connected:
+                messagebox.showerror("Connection Error", "Please connect to ESP32-S3 first!")
+                return
+            self.calib_running = True
+            self.btn_master_calib.config(text="⏹️ Abort Master Calibration", bg="#D50000", fg="#FFF")
+            self.calib_thread = threading.Thread(target=self._run_master_calibration_worker, daemon=True)
+            self.calib_thread.start()
+
+    def _run_master_calibration_worker(self):
+        try:
+            align_v = float(self.calib_align_volt_var.get().strip())
+        except Exception:
+            align_v = 3.5
+
+        # Step 0: Pre-Flight Hardware Qualification
+        self.root.after(0, lambda: [
+            self.calib_progress_var.set(2.0),
+            self.calib_status_var.set("Step 0/5: Checking Sensor & SPI Bus Diagnostics (r)...")
+        ])
+        self.reader.send_cmd("r")
+        time.sleep(0.4)
+
+        with self.reader.lock:
+            mag_ok = self.reader.last_mag_ok
+            parity_ok = self.reader.last_parity_ok
+            raw_cnt = self.reader.last_raw_14bit
+
+        if not mag_ok or not parity_ok or raw_cnt == 0 or raw_cnt == 16383:
+            self.root.after(0, lambda: [
+                self.calib_status_var.set("❌ Pre-Flight Failed: Magnet Fault or Parity Errors! Check wiring."),
+                self.calib_grade_var.set("SENSOR FAULT")
+            ])
+            self._cleanup_calib_ui()
+            return
+
+        # =========================================================================
+        # METHOD 1: HIGH-PRECISION 128-PT DUAL-PASS LUT CALIBRATION ('w')
+        # =========================================================================
+        self.root.after(0, lambda: [
+            self.calib_status_var.set(f"Step 1/5: Running 128-Point Dual-Pass LUT Sweep at {align_v:.1f}V..."),
+            self.calib_progress_var.set(5.0)
+        ])
+
+        lut_success = self._execute_firmware_sweep(f"w{align_v:.2f}", timeout_sec=200)
+
+        # Retry with higher voltage if stalled or cogging occurred
+        if not lut_success and self.calib_boost_retry_var.get() and self.calib_running:
+            boost_v = min(4.0, align_v + 0.5)
+            self.root.after(0, lambda bv=boost_v: self.calib_status_var.set(f"⚠️ LUT Retrying with Boost Voltage {bv:.1f}V to overcome cogging/stiction..."))
+            time.sleep(2.0)
+            lut_success = self._execute_firmware_sweep(f"w{boost_v:.2f}", timeout_sec=200)
+
+        # =========================================================================
+        # METHOD 2: 11-POLE ROUND-TRIP ALIGNMENT ('c') FALLBACK (IF LUT FAILED)
+        # =========================================================================
+        c_success = lut_success
+        if not lut_success and self.calib_running:
+            fallback_v = min(4.0, align_v + 0.4)
+            self.root.after(0, lambda fv=fallback_v: self.calib_status_var.set(f"Step 2/5: Fallback to High-Torque 11-Pole Round-Trip Alignment ({fv:.1f}V)..."))
+            time.sleep(1.0)
+            c_success = self._execute_firmware_sweep(f"c{fallback_v:.2f}", timeout_sec=60)
+            if not c_success and self.calib_running:
+                # Retry once more with max safe voltage
+                time.sleep(1.5)
+                c_success = self._execute_firmware_sweep("c4.00", timeout_sec=60)
+
+        if not self.calib_running:
+            self._cleanup_calib_ui()
+            return
+
+        if not c_success:
+            self.root.after(0, lambda: [
+                self.calib_grade_var.set("GRADE F (FAILED)"),
+                self.calib_status_var.set("❌ Calibration failed. Check motor wiring, power supply, and mechanical friction.")
+            ])
+            self._cleanup_calib_ui()
+            return
+
+        # =========================================================================
+        # POST-CALIBRATION: CLOSED-LOOP VERIFICATION PULSE
+        # =========================================================================
+        verified = False
+        if self.calib_verify_var.get() and self.calib_running:
+            self.root.after(0, lambda: [
+                self.calib_status_var.set("Step 4/5: Running Dual-Direction Closed-Loop Verification Spin (±1.5V)..."),
+                self.calib_progress_var.set(90.0)
+            ])
+            verified = self._verify_closed_loop_motion()
+        else:
+            verified = True
+
+        # =========================================================================
+        # AUTO-SAVE TO FLASH (NVS) & FINALIZE
+        # =========================================================================
+        if self.calib_running and verified:
+            self.root.after(0, lambda: [
+                self.calib_status_var.set("Step 5/5: Auto-Saving Certified Profile to Flash Memory (NVS)..."),
+                self.calib_progress_var.set(100.0)
+            ])
+            self.reader.send_cmd("save")
+            time.sleep(0.4)
+            with self.reader.lock:
+                grade = self.reader.last_calib_grade or "CERTIFIED"
+                zero_a = self.reader.last_zero_electric_angle or self.current_zero_angle_rad
+            self.current_zero_angle_rad = zero_a
+            self.root.after(0, lambda g=grade, a=zero_a: [
+                self.calib_grade_var.set(g),
+                self.calib_status_var.set(f"🎉 Calibration Certified! Zero: {a:.5f} rad ({a*57.29578:.1f}°) | {g} | Saved to Flash."),
+                self.entry_zero_angle.delete(0, "end"),
+                self.entry_zero_angle.insert(0, f"{a:.5f}"),
+                self.lbl_angle_deg.config(text=f"({a*57.29578:.2f}°)")
+            ])
+        elif self.calib_running and not verified:
+            self.root.after(0, lambda: self.calib_status_var.set("⚠️ Verification failed: Low rotation detected. Profile not saved to Flash."))
+
+        self._cleanup_calib_ui()
+
+    def _execute_firmware_sweep(self, cmd, timeout_sec=200):
+        with self.reader.lock:
+            self.reader.last_calib_success = False
+            self.reader.last_calib_failed = False
+            self.reader.calibrating = True
+        self.reader.send_cmd(cmd)
+        t_start = time.time()
+        while time.time() - t_start < timeout_sec:
+            if not self.calib_running:
+                self.reader.send_cmd("x")
+                return False
+            with self.reader.lock:
+                done = (not self.reader.calibrating) and (self.reader.last_calib_success or self.reader.last_calib_failed)
+                success = self.reader.last_calib_success
+                failed = self.reader.last_calib_failed
+                p_pct = self.reader.calib_progress_pct
+                st_name = self.reader.calib_stage_name
+            if p_pct > 0:
+                self.root.after(0, lambda p=p_pct: self.calib_progress_var.set(p))
+            if st_name:
+                self.root.after(0, lambda s=st_name: self.calib_status_var.set(s))
+            if done:
+                return success and not failed
+            time.sleep(0.1)
+        return False
+
+    def _verify_closed_loop_motion(self):
+        # Forward test (+1.5V)
+        self.reader.send_cmd("v1.50")
+        t0 = time.time()
+        fwd_speeds = []
+        while time.time() - t0 < 0.6:
+            if not self.calib_running:
+                self.reader.send_cmd("v0.0"); return False
+            with self.reader.lock:
+                fwd_speeds.append(abs(self.reader.last_actual_rpm))
+            time.sleep(0.05)
+        self.reader.send_cmd("v0.0")
+        time.sleep(0.3)
+
+        # Reverse test (-1.5V)
+        self.reader.send_cmd("v-1.50")
+        t1 = time.time()
+        rev_speeds = []
+        while time.time() - t1 < 0.6:
+            if not self.calib_running:
+                self.reader.send_cmd("v0.0"); return False
+            with self.reader.lock:
+                rev_speeds.append(abs(self.reader.last_actual_rpm))
+            time.sleep(0.05)
+        self.reader.send_cmd("v0.0")
+        time.sleep(0.2)
+
+        max_fwd = max(fwd_speeds) if fwd_speeds else 0.0
+        max_rev = max(rev_speeds) if rev_speeds else 0.0
+
+        if max_fwd >= 20.0 and max_rev >= 20.0:
+            return True
+        else:
+            self.root.after(0, lambda mf=max_fwd, mr=max_rev: self.calib_status_var.set(f"⚠️ Verification: Low rotation (Fwd={mf:.0f}, Rev={mr:.0f} RPM)."))
+            return False
+
+    def _cleanup_calib_ui(self):
+        self.calib_running = False
+        self.root.after(0, lambda: self.btn_master_calib.config(text="🚀 1-CLICK MASTER AUTO-CALIBRATE (MULTI-METHOD)", bg="#00E676", fg="#000"))
+
+    # =========================================================================
+    # HIGH-PRECISION ROTATIONAL SYMMETRY EQUALIZER
+    # =========================================================================
     def _toggle_auto_symmetry(self):
         if self.sym_running:
             self.sym_running = False
             self.btn_auto_sym.config(text="🚀 1-CLICK AUTO-EQUALIZE SYMMETRY", bg="#00E676", fg="#000")
             self.sym_status_var.set("Auto Equalizer Aborted by User.")
-            self.reader.send_cmd("u0.0")
+            self.reader.send_cmd("v0.0")
         else:
             if not self.reader.connected:
                 messagebox.showerror("Connection Error", "Please connect to ESP32-S3 first!")
@@ -1034,15 +1445,14 @@ class MT6818DashboardGUI:
         ])
         time.sleep(0.05)
 
-        # 2. Forward Spin (+V): Smooth settle with 0-RPM duration stall detection (400ms)
+        # 2. Forward Spin (+V): Smooth 1.8s settle with stall penalty (no E-stop shutdown)
         self.reader.send_cmd(f"v{v_test:.2f}")
         t_spin = time.time()
         stall_time_s = 0.0
         last_t = time.time()
-        while time.time() - t_spin < 1.1:
+        while time.time() - t_spin < 1.8:
             if not self.sym_running:
                 self.reader.send_cmd("v0.0")
-                self.reader.send_cmd("x")
                 return None
             
             now = time.time()
@@ -1052,20 +1462,20 @@ class MT6818DashboardGUI:
             with self.reader.lock:
                 live_spd = abs(self.reader.last_actual_rpm)
             
-            if (now - t_spin) > 0.15:
+            if (now - t_spin) > 0.2:
                 if live_spd < 3.0:
                     stall_time_s += dt
-                    if stall_time_s >= 0.40: # Locked at 0 RPM for >= 400ms
+                    if stall_time_s >= 0.50:
                         self.reader.send_cmd("v0.0")
-                        self.reader.send_cmd("x")
-                        self._record_sym_row(stage_name, candidate_angle, base_zero, 0.0, 0.0, "[STALL - 0 RPM]")
+                        time.sleep(0.3)
+                        self._record_sym_row(stage_name, candidate_angle, base_zero, 0.0, 0.0, "[STALL - 0 RPM]", v_test=v_test)
                         return {"angle": candidate_angle, "fwd": 0, "rev": 0, "delta": 0, "sym": 0, "kv": 0, "score": 0, "status": "[STALL]", "is_valid": False}
                 else:
                     stall_time_s = 0.0
             time.sleep(0.02)
 
         fwd_samples = []
-        for _ in range(15):
+        for _ in range(30): # 30 samples over ~0.9s for noise immunity
             if not self.sym_running:
                 self.reader.send_cmd("v0.0")
                 return None
@@ -1075,24 +1485,23 @@ class MT6818DashboardGUI:
         fwd_rpm = sum(fwd_samples) / max(1, len(fwd_samples))
         self.sym_fwd_rpm = fwd_rpm
 
-        # Soft stop
+        # Soft stop & cool-down pause
         self.reader.send_cmd("v0.0")
         t_stop = time.time()
-        while time.time() - t_stop < 0.40:
+        while time.time() - t_stop < 0.50:
             if not self.sym_running: return None
             time.sleep(0.02)
 
         if not self.sym_running: return None
 
-        # 3. Reverse Spin (-V): Smooth settle with 0-RPM duration stall detection (400ms)
+        # 3. Reverse Spin (-V): Smooth 1.8s settle
         self.reader.send_cmd(f"v-{v_test:.2f}")
         t_rev = time.time()
         stall_time_s = 0.0
         last_t = time.time()
-        while time.time() - t_rev < 1.1:
+        while time.time() - t_rev < 1.8:
             if not self.sym_running:
                 self.reader.send_cmd("v0.0")
-                self.reader.send_cmd("x")
                 return None
             
             now = time.time()
@@ -1102,20 +1511,20 @@ class MT6818DashboardGUI:
             with self.reader.lock:
                 live_spd = abs(self.reader.last_actual_rpm)
             
-            if (now - t_rev) > 0.15:
+            if (now - t_rev) > 0.2:
                 if live_spd < 3.0:
                     stall_time_s += dt
-                    if stall_time_s >= 0.40: # Locked at 0 RPM for >= 400ms
+                    if stall_time_s >= 0.50:
                         self.reader.send_cmd("v0.0")
-                        self.reader.send_cmd("x")
-                        self._record_sym_row(stage_name, candidate_angle, base_zero, fwd_rpm, 0.0, "[STALL - 0 RPM]")
+                        time.sleep(0.3)
+                        self._record_sym_row(stage_name, candidate_angle, base_zero, fwd_rpm, 0.0, "[STALL - 0 RPM]", v_test=v_test)
                         return {"angle": candidate_angle, "fwd": fwd_rpm, "rev": 0, "delta": 0, "sym": 0, "kv": 0, "score": 0, "status": "[STALL]", "is_valid": False}
                 else:
                     stall_time_s = 0.0
             time.sleep(0.02)
 
         rev_samples = []
-        for _ in range(15):
+        for _ in range(30):
             if not self.sym_running:
                 self.reader.send_cmd("v0.0")
                 return None
@@ -1125,16 +1534,16 @@ class MT6818DashboardGUI:
         rev_rpm = sum(rev_samples) / max(1, len(rev_samples))
         self.sym_rev_rpm = rev_rpm
 
-        # Soft stop
+        # Soft stop & inter-candidate cooldown
         self.reader.send_cmd("v0.0")
         t_stop2 = time.time()
-        while time.time() - t_stop2 < 0.40:
+        while time.time() - t_stop2 < 0.50:
             if not self.sym_running: return None
             time.sleep(0.02)
 
-        # 4. Evaluation & Score
+        # 4. Evaluation & Precision Score
         delta_rpm = fwd_rpm - rev_rpm
-        is_stalled = (fwd_rpm < 5.0 or rev_rpm < 5.0)
+        is_stalled = (fwd_rpm < 15.0 or rev_rpm < 15.0)
         mean_rpm = (fwd_rpm + rev_rpm) * 0.5
         stage_kv = mean_rpm / max(0.1, v_test)
         max_rpm = max(fwd_rpm, rev_rpm, 1.0)
@@ -1142,14 +1551,15 @@ class MT6818DashboardGUI:
 
         if is_stalled:
             score = 0.0
-            status = "[STALL - 0 RPM]"
+            status = "[STALL - LOW RPM]"
             is_valid = False
         else:
-            score = sym_pct
+            # Score balances high directional symmetry with high torque/speed production
+            score = sym_pct * (1.0 + 0.001 * mean_rpm)
             status = f"OK ({sym_pct:.1f}%)"
             is_valid = True
 
-        self._record_sym_row(stage_name, candidate_angle, base_zero, fwd_rpm, rev_rpm, status)
+        self._record_sym_row(stage_name, candidate_angle, base_zero, fwd_rpm, rev_rpm, status, v_test=v_test)
 
         return {
             "angle": candidate_angle,
@@ -1163,12 +1573,13 @@ class MT6818DashboardGUI:
             "is_valid": is_valid
         }
 
-    def _record_sym_row(self, stage_name, candidate_angle, base_zero, fwd_rpm, rev_rpm, status):
-        nudge_val = candidate_angle - base_zero
+    def _record_sym_row(self, stage_name, candidate_angle, base_zero, fwd_rpm, rev_rpm, status, v_test=4.0):
+        # Shortest circular angular difference
+        nudge_val = (candidate_angle - base_zero + math.pi) % (2.0 * math.pi) - math.pi
         delta_rpm = fwd_rpm - rev_rpm
         max_rpm = max(fwd_rpm, rev_rpm, 1.0)
         sym_pct = (min(fwd_rpm, rev_rpm) / max_rpm) * 100.0 if (fwd_rpm > 5.0 and rev_rpm > 5.0) else 0.0
-        stage_kv = ((fwd_rpm + rev_rpm) * 0.5) / 4.0
+        stage_kv = ((fwd_rpm + rev_rpm) * 0.5) / max(0.1, v_test)
 
         row_data = (
             stage_name,
@@ -1198,28 +1609,55 @@ class MT6818DashboardGUI:
             self.sym_tree.delete(item) for item in self.sym_tree.get_children()
         ])
 
-        # Step 1: Baseline Zero
-        try:
-            base_zero = float(self.entry_zero_angle.get().strip())
-        except ValueError:
+        # Step 0: If checked, re-run 11-pole continuous alignment first
+        if self.chk_recalib_var.get() and self.sym_running:
+            self.sym_status_var.set("Phase 0/3: Re-running 11-Pole Alignment Sweep first...")
             with self.reader.lock:
-                base_zero = self.reader.last_zero_electric_angle or self.current_zero_angle_rad
+                self.reader.last_calib_zero_angle = None
+                self.reader.calibrating = True
+                self.reader.last_calib_failed = False
+            cal_v = self.entry_align_v.get().strip() or "4.0"
+            self.reader.send_cmd(f"c{cal_v}")
+            t_align = time.time()
+            time.sleep(1.0)
+            while time.time() - t_align < 35:
+                if not self.sym_running:
+                    self.reader.send_cmd("x"); return
+                with self.reader.lock:
+                    if not self.reader.calibrating and (self.reader.last_calib_zero_angle is not None or self.reader.last_calib_failed):
+                        break
+                time.sleep(0.3)
+            time.sleep(0.5)
+
+        # Baseline Zero
+        with self.reader.lock:
+            latest_zero = self.reader.last_calib_zero_angle or self.reader.last_zero_electric_angle
+        try:
+            base_zero = latest_zero if (self.chk_recalib_var.get() and latest_zero is not None) else float(self.entry_zero_angle.get().strip())
+        except ValueError:
+            base_zero = latest_zero if latest_zero is not None else self.current_zero_angle_rad
+
+        def _sync_base_entry(z=base_zero):
+            self.entry_zero_angle.delete(0, "end")
+            self.entry_zero_angle.insert(0, f"{z:.5f}")
+            self.lbl_angle_deg.config(text=f"({z*57.29578:.2f}°)")
+        self.root.after(0, _sync_base_entry)
 
         self.current_zero_angle_rad = base_zero
         all_results = []
 
         # =============================================================
-        # PASS 1: MEDIUM GRID SWEEP (7 Candidate Points across ±0.0030 rad)
+        # PASS 1: WIDE COARSE EXPLORATION (±0.040 rad / ±2.3° elec)
         # =============================================================
-        self.sym_status_var.set("Pass 1/2: Sweeping 7 Candidate Angles across Baseline ±0.0030 rad...")
-        med_offsets = [0.0000, +0.0010, -0.0010, +0.0020, -0.0020, +0.0030, -0.0030]
+        self.sym_status_var.set("Pass 1/3: Coarse Bracket Sweep across Baseline ±0.040 rad...")
+        coarse_offsets = [0.0000, +0.0200, -0.0200, +0.0400, -0.0400]
         pass1_results = []
 
-        for i, off in enumerate(med_offsets, 1):
+        for i, off in enumerate(coarse_offsets, 1):
             if not self.sym_running: break
-            self.sym_progress_var.set(5.0 + (i / len(med_offsets)) * 45.0)
-            ang = base_zero + off
-            label = f"Medium #{i} ({off:+.4f})"
+            self.sym_progress_var.set((i / len(coarse_offsets)) * 35.0)
+            ang = (base_zero + off) % (2.0 * math.pi)
+            label = f"Coarse #{i} ({off:+.4f})"
             res = self._measure_candidate_angle(ang, label, v_test, base_zero)
             if res:
                 pass1_results.append(res)
@@ -1231,30 +1669,51 @@ class MT6818DashboardGUI:
             self._cleanup_sym_ui()
             return
 
-        # Best from Pass 1 (highest symmetry score)
-        best_medium = max(valid_pass1, key=lambda r: r["score"])
-        best_angle = best_medium["angle"]
+        best_coarse = max(valid_pass1, key=lambda r: r["score"])
+        best_angle = best_coarse["angle"]
 
         # =============================================================
-        # PASS 2: FINE GRID SWEEP (5 Candidate Points around Winner ±0.0006 rad)
+        # PASS 2: MEDIUM ZOOM SWEEP (±0.008 rad around Coarse Winner)
         # =============================================================
-        pass2_results = [best_medium]
+        pass2_results = [best_coarse]
         if self.sym_running:
-            self.sym_status_var.set(f"Pass 2/2: Fine-Tuning 5 Micro-Angles around Winner ({best_angle*57.3:.2f}°)...")
-            fine_offsets = [+0.0003, -0.0003, +0.0006, -0.0006]
+            self.sym_status_var.set(f"Pass 2/3: Medium Zooming around Winner ({best_angle*57.3:.2f}°)...")
+            med_offsets = [+0.0080, -0.0080, +0.0040, -0.0040]
 
-            for i, off in enumerate(fine_offsets, 1):
+            for i, off in enumerate(med_offsets, 1):
                 if not self.sym_running: break
-                self.sym_progress_var.set(50.0 + (i / len(fine_offsets)) * 45.0)
-                ang = best_angle + off
-                label = f"Fine #{i} ({off:+.4f})"
+                self.sym_progress_var.set(35.0 + (i / len(med_offsets)) * 35.0)
+                ang = (best_angle + off) % (2.0 * math.pi)
+                label = f"Med #{i} ({off:+.4f})"
                 res = self._measure_candidate_angle(ang, label, v_test, base_zero)
                 if res:
                     pass2_results.append(res)
                     all_results.append(res)
 
         valid_pass2 = [r for r in pass2_results if r["is_valid"]]
-        winner = max(valid_pass2, key=lambda r: r["score"]) if valid_pass2 else best_medium
+        best_med = max(valid_pass2, key=lambda r: r["score"]) if valid_pass2 else best_coarse
+        best_angle2 = best_med["angle"]
+
+        # =============================================================
+        # PASS 3: FINE MICRO-TRIM (±0.0015 rad for >99% Symmetry)
+        # =============================================================
+        pass3_results = [best_med]
+        if self.sym_running:
+            self.sym_status_var.set(f"Pass 3/3: Fine Micro-Trimming for >99% Symmetry...")
+            fine_offsets = [+0.0015, -0.0015, +0.0007, -0.0007]
+
+            for i, off in enumerate(fine_offsets, 1):
+                if not self.sym_running: break
+                self.sym_progress_var.set(70.0 + (i / len(fine_offsets)) * 30.0)
+                ang = (best_angle2 + off) % (2.0 * math.pi)
+                label = f"Fine #{i} ({off:+.4f})"
+                res = self._measure_candidate_angle(ang, label, v_test, base_zero)
+                if res:
+                    pass3_results.append(res)
+                    all_results.append(res)
+
+        valid_pass3 = [r for r in pass3_results if r["is_valid"]]
+        winner = max(valid_pass3, key=lambda r: r["score"]) if valid_pass3 else best_med
 
         if not self.sym_running:
             self.sym_status_var.set("Auto Equalizer Aborted by User.")
@@ -1327,6 +1786,22 @@ class MT6818DashboardGUI:
             self.reader.send_cmd(cmd)
             self.cmd_entry.delete(0, "end")
 
+    def _set_speed_preset(self, speed_rpm):
+        self.entry_target.delete(0, "end")
+        self.entry_target.insert(0, str(float(speed_rpm)))
+        self._set_param("t", str(float(speed_rpm)))
+
+    def _nudge_target_rpm(self, delta):
+        try:
+            curr = float(self.entry_target.get().strip())
+        except Exception:
+            with self.reader.lock:
+                curr = self.reader.last_target_rpm
+        new_rpm = max(-1432.0, min(1432.0, curr + delta))
+        self.entry_target.delete(0, "end")
+        self.entry_target.insert(0, f"{new_rpm:.1f}")
+        self._set_param("t", f"{new_rpm:.1f}")
+
     def _reset_gm3506_defaults(self):
         self.entry_ramp.delete(0, "end"); self.entry_ramp.insert(0, "200.0")
         self.entry_v.delete(0, "end"); self.entry_v.insert(0, "12.0")
@@ -1338,7 +1813,18 @@ class MT6818DashboardGUI:
         self.entry_lag.delete(0, "end"); self.entry_lag.insert(0, "35.0")
         self.entry_kv.delete(0, "end"); self.entry_kv.insert(0, "171.9")
         self.entry_target.delete(0, "end"); self.entry_target.insert(0, "0.0")
-        self.reader.send_cmd("r")
+
+        # Send all actual defaults to ESP32 controller
+        self.reader.send_cmd("a200.0")
+        self.reader.send_cmd("l12.0")
+        self.reader.send_cmd("m1432.0")
+        self.reader.send_cmd("p0.12")
+        self.reader.send_cmd("i1.20")
+        self.reader.send_cmd("d0.000")
+        self.reader.send_cmd("f0.005")
+        self.reader.send_cmd("s35.0")
+        self.reader.send_cmd("q171.9")
+        self.reader.send_cmd("t0.0")
 
     def _apply_kv_to_motor(self):
         with self.reader.lock:
@@ -1357,8 +1843,46 @@ class MT6818DashboardGUI:
         except ValueError:
             messagebox.showwarning("Input Error", f"Invalid numeric value: '{val_str}'")
 
+    def emergency_stop(self):
+        """Universal Emergency Stop: Immediately terminates all worker threads, aborts sweeps, and disables inverter."""
+        # 1. Abort all background orchestrator loops
+        self.calib_running = False
+        self.sym_running = False
+        self.benchmark_running = False
+
+        # 2. Reset UI buttons to safe Idle states
+        try:
+            self.btn_master_calib.config(text="🚀 1-CLICK MASTER AUTO-CALIBRATE (MULTI-METHOD)", bg="#00E676", fg="#000")
+            self.btn_auto_sym.config(text="🚀 1-CLICK AUTO-EQUALIZE SYMMETRY", bg="#00E676", fg="#000")
+            self.btn_benchmark.config(text="▶️ Start 2-Min PID Benchmark", bg="#00E676", fg="#000")
+            self.btn_run_kv.config(text="🚀 START 18-Stage KV Sweep (k)", bg="#00E676", fg="#000")
+        except Exception:
+            pass
+
+        # 3. Update status strings to reflect E-Stop
+        self.calib_status_var.set("🛑 EMERGENCY STOP: All operations terminated.")
+        self.sym_status_var.set("🛑 EMERGENCY STOP: Stator coils de-energized.")
+        self.benchmark_status_var.set("🛑 EMERGENCY STOP: Benchmark aborted.")
+        self.kv_status_var.set("🛑 EMERGENCY STOP: KV test stopped.")
+
+        # 4. Transmit high-priority emergency stop burst to ESP32-S3 hardware
+        self.reader.send_emergency_stop()
+
+    def _on_space_pressed(self, event):
+        # Allow typing space inside Text or Entry widgets without triggering E-stop
+        widget = event.widget
+        if isinstance(widget, (tk.Entry, ttk.Entry, tk.Text)):
+            return
+        self.emergency_stop()
+
     def _handle_btn(self, cmd):
-        if cmd == "FLASH":
+        if cmd == "x" or cmd == "X":
+            self.emergency_stop()
+        elif cmd == "+":
+            self._nudge_target_rpm(+10.0)
+        elif cmd == "-":
+            self._nudge_target_rpm(-10.0)
+        elif cmd == "FLASH":
             self._flash_firmware()
         elif cmd == "SAVE_JSON":
             self._export_config_dialog()
@@ -1377,10 +1901,17 @@ class MT6818DashboardGUI:
         if not filename:
             return
         
+        with self.reader.lock:
+            detected_dir = getattr(self.reader, 'last_sensor_direction', -1)
+        try:
+            lag_val = float(self.entry_lag.get().strip() or "35.0")
+        except ValueError:
+            lag_val = 35.0
+
         cfg = {
             "zero_electric_angle": self.current_zero_angle_rad,
-            "sensor_direction": 1,
-            "sensor_lag_comp_us": 35.0,
+            "sensor_direction": detected_dir,
+            "sensor_lag_comp_us": lag_val,
             "motor_kv_rating": float(self.entry_kv.get().strip() or "130.0"),
             "pid_p": float(self.entry_p.get().strip() or "0.12"),
             "pid_i": float(self.entry_i.get().strip() or "1.20"),
@@ -1434,6 +1965,7 @@ class MT6818DashboardGUI:
                 self.reader.send_cmd(f"f{cfg['lpf_tf']}")
                 time.sleep(0.05)
             if "sensor_lag_comp_us" in cfg:
+                self.entry_lag.delete(0, "end"); self.entry_lag.insert(0, str(cfg["sensor_lag_comp_us"]))
                 self.reader.send_cmd(f"s{cfg['sensor_lag_comp_us']}")
                 time.sleep(0.05)
             if "motor_kv_rating" in cfg:
@@ -1445,7 +1977,7 @@ class MT6818DashboardGUI:
             messagebox.showerror("Upload Error", f"Failed to load profile:\n{str(e)}")
 
     def _flash_firmware(self):
-        ans = messagebox.askyesno("Flash ESP32-S3", "Upload firmware to ESP32-S3 (ESP32-S3_Motor_24_08)?\n(ESP32-S3 should be connected in DFU / Boot mode)")
+        ans = messagebox.askyesno("Flash ESP32-S3", "Upload firmware to ESP32-S3 (esp32s3_suite)?\n(ESP32-S3 should be connected in DFU / Boot mode)")
         if not ans:
             return
         self.reader.disconnect()
@@ -1454,12 +1986,12 @@ class MT6818DashboardGUI:
 
         def do_flash():
             pio_exe = find_pio_executable()
-            workspace_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-            cmd = [pio_exe, "run", "-e", "ESP32-S3_Motor_24_08", "-t", "upload"]
+            workspace_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+            cmd = [pio_exe, "run", "-e", "esp32s3_suite", "-t", "upload"]
             try:
                 res = subprocess.run(cmd, capture_output=True, text=True, cwd=workspace_root)
                 if res.returncode == 0:
-                    self.root.after(0, lambda: messagebox.showinfo("Flash Success", "ESP32-S3 firmware (ESP32-S3_Motor_24_08) flashed successfully!"))
+                    self.root.after(0, lambda: messagebox.showinfo("Flash Success", "ESP32-S3 firmware (esp32s3_suite) flashed successfully!"))
                 else:
                     err_msg = res.stderr.strip() or res.stdout.strip()
                     self.root.after(0, lambda: messagebox.showerror("Flash Error", f"Upload failed:\n{err_msg[-500:]}"))
@@ -1496,14 +2028,15 @@ class MT6818DashboardGUI:
         for item in self.kv_tree.get_children():
             self.kv_tree.delete(item)
 
+        self._kv_table_finalized = False
         self.btn_run_kv.config(text="🔄 Running KV Sweep...", bg="#FF9100", fg="#000")
         self.kv_progress_var.set(5.0)
         self.kv_status_var.set("Initiating FOC Alignment & Voltage Sweep...")
-        self.reader.send_cmd("v")
+        self.reader.send_cmd("k")
 
     def _abort_kv_test(self):
         self.reader.send_cmd("x")
-        self.btn_run_kv.config(text="🚀 START 18-Stage KV Sweep (v)", bg="#00E676", fg="#000")
+        self.btn_run_kv.config(text="🚀 START 18-Stage KV Sweep (k)", bg="#00E676", fg="#000")
         self.kv_status_var.set("KV Test Aborted by User.")
         with self.reader.lock:
             self.reader.kv_test_active = False
@@ -1598,14 +2131,34 @@ class MT6818DashboardGUI:
         stage_duration = 10.0
         settle_time = 2.5
 
-        self.root.after(0, lambda: self.benchmark_status_var.set("Ensuring SimpleFOC Calibration..."))
-        self.reader.send_cmd("c")
-        time.sleep(1.5)
+        # Step 0: Ensure SimpleFOC has calibrated electrical zero
+        with self.reader.lock:
+            already_calibrated = self.reader.last_calib_success and self.reader.last_calib_zero_angle is not None
+        if not already_calibrated:
+            self.root.after(0, lambda: self.benchmark_status_var.set("Phase 0: Executing 11-Pole Alignment before benchmark..."))
+            with self.reader.lock:
+                self.reader.last_calib_zero_angle = None
+                self.reader.calibrating = True
+                self.reader.last_calib_failed = False
+            self.reader.send_cmd("c4.0")
+            t_cal = time.time()
+            time.sleep(1.0)
+            while time.time() - t_cal < 35:
+                if not self.benchmark_running:
+                    self.reader.send_cmd("x")
+                    return
+                with self.reader.lock:
+                    if not self.reader.calibrating and (self.reader.last_calib_zero_angle is not None or self.reader.last_calib_failed):
+                        break
+                time.sleep(0.3)
+            time.sleep(0.5)
 
         start_bench_time = time.time()
+        was_aborted = False
 
         for idx, p in enumerate(presets):
             if not self.benchmark_running:
+                was_aborted = True
                 break
 
             self.reader.send_cmd(f"p{p['p']}")
@@ -1631,6 +2184,7 @@ class MT6818DashboardGUI:
 
             while time.time() - stage_start < stage_duration:
                 if not self.benchmark_running:
+                    was_aborted = True
                     break
 
                 elapsed_in_stage = time.time() - stage_start
@@ -1689,11 +2243,18 @@ class MT6818DashboardGUI:
                 self.benchmark_results.append(result_entry)
 
         self.benchmark_running = False
-        self.reader.send_cmd("t0")
+        if was_aborted:
+            self.reader.send_cmd("x")
+        else:
+            self.reader.send_cmd("t0")
 
-        def _finish():
+        def _finish(aborted=was_aborted):
             self.btn_benchmark.config(text="▶️ Start 2-Min PID Benchmark", bg="#00E676", fg="#000")
-            if self.benchmark_results:
+            if aborted:
+                self.benchmark_status_var.set("Benchmark Aborted.")
+                if self.benchmark_results:
+                    self.btn_show_results.config(state="normal")
+            elif self.benchmark_results:
                 self.benchmark_results.sort(key=lambda x: x['score'])
                 for rank_idx, r in enumerate(self.benchmark_results):
                     r['rank'] = rank_idx + 1
@@ -1868,11 +2429,39 @@ class MT6818DashboardGUI:
         else:
             self.lbl_stall.config(text="STALL GUARD: OK", bg="#455A64", fg="#B0BEC5")
 
+        with self.reader.lock:
+            foc_khz = getattr(self.reader, "last_foc_khz", 0.0)
+        if foc_khz > 0.0:
+            self.lbl_foc.config(text=f"FOC: {foc_khz:.1f} kHz", bg="#00E676" if foc_khz >= 5.0 else "#FFD600", fg="#000000")
+        else:
+            self.lbl_foc.config(text="FOC: -- kHz", bg="#1B5E20", fg="#69F0AE")
+
         if self.reader.connected:
             self.conn_label.config(text=f"ONLINE ({self.reader.port})", fg="#69F0AE")
             self.btn_connect.config(text="Disconnect", bg="#FF5252")
         else:
             self.conn_label.config(text="RECONNECTING...", fg="#FFD600")
+
+        # Sync Auto-Calibration UI elements
+        with self.reader.lock:
+            c_prog = self.reader.calib_progress_pct
+            c_stage = self.reader.calib_stage_name
+            c_active = self.reader.calibrating
+            c_grade = self.reader.last_calib_grade
+
+        if not self.calib_running and c_active:
+            if c_prog > 0:
+                self.calib_progress_var.set(c_prog)
+            if c_stage:
+                self.calib_status_var.set(c_stage)
+
+        if c_grade:
+            self.calib_grade_var.set(c_grade)
+            grade_col = "#69F0AE" if ("GRADE A" in c_grade or "CERTIFIED" in c_grade) else ("#FFD600" if "GRADE B" in c_grade else "#FF5252")
+            self.lbl_calib_grade_badge.config(fg=grade_col)
+        elif lut_is_active:
+            self.calib_grade_var.set("128-PT LUT ACTIVE")
+            self.lbl_calib_grade_badge.config(fg="#69F0AE")
 
         self._update_kv_tab_data(kv_pts, kv_res, kv_active)
         self._update_symmetry_tab()
@@ -1920,10 +2509,10 @@ class MT6818DashboardGUI:
             self.lbl_kv_r2_tag.config(text=f"R² Fit: {r2_val:.5f} | KV: {kv_val:.1f} RPM/V")
 
         current_rows = len(self.kv_tree.get_children())
-        if len(kv_pts) > current_rows:
-            slope = kv_res.get('KV', 130.0) if kv_res else 130.0
-            v0 = kv_res.get('V0', 0.0) if kv_res else 0.0
+        slope = kv_res.get('KV', 130.0) if kv_res else 130.0
+        v0 = kv_res.get('V0', 0.0) if kv_res else 0.0
 
+        if len(kv_pts) > current_rows:
             for i in range(current_rows, len(kv_pts)):
                 p = kv_pts[i]
                 v = p['voltage']
@@ -1947,6 +2536,29 @@ class MT6818DashboardGUI:
             children = self.kv_tree.get_children()
             if children:
                 self.kv_tree.see(children[-1])
+        elif kv_res and not getattr(self, '_kv_table_finalized', False):
+            # Final regression results arrived: update all existing rows with true fit and residual
+            children = self.kv_tree.get_children()
+            if len(children) == len(kv_pts) and len(kv_pts) > 0:
+                for idx, child_id in enumerate(children):
+                    p = kv_pts[idx]
+                    v = p['voltage']
+                    rpm = p['rpm']
+                    if v >= 0:
+                        fit_rpm = max(0.0, (v - v0) * slope)
+                    else:
+                        fit_rpm = min(0.0, (v + v0) * slope)
+                    residual = rpm - fit_rpm
+                    self.kv_tree.item(child_id, values=(
+                        f"#{p['stage']}",
+                        f"{v:+.1f} V",
+                        f"{rpm:+.1f} RPM",
+                        f"{fit_rpm:+.1f} RPM",
+                        f"{residual:+.1f}",
+                        f"±{p['ripple']*0.5:.1f}",
+                        f"±{p['std_dev']:.2f}"
+                    ))
+                self._kv_table_finalized = True
 
     def _draw_gauge(self, deg):
         try:
@@ -2046,7 +2658,7 @@ class MT6818DashboardGUI:
             if w < 40 or h < 40:
                 return
 
-            pad_left = 60
+            pad_left = 80
             pad_right = 30
             pad_top = 30
             pad_bottom = 40
@@ -2079,22 +2691,35 @@ class MT6818DashboardGUI:
                 canvas.create_text(x, pad_top + ph + 14, text=f"{v_val:+} V", fill="#8A99AD", font=("Segoe UI", 8), anchor="center")
 
             canvas.create_text(pad_left + pw / 2, pad_top + ph + 30, text="Commanded Q-Axis Voltage Uq (V)", fill="#00E5FF", font=("Segoe UI", 9, "bold"))
-            canvas.create_text(16, pad_top + ph / 2, text="Actual Speed (RPM)", fill="#69F0AE", font=("Segoe UI", 9, "bold"), angle=90)
+            canvas.create_text(18, pad_top + ph / 2, text="Actual Speed (RPM)", fill="#69F0AE", font=("Segoe UI", 9, "bold"), angle=90)
 
             if kv_res and kv_res.get('KV', 0) > 1.0:
                 kv = kv_res['KV']
                 v0 = kv_res.get('V0', 0.0)
 
+                # Positive voltage line
                 x_start_pos = cx + (v0 / v_max) * (pw / 2)
                 y_start_pos = cy
-                x_end_pos = cx + (12.0 / v_max) * (pw / 2)
-                y_end_pos = cy - ((12.0 - v0) * kv / rpm_max) * (ph / 2)
+                calc_pos_rpm = (12.0 - v0) * kv
+                if calc_pos_rpm > rpm_max:
+                    v_pos_end = v0 + (rpm_max / kv)
+                    x_end_pos = cx + (v_pos_end / v_max) * (pw / 2)
+                    y_end_pos = pad_top
+                else:
+                    x_end_pos = cx + (12.0 / v_max) * (pw / 2)
+                    y_end_pos = cy - (calc_pos_rpm / rpm_max) * (ph / 2)
                 canvas.create_line(x_start_pos, y_start_pos, x_end_pos, y_end_pos, fill="#69F0AE", width=2)
 
+                # Negative voltage line
                 x_start_neg = cx - (v0 / v_max) * (pw / 2)
                 y_start_neg = cy
-                x_end_neg = cx - (12.0 / v_max) * (pw / 2)
-                y_end_neg = cy + ((12.0 - v0) * kv / rpm_max) * (ph / 2)
+                if calc_pos_rpm > rpm_max:
+                    v_neg_end = v0 + (rpm_max / kv)
+                    x_end_neg = cx - (v_neg_end / v_max) * (pw / 2)
+                    y_end_neg = pad_top + ph
+                else:
+                    x_end_neg = cx - (12.0 / v_max) * (pw / 2)
+                    y_end_neg = cy + (calc_pos_rpm / rpm_max) * (ph / 2)
                 canvas.create_line(x_start_neg, y_start_neg, x_end_neg, y_end_neg, fill="#69F0AE", width=2)
 
                 eq_text = f"y = {kv:.1f} · (Uq - {v0:.2f}V)  [R² = {kv_res.get('R2', 0):.5f}]"
@@ -2214,6 +2839,11 @@ if __name__ == "__main__":
     app = MT6818DashboardGUI(root, reader)
 
     def on_close():
+        try:
+            app.emergency_stop()
+            time.sleep(0.08)
+        except Exception:
+            pass
         reader.disconnect()
         try:
             root.destroy()
