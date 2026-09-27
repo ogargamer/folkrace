@@ -113,6 +113,16 @@ public:
   float lut_errors[ENCODER_LUT_SIZE];
   bool is_lut_calibrated;
 
+  // Harmonic Fit & Physical Diagnostic Metrics
+  float harmonic_r_squared;
+  float harmonic_pk_pk_deg;
+  float harmonic_rms_deg;
+  float harmonic_res_pk_pk_deg;
+  float harmonic_res_rms_deg;
+  float harmonic_mean_lag_deg;
+  float harmonic_lag_ripple_deg;
+  float harmonic_max_drag_angle_deg;
+
   // Diagnostics & Tracking
   uint32_t total_reads;
   uint32_t parity_errors;
@@ -132,6 +142,10 @@ public:
         fourier_A3(0.0f), fourier_B3(0.0f),
         fourier_A4(0.0f), fourier_B4(0.0f),
         is_lut_calibrated(false),
+        harmonic_r_squared(0.0f), harmonic_pk_pk_deg(0.0f), harmonic_rms_deg(0.0f),
+        harmonic_res_pk_pk_deg(0.0f), harmonic_res_rms_deg(0.0f),
+        harmonic_mean_lag_deg(0.0f), harmonic_lag_ripple_deg(0.0f),
+        harmonic_max_drag_angle_deg(0.0f),
         total_reads(0), parity_errors(0), mag_faults(0), last_no_mag(false),
         last_parity_ok(true), last_raw_h(0), last_raw_l(0), last_raw_14bit(0),
         zero_offset_deg(0.0f) {
@@ -631,6 +645,14 @@ void saveConfigToNVS() {
   prefs.putFloat("f_b3", encoder1.fourier_B3);
   prefs.putFloat("f_a4", encoder1.fourier_A4);
   prefs.putFloat("f_b4", encoder1.fourier_B4);
+  prefs.putFloat("h_r2", encoder1.harmonic_r_squared);
+  prefs.putFloat("h_pk", encoder1.harmonic_pk_pk_deg);
+  prefs.putFloat("h_rms", encoder1.harmonic_rms_deg);
+  prefs.putFloat("h_respk", encoder1.harmonic_res_pk_pk_deg);
+  prefs.putFloat("h_resrms", encoder1.harmonic_res_rms_deg);
+  prefs.putFloat("h_mlag", encoder1.harmonic_mean_lag_deg);
+  prefs.putFloat("h_lrip", encoder1.harmonic_lag_ripple_deg);
+  prefs.putFloat("h_lpkang", encoder1.harmonic_max_drag_angle_deg);
   prefs.putBytes("lut_table", encoder1.lut_errors, sizeof(encoder1.lut_errors));
   prefs.putBytes("pole_zeros", calibrated_pole_zeros,
                  sizeof(calibrated_pole_zeros));
@@ -674,6 +696,14 @@ bool loadConfigFromNVS() {
   encoder1.fourier_B3 = prefs.getFloat("f_b3", 0.0f);
   encoder1.fourier_A4 = prefs.getFloat("f_a4", 0.0f);
   encoder1.fourier_B4 = prefs.getFloat("f_b4", 0.0f);
+  encoder1.harmonic_r_squared = prefs.getFloat("h_r2", 0.0f);
+  encoder1.harmonic_pk_pk_deg = prefs.getFloat("h_pk", 0.0f);
+  encoder1.harmonic_rms_deg = prefs.getFloat("h_rms", 0.0f);
+  encoder1.harmonic_res_pk_pk_deg = prefs.getFloat("h_respk", 0.0f);
+  encoder1.harmonic_res_rms_deg = prefs.getFloat("h_resrms", 0.0f);
+  encoder1.harmonic_mean_lag_deg = prefs.getFloat("h_mlag", 0.0f);
+  encoder1.harmonic_lag_ripple_deg = prefs.getFloat("h_lrip", 0.0f);
+  encoder1.harmonic_max_drag_angle_deg = prefs.getFloat("h_lpkang", 0.0f);
 
   prefs.getBytes("lut_table", encoder1.lut_errors, sizeof(encoder1.lut_errors));
   prefs.getBytes("pole_zeros", calibrated_pole_zeros,
@@ -1088,6 +1118,96 @@ void printLUTMetrics() {
   }
   Serial.println("-------------------------------------------------------------"
                  "-------------------\n");
+}
+
+// ============================================================================
+// COMPREHENSIVE HARMONIC & PHYSICAL FAULT DIAGNOSTIC REPORT
+// ============================================================================
+void printHarmonicReport() {
+  float a1 = encoder1.fourier_A1, b1 = encoder1.fourier_B1;
+  float a2 = encoder1.fourier_A2, b2 = encoder1.fourier_B2;
+  float a3 = encoder1.fourier_A3, b3 = encoder1.fourier_B3;
+  float a4 = encoder1.fourier_A4, b4 = encoder1.fourier_B4;
+
+  float h1_amp = sqrtf(a1 * a1 + b1 * b1) * 57.2957795f;
+  float h2_amp = sqrtf(a2 * a2 + b2 * b2) * 57.2957795f;
+  float h3_amp = sqrtf(a3 * a3 + b3 * b3) * 57.2957795f;
+  float h4_amp = sqrtf(a4 * a4 + b4 * b4) * 57.2957795f;
+
+  float phi1 = atan2f(b1, a1) * 57.2957795f; if (phi1 < 0.0f) phi1 += 360.0f;
+  float phi2 = atan2f(b2, a2) * 57.2957795f; if (phi2 < 0.0f) phi2 += 360.0f;
+  float phi3 = atan2f(b3, a3) * 57.2957795f; if (phi3 < 0.0f) phi3 += 360.0f;
+  float phi4 = atan2f(b4, a4) * 57.2957795f; if (phi4 < 0.0f) phi4 += 360.0f;
+
+  float apex1 = phi1;
+  float apex2 = phi2 * 0.5f;
+  float apex3 = phi3 / 3.0f;
+  float apex4 = phi4 * 0.25f;
+
+  Serial.println("\n================================================================================");
+  Serial.println("🔬 MT6816 HARMONIC CALIBRATION & PHYSICAL DIAGNOSTIC REPORT");
+  Serial.println("================================================================================");
+  Serial.printf("  Active Correction Mode        : %d (%s)\n",
+                encoder1.correction_mode,
+                encoder1.correction_mode == 2 ? "MODE 2: CONTINUOUS HARMONICS" :
+                (encoder1.correction_mode == 1 ? "MODE 1: 128-PT STEPPED LUT" : "MODE 0: RAW UNCALIBRATED"));
+  Serial.println("--------------------------------------------------------------------------------");
+  Serial.println("  HARMONIC DECOMPOSITION & PHYSICAL APEX LOCALIZATION:");
+  Serial.printf("  • Harmonic 1 (Runout/Eccentricity) : ±%.4f°  [A1=%+.6f, B1=%+.6f]\n", h1_amp, a1, b1);
+  Serial.printf("    Phase φ1: %5.1f°  ==> Rotor Eccentricity Apex at: %5.1f° mech\n", phi1, apex1);
+  Serial.printf("  • Harmonic 2 (Magnet Tilt/Ovality) : ±%.4f°  [A2=%+.6f, B2=%+.6f]\n", h2_amp, a2, b2);
+  Serial.printf("    Phase φ2: %5.1f°  ==> Magnet Tilt Axis Apex at   : %5.1f° mech (and %5.1f°)\n", phi2, apex2, fmodf(apex2 + 180.0f, 360.0f));
+  Serial.printf("  • Harmonic 3 (3-Point Chassis Pinch: ±%.4f°  [A3=%+.6f, B3=%+.6f]\n", h3_amp, a3, b3);
+  Serial.printf("    Phase φ3: %5.1f°  ==> Primary Clamp Pinch Apex at: %5.1f° mech (every 120°)\n", phi3, apex3);
+  Serial.printf("  • Harmonic 4 (Bridge/Flux Saturation): ±%.4f°  [A4=%+.6f, B4=%+.6f]\n", h4_amp, a4, b4);
+  Serial.printf("    Phase φ4: %5.1f°  ==> Quad-Bridge Mismatch Axis  : %5.1f° mech (every 90°)\n", phi4, apex4);
+  Serial.println("--------------------------------------------------------------------------------");
+  Serial.println("  CALIBRATION QUALITY, RIPPLE REDUCTION & FIT:");
+  Serial.printf("  • Raw Uncalibrated Error Span      : %.4f° mech (±%.4f°) | RMS: %.4f°\n",
+                encoder1.harmonic_pk_pk_deg, encoder1.harmonic_pk_pk_deg * 0.5f, encoder1.harmonic_rms_deg);
+  Serial.printf("  • Reconstructed Residual Ripple    : %.4f° mech (±%.4f°) | RMS: %.4f°\n",
+                encoder1.harmonic_res_pk_pk_deg, encoder1.harmonic_res_pk_pk_deg * 0.5f, encoder1.harmonic_res_rms_deg);
+  float ripple_reduc = (encoder1.harmonic_pk_pk_deg > 1e-4f) ?
+                       ((1.0f - (encoder1.harmonic_res_pk_pk_deg / encoder1.harmonic_pk_pk_deg)) * 100.0f) : 0.0f;
+  Serial.printf("  • Non-Linearity Ripple Reduction   : %.1f%%\n", ripple_reduc);
+  Serial.printf("  • Harmonic Model Fit Quality (R²)  : %.2f%%\n", encoder1.harmonic_r_squared * 100.0f);
+  if (encoder1.harmonic_r_squared >= 0.90f) {
+    Serial.println("    Status: ✅ EXCELLENT FIT (Harmonics 1, 2, 4 explain >90% of encoder distortion)");
+  } else if (encoder1.harmonic_r_squared >= 0.75f) {
+    Serial.println("    Status: ℹ️ MODERATE FIT (Some unmodeled high-frequency ripple or noise present)");
+  } else {
+    Serial.println("    Status: ⚠️ POOR FIT (<75% explained). Check mechanical mounting, shaft wobble or magnet airgap!");
+  }
+  Serial.println("--------------------------------------------------------------------------------");
+  Serial.println("  DYNAMIC MECHANICAL DRAG & BEARING UNIFORMITY (38 RPM):");
+  Serial.printf("  • Mean Directional Rotor Lag       : %.4f° mech\n", encoder1.harmonic_mean_lag_deg);
+  Serial.printf("  • Bearing Drag Non-Uniformity (Pk) : %.4f° mech\n", encoder1.harmonic_lag_ripple_deg);
+  if (encoder1.harmonic_lag_ripple_deg > 0.08f) {
+    Serial.printf("    ⚠️ WARNING: Friction varies significantly around rotation (Peak drag at %.1f° mech)!\n",
+                  encoder1.harmonic_max_drag_angle_deg);
+    Serial.println("    ACTION: Check for bearing notchiness, tight raceway, or mechanical rubbing.");
+  } else {
+    Serial.println("    Status: ✅ DRAG UNIFORM (Bearing rotation is smooth and isotropic)");
+  }
+  Serial.println("--------------------------------------------------------------------------------");
+  Serial.println("  PHYSICAL FAULT DIAGNOSTICS:");
+  bool h3_warn = (h1_amp > 0.05f && h3_amp > 0.20f * h1_amp);
+  bool h4_warn = (h1_amp > 0.05f && h4_amp > 0.25f * h1_amp);
+  if (h3_warn) {
+    Serial.printf("  ⚠️ CHASSIS CLAMP ALERT: H3 (%.3f°) is %.1f%% of H1 (limit 20%%)!\n", h3_amp, (h3_amp / h1_amp) * 100.0f);
+    Serial.println("     ROOT CAUSE: 3-bolt faceplate over-torqued or warped mounting flange.");
+    Serial.printf("     ACTION: Loosen and re-torque mounting bolts near apex %.1f°.\n", apex3);
+  } else {
+    Serial.println("  • Chassis Clamping Distortion      : ✅ PASS (<20% of H1)");
+  }
+  if (h4_warn) {
+    Serial.printf("  ⚠️ FLUX SATURATION ALERT: H4 (%.3f°) is %.1f%% of H1 (limit 25%%)!\n", h4_amp, (h4_amp / h1_amp) * 100.0f);
+    Serial.println("     ROOT CAUSE: Magnet is too close to MT6816 (<0.8mm) causing quad-bridge flux saturation.");
+    Serial.println("     ACTION: Increase magnet-to-sensor axial airgap to 1.0 - 1.5mm.");
+  } else {
+    Serial.println("  • Hall Quad-Bridge / Saturation    : ✅ PASS (<25% of H1)");
+  }
+  Serial.println("================================================================================\n");
 }
 
 // ============================================================================
@@ -2233,6 +2353,21 @@ bool calibrateDynamicContinuous(float calib_voltage) {
     drag_free[i] = 0.5f * (fwd_mean[i] + rev_mean[i]);
   }
 
+  // Directional Drag / Lag Analysis (Rotor lag at steady speed)
+  float mean_lag_rad = 0.0f;
+  float max_lag_rad = -100.0f, min_lag_rad = 100.0f;
+  int max_lag_bin = 0;
+  for (int i = 0; i < NUM_BINS; i++) {
+    float lag = 0.5f * (fwd_mean[i] - rev_mean[i]);
+    mean_lag_rad += lag;
+    if (lag > max_lag_rad) { max_lag_rad = lag; max_lag_bin = i; }
+    if (lag < min_lag_rad) { min_lag_rad = lag; }
+  }
+  mean_lag_rad /= (float)NUM_BINS;
+  encoder1.harmonic_mean_lag_deg = fabsf(mean_lag_rad) * 57.2957795f;
+  encoder1.harmonic_lag_ripple_deg = (max_lag_rad - min_lag_rad) * 57.2957795f;
+  encoder1.harmonic_max_drag_angle_deg = ((float)max_lag_bin + 0.5f) * bin_width_rad * 57.2957795f;
+
   // DC Offset A0 Subtraction for zero-mean LUT & Harmonic Parity
   float A0 = 0.0f;
   for (int i = 0; i < NUM_BINS; i++) {
@@ -2278,39 +2413,51 @@ bool calibrateDynamicContinuous(float calib_voltage) {
   }
   float pk_pk_deg = (max_e - min_e) * 57.2957795f;
   float rms_deg = sqrtf(sum_sq / (float)NUM_BINS) * 57.2957795f;
+  encoder1.harmonic_pk_pk_deg = pk_pk_deg;
+  encoder1.harmonic_rms_deg = rms_deg;
 
-  Serial.println("\n--------------------------------------------------------------------------------");
-  Serial.println("📊 CONTINUOUS SPATIAL HARMONIC CALIBRATION RESULTS:");
-  Serial.printf("  Peak-to-Peak Error Span       : %.3f deg mech (±%.3f deg)\n", pk_pk_deg, pk_pk_deg * 0.5f);
-  Serial.printf("  RMS Residual Error            : %.3f deg mech\n", rms_deg);
-  Serial.printf("  Harmonic 1 (Eccentricity/Run) : ±%.3f deg (A1=%+.6f, B1=%+.6f)\n", h1_amp_deg, A[1], B[1]);
-  Serial.printf("  Harmonic 2 (Magnet Tilt/Oval) : ±%.3f deg (A2=%+.6f, B2=%+.6f)\n", h2_amp_deg, A[2], B[2]);
-  Serial.printf("  Harmonic 3 (3-Point Clamping) : ±%.3f deg (A3=%+.6f, B3=%+.6f)\n", h3_amp_deg, A[3], B[3]);
-  Serial.printf("  Harmonic 4 (Bridge/Saturation): ±%.3f deg (A4=%+.6f, B4=%+.6f)\n", h4_amp_deg, A[4], B[4]);
-  Serial.printf("  Spatial Bins Sampled          : Forward Missing=%d, Reverse Missing=%d\n", missing_fwd, missing_rev);
+  // Fit Quality (R^2) & Residual Ripple after H1 + H2 + H4 compensation
+  float ss_tot = 0.0f, ss_res = 0.0f;
+  float res_max = -100.0f, res_min = 100.0f;
+  for (int i = 0; i < NUM_BINS; i++) {
+    float theta_i = ((float)i + 0.5f) * bin_width_rad;
+    float s1 = sinf(theta_i), c1 = cosf(theta_i);
+    float s2 = 2.0f * s1 * c1, c2 = c1 * c1 - s1 * s1;
+    float s4 = 2.0f * s2 * c2, c4 = c2 * c2 - s2 * s2;
+    float harm_val = (A[1] * c1 + B[1] * s1) + (A[2] * c2 + B[2] * s2) + (A[4] * c4 + B[4] * s4);
+    float res_err = drag_free[i] - harm_val;
+    ss_tot += drag_free[i] * drag_free[i];
+    ss_res += res_err * res_err;
+    if (res_err > res_max) res_max = res_err;
+    if (res_err < res_min) res_min = res_err;
+  }
+  float r_squared = (ss_tot > 1e-12f) ? (1.0f - (ss_res / ss_tot)) : 1.0f;
+  if (r_squared < 0.0f) r_squared = 0.0f;
+  encoder1.harmonic_r_squared = r_squared;
+  encoder1.harmonic_res_pk_pk_deg = (res_max - res_min) * 57.2957795f;
+  encoder1.harmonic_res_rms_deg = sqrtf(ss_res / (float)NUM_BINS) * 57.2957795f;
 
-  // Diagnostic health checks
-  if (h1_amp_deg > 0.05f && h3_amp_deg > 0.20f * h1_amp_deg) {
-    Serial.printf("  ⚠️ DIAGNOSTIC ALERT: Harmonic 3 (%.3f deg) exceeds 20%% of Harmonic 1 (%.3f deg)!\n", h3_amp_deg, h1_amp_deg);
-    Serial.println("     ROOT CAUSE: Mechanical chassis distortion from 3-point face mounting or bearing deformation.");
-    Serial.println("     ACTION: Inspect 3-bolt faceplate torque and ensure mounting flange is planar.");
-  }
-  if (h1_amp_deg > 0.05f && h4_amp_deg > 0.25f * h1_amp_deg) {
-    Serial.printf("  ⚠️ DIAGNOSTIC ALERT: Harmonic 4 (%.3f deg) exceeds 25%% of Harmonic 1 (%.3f deg)!\n", h4_amp_deg, h1_amp_deg);
-    Serial.println("     ROOT CAUSE: Hall sensor bridge quad-mismatch or magnetic flux saturation (airgap < 0.8mm).");
-    Serial.println("     ACTION: Increase magnet airgap to 1.0 - 1.5mm or inspect magnetic axis alignment.");
-  }
+  float phi1 = atan2f(B[1], A[1]) * 57.2957795f; if (phi1 < 0.0f) phi1 += 360.0f;
+  float phi2 = atan2f(B[2], A[2]) * 57.2957795f; if (phi2 < 0.0f) phi2 += 360.0f;
+  float phi3 = atan2f(B[3], A[3]) * 57.2957795f; if (phi3 < 0.0f) phi3 += 360.0f;
+  float phi4 = atan2f(B[4], A[4]) * 57.2957795f; if (phi4 < 0.0f) phi4 += 360.0f;
+
+  // Print Complete Diagnostic & Physical Localization Report
+  printHarmonicReport();
 
   // Phase 7: NVS Flash Save & Runtime Reconstruction
-  Serial.println("\n>>> Phase 7: NVS Flash Save & Runtime Reconstruction...");
+  Serial.println(">>> Phase 7: NVS Flash Save & Runtime Reconstruction...");
   encoder1.correction_mode = 2; // Activate Continuous Analytical Harmonics Mode
   Serial.println(">>> Sensor Correction Mode activated: MODE 2 (CONTINUOUS ANALYTICAL HARMONICS)");
 
   // Structured lines for Python GUI
   Serial.print("[HARMONIC_RESULTS]: ");
-  Serial.printf("A1=%.6f,B1=%.6f,A2=%.6f,B2=%.6f,A3=%.6f,B3=%.6f,A4=%.6f,B4=%.6f,H1=%.4f,H2=%.4f,H3=%.4f,H4=%.4f,PkPk=%.4f,RMS=%.4f\n",
+  Serial.printf("A1=%.6f,B1=%.6f,A2=%.6f,B2=%.6f,A3=%.6f,B3=%.6f,A4=%.6f,B4=%.6f,H1=%.4f,H2=%.4f,H3=%.4f,H4=%.4f,PkPk=%.4f,RMS=%.4f,Phi1=%.2f,Phi2=%.2f,Phi3=%.2f,Phi4=%.2f,R2=%.4f,ResPkPk=%.4f,ResRMS=%.4f,LagMean=%.4f,LagRipple=%.4f,LagPeakAng=%.1f\n",
                 A[1], B[1], A[2], B[2], A[3], B[3], A[4], B[4],
-                h1_amp_deg, h2_amp_deg, h3_amp_deg, h4_amp_deg, pk_pk_deg, rms_deg);
+                h1_amp_deg, h2_amp_deg, h3_amp_deg, h4_amp_deg, pk_pk_deg, rms_deg,
+                phi1, phi2, phi3, phi4, r_squared,
+                encoder1.harmonic_res_pk_pk_deg, encoder1.harmonic_res_rms_deg,
+                encoder1.harmonic_mean_lag_deg, encoder1.harmonic_lag_ripple_deg, encoder1.harmonic_max_drag_angle_deg);
 
   Serial.print("[HARMONIC_BINS]: ");
   for (int i = 0; i < NUM_BINS; i++) {
@@ -2734,6 +2881,10 @@ void executeCommand(String cmd) {
     foc_paused = false;
     return;
   }
+  if (cmd.equalsIgnoreCase("HARM_INFO") || cmd.equalsIgnoreCase("harm_info") || cmd.equalsIgnoreCase("HARM") || cmd.equalsIgnoreCase("harm") || cmd.equalsIgnoreCase("HARM_REPORT")) {
+    printHarmonicReport();
+    return;
+  }
 
   switch (action) {
   case 'w':
@@ -3035,6 +3186,7 @@ void executeCommand(String cmd) {
     Serial.println("  CALIB_LUT     : 🔬 Stepped 128-Point Dual-Pass LUT Calibration");
     Serial.println("  SET_MODE <0-2>: Set Mode: 0=Raw, 1=128-PT LUT, 2=Harmonics");
     Serial.println("  BENCH_COMPARE : 🏁 Run 3-Way Mode Comparison with Commutation Parity");
+    Serial.println("  HARM_INFO     : 🔬 Print Full Physical Harmonic Diagnostic & Apex Report");
     Serial.println("  w [volts]     : 🔬 Master Fourier Calibration + 11-Pole "
                    "Continuous Zero");
     Serial.println(

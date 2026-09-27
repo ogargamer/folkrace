@@ -359,11 +359,15 @@ def draw_harmonic_overlay_plot(canvas, bin_points, h_coeffs):
             h3 = h_coeffs.get("H3", 0.0)
             h4 = h_coeffs.get("H4", 0.0)
             pk = h_coeffs.get("PkPk", 0.0)
+            r2 = h_coeffs.get("R2", 0.0)
+            res_pk = h_coeffs.get("ResPkPk", 0.0)
 
             clamp_alert = h1 > 0.05 and h3 > 0.20 * h1
             sat_alert = h1 > 0.05 and h4 > 0.25 * h1
 
-            stat_txt = f"H1(Ecc): ±{h1:.3f}° | H2(Tilt): ±{h2:.3f}° | H3(Clamp): ±{h3:.3f}°{' ⚠️' if clamp_alert else ''} | H4(Sat): ±{h4:.3f}°{' ⚠️' if sat_alert else ''} | Pk-Pk: {pk:.3f}°"
+            r2_str = f" | R²: {r2*100.0:.1f}%" if r2 > 0 else ""
+            res_str = f" | Res: ±{res_pk*0.5:.3f}°" if res_pk > 0 else ""
+            stat_txt = f"H1: ±{h1:.3f}° | H2: ±{h2:.3f}° | H3: ±{h3:.3f}°{' ⚠️' if clamp_alert else ''} | H4: ±{h4:.3f}°{' ⚠️' if sat_alert else ''} | Pk-Pk: {pk:.3f}°{r2_str}{res_str}"
             canvas.create_text(w - pad_right, legend_y, text=stat_txt, fill="#FFD600" if (clamp_alert or sat_alert) else "#E0E0E0",
                                font=("Segoe UI", 8, "bold"), anchor="e")
         else:

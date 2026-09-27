@@ -745,6 +745,74 @@ class MT6818DashboardGUI:
         except ValueError:
             pass
 
+    def _copy_harmonic_report(self):
+        with self.reader.lock:
+            coeffs = dict(getattr(self.reader, 'harmonic_coeffs', {}))
+        if not coeffs:
+            messagebox.showinfo("Report Empty", "No harmonic calibration data available yet. Run 'CALIB_DYN' first.")
+            return
+
+        a1 = coeffs.get("A1", 0.0); b1 = coeffs.get("B1", 0.0); h1 = coeffs.get("H1", math.hypot(a1, b1) * 57.2957795)
+        a2 = coeffs.get("A2", 0.0); b2 = coeffs.get("B2", 0.0); h2 = coeffs.get("H2", math.hypot(a2, b2) * 57.2957795)
+        a3 = coeffs.get("A3", 0.0); b3 = coeffs.get("B3", 0.0); h3 = coeffs.get("H3", math.hypot(a3, b3) * 57.2957795)
+        a4 = coeffs.get("A4", 0.0); b4 = coeffs.get("B4", 0.0); h4 = coeffs.get("H4", math.hypot(a4, b4) * 57.2957795)
+
+        phi1 = coeffs.get("Phi1", math.degrees(math.atan2(b1, a1)) % 360.0)
+        phi2 = coeffs.get("Phi2", math.degrees(math.atan2(b2, a2)) % 360.0)
+        phi3 = coeffs.get("Phi3", math.degrees(math.atan2(b3, a3)) % 360.0)
+        phi4 = coeffs.get("Phi4", math.degrees(math.atan2(b4, a4)) % 360.0)
+
+        r2 = coeffs.get("R2", 0.0)
+        pk_pk = coeffs.get("PkPk", 0.0)
+        rms = coeffs.get("RMS", 0.0)
+        res_pk = coeffs.get("ResPkPk", 0.0)
+        res_rms = coeffs.get("ResRMS", 0.0)
+        lag_m = coeffs.get("LagMean", 0.0)
+        lag_rip = coeffs.get("LagRipple", 0.0)
+        lag_ang = coeffs.get("LagPeakAng", 0.0)
+
+        apex1 = phi1
+        apex2 = (phi2 * 0.5) % 360.0
+        apex3 = (phi3 / 3.0) % 360.0
+        apex4 = (phi4 * 0.25) % 360.0
+
+        lines = [
+            "================================================================================",
+            "🔬 MT6816 CONTINUOUS HARMONIC CALIBRATION & PHYSICAL DIAGNOSTIC REPORT",
+            "================================================================================",
+            f"Active Mode: Mode {self.sensor_mode_var.get()}",
+            "--------------------------------------------------------------------------------",
+            "PHYSICAL HARMONIC DECOMPOSITION & APEX LOCALIZATION:",
+            f"  • Harmonic 1 (Runout/Eccentricity) : ±{h1:.4f}°  [A1={a1:+.6f}, B1={b1:+.6f}]",
+            f"    Phase φ1: {phi1:5.1f}°  ==> Rotor Eccentricity Apex at: {apex1:5.1f}° mech",
+            f"  • Harmonic 2 (Magnet Tilt/Ovality) : ±{h2:.4f}°  [A2={a2:+.6f}, B2={b2:+.6f}]",
+            f"    Phase φ2: {phi2:5.1f}°  ==> Magnet Tilt Axis Apex at   : {apex2:5.1f}° & {(apex2+180)%360:5.1f}° mech",
+            f"  • Harmonic 3 (3-Point Chassis Pinch: ±{h3:.4f}°  [A3={a3:+.6f}, B3={b3:+.6f}]",
+            f"    Phase φ3: {phi3:5.1f}°  ==> Primary Clamp Pinch Apex at: {apex3:5.1f}° mech (every 120°)",
+            f"  • Harmonic 4 (Bridge/Saturation)   : ±{h4:.4f}°  [A4={a4:+.6f}, B4={b4:+.6f}]",
+            f"    Phase φ4: {phi4:5.1f}°  ==> Quad-Bridge Mismatch Axis  : {apex4:5.1f}° mech (every 90°)",
+            "--------------------------------------------------------------------------------",
+            "CALIBRATION QUALITY, RIPPLE REDUCTION & FIT:",
+            f"  • Raw Uncalibrated Error Span      : {pk_pk:.4f}° mech (±{pk_pk*0.5:.4f}°) | RMS: {rms:.4f}°",
+            f"  • Reconstructed Residual Ripple    : {res_pk:.4f}° mech (±{res_pk*0.5:.4f}°) | RMS: {res_rms:.4f}°",
+            f"  • Non-Linearity Ripple Reduction   : {(1.0 - (res_pk/pk_pk))*100.0 if pk_pk > 1e-4 else 0.0:.1f}%",
+            f"  • Harmonic Model Fit Quality (R²)  : {r2*100.0:.2f}%",
+            "--------------------------------------------------------------------------------",
+            "DYNAMIC MECHANICAL DRAG & BEARING UNIFORMITY (38 RPM):",
+            f"  • Mean Directional Rotor Lag       : {lag_m:.4f}° mech",
+            f"  • Bearing Drag Non-Uniformity (Pk) : {lag_rip:.4f}° mech",
+            f"  • Peak Friction / Binding Angle    : {lag_ang:.1f}° mech",
+            "--------------------------------------------------------------------------------",
+            "PHYSICAL FAULT DIAGNOSTICS & ACTIONS:",
+            f"  • Chassis Clamping Distortion      : {'⚠️ WARNING: H3 exceeds 20% H1 (Pinch at ' + f'{apex3:.1f}°)' if (h1 > 0.02 and h3/h1 > 0.20) else '✅ PASS (<20% of H1)'}",
+            f"  • Hall Quad-Bridge / Saturation    : {'⚠️ WARNING: H4 exceeds 25% H1 (Airgap < 0.8mm)' if (h1 > 0.02 and h4/h1 > 0.25) else '✅ PASS (<25% of H1)'}",
+            "================================================================================\n"
+        ]
+        text_report = "\n".join(lines)
+        self.root.clipboard_clear()
+        self.root.clipboard_append(text_report)
+        messagebox.showinfo("Report Copied", "Complete physical harmonic diagnostic report copied to clipboard!")
+
     def _on_mode_change(self):
         m = self.sensor_mode_var.get()
         self.reader.send_cmd(f"SET_MODE {m}")
@@ -778,6 +846,10 @@ class MT6818DashboardGUI:
                   bg="#00E5FF", fg="#000", activebackground="#84FFFF", relief="flat", padx=10, pady=5,
                   command=lambda: self.reader.send_cmd("BENCH_COMPARE")).pack(side="left", padx=3)
 
+        tk.Button(btn_bar, text="📋 Copy Diagnostic Report", font=("Segoe UI", 9, "bold"),
+                  bg="#FFD600", fg="#000", activebackground="#FFE57F", relief="flat", padx=10, pady=5,
+                  command=self._copy_harmonic_report).pack(side="left", padx=3)
+
         tk.Button(btn_bar, text="💾 Save NVS", font=("Segoe UI", 8, "bold"), bg="#2979FF", fg="#FFF",
                   relief="flat", padx=8, pady=5, command=lambda: self.reader.send_cmd("save")).pack(side="right", padx=2)
         tk.Button(btn_bar, text="🔄 Load NVS", font=("Segoe UI", 8, "bold"), bg="#455A64", fg="#FFF",
@@ -810,7 +882,7 @@ class MT6818DashboardGUI:
         self.harm_canvas = tk.Canvas(plot_card, bg="#10151E", height=240, highlightthickness=0)
         self.harm_canvas.pack(fill="x", expand=True, pady=4)
 
-        # Diagnostic Cards Grid (4 Cards: H1, H2, H3, H4)
+        # Primary Diagnostic Cards Grid (H1, H2, H3, H4)
         diag_grid = ttk.Frame(scroll_container)
         diag_grid.pack(fill="x", pady=4)
         diag_grid.columnconfigure((0, 1, 2, 3), weight=1)
@@ -821,7 +893,7 @@ class MT6818DashboardGUI:
         ttk.Label(c1, text="HARMONIC 1: RUNOUT / ECCENTRICITY", style="CardTitle.TLabel").pack(anchor="w")
         self.lbl_h1_val = tk.Label(c1, text="±0.000° mech", font=("Segoe UI", 12, "bold"), bg="#1A2230", fg="#69F0AE")
         self.lbl_h1_val.pack(anchor="w", pady=1)
-        self.lbl_h1_desc = tk.Label(c1, text="Cos/Sin (A1, B1): 0.00, 0.00", font=("Segoe UI", 8), bg="#1A2230", fg="#8A99AD")
+        self.lbl_h1_desc = tk.Label(c1, text="Apex at --° mech | A1=0.00, B1=0.00", font=("Segoe UI", 8), bg="#1A2230", fg="#8A99AD")
         self.lbl_h1_desc.pack(anchor="w")
         self.lbl_h1_status = tk.Label(c1, text="Status: Ready", font=("Segoe UI", 8, "bold"), bg="#1A2230", fg="#00E5FF")
         self.lbl_h1_status.pack(anchor="w")
@@ -832,7 +904,7 @@ class MT6818DashboardGUI:
         ttk.Label(c2, text="HARMONIC 2: MAGNET TILT / ELLIPTICITY", style="CardTitle.TLabel").pack(anchor="w")
         self.lbl_h2_val = tk.Label(c2, text="±0.000° mech", font=("Segoe UI", 12, "bold"), bg="#1A2230", fg="#69F0AE")
         self.lbl_h2_val.pack(anchor="w", pady=1)
-        self.lbl_h2_desc = tk.Label(c2, text="Cos/Sin (A2, B2): 0.00, 0.00", font=("Segoe UI", 8), bg="#1A2230", fg="#8A99AD")
+        self.lbl_h2_desc = tk.Label(c2, text="Tilt Axis at --° & --° mech", font=("Segoe UI", 8), bg="#1A2230", fg="#8A99AD")
         self.lbl_h2_desc.pack(anchor="w")
         self.lbl_h2_status = tk.Label(c2, text="Status: Ready", font=("Segoe UI", 8, "bold"), bg="#1A2230", fg="#00E5FF")
         self.lbl_h2_status.pack(anchor="w")
@@ -843,7 +915,7 @@ class MT6818DashboardGUI:
         ttk.Label(c3, text="HARMONIC 3: 3-POINT CLAMPING", style="CardTitle.TLabel").pack(anchor="w")
         self.lbl_h3_val = tk.Label(c3, text="±0.000° mech", font=("Segoe UI", 12, "bold"), bg="#1A2230", fg="#69F0AE")
         self.lbl_h3_val.pack(anchor="w", pady=1)
-        self.lbl_h3_desc = tk.Label(c3, text="Chassis Faceplate Distortion", font=("Segoe UI", 8), bg="#1A2230", fg="#8A99AD")
+        self.lbl_h3_desc = tk.Label(c3, text="Pinch Apex at --° mech (every 120°)", font=("Segoe UI", 8), bg="#1A2230", fg="#8A99AD")
         self.lbl_h3_desc.pack(anchor="w")
         self.lbl_h3_status = tk.Label(c3, text="Status: Ready (<20% H1)", font=("Segoe UI", 8, "bold"), bg="#1A2230", fg="#00E5FF")
         self.lbl_h3_status.pack(anchor="w")
@@ -854,10 +926,59 @@ class MT6818DashboardGUI:
         ttk.Label(c4, text="HARMONIC 4: FLUX SATURATION / BRIDGE", style="CardTitle.TLabel").pack(anchor="w")
         self.lbl_h4_val = tk.Label(c4, text="±0.000° mech", font=("Segoe UI", 12, "bold"), bg="#1A2230", fg="#69F0AE")
         self.lbl_h4_val.pack(anchor="w", pady=1)
-        self.lbl_h4_desc = tk.Label(c4, text="Hall Bridge Orthogonality / Saturation", font=("Segoe UI", 8), bg="#1A2230", fg="#8A99AD")
+        self.lbl_h4_desc = tk.Label(c4, text="Mismatch Axis at --° mech (every 90°)", font=("Segoe UI", 8), bg="#1A2230", fg="#8A99AD")
         self.lbl_h4_desc.pack(anchor="w")
         self.lbl_h4_status = tk.Label(c4, text="Status: Ready (<25% H1)", font=("Segoe UI", 8, "bold"), bg="#1A2230", fg="#00E5FF")
         self.lbl_h4_status.pack(anchor="w")
+
+        # Secondary Quality & Dynamic Metrics Grid
+        diag_grid2 = ttk.Frame(scroll_container)
+        diag_grid2.pack(fill="x", pady=(2, 4))
+        diag_grid2.columnconfigure((0, 1, 2, 3), weight=1)
+
+        # Card 5: Fit Quality R^2
+        c5 = ttk.Frame(diag_grid2, style="Card.TFrame", padding=8)
+        c5.grid(row=0, column=0, sticky="nsew", padx=2)
+        ttk.Label(c5, text="HARMONIC FIT QUALITY (R²)", style="CardTitle.TLabel").pack(anchor="w")
+        self.lbl_r2_val = tk.Label(c5, text="0.0 %", font=("Segoe UI", 12, "bold"), bg="#1A2230", fg="#69F0AE")
+        self.lbl_r2_val.pack(anchor="w", pady=1)
+        self.lbl_r2_desc = tk.Label(c5, text="Variance Explained (H1+H2+H4)", font=("Segoe UI", 8), bg="#1A2230", fg="#8A99AD")
+        self.lbl_r2_desc.pack(anchor="w")
+        self.lbl_r2_status = tk.Label(c5, text="Status: Ready", font=("Segoe UI", 8, "bold"), bg="#1A2230", fg="#00E5FF")
+        self.lbl_r2_status.pack(anchor="w")
+
+        # Card 6: Residual Non-Harmonic Ripple
+        c6 = ttk.Frame(diag_grid2, style="Card.TFrame", padding=8)
+        c6.grid(row=0, column=1, sticky="nsew", padx=2)
+        ttk.Label(c6, text="RESIDUAL NON-HARMONIC RIPPLE", style="CardTitle.TLabel").pack(anchor="w")
+        self.lbl_res_val = tk.Label(c6, text="±0.000° mech", font=("Segoe UI", 12, "bold"), bg="#1A2230", fg="#69F0AE")
+        self.lbl_res_val.pack(anchor="w", pady=1)
+        self.lbl_res_desc = tk.Label(c6, text="RMS Residual: 0.000°", font=("Segoe UI", 8), bg="#1A2230", fg="#8A99AD")
+        self.lbl_res_desc.pack(anchor="w")
+        self.lbl_res_status = tk.Label(c6, text="Ripple Reduction: -- %", font=("Segoe UI", 8, "bold"), bg="#1A2230", fg="#00E5FF")
+        self.lbl_res_status.pack(anchor="w")
+
+        # Card 7: Dynamic Rotor Lag
+        c7 = ttk.Frame(diag_grid2, style="Card.TFrame", padding=8)
+        c7.grid(row=0, column=2, sticky="nsew", padx=2)
+        ttk.Label(c7, text="DYNAMIC ROTOR LAG (38 RPM)", style="CardTitle.TLabel").pack(anchor="w")
+        self.lbl_lag_val = tk.Label(c7, text="0.000° mech", font=("Segoe UI", 12, "bold"), bg="#1A2230", fg="#00E5FF")
+        self.lbl_lag_val.pack(anchor="w", pady=1)
+        self.lbl_lag_desc = tk.Label(c7, text="Phase Lag under Dynamic Load", font=("Segoe UI", 8), bg="#1A2230", fg="#8A99AD")
+        self.lbl_lag_desc.pack(anchor="w")
+        self.lbl_lag_status = tk.Label(c7, text="Status: Ready", font=("Segoe UI", 8, "bold"), bg="#1A2230", fg="#69F0AE")
+        self.lbl_lag_status.pack(anchor="w")
+
+        # Card 8: Bearing Friction Uniformity
+        c8 = ttk.Frame(diag_grid2, style="Card.TFrame", padding=8)
+        c8.grid(row=0, column=3, sticky="nsew", padx=2)
+        ttk.Label(c8, text="BEARING FRICTION UNIFORMITY", style="CardTitle.TLabel").pack(anchor="w")
+        self.lbl_fric_val = tk.Label(c8, text="Δ0.000° mech", font=("Segoe UI", 12, "bold"), bg="#1A2230", fg="#69F0AE")
+        self.lbl_fric_val.pack(anchor="w", pady=1)
+        self.lbl_fric_desc = tk.Label(c8, text="Peak Drag Angle: --° mech", font=("Segoe UI", 8), bg="#1A2230", fg="#8A99AD")
+        self.lbl_fric_desc.pack(anchor="w")
+        self.lbl_fric_status = tk.Label(c8, text="Status: Ready", font=("Segoe UI", 8, "bold"), bg="#1A2230", fg="#00E5FF")
+        self.lbl_fric_status.pack(anchor="w")
 
         # Benchmark Comparison Leaderboard Card
         bench_card = ttk.Frame(scroll_container, style="Card.TFrame", padding=10)
@@ -1321,29 +1442,72 @@ class MT6818DashboardGUI:
             a3 = coeffs.get("A3", 0.0); b3 = coeffs.get("B3", 0.0); h3 = coeffs.get("H3", math.hypot(a3, b3) * 57.2957795)
             a4 = coeffs.get("A4", 0.0); b4 = coeffs.get("B4", 0.0); h4 = coeffs.get("H4", math.hypot(a4, b4) * 57.2957795)
 
+            phi1 = coeffs.get("Phi1", math.degrees(math.atan2(b1, a1)) % 360.0)
+            phi2 = coeffs.get("Phi2", math.degrees(math.atan2(b2, a2)) % 360.0)
+            phi3 = coeffs.get("Phi3", math.degrees(math.atan2(b3, a3)) % 360.0)
+            phi4 = coeffs.get("Phi4", math.degrees(math.atan2(b4, a4)) % 360.0)
+
+            r2 = coeffs.get("R2", 0.0)
+            pk_pk = coeffs.get("PkPk", 0.0)
+            rms = coeffs.get("RMS", 0.0)
+            res_pk = coeffs.get("ResPkPk", 0.0)
+            res_rms = coeffs.get("ResRMS", 0.0)
+            lag_m = coeffs.get("LagMean", 0.0)
+            lag_rip = coeffs.get("LagRipple", 0.0)
+            lag_ang = coeffs.get("LagPeakAng", 0.0)
+
+            apex1 = phi1
+            apex2 = (phi2 * 0.5) % 360.0
+            apex3 = (phi3 / 3.0) % 360.0
+            apex4 = (phi4 * 0.25) % 360.0
+
             self.lbl_h1_val.config(text=f"±{h1:.4f}° mech")
-            self.lbl_h1_desc.config(text=f"A1={a1:.4f}, B1={b1:.4f} rad")
-            self.lbl_h1_status.config(text=f"Runout Peak: ±{(h1*1000):.1f} mdeg", fg="#69F0AE")
+            self.lbl_h1_desc.config(text=f"Apex at {apex1:.1f}° | A1={a1:+.4f}, B1={b1:+.4f}")
+            self.lbl_h1_status.config(text=f"Runout: ±{(h1*1000):.1f} mdeg (φ={phi1:.1f}°)", fg="#69F0AE")
 
             self.lbl_h2_val.config(text=f"±{h2:.4f}° mech")
-            self.lbl_h2_desc.config(text=f"A2={a2:.4f}, B2={b2:.4f} rad")
-            self.lbl_h2_status.config(text=f"Tilt Peak: ±{(h2*1000):.1f} mdeg", fg="#69F0AE")
+            self.lbl_h2_desc.config(text=f"Tilt Axis at {apex2:.1f}° & {(apex2+180)%360:.1f}°")
+            self.lbl_h2_status.config(text=f"Tilt: ±{(h2*1000):.1f} mdeg (φ={phi2:.1f}°)", fg="#69F0AE")
 
             self.lbl_h3_val.config(text=f"±{h3:.4f}° mech")
-            self.lbl_h3_desc.config(text=f"A3={a3:.4f}, B3={b3:.4f} rad")
+            self.lbl_h3_desc.config(text=f"Pinch Apex at {apex3:.1f}° mech (every 120°)")
             if h1 > 0.02 and (h3 / h1) > 0.20:
-                self.lbl_h3_status.config(text=f"⚠️ CLAMP PINCH! ({h3/h1*100:.1f}% H1)", fg="#FF5252")
+                self.lbl_h3_status.config(text=f"⚠️ PINCH ALERT! ({h3/h1*100:.1f}% H1 at {apex3:.1f}°)", fg="#FF5252")
             else:
                 pct = (h3 / h1 * 100.0) if h1 > 0.001 else 0.0
                 self.lbl_h3_status.config(text=f"✅ CHASSIS PASS ({pct:.1f}% H1)", fg="#69F0AE")
 
             self.lbl_h4_val.config(text=f"±{h4:.4f}° mech")
-            self.lbl_h4_desc.config(text=f"A4={a4:.4f}, B4={b4:.4f} rad")
+            self.lbl_h4_desc.config(text=f"Mismatch Axis at {apex4:.1f}° (every 90°)")
             if h1 > 0.02 and (h4 / h1) > 0.25:
                 self.lbl_h4_status.config(text=f"⚠️ FLUX SAT / BRIDGE! ({h4/h1*100:.1f}% H1)", fg="#FF5252")
             else:
                 pct = (h4 / h1 * 100.0) if h1 > 0.001 else 0.0
                 self.lbl_h4_status.config(text=f"✅ FLUX PASS ({pct:.1f}% H1)", fg="#69F0AE")
+
+            # Secondary Quality & Dynamic Cards Update
+            self.lbl_r2_val.config(text=f"{r2*100.0:.2f} %")
+            if r2 >= 0.90:
+                self.lbl_r2_status.config(text="✅ EXCELLENT (>90% fit)", fg="#69F0AE")
+            elif r2 >= 0.75:
+                self.lbl_r2_status.config(text="ℹ️ MODERATE (75-90%)", fg="#FFD600")
+            else:
+                self.lbl_r2_status.config(text="⚠️ LOW (<75% explained)", fg="#FF5252")
+
+            reduction_pct = (1.0 - (res_pk / pk_pk)) * 100.0 if pk_pk > 1e-4 else 0.0
+            self.lbl_res_val.config(text=f"±{res_pk*0.5:.4f}° mech")
+            self.lbl_res_desc.config(text=f"RMS Residual: {res_rms:.4f}° mech")
+            self.lbl_res_status.config(text=f"Ripple Reduction: {reduction_pct:.1f}%", fg="#69F0AE")
+
+            self.lbl_lag_val.config(text=f"{lag_m:.4f}° mech")
+            self.lbl_lag_status.config(text=f"Rotor Lag @ 38 RPM", fg="#00E5FF")
+
+            self.lbl_fric_val.config(text=f"Δ{lag_rip:.4f}° mech")
+            self.lbl_fric_desc.config(text=f"Peak Drag at {lag_ang:.1f}° mech")
+            if lag_rip > 0.08:
+                self.lbl_fric_status.config(text=f"⚠️ BINDING DETECTED ({lag_ang:.1f}°)", fg="#FF5252")
+            else:
+                self.lbl_fric_status.config(text="✅ UNIFORM ROTATION", fg="#69F0AE")
 
         # Redraw harmonic overlay canvas
         draw_harmonic_overlay_plot(self.harm_canvas, pts, coeffs)
