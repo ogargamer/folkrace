@@ -20,7 +20,9 @@
 #define MOTOR_PHASE_RESISTANCE_OHM 5.60f // Phase-to-Phase / 2 = 5.6 Ohm
 #define POWER_SUPPLY_VOLTAGE 12.0f       // 12V DC Regulated Bench Supply
 #define CALIBRATION_VOLTAGE                                                    \
-  3.50f // Safe Open-Loop Calibration Voltage (3.5V ~ 0.45A)
+  3.50f // Safe Open-Loop Calibration Step Voltage (3.5V ~ 0.45A)
+#define CALIBRATION_HOLD_VOLTAGE                                               \
+  2.40f // Thermal Relief Hold Voltage during Settle & Sample (2.4V ~ 0.30A)
 
 // 2. BUS & PROTOCOL SETTINGS
 #define SPI_SPEED_DEFAULT_HZ                                                   \
@@ -28,15 +30,16 @@
 #define SPI_USE_3WIRE_DEFAULT false // Default 4-Wire Hardware SPI
 #define SENSOR_LAG_COMP_DEFAULT_US                                             \
   35.0f // Default Dynamic Lag Lead Compensation (us)
-#define DEFAULT_LPF_TF_SEC                                                     \
-  0.0050f // Velocity Low-Pass Filter Tf (5 ms gives razor-sharp response)
+#define DEFAULT_LPF_TF_MS                                                      \
+  5.0f // Velocity Low-Pass Filter Tf in ms (5.0 ms gives razor-sharp response)
+#define DEFAULT_LPF_TF_SEC (DEFAULT_LPF_TF_MS * 0.001f)
 
 // 3. 128-POINT ENCODER NON-LINEARITY LUT CONSTANTS
 #define ENCODER_LUT_SIZE 128 // 128-point calibration table
 // Maximum allowed single-point correction before pole-slip is declared:
-#define LUT_ANOMALY_THRESHOLD_RAD 0.25f // > 14.3 deg mech = pole jump
+#define LUT_ANOMALY_THRESHOLD_RAD 0.070f // > 4.0 deg mech (~44 deg elec) = pole slip / stall
 // Maximum allowed peak-to-peak span across the whole table:
-#define LUT_PKPK_LIMIT_RAD 0.50f        // > 28.6 deg mech = bad sweep
+#define LUT_PKPK_LIMIT_RAD 0.120f        // > 6.87 deg mech (~75 deg elec) = bad sweep / binding
 #define CALIB_SWEEP_STEPS                                                      \
   256 // Number of micro-steps across 360 mechanical degrees
 #define ALIGNMENT_OVERSAMPLE_COUNT                                             \
@@ -170,17 +173,13 @@ public:
     SPI.beginTransaction(settings);
 
     digitalWrite(target_cs, LOW);
-    delayMicroseconds(1);
     uint16_t rx_h = SPI.transfer16(0x8300);
-    delayMicroseconds(1);
     digitalWrite(target_cs, HIGH);
 
-    delayMicroseconds(1);
+    delayMicroseconds(1); // CS deassertion hold time (t_CS_HIGH >= 150ns)
 
     digitalWrite(target_cs, LOW);
-    delayMicroseconds(1);
     uint16_t rx_l = SPI.transfer16(0x8400);
-    delayMicroseconds(1);
     digitalWrite(target_cs, HIGH);
 
     SPI.endTransaction();
@@ -305,6 +304,10 @@ public:
 
     float offset = (1.0f - frac) * lut_errors[idx0] + frac * lut_errors[idx1];
     float calib_rad = raw_rad - offset;
+    while (calib_rad < 0.0f)
+      calib_rad += _2PI;
+    while (calib_rad >= _2PI)
+      calib_rad -= _2PI;
     return calib_rad;
   }
 
@@ -371,6 +374,7 @@ bool show_telemetry = true;
 uint32_t last_telemetry_time_ms = 0;
 
 float calib_align_voltage = CALIBRATION_VOLTAGE;
+float calib_hold_voltage = CALIBRATION_HOLD_VOLTAGE;
 float base_zero_electric_angle = 0.0f;
 float sensor_lag_comp_us = SENSOR_LAG_COMP_DEFAULT_US;
 float motor_kv_rating = DEFAULT_MOTOR_KV_RATING;
@@ -453,14 +457,15 @@ void focTaskLoop(void *param) {
     }
 
     if (is_enabled) {
-      // 1. Dynamic Sensor Lag Compensation
+      // 1. 11-Pole Continuous Zero Vector + Dynamic Sensor Lag Compensation
+      float zero_elec = getInterpolatedElectricalZero(motor1.shaft_angle);
       if (sensor_lag_comp_us > 0.0f) {
         float lead_rad = motor1.shaft_velocity * (float)motor1.pole_pairs *
                          (sensor_lag_comp_us * 1e-6f);
         motor1.zero_electric_angle =
-            _normalizeAngle(base_zero_electric_angle - lead_rad);
+            _normalizeAngle(zero_elec - lead_rad);
       } else {
-        motor1.zero_electric_angle = base_zero_electric_angle;
+        motor1.zero_electric_angle = zero_elec;
       }
 
       // 2. High-Frequency Commutation Loop
@@ -586,7 +591,7 @@ bool loadConfigFromNVS() {
   motor1.PID_velocity.P = prefs.getFloat("pid_p", DEFAULT_PID_P);
   motor1.PID_velocity.I = prefs.getFloat("pid_i", DEFAULT_PID_I);
   motor1.PID_velocity.D = prefs.getFloat("pid_d", DEFAULT_PID_D);
-  motor1.LPF_velocity.Tf = prefs.getFloat("lpf_tf", DEFAULT_LPF_TF_SEC);
+  motor1.LPF_velocity.Tf = prefs.getFloat("lpf_tf", (DEFAULT_LPF_TF_MS * 0.001f));
 
   prefs.end();
 
@@ -877,6 +882,7 @@ void runSpeedLagOptimizer(float test_rpm) {
 // 128-POINT NON-LINEARITY LUT CALIBRATION
 // ============================================================================
 bool calibrate256PointLUT(float align_voltage) {
+  float hold_voltage = min(align_voltage, calib_hold_voltage);
   Serial.println("\n==========================================================="
                  "=====================");
   Serial.println(
@@ -884,14 +890,20 @@ bool calibrate256PointLUT(float align_voltage) {
   Serial.println("============================================================="
                  "===================");
   Serial.println("Target Motor       : GM3506 (11 Pole Pairs on ESP32-S3)");
-  Serial.print("Calibration Voltage: ");
+  Serial.print("Step / Hold Voltage: ");
   Serial.print(align_voltage, 2);
-  Serial.println(" V");
+  Serial.print(" V (move) / ");
+  Serial.print(hold_voltage, 2);
+  Serial.println(" V (hold & sample)");
   Serial.println(
       "Methodology        : 128-Step Dual-Pass Bidirectional Mechanical Sweep");
   Serial.println("Oversampling       : 64 Samples / Step with Micro-Dither "
                  "(Stiction Cancellation)");
-  Serial.println("Anomaly Guard      : Any |err| > 0.25 rad -> FAIL (pole slip)");
+  Serial.print("Anomaly Guard      : Any |err| > ");
+  Serial.print(LUT_ANOMALY_THRESHOLD_RAD, 3);
+  Serial.print(" rad (");
+  Serial.print(LUT_ANOMALY_THRESHOLD_RAD * 57.2957795f, 1);
+  Serial.println(" deg) -> FAIL (pole slip)");
   Serial.println("Press 'x' to STOP anytime");
   Serial.println("-------------------------------------------------------------"
                  "-------------------");
@@ -904,7 +916,9 @@ bool calibrate256PointLUT(float align_voltage) {
   // 1. Determining Commutation Direction & Settling Start Position
   Serial.print("1. Determining Sensor Commutation Direction & Settling... ");
   motor1.setPhaseVoltage(align_voltage, 0, _3PI_2);
-  delay(400);
+  delay(100);
+  motor1.setPhaseVoltage(hold_voltage, 0, _3PI_2);
+  delay(300);
   float start_raw = encoder1.getRawMechanicalAngle();
 
   const int DIR_STEPS = 200;
@@ -1017,7 +1031,7 @@ bool calibrate256PointLUT(float align_voltage) {
       motor1.setPhaseVoltage(align_voltage, 0, target_elec - dither);
       delayMicroseconds(500);
     }
-    motor1.setPhaseVoltage(align_voltage, 0, target_elec);
+    motor1.setPhaseVoltage(hold_voltage, 0, target_elec);
     delay(180); // High-accuracy damp settle before sampling
 
     float sum_sin = 0.0f, sum_cos = 0.0f;
@@ -1061,7 +1075,9 @@ bool calibrate256PointLUT(float align_voltage) {
   float rev_start_elec =
       _3PI_2 + (float)dir_sign * (float)MOTOR_POLE_PAIRS * rev_start_mech;
   motor1.setPhaseVoltage(align_voltage, 0, rev_start_elec);
-  delay(350);
+  delay(100);
+  motor1.setPhaseVoltage(hold_voltage, 0, rev_start_elec);
+  delay(250);
 
   // PASS 2: REVERSE (CCW) SWEEP
   for (int i = TOTAL_STEPS - 1; i >= 0; i--) {
@@ -1104,7 +1120,7 @@ bool calibrate256PointLUT(float align_voltage) {
       motor1.setPhaseVoltage(align_voltage, 0, target_elec - dither);
       delayMicroseconds(500);
     }
-    motor1.setPhaseVoltage(align_voltage, 0, target_elec);
+    motor1.setPhaseVoltage(hold_voltage, 0, target_elec);
     delay(180); // High-accuracy damp settle
 
     float sum_sin = 0.0f, sum_cos = 0.0f;
@@ -1241,12 +1257,16 @@ bool calibrate256PointLUT(float align_voltage) {
     if (anomaly_count > 0) {
       Serial.print("   ");
       Serial.print(anomaly_count);
-      Serial.println(" points exceeded ±0.25 rad threshold (pole slip or motor stall).");
+      Serial.print(" points exceeded ±");
+      Serial.print(LUT_ANOMALY_THRESHOLD_RAD, 3);
+      Serial.println(" rad threshold (pole slip or motor stall).");
     }
     if (pk_pk_rad > LUT_PKPK_LIMIT_RAD) {
       Serial.print("   Peak-to-Peak span ");
       Serial.print(pk_pk_rad, 4);
-      Serial.println(" rad exceeds 0.50 rad safety limit.");
+      Serial.print(" rad exceeds ");
+      Serial.print(LUT_PKPK_LIMIT_RAD, 3);
+      Serial.println(" rad safety limit.");
     }
     Serial.println("   HINT: Check motor is free, try higher align voltage (w 4.2)");
     Serial.println("-------------------------------------------------------------"
@@ -1295,6 +1315,7 @@ bool calibrate256PointLUT(float align_voltage) {
 // CALIBRATION: FULL 360° BIDIRECTIONAL ROUND-TRIP SWEEP WITH DECAYING DITHER
 // ============================================================================
 bool calibrateComprehensiveFOC(float align_voltage) {
+  float hold_voltage = min(align_voltage, calib_hold_voltage);
   Serial.println("\n==========================================================="
                  "=====================");
   Serial.println(
@@ -1302,9 +1323,11 @@ bool calibrateComprehensiveFOC(float align_voltage) {
   Serial.println("============================================================="
                  "===================");
   Serial.println("Target Motor       : GM3506 (11 Pole Pairs on ESP32-S3)");
-  Serial.print("Calibration Voltage: ");
+  Serial.print("Step / Hold Voltage: ");
   Serial.print(align_voltage, 2);
-  Serial.println(" V (Current ~ 0.45A)");
+  Serial.print(" V (move) / ");
+  Serial.print(hold_voltage, 2);
+  Serial.println(" V (hold & sample)");
   Serial.println("Methodology        : 11-Pole Continuous Sweep + "
                  "Bidirectional Dither Hysteresis Cancellation");
   Serial.print("Oversampling       : ");
@@ -1447,7 +1470,7 @@ bool calibrateComprehensiveFOC(float align_voltage) {
       motor1.setPhaseVoltage(align_voltage, 0, target_el - dither);
       delayMicroseconds(800);
     }
-    motor1.setPhaseVoltage(align_voltage, 0, target_el);
+    motor1.setPhaseVoltage(hold_voltage, 0, target_el);
     delay(80);
 
     float mech = 0.0f;
@@ -1495,7 +1518,7 @@ bool calibrateComprehensiveFOC(float align_voltage) {
       motor1.setPhaseVoltage(align_voltage, 0, target_el - dither);
       delayMicroseconds(800);
     }
-    motor1.setPhaseVoltage(align_voltage, 0, target_el);
+    motor1.setPhaseVoltage(hold_voltage, 0, target_el);
     delay(80);
 
     float mech = 0.0f;
@@ -2266,7 +2289,8 @@ void setup() {
   motor1.PID_velocity.I = DEFAULT_PID_I;
   motor1.PID_velocity.D = DEFAULT_PID_D;
   motor1.PID_velocity.output_ramp = DEFAULT_OUTPUT_RAMP_V_PER_S;
-  motor1.LPF_velocity.Tf = DEFAULT_LPF_TF_SEC;
+  motor1.LPF_velocity.Tf = (DEFAULT_LPF_TF_MS * 0.001f);
+  motor1.motion_downsample = 15; // Decouple velocity PID (~1.5 kHz) from FOC commutation (~25 kHz)
 
   motor1.init();
 
