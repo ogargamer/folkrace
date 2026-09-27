@@ -56,6 +56,12 @@ class ESP32SerialReader:
         self.last_sensor_direction = -1
         self.msg_count = 0
 
+        # Harmonic Calibration & Benchmark State
+        self.harmonic_results = {}
+        self.harmonic_bins = []
+        self.bench_compare_results = []
+        self.last_correction_mode = 0
+
         # KV Test Streaming & Results State
         self.kv_test_active = False
         self.kv_points = []
@@ -242,6 +248,109 @@ class ESP32SerialReader:
                 self.kv_test_active = False
             return
 
+        if "STARTING CONTINUOUS SPATIAL-BINNED HARMONIC CALIBRATION" in line:
+            with self.lock:
+                self.calibrating = True
+                self.calib_stage_name = "Phase 0: Soft DC Aligning & Settle..."
+                self.calib_progress_pct = 5.0
+                self.last_calib_failed = False
+                self.last_calib_success = False
+                self.last_calib_grade = ""
+                self.last_calib_error = ""
+            return
+
+        if "Phase 1: Forward Run-Up Runway" in line:
+            with self.lock:
+                self.calib_stage_name = "Phase 1: CW Runway (0 -> 38 RPM)..."
+                self.calib_progress_pct = 15.0
+            return
+
+        if "Phase 2: Forward Spatial Acquisition" in line:
+            with self.lock:
+                self.calib_stage_name = "Phase 2: Forward 128-Bin Sampling (CW)..."
+                self.calib_progress_pct = 35.0
+            return
+
+        if "Phase 3a: Forward Deceleration" in line or "Phase 3b: Phase-Continuous Reversal" in line or "Phase 3c: Reverse Run-Up" in line:
+            with self.lock:
+                self.calib_stage_name = "Phase 3: Continuous Phase Reversal..."
+                self.calib_progress_pct = 55.0
+            return
+
+        if "Phase 4: Reverse Spatial Acquisition" in line:
+            with self.lock:
+                self.calib_stage_name = "Phase 4: Reverse 128-Bin Sampling (CCW)..."
+                self.calib_progress_pct = 75.0
+            return
+
+        if "Phase 5: Point-by-Point Cancellation" in line:
+            with self.lock:
+                self.calib_stage_name = "Phase 5: Drag Cancellation & A0 Nulling..."
+                self.calib_progress_pct = 88.0
+            return
+
+        if "Phase 6: Direct Discrete Fourier Transform" in line:
+            with self.lock:
+                self.calib_stage_name = "Phase 6: Direct DFT Extraction (Orders 1-4)..."
+                self.calib_progress_pct = 94.0
+            return
+
+        if "[HARMONIC_RESULTS]:" in line:
+            try:
+                res = {}
+                for item in line.split("[HARMONIC_RESULTS]:")[1].split(","):
+                    if "=" in item:
+                        k, v = item.strip().split("=", 1)
+                        res[k.strip()] = float(v.strip())
+                with self.lock:
+                    self.harmonic_results = res
+                    self.last_correction_mode = 2
+                    self.last_lut_active = True
+            except Exception:
+                pass
+            return
+
+        if "[HARMONIC_BINS]:" in line:
+            try:
+                raw_bins = line.split("[HARMONIC_BINS]:")[1].strip()
+                pts = [float(x.strip()) for x in raw_bins.split(",") if x.strip()]
+                with self.lock:
+                    self.harmonic_bins = pts
+            except Exception:
+                pass
+            return
+
+        if "[BENCH_COMPARE_RESULT]:" in line:
+            try:
+                res = {}
+                for item in line.split("[BENCH_COMPARE_RESULT]:")[1].split(","):
+                    if "=" in item:
+                        k, v = item.strip().split("=", 1)
+                        try:
+                            res[k.strip()] = float(v.strip())
+                        except ValueError:
+                            res[k.strip()] = v.strip()
+                with self.lock:
+                    self.bench_compare_results.append(res)
+            except Exception:
+                pass
+            return
+
+        if "POLE-SLIP ABORT" in line:
+            with self.lock:
+                self.last_calib_failed = True
+                self.calibrating = False
+                self.last_calib_error = "Pole-Slip Abort (Torque limit exceeded)"
+                self.calib_stage_name = "❌ Pole-Slip Stall Abort"
+            return
+
+        if "Sensor Correction Mode set to:" in line or "Sensor Correction Mode activated: MODE" in line:
+            m_m = re.search(r'MODE\s*(\d)', line, re.IGNORECASE) or re.search(r'set to:\s*(\d)', line, re.IGNORECASE)
+            if m_m:
+                with self.lock:
+                    self.last_correction_mode = int(m_m.group(1))
+            return
+
         if "STARTING 128-POINT DUAL-PASS NON-LINEARITY LUT CALIBRATION" in line:
             with self.lock:
                 self.calibrating = True
@@ -424,7 +533,13 @@ class ESP32SerialReader:
                     ctrl_mode = "CLOSED-LOOP VELOCITY"
 
                 bus_mode = "3-Wire" if "Mode: 3-Wire" in line else "4-Wire"
-                lut_active = "(FOURIER:128)" in line or "128-Point LUT" in line or "128-PT LUT" in line
+                lut_active = "(FOURIER:128)" in line or "128-Point LUT" in line or "128-PT LUT" in line or "(HARMONIC)" in line
+                if "(HARMONIC)" in line:
+                    self.last_correction_mode = 2
+                elif "(FOURIER:128)" in line:
+                    self.last_correction_mode = 1
+                elif "(RAW)" in line:
+                    self.last_correction_mode = 0
                 mag_ok = "[ OK ]" in line or "[MAGNET OK]" in line
                 parity_ok = "[PASS]" in line or "Parity: [ PASS ]" in line
 

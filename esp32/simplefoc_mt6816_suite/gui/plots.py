@@ -234,3 +234,142 @@ def draw_symmetry_needle(canvas, fwd_rpm, rev_rpm):
         canvas.create_text(cx, cy + 12, text=diff_str, fill="#FFFFFF", font=("Segoe UI", 9, "bold"))
     except Exception:
         pass
+
+
+def draw_harmonic_overlay_plot(canvas, bin_points, h_coeffs):
+    """
+    Draws the 128-slot discrete drag-free spatial bin error points alongside
+    the reconstructed smooth analytical harmonic curve (H1 + H2 + H4).
+    Displays diagnostic badges for eccentricity, tilt, clamping distortion, and flux saturation.
+    """
+    try:
+        canvas.delete("all")
+        w = canvas.winfo_width()
+        h = canvas.winfo_height()
+        if w < 40 or h < 40:
+            return
+
+        pad_left = 65
+        pad_right = 30
+        pad_top = 40
+        pad_bottom = 35
+
+        pw = w - pad_left - pad_right
+        ph = h - pad_top - pad_bottom
+        cx = pad_left + pw / 2
+        cy = pad_top + ph / 2
+
+        # Dark card plot background
+        canvas.create_rectangle(pad_left, pad_top, pad_left + pw, pad_top + ph, fill="#121722", outline="#222D3E", width=1)
+
+        # Determine y-axis scale in mechanical degrees
+        y_max = 1.0  # default minimum scale +-1.0 deg
+        if bin_points:
+            # bin_points are in radians -> convert to deg
+            max_pt = max(abs(x * 57.2957795) for x in bin_points)
+            y_max = max(1.0, max_pt * 1.25)
+        elif h_coeffs and h_coeffs.get("PkPk", 0) > 0:
+            y_max = max(1.0, (h_coeffs["PkPk"] * 0.5) * 1.3)
+
+        # Horizontal gridlines & Y-labels
+        grid_steps = 4
+        for step in range(-grid_steps, grid_steps + 1):
+            deg_val = (step / grid_steps) * y_max
+            y = cy - (deg_val / y_max) * (ph / 2)
+            is_zero = (step == 0)
+            col = "#37474F" if is_zero else "#1C2433"
+            width = 2 if is_zero else 1
+            dash = () if is_zero else (2, 4)
+            canvas.create_line(pad_left, y, pad_left + pw, y, fill=col, width=width, dash=dash)
+            canvas.create_text(pad_left - 8, y, text=f"{deg_val:+.2f}°", fill="#8A99AD" if not is_zero else "#00E5FF",
+                               font=("Segoe UI", 8), anchor="e")
+
+        # Vertical gridlines & X-labels (Mechanical Angle 0 to 360 deg)
+        for a in [0, 45, 90, 135, 180, 225, 270, 315, 360]:
+            x = pad_left + (a / 360.0) * pw
+            canvas.create_line(x, pad_top, x, pad_top + ph, fill="#1C2433", width=1, dash=(2, 4))
+            canvas.create_text(x, pad_top + ph + 12, text=f"{a}°", fill="#8A99AD", font=("Segoe UI", 8), anchor="center")
+
+        # X-Axis label
+        canvas.create_text(pad_left + pw / 2, pad_top + ph + 24, text="Mechanical Rotor Angle θ (degrees)",
+                           fill="#8A99AD", font=("Segoe UI", 8, "bold"))
+
+        # Y-Axis label
+        canvas.create_text(16, pad_top + ph / 2, text="Angular Error (deg mech)",
+                           fill="#00E5FF", font=("Segoe UI", 8, "bold"), angle=90)
+
+        # Plot 128 discrete spatial bin error points (Cyan circles)
+        if bin_points and len(bin_points) >= 128:
+            pts_count = len(bin_points)
+            for i, rad_err in enumerate(bin_points):
+                deg_err = rad_err * 57.2957795
+                angle_deg = ((i + 0.5) / float(pts_count)) * 360.0
+                px = pad_left + (angle_deg / 360.0) * pw
+                py = cy - (deg_err / y_max) * (ph / 2)
+                py = max(pad_top + 2, min(pad_top + ph - 2, py))
+                canvas.create_oval(px - 2.5, py - 2.5, px + 2.5, py + 2.5, fill="#00E5FF", outline="#FFFFFF", width=1)
+
+        # Plot continuous analytical harmonic curve (Green line)
+        if h_coeffs and ("A1" in h_coeffs or "H1" in h_coeffs):
+            a1 = h_coeffs.get("A1", 0.0)
+            b1 = h_coeffs.get("B1", 0.0)
+            a2 = h_coeffs.get("A2", 0.0)
+            b2 = h_coeffs.get("B2", 0.0)
+            a4 = h_coeffs.get("A4", 0.0)
+            b4 = h_coeffs.get("B4", 0.0)
+
+            curve_pts = []
+            N_STEPS = 240
+            for k in range(N_STEPS + 1):
+                th = (float(k) / float(N_STEPS)) * (2.0 * math.pi)
+                # Double angle identities evaluation:
+                sin1 = math.sin(th)
+                cos1 = math.cos(th)
+                sin2 = 2.0 * sin1 * cos1
+                cos2 = cos1 * cos1 - sin1 * sin1
+                sin4 = 2.0 * sin2 * cos2
+                cos4 = cos2 * cos2 - sin2 * sin2
+                harm_rad = (a1 * cos1 + b1 * sin1) + (a2 * cos2 + b2 * sin2) + (a4 * cos4 + b4 * sin4)
+                harm_deg = harm_rad * 57.2957795
+
+                px = pad_left + (float(k) / float(N_STEPS)) * pw
+                py = cy - (harm_deg / y_max) * (ph / 2)
+                py = max(pad_top + 1, min(pad_top + ph - 1, py))
+                curve_pts.append((px, py))
+
+            for k in range(len(curve_pts) - 1):
+                canvas.create_line(curve_pts[k][0], curve_pts[k][1], curve_pts[k+1][0], curve_pts[k+1][1],
+                                   fill="#69F0AE", width=2)
+
+        # Header Legend & Diagnostic Summary
+        legend_x = pad_left + 10
+        legend_y = pad_top - 24
+
+        # Legend dots
+        canvas.create_oval(legend_x, legend_y - 4, legend_x + 8, legend_y + 4, fill="#00E5FF", outline="#FFF")
+        canvas.create_text(legend_x + 12, legend_y, text="128-Bin Drag-Free Samples", fill="#00E5FF", font=("Segoe UI", 8, "bold"), anchor="w")
+
+        canvas.create_line(legend_x + 180, legend_y, legend_x + 200, legend_y, fill="#69F0AE", width=2)
+        canvas.create_text(legend_x + 205, legend_y, text="Reconstructed Harmonics (H1+H2+H4)", fill="#69F0AE", font=("Segoe UI", 8, "bold"), anchor="w")
+
+        # Diagnostics Badges (Right-aligned in header)
+        if h_coeffs:
+            h1 = h_coeffs.get("H1", 0.0)
+            h2 = h_coeffs.get("H2", 0.0)
+            h3 = h_coeffs.get("H3", 0.0)
+            h4 = h_coeffs.get("H4", 0.0)
+            pk = h_coeffs.get("PkPk", 0.0)
+
+            clamp_alert = h1 > 0.05 and h3 > 0.20 * h1
+            sat_alert = h1 > 0.05 and h4 > 0.25 * h1
+
+            stat_txt = f"H1(Ecc): ±{h1:.3f}° | H2(Tilt): ±{h2:.3f}° | H3(Clamp): ±{h3:.3f}°{' ⚠️' if clamp_alert else ''} | H4(Sat): ±{h4:.3f}°{' ⚠️' if sat_alert else ''} | Pk-Pk: {pk:.3f}°"
+            canvas.create_text(w - pad_right, legend_y, text=stat_txt, fill="#FFD600" if (clamp_alert or sat_alert) else "#E0E0E0",
+                               font=("Segoe UI", 8, "bold"), anchor="e")
+        else:
+            if not bin_points:
+                canvas.create_text(cx, cy, text="Click '🚀 Continuous Harmonic Calib' to sweep and render 128-slot spatial harmonic model",
+                                   fill="#546E7A", font=("Segoe UI", 10, "italic"))
+    except Exception:
+        pass
+

@@ -17,7 +17,7 @@ from .benchmarker import BenchmarkRunner
 from .calibrator import Calibrator
 from .symmetry_equalizer import SymmetryEqualizer
 from .kv_analyzer import KVAnalyzer
-from .plots import draw_gauge, draw_chart, draw_kv_scatter_plot, draw_symmetry_needle
+from .plots import draw_gauge, draw_chart, draw_kv_scatter_plot, draw_symmetry_needle, draw_harmonic_overlay_plot
 
 
 class MT6818DashboardGUI:
@@ -32,6 +32,8 @@ class MT6818DashboardGUI:
         self.autoscroll_enabled = True
 
         # State Variables
+        self.sensor_mode_var = tk.IntVar(value=0)
+
         self.benchmark_progress_var = tk.DoubleVar(value=0.0)
         self.benchmark_status_var = tk.StringVar(value="Ready for 2-Min PID Benchmark")
 
@@ -127,9 +129,13 @@ class MT6818DashboardGUI:
         self.tab_sym = ttk.Frame(self.notebook)
         self.notebook.add(self.tab_sym, text="  ⚖️ Phase Angle & KV Equalizer  ")
 
+        self.tab_harm = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_harm, text="  🔬 Harmonic Calibration & Benchmark  ")
+
         self._build_dashboard_tab(self.tab_dash)
         self._build_kv_analyzer_tab(self.tab_kv)
         self._build_symmetry_tab(self.tab_sym)
+        self._build_harmonic_tab(self.tab_harm)
 
     def _build_dashboard_tab(self, parent):
         main_paned = tk.PanedWindow(parent, orient="horizontal", bg="#12161E", bd=0, sashwidth=4)
@@ -354,25 +360,36 @@ class MT6818DashboardGUI:
 
         ttk.Label(btn_frame, text="⚡ MOTOR CONTROL & BENCH ACTIONS", style="CardTitle.TLabel").grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 6))
 
-        self._create_btn(btn_frame, "🔬 128-PT LUT (w)", "w", "#E040FB", 1, 0)
-        self._create_btn(btn_frame, "⚡ 11-Pole Align (c)", "c", "#7C4DFF", 1, 1)
-        self._create_btn(btn_frame, "🟢 Enable (e)", "e", "#00E676", 1, 2)
-        self._create_btn(btn_frame, "🛑 STOP / Dis (x)", "x", "#D50000", 1, 3)
+        # Mode Selector Radio Buttons Row
+        mode_radio_row = ttk.Frame(btn_frame)
+        mode_radio_row.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(0, 6))
+        ttk.Label(mode_radio_row, text="Active Mode:", font=("Segoe UI", 8, "bold"),
+                  background="#1A2230", foreground="#00E5FF").pack(side="left", padx=2)
+        for val, label in [(0, "Raw (0)"), (1, "128-PT LUT (1)"), (2, "Harmonics (2)")]:
+            tk.Radiobutton(mode_radio_row, text=label, variable=self.sensor_mode_var, value=val,
+                           font=("Segoe UI", 8, "bold"), bg="#1A2230", fg="#FFFFFF", selectcolor="#0E131B",
+                           activebackground="#1A2230", activeforeground="#00E5FF",
+                           command=self._on_mode_change).pack(side="left", padx=4)
 
-        self._create_btn(btn_frame, "🏎️ RPM +10 (+)", "+", "#00E676", 2, 0)
-        self._create_btn(btn_frame, "🏎️ RPM -10 (-)", "-", "#FF5252", 2, 1)
-        self._create_btn(btn_frame, "🎯 Zero / Tare (z)", "z", "#FFD600", 2, 2)
-        self._create_btn(btn_frame, "🔬 Full Calib (w)", "w", "#00B0FF", 2, 3)
+        self._create_btn(btn_frame, "🚀 Harmonic Calib", "CALIB_DYN", "#00E676", 2, 0)
+        self._create_btn(btn_frame, "🔬 Stepped LUT", "CALIB_LUT", "#E040FB", 2, 1)
+        self._create_btn(btn_frame, "🏁 3-Way Bench", "BENCH_COMPARE", "#00E5FF", 2, 2)
+        self._create_btn(btn_frame, "🛑 STOP / Dis (x)", "x", "#D50000", 2, 3)
 
-        self._create_btn(btn_frame, "🎲 Re-Roll Zero (c)", "c", "#FF6D00", 3, 0)
-        self._create_btn(btn_frame, "⚡ Trim Lag (n1000)", "n1000", "#FFD600", 3, 1)
-        self._create_btn(btn_frame, "🏎️ Test 1000 RPM", "t1000", "#00E676", 3, 2)
-        self._create_btn(btn_frame, "📋 Dump LUT (u)", "u", "#00E5FF", 3, 3)
+        self._create_btn(btn_frame, "🟢 Enable (e)", "e", "#00E676", 3, 0)
+        self._create_btn(btn_frame, "⚡ 11-Pole Align (c)", "c", "#7C4DFF", 3, 1)
+        self._create_btn(btn_frame, "🎯 Zero / Tare (z)", "z", "#FFD600", 3, 2)
+        self._create_btn(btn_frame, "🏎️ Test 1000 RPM", "t1000", "#00E676", 3, 3)
 
-        self._create_btn(btn_frame, "💾 Save Flash (NVS)", "save", "#00E5FF", 4, 0)
-        self._create_btn(btn_frame, "🔄 Load Flash (NVS)", "load", "#2979FF", 4, 1)
-        self._create_btn(btn_frame, "💾 Save JSON File", "SAVE_JSON", "#7C4DFF", 4, 2)
-        self._create_btn(btn_frame, "📂 Load JSON File", "LOAD_JSON", "#E040FB", 4, 3)
+        self._create_btn(btn_frame, "🏎️ RPM +10 (+)", "+", "#00E676", 4, 0)
+        self._create_btn(btn_frame, "🏎️ RPM -10 (-)", "-", "#FF5252", 4, 1)
+        self._create_btn(btn_frame, "⚡ Trim Lag (n1000)", "n1000", "#FFD600", 4, 2)
+        self._create_btn(btn_frame, "📋 Dump LUT (u)", "u", "#00E5FF", 4, 3)
+
+        self._create_btn(btn_frame, "💾 Save Flash (NVS)", "save", "#00E5FF", 5, 0)
+        self._create_btn(btn_frame, "🔄 Load Flash (NVS)", "load", "#2979FF", 5, 1)
+        self._create_btn(btn_frame, "💾 Save JSON File", "SAVE_JSON", "#7C4DFF", 5, 2)
+        self._create_btn(btn_frame, "📂 Load JSON File", "LOAD_JSON", "#E040FB", 5, 3)
 
         # Oscilloscope Chart Canvas
         chart_card = ttk.Frame(right_col, style="Card.TFrame", padding=10)
@@ -727,6 +744,148 @@ class MT6818DashboardGUI:
             self.reader.send_cmd(f"v-{v:.2f}")
         except ValueError:
             pass
+
+    def _on_mode_change(self):
+        m = self.sensor_mode_var.get()
+        self.reader.send_cmd(f"SET_MODE {m}")
+
+    def _build_harmonic_tab(self, parent):
+        scroll_container = ttk.Frame(parent)
+        scroll_container.pack(fill="both", expand=True, padx=8, pady=8)
+
+        # Top Control & Mode Card
+        ctrl_card = ttk.Frame(scroll_container, style="Card.TFrame", padding=10)
+        ctrl_card.pack(fill="x", pady=(0, 6))
+
+        top_row = ttk.Frame(ctrl_card)
+        top_row.pack(fill="x", pady=(0, 6))
+
+        ttk.Label(top_row, text="🔬 CONTINUOUS SPATIAL-BINNED HARMONIC CALIBRATION & ANALYSIS", style="CardTitle.TLabel").pack(side="left")
+
+        # Action Buttons Row
+        btn_bar = ttk.Frame(ctrl_card)
+        btn_bar.pack(fill="x", pady=(2, 6))
+
+        tk.Button(btn_bar, text="🚀 Continuous Harmonic Calib (CALIB_DYN)", font=("Segoe UI", 9, "bold"),
+                  bg="#00E676", fg="#000", activebackground="#69F0AE", relief="flat", padx=10, pady=5,
+                  command=lambda: self.reader.send_cmd("CALIB_DYN")).pack(side="left", padx=3)
+
+        tk.Button(btn_bar, text="🔬 Stepped LUT Calib (CALIB_LUT)", font=("Segoe UI", 9, "bold"),
+                  bg="#E040FB", fg="#000", activebackground="#EA80FC", relief="flat", padx=10, pady=5,
+                  command=lambda: self.reader.send_cmd("CALIB_LUT")).pack(side="left", padx=3)
+
+        tk.Button(btn_bar, text="🏁 3-Way Mode Benchmark (BENCH_COMPARE)", font=("Segoe UI", 9, "bold"),
+                  bg="#00E5FF", fg="#000", activebackground="#84FFFF", relief="flat", padx=10, pady=5,
+                  command=lambda: self.reader.send_cmd("BENCH_COMPARE")).pack(side="left", padx=3)
+
+        tk.Button(btn_bar, text="💾 Save NVS", font=("Segoe UI", 8, "bold"), bg="#2979FF", fg="#FFF",
+                  relief="flat", padx=8, pady=5, command=lambda: self.reader.send_cmd("save")).pack(side="right", padx=2)
+        tk.Button(btn_bar, text="🔄 Load NVS", font=("Segoe UI", 8, "bold"), bg="#455A64", fg="#FFF",
+                  relief="flat", padx=8, pady=5, command=lambda: self.reader.send_cmd("load")).pack(side="right", padx=2)
+
+        # Radio Buttons Row
+        mode_row = ttk.Frame(ctrl_card)
+        mode_row.pack(fill="x", pady=(4, 2))
+        ttk.Label(mode_row, text="Active Runtime Correction Mode:", font=("Segoe UI", 9, "bold"),
+                  background="#1A2230", foreground="#00E5FF").pack(side="left", padx=(2, 10))
+
+        modes = [
+            (0, "Mode 0: Raw (Uncalibrated)"),
+            (1, "Mode 1: 128-Point Stepped LUT"),
+            (2, "Mode 2: Continuous Harmonics (Double-Angle Identities)")
+        ]
+        for val, label in modes:
+            tk.Radiobutton(mode_row, text=label, variable=self.sensor_mode_var, value=val,
+                           font=("Segoe UI", 9, "bold"), bg="#1A2230", fg="#FFFFFF", selectcolor="#0E131B",
+                           activebackground="#1A2230", activeforeground="#00E5FF",
+                           command=self._on_mode_change).pack(side="left", padx=8)
+
+        # Harmonic Overlay Graph Canvas Card
+        plot_card = ttk.Frame(scroll_container, style="Card.TFrame", padding=10)
+        plot_card.pack(fill="x", pady=4)
+
+        ttk.Label(plot_card, text="SPATIAL-BINNED DRAG-FREE SAMPLES & ANALYTICAL HARMONIC CURVE (128 BINS ACROSS 360° MECH)",
+                  style="CardTitle.TLabel").pack(anchor="w")
+
+        self.harm_canvas = tk.Canvas(plot_card, bg="#10151E", height=240, highlightthickness=0)
+        self.harm_canvas.pack(fill="x", expand=True, pady=4)
+
+        # Diagnostic Cards Grid (4 Cards: H1, H2, H3, H4)
+        diag_grid = ttk.Frame(scroll_container)
+        diag_grid.pack(fill="x", pady=4)
+        diag_grid.columnconfigure((0, 1, 2, 3), weight=1)
+
+        # Card 1: H1
+        c1 = ttk.Frame(diag_grid, style="Card.TFrame", padding=8)
+        c1.grid(row=0, column=0, sticky="nsew", padx=2)
+        ttk.Label(c1, text="HARMONIC 1: RUNOUT / ECCENTRICITY", style="CardTitle.TLabel").pack(anchor="w")
+        self.lbl_h1_val = tk.Label(c1, text="±0.000° mech", font=("Segoe UI", 12, "bold"), bg="#1A2230", fg="#69F0AE")
+        self.lbl_h1_val.pack(anchor="w", pady=1)
+        self.lbl_h1_desc = tk.Label(c1, text="Cos/Sin (A1, B1): 0.00, 0.00", font=("Segoe UI", 8), bg="#1A2230", fg="#8A99AD")
+        self.lbl_h1_desc.pack(anchor="w")
+        self.lbl_h1_status = tk.Label(c1, text="Status: Ready", font=("Segoe UI", 8, "bold"), bg="#1A2230", fg="#00E5FF")
+        self.lbl_h1_status.pack(anchor="w")
+
+        # Card 2: H2
+        c2 = ttk.Frame(diag_grid, style="Card.TFrame", padding=8)
+        c2.grid(row=0, column=1, sticky="nsew", padx=2)
+        ttk.Label(c2, text="HARMONIC 2: MAGNET TILT / ELLIPTICITY", style="CardTitle.TLabel").pack(anchor="w")
+        self.lbl_h2_val = tk.Label(c2, text="±0.000° mech", font=("Segoe UI", 12, "bold"), bg="#1A2230", fg="#69F0AE")
+        self.lbl_h2_val.pack(anchor="w", pady=1)
+        self.lbl_h2_desc = tk.Label(c2, text="Cos/Sin (A2, B2): 0.00, 0.00", font=("Segoe UI", 8), bg="#1A2230", fg="#8A99AD")
+        self.lbl_h2_desc.pack(anchor="w")
+        self.lbl_h2_status = tk.Label(c2, text="Status: Ready", font=("Segoe UI", 8, "bold"), bg="#1A2230", fg="#00E5FF")
+        self.lbl_h2_status.pack(anchor="w")
+
+        # Card 3: H3
+        c3 = ttk.Frame(diag_grid, style="Card.TFrame", padding=8)
+        c3.grid(row=0, column=2, sticky="nsew", padx=2)
+        ttk.Label(c3, text="HARMONIC 3: 3-POINT CLAMPING", style="CardTitle.TLabel").pack(anchor="w")
+        self.lbl_h3_val = tk.Label(c3, text="±0.000° mech", font=("Segoe UI", 12, "bold"), bg="#1A2230", fg="#69F0AE")
+        self.lbl_h3_val.pack(anchor="w", pady=1)
+        self.lbl_h3_desc = tk.Label(c3, text="Chassis Faceplate Distortion", font=("Segoe UI", 8), bg="#1A2230", fg="#8A99AD")
+        self.lbl_h3_desc.pack(anchor="w")
+        self.lbl_h3_status = tk.Label(c3, text="Status: Ready (<20% H1)", font=("Segoe UI", 8, "bold"), bg="#1A2230", fg="#00E5FF")
+        self.lbl_h3_status.pack(anchor="w")
+
+        # Card 4: H4
+        c4 = ttk.Frame(diag_grid, style="Card.TFrame", padding=8)
+        c4.grid(row=0, column=3, sticky="nsew", padx=2)
+        ttk.Label(c4, text="HARMONIC 4: FLUX SATURATION / BRIDGE", style="CardTitle.TLabel").pack(anchor="w")
+        self.lbl_h4_val = tk.Label(c4, text="±0.000° mech", font=("Segoe UI", 12, "bold"), bg="#1A2230", fg="#69F0AE")
+        self.lbl_h4_val.pack(anchor="w", pady=1)
+        self.lbl_h4_desc = tk.Label(c4, text="Hall Bridge Orthogonality / Saturation", font=("Segoe UI", 8), bg="#1A2230", fg="#8A99AD")
+        self.lbl_h4_desc.pack(anchor="w")
+        self.lbl_h4_status = tk.Label(c4, text="Status: Ready (<25% H1)", font=("Segoe UI", 8, "bold"), bg="#1A2230", fg="#00E5FF")
+        self.lbl_h4_status.pack(anchor="w")
+
+        # Benchmark Comparison Leaderboard Card
+        bench_card = ttk.Frame(scroll_container, style="Card.TFrame", padding=10)
+        bench_card.pack(fill="x", pady=4)
+
+        b_hdr = ttk.Frame(bench_card)
+        b_hdr.pack(fill="x", pady=(0, 4))
+        ttk.Label(b_hdr, text="🏆 HEAD-TO-HEAD BENCHMARK COMPARISON LEADERBOARD (GM3506 @ 30 rad/s)", style="CardTitle.TLabel").pack(side="left")
+
+        # Treeview table
+        cols = ("mode", "name", "latency", "jitter", "mae", "temp", "zero")
+        self.bench_tree = ttk.Treeview(bench_card, columns=cols, show="headings", height=3)
+        self.bench_tree.heading("mode", text="Mode")
+        self.bench_tree.heading("name", text="Description")
+        self.bench_tree.heading("latency", text="Read Latency (µs)")
+        self.bench_tree.heading("jitter", text="Velocity Jitter σ (rad/s)")
+        self.bench_tree.heading("mae", text="Tracking MAE (rad/s)")
+        self.bench_tree.heading("temp", text="ΔTemp (°C)")
+        self.bench_tree.heading("zero", text="Zero Angle (rad)")
+
+        self.bench_tree.column("mode", width=50, anchor="center")
+        self.bench_tree.column("name", width=200, anchor="w")
+        self.bench_tree.column("latency", width=120, anchor="center")
+        self.bench_tree.column("jitter", width=140, anchor="center")
+        self.bench_tree.column("mae", width=130, anchor="center")
+        self.bench_tree.column("temp", width=90, anchor="center")
+        self.bench_tree.column("zero", width=130, anchor="center")
+        self.bench_tree.pack(fill="x", pady=2)
 
     def _create_card(self, parent, title, init_val, color, row, col):
         card = ttk.Frame(parent, style="Card.TFrame", padding="8 6 8 6")
@@ -1108,6 +1267,7 @@ class MT6818DashboardGUI:
         }
         self.kv_analyzer.update_table_and_metrics(self.kv_tree, kv_pts, kv_res, kv_active, self.btn_run_kv, cards)
         self._update_symmetry_tab()
+        self._update_harmonic_tab()
         draw_gauge(self.gauge_canvas, deg)
         draw_chart(self.chart_canvas, self.reader)
         draw_kv_scatter_plot(self.kv_canvas, kv_pts, kv_res)
@@ -1142,3 +1302,72 @@ class MT6818DashboardGUI:
         self.card_sym_pct.config(text=f"{sym_pct:.1f} %")
         self.card_sym_kv.config(text=f"{equalized_kv:.1f} RPM/V")
         self.card_sym_ke.config(text=f"{ke:.4f} V·s/rad")
+
+    def _update_harmonic_tab(self):
+        with self.reader.lock:
+            coeffs = dict(getattr(self.reader, 'harmonic_coeffs', {}))
+            pts = list(getattr(self.reader, 'harmonic_bin_points', []))
+            bench_res = dict(getattr(self.reader, 'bench_compare_results', {}))
+            lut_mode = getattr(self.reader, 'last_lut_mode', -1)
+
+        # Sync radio button if firmware reported mode
+        if lut_mode in [0, 1, 2] and self.sensor_mode_var.get() != lut_mode:
+            self.sensor_mode_var.set(lut_mode)
+
+        # Update diagnostic cards
+        if coeffs:
+            a1 = coeffs.get("A1", 0.0); b1 = coeffs.get("B1", 0.0); h1 = coeffs.get("H1", math.hypot(a1, b1) * 57.2957795)
+            a2 = coeffs.get("A2", 0.0); b2 = coeffs.get("B2", 0.0); h2 = coeffs.get("H2", math.hypot(a2, b2) * 57.2957795)
+            a3 = coeffs.get("A3", 0.0); b3 = coeffs.get("B3", 0.0); h3 = coeffs.get("H3", math.hypot(a3, b3) * 57.2957795)
+            a4 = coeffs.get("A4", 0.0); b4 = coeffs.get("B4", 0.0); h4 = coeffs.get("H4", math.hypot(a4, b4) * 57.2957795)
+
+            self.lbl_h1_val.config(text=f"±{h1:.4f}° mech")
+            self.lbl_h1_desc.config(text=f"A1={a1:.4f}, B1={b1:.4f} rad")
+            self.lbl_h1_status.config(text=f"Runout Peak: ±{(h1*1000):.1f} mdeg", fg="#69F0AE")
+
+            self.lbl_h2_val.config(text=f"±{h2:.4f}° mech")
+            self.lbl_h2_desc.config(text=f"A2={a2:.4f}, B2={b2:.4f} rad")
+            self.lbl_h2_status.config(text=f"Tilt Peak: ±{(h2*1000):.1f} mdeg", fg="#69F0AE")
+
+            self.lbl_h3_val.config(text=f"±{h3:.4f}° mech")
+            self.lbl_h3_desc.config(text=f"A3={a3:.4f}, B3={b3:.4f} rad")
+            if h1 > 0.02 and (h3 / h1) > 0.20:
+                self.lbl_h3_status.config(text=f"⚠️ CLAMP PINCH! ({h3/h1*100:.1f}% H1)", fg="#FF5252")
+            else:
+                pct = (h3 / h1 * 100.0) if h1 > 0.001 else 0.0
+                self.lbl_h3_status.config(text=f"✅ CHASSIS PASS ({pct:.1f}% H1)", fg="#69F0AE")
+
+            self.lbl_h4_val.config(text=f"±{h4:.4f}° mech")
+            self.lbl_h4_desc.config(text=f"A4={a4:.4f}, B4={b4:.4f} rad")
+            if h1 > 0.02 and (h4 / h1) > 0.25:
+                self.lbl_h4_status.config(text=f"⚠️ FLUX SAT / BRIDGE! ({h4/h1*100:.1f}% H1)", fg="#FF5252")
+            else:
+                pct = (h4 / h1 * 100.0) if h1 > 0.001 else 0.0
+                self.lbl_h4_status.config(text=f"✅ FLUX PASS ({pct:.1f}% H1)", fg="#69F0AE")
+
+        # Redraw harmonic overlay canvas
+        draw_harmonic_overlay_plot(self.harm_canvas, pts, coeffs)
+
+        # Update Benchmark leaderboard table
+        if bench_res:
+            current_keys = set(bench_res.keys())
+            existing_items = self.bench_tree.get_children()
+            if len(existing_items) != len(current_keys):
+                self.bench_tree.delete(*existing_items)
+                mode_names = {
+                    0: "Mode 0: Raw (Uncalibrated)",
+                    1: "Mode 1: 128-PT Stepped LUT",
+                    2: "Mode 2: Continuous Harmonics (Double-Angle)"
+                }
+                for m_id in sorted(current_keys):
+                    row = bench_res[m_id]
+                    self.bench_tree.insert("", "end", values=(
+                        f"Mode {m_id}",
+                        mode_names.get(m_id, f"Mode {m_id}"),
+                        f"{row.get('latency_us', 0.0):.2f}",
+                        f"{row.get('jitter_rad_s', 0.0):.3f}",
+                        f"{row.get('mae_rad_s', 0.0):.3f}",
+                        f"{row.get('delta_temp_c', 0.0):+.2f}",
+                        f"{row.get('zero_angle_rad', 0.0):.5f}"
+                    ))
+
