@@ -105,7 +105,6 @@ class StuckRecoveryManager:
         self.corrective_substate: str = "FORWARD"  # "FORWARD" or "REVERSE"
         self.corrective_steer_dir: float = 1.0     # +1.0 (Left) or -1.0 (Right) towards more open side
         self.corrective_reverse_timer: float = 0.0
-        self.corrective_reverse_stroke_count: int = 0
         self.forward_grace_timer: float = 0.0
 
         # --- KINEMATIC ESCAPE ARCS PRECOMPUTATION ---
@@ -257,7 +256,8 @@ class StuckRecoveryManager:
         if is_right_pinned and not is_left_pinned:
             return -1.0
 
-        d_esc_left, d_esc_right, _ = arc_clearance
+        d_esc_left = arc_clearance[0]
+        d_esc_right = arc_clearance[1]
         diff_arc = d_esc_right - d_esc_left
         if abs(diff_arc) > similar_eps_m:
             return -1.0 if diff_arc > 0.0 else 1.0
@@ -283,7 +283,8 @@ class StuckRecoveryManager:
         3. Secondary fallback: heading error towards target yaw.
         4. Default fallback: +1.0 (Left).
         """
-        d_esc_left, d_esc_right, _ = arc_clearance
+        d_esc_left = arc_clearance[0]
+        d_esc_right = arc_clearance[1]
         diff_arc = d_esc_left - d_esc_right  # > 0 means left has more clearance
 
         if abs(diff_arc) > similar_eps_m:
@@ -481,7 +482,6 @@ class StuckRecoveryManager:
         self.last_corrective_yaw = current_yaw
         self.corrective_accumulated_turn = 0.0
         self.corrective_reverse_timer = 0.0
-        self.corrective_reverse_stroke_count = 0
 
         # Resolve open side if not explicitly specified
         if steer_sign is None:
@@ -507,19 +507,18 @@ class StuckRecoveryManager:
             self.current_cmd_v = self.forward_speed
             self.current_cmd_steer = self.corrective_steer_dir * self.steer_angle
 
-    def engage_corrective_reverse(self):
+    def engage_corrective_reverse(self, force: bool = False):
         """Engages reverse support phase during CORRECTIVE_180 when an obstacle is encountered."""
         if self.state == StuckRecoveryState.CORRECTIVE_180 and self.corrective_substate != "REVERSE":
-            if self.forward_grace_timer <= 0.0:
+            if force or self.forward_grace_timer <= 0.0:
                 self.corrective_substate = "REVERSE"
                 self.corrective_reverse_timer = 0.0
-                self.corrective_reverse_stroke_count += 1
 
     def update(
         self,
         dt: float,
         current_v: float,
-        commanded_v: float,
+        commanded_v: float = 0.0,
         heading_err: float = 0.0,
         active_steer: float = 0.0,
         hazard_mask: Optional[np.ndarray] = None,
@@ -534,6 +533,38 @@ class StuckRecoveryManager:
         Returns:
             (is_recovering, target_v, target_steer)
         """
+        # STATE 0: NORMAL DRIVE (Early exit before expensive costmap/ToF calculations)
+        if self.state == StuckRecoveryState.NORMAL_DRIVE:
+            return False, 0.0, 0.0
+
+        # ACTIVE RECOVERY TIMERS
+        self.stroke_timer += dt
+        self.total_recovery_timer += dt
+        if self.forward_grace_timer > 0.0:
+            self.forward_grace_timer -= dt
+            if current_v >= 0.05:
+                # Forward momentum achieved: cancel grace period immediately
+                self.forward_grace_timer = 0.0
+
+        # PHASE 3: DECELERATE SPEED TO 0 WHILE CENTERING SERVO
+        if self.state == StuckRecoveryState.DECEL_AND_CENTER:
+            self.current_cmd_v = 0.0
+            self.current_cmd_steer = 0.0
+
+            # Wait until steering physically and commanded gets to 0.0
+            is_centered = (abs(active_steer) <= 0.04) and (abs(self.current_cmd_steer) <= 0.02)
+            phase_timeout = (self.stroke_timer >= 0.08)
+
+            if is_centered or phase_timeout:
+                self.state = StuckRecoveryState.NORMAL_DRIVE
+                self.stroke_timer = 0.0
+                self.total_recovery_timer = 0.0
+                self.current_cmd_v = 0.0
+                self.current_cmd_steer = 0.0
+                return False, 0.0, 0.0
+
+            return True, self.current_cmd_v, self.current_cmd_steer
+
         # 1. Direct physical sightline check on front 4.1° ToF sensors & per-side minimums
         d_straight_tof = TOF_MAX_RANGE_M
         min_l_tof = TOF_MAX_RANGE_M
@@ -563,35 +594,14 @@ class StuckRecoveryManager:
                     max_any_tof = float(max(cached_tofs))
 
         # 2. Evaluate Pinned State directly against the robot via Costmap Grid Cells
-        # and front corner swing calculation at max steering lock
         is_l_pinned, is_r_pinned = self.evaluate_pinned_state(
             hazard_mask=hazard_mask,
             costmap_obj=costmap_obj,
             cached_tofs=cached_tofs,
         )
-
-        # 3. Project Max Steering Lock Escape Arcs onto Costmap Hazard Mask
-        d_esc_l, d_esc_r, d_esc_c = self.evaluate_costmap_escape_arcs(hazard_mask, costmap_obj)
-        arc_clearance = (d_esc_l, d_esc_r, d_esc_c)
-        max_forward_escape = max(d_esc_l, d_esc_r, d_esc_c)
-
-        # 4. Check if front is blocked (< 15cm) and neither side arc is open
         front_blocked = (d_straight_tof < 0.15)
-        side_free_thresh = max(0.08, self.arc_lookahead_m - 0.01)
-        side_curvature_free = (d_esc_l >= side_free_thresh or d_esc_r >= side_free_thresh)
-        is_front_imminent_obstacle = front_blocked and (not side_curvature_free)
 
-        # STATE 0: NORMAL DRIVE (Shield handles recovery initiation)
-        if self.state == StuckRecoveryState.NORMAL_DRIVE:
-            return False, 0.0, 0.0
-
-        # ACTIVE RECOVERY TIMERS
-        self.stroke_timer += dt
-        self.total_recovery_timer += dt
-        if self.forward_grace_timer > 0.0:
-            self.forward_grace_timer -= dt
-
-        # Global failsafe timeout
+        # Global failsafe timeout for PIVOT_REVERSE
         if self.state != StuckRecoveryState.CORRECTIVE_180:
             if self.total_recovery_timer >= RECOVERY_TOTAL_TIMEOUT_S and d_straight_tof >= self.clearance_exit_m:
                 self.state = StuckRecoveryState.NORMAL_DRIVE
@@ -601,9 +611,6 @@ class StuckRecoveryManager:
 
         # PHASE 1: PIVOT REVERSE ARC
         if self.state == StuckRecoveryState.PIVOT_REVERSE:
-            # Stop reversing when front ToF clearance opens up (>= clearance_exit_m and not front_blocked)
-            # AND vehicle is unpinned from walls (not is_l_pinned and not is_r_pinned)
-            # AND at least one other ToF sensor opens up (>= any_tof_exit_m, default 0.60m)
             is_unpinned = (not is_l_pinned and not is_r_pinned)
             front_cleared = (d_straight_tof >= self.clearance_exit_m and not front_blocked and is_unpinned)
             any_tof_cleared = (max_any_tof >= self.any_tof_exit_m) or (
@@ -639,7 +646,6 @@ class StuckRecoveryManager:
 
             self.current_cmd_v = target_v
             self.current_cmd_steer = target_steer
-
             return True, self.current_cmd_v, self.current_cmd_steer
 
         # PHASE 2: CORRECTIVE 180 AUTO-CORRECTION ARC (Anti-Wrong-Way)
@@ -658,8 +664,8 @@ class StuckRecoveryManager:
             has_turned_135 = (self.corrective_accumulated_turn >= math.radians(135.0))
             is_turn_sufficient = has_turned_135 or (yaw_aligned and self.corrective_accumulated_turn >= math.radians(75.0))
 
-            # Global failsafe timeout for corrective 180 (3.0s with clear front, or 4.5s unconditional)
-            if (self.total_recovery_timer >= 3.0 and d_straight_tof >= 0.20) or self.total_recovery_timer >= 4.5:
+            # Global failsafe timeout for corrective 180 (1.2s with clear front, or 1.8s unconditional)
+            if (self.total_recovery_timer >= 1.2 and d_straight_tof >= 0.20) or self.total_recovery_timer >= 1.8:
                 self.state = StuckRecoveryState.NORMAL_DRIVE
                 self.stroke_timer = 0.0
                 self.total_recovery_timer = 0.0
@@ -667,28 +673,26 @@ class StuckRecoveryManager:
                 self.current_cmd_steer = 0.0
                 return False, 0.0, 0.0
 
+            # Exit condition: turned sufficiently, front ToF open (>= clearance_exit_m) and unpinned
+            front_cleared = (
+                d_straight_tof >= self.clearance_exit_m
+                and not front_blocked
+                and not is_l_pinned
+                and not is_r_pinned
+            )
+            any_tof_cleared = (max_any_tof >= self.any_tof_exit_m) or (
+                cached_tofs is not None and len(cached_tofs) <= 2 and max_any_tof >= self.clearance_exit_m
+            )
+            if is_turn_sufficient and front_cleared and any_tof_cleared:
+                self.state = StuckRecoveryState.DECEL_AND_CENTER
+                self.stroke_timer = 0.0
+                self.current_cmd_v = 0.0
+                self.current_cmd_steer = 0.0
+                return True, 0.0, 0.0
+
             # --- SUBSTATE A: FORWARD 180 SPIN ARC ---
             if self.corrective_substate == "FORWARD":
-                # Exit condition: turned sufficiently, front ToF open (>= clearance_exit_m) and not blocked
-                front_cleared = (
-                    d_straight_tof >= self.clearance_exit_m
-                    and not front_blocked
-                    and not is_l_pinned
-                    and not is_r_pinned
-                )
-                any_tof_cleared = (max_any_tof >= self.any_tof_exit_m) or (
-                    cached_tofs is not None and len(cached_tofs) <= 2 and max_any_tof >= self.clearance_exit_m
-                )
-                if is_turn_sufficient and front_cleared and any_tof_cleared and not is_front_imminent_obstacle:
-                    self.state = StuckRecoveryState.DECEL_AND_CENTER
-                    self.stroke_timer = 0.0
-                    self.current_cmd_v = 0.0
-                    self.current_cmd_steer = 0.0
-                    return True, 0.0, 0.0
-
-                # Obstacle detection during forward turn:
-                # Do NOT trigger stall during forward grace period while accelerating from reverse!
-                is_stalled = (self.forward_grace_timer <= 0.0 and abs(current_v) < 0.10 and self.stroke_timer > 0.30)
+                is_stalled = (self.forward_grace_timer <= 0.0 and abs(current_v) < 0.10 and self.stroke_timer > 0.12)
                 is_wall_collision = (
                     d_straight_tof < 0.16
                     or is_l_pinned
@@ -697,10 +701,11 @@ class StuckRecoveryManager:
                     or min_r_tof <= 0.035
                 )
 
-                if is_wall_collision or is_stalled:
-                    # Obstacle encountered: engage reverse logic to support the 180!
-                    self.engage_corrective_reverse()
-                    # Fall through to execute reverse command in this cycle
+                if is_wall_collision:
+                    self.engage_corrective_reverse(force=True)
+                elif is_stalled:
+                    self.engage_corrective_reverse(force=False)
+                # Fall through to execute reverse command in this cycle
 
             # --- SUBSTATE B: REVERSE SUPPORT PHASE ---
             if self.corrective_substate == "REVERSE":
@@ -720,34 +725,17 @@ class StuckRecoveryManager:
                     costmap_obj=costmap_obj,
                 )
 
-                # Check if reverse has created enough front clearance or reached stroke limit
-                front_cleared = (
-                    d_straight_tof >= self.clearance_exit_m
-                    and not front_blocked
-                    and not is_l_pinned
-                    and not is_r_pinned
-                )
-                any_tof_cleared = (max_any_tof >= self.any_tof_exit_m) or (
-                    cached_tofs is not None and len(cached_tofs) <= 2 and max_any_tof >= self.clearance_exit_m
-                )
                 has_min_reverse_time = (self.corrective_reverse_timer >= RECOVERY_EXIT_MIN_TIME_S)
                 reverse_timeout = (self.corrective_reverse_timer >= RECOVERY_REVERSE_STROKE_MAX_S)
-
-                # Did reverse pivot itself complete alignment?
-                if is_turn_sufficient and front_cleared and any_tof_cleared and not is_front_imminent_obstacle:
-                    self.state = StuckRecoveryState.DECEL_AND_CENTER
-                    self.stroke_timer = 0.0
-                    self.current_cmd_v = 0.0
-                    self.current_cmd_steer = 0.0
-                    return True, 0.0, 0.0
 
                 if (front_cleared and any_tof_cleared and has_min_reverse_time) or reverse_timeout:
                     # Reverse clearance achieved! Switch back to forward 180 arc
                     self.corrective_substate = "FORWARD"
                     self.stroke_timer = 0.0
-                    self.forward_grace_timer = 0.35  # Grace period to accelerate forward from negative velocity
+                    self.forward_grace_timer = 0.20  # Grace period to accelerate forward; cancels early if current_v >= 0.05
 
                     # Re-evaluate open side with current arc clearances
+                    d_esc_l, d_esc_r, _ = self.evaluate_costmap_escape_arcs(hazard_mask, costmap_obj)
                     diff_arc = d_esc_l - d_esc_r
                     if abs(diff_arc) > 0.04:
                         self.corrective_steer_dir = 1.0 if diff_arc > 0.0 else -1.0
@@ -768,33 +756,6 @@ class StuckRecoveryManager:
             target_steer = self.corrective_steer_dir * self.steer_angle
             self.current_cmd_v = target_v
             self.current_cmd_steer = target_steer
-            return True, self.current_cmd_v, self.current_cmd_steer
-
-        # PHASE 3: DECELERATE SPEED TO 0 WHILE CENTERING SERVO
-        elif self.state == StuckRecoveryState.DECEL_AND_CENTER:
-            self.stroke_timer += dt
-            self.total_recovery_timer += dt
-            self.current_cmd_v = 0.0
-
-            # Slew commanded steering toward 0.0 radians at physical servo slew rate
-            dsteer_step = self.servo_slew_rad_s * dt
-            if abs(self.current_cmd_steer) <= dsteer_step:
-                self.current_cmd_steer = 0.0
-            else:
-                self.current_cmd_steer -= math.copysign(dsteer_step, self.current_cmd_steer)
-
-            # Wait until steering physically and commanded gets to 0.0
-            is_centered = (abs(active_steer) <= 0.04) and (abs(self.current_cmd_steer) <= 0.02)
-            phase_timeout = (self.stroke_timer >= 0.25)
-
-            if is_centered or phase_timeout:
-                self.state = StuckRecoveryState.NORMAL_DRIVE
-                self.stroke_timer = 0.0
-                self.total_recovery_timer = 0.0
-                self.current_cmd_v = 0.0
-                self.current_cmd_steer = 0.0
-                return False, 0.0, 0.0
-
             return True, self.current_cmd_v, self.current_cmd_steer
 
         return False, 0.0, 0.0
