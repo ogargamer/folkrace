@@ -3,7 +3,7 @@
   ZERO-CHEATING SENSOR FUSION: 4-WHEEL ENCODERS + BNO08X IMU (120 Hz)
   Computes true forward velocity, yaw rate, and heading without Supervisor shortcuts.
   Features:
-    - 4-Wheel Differential Kinematics with Ackermann Steer Projection
+    - 4-Wheel Differential Kinematics with 40% Ackermann Steer Projection
     - Median-of-4 Outlier Rejection (robust against single-wheel spin / lift)
     - Real-Time Wheel Slip Detection (Gyro vs Differential Cross-Check)
     - Adaptive Traction-Aware Complementary Filter

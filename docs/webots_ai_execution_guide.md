@@ -154,7 +154,7 @@ All controllers, C++ planners, MPC solvers, and recovery managers in this projec
 ### B. Steering Angle Sign Convention (`cmd_steer_rad`, `steer_deg`)
 * **Positive ($+$)**: **Steer LEFT** (Counter-Clockwise / CCW yaw turn)
 * **Negative ($-$)**: **Steer RIGHT** (Clockwise / CW yaw turn)
-* **Steering Limits**: $\approx \pm 34.97^\circ$ ($\pm 0.610\text{ rad}$) virtual Ackermann bicycle limit $\rightarrow \pm 39.9^\circ$ ($\pm 0.697\text{ rad}$) servo angle.
+* **Steering Limits**: $\approx \pm 37.65^\circ$ ($\pm 0.657\text{ rad}$) virtual center limit yielding $\pm 39.9^\circ$ ($\pm 0.696\text{ rad}$) inside servo limit at 40% Ackermann.
 
 ### C. Yaw & Angular Velocity (`yaw`, `gyro_z`, `theta_g`)
 * **Positive ($+$)**: **Turning Left** (CCW)

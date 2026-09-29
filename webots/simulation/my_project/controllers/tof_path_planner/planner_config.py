@@ -30,10 +30,12 @@ LR = 0.06625                   # meters (rear axle to CoG)
 # Vehicle moment of inertia around vertical yaw axis (Iz = (1/12) * m * (L^2 + W^2))
 IZ = (1.0 / 12.0) * VEHICLE_MASS * (WHEELBASE**2 + ((TRACK_FRONT + TRACK_REAR) / 2.0)**2)  # kg * m^2
 
-# Actuator Limits (Virtual Bicycle Model & Servos)
+# Actuator Limits (40% Ackermann Steering Model & Servos)
+ACKERMANN_PERCENT = 0.40        # 40% Ackermann steering geometry (0.0 = parallel, 1.0 = true Ackermann)
 MAX_SERVO_RAD = 0.696386        # radians (+- 39.9 deg per-servo limit, buffered 0.1 deg inside Webots 40.0 deg hard stops)
-MAX_STEERING_RAD = 0.696386     # backward-compatible alias to MAX_SERVO_RAD
-MAX_ACKERMANN_RAD = 0.610273    # radians (+- 34.97 deg virtual center Ackermann limit yielding 39.9 deg inside servo)
+MAX_STEERING_RAD = 0.657137     # radians (+- 37.65 deg virtual center limit yielding 39.9 deg inside servo at 40% Ackermann)
+MAX_PARALLEL_STEER_RAD = 0.696386 # radians (+- 39.9 deg physical servo lock)
+MAX_ACKERMANN_RAD = MAX_STEERING_RAD    # backward-compatible alias to MAX_STEERING_RAD
 MAX_SERVO_RATE_RAD_S = 10.5    # rad/s maximum steering slew rate
 MOTOR_DIR = -1.0               # Webots motor sign (-1.0 pushes vehicle forward)
 V_MAX_WHEEL = 5.500            # m/s physical maximum wheel velocity (200 rad/s * 0.0275m)
@@ -57,13 +59,14 @@ ACCEL_FWD_MAX = ACCEL_FWD_RATIO * A_MAX_BASE      # ~7.09 m/s^2 forward motor ac
 BRAKE_DECEL_MAX = BRAKE_DECEL_RATIO * A_MAX_BASE  # ~8.34 m/s^2 braking / deceleration limit
 LAT_ACCEL_MAX = LAT_ACCEL_RATIO * A_MAX_BASE      # ~7.92 m/s^2 cornering lateral acceleration limit
 
-# Kinematic turning radius at inside wheel lock (39.9 deg servo limit -> 34.97 deg Ackermann)
-# R_min = (L / tan(delta_in)) + (w / 2)
-R_MIN_TURN = (WHEELBASE / math.tan(MAX_SERVO_RAD)) + (TRACK_KINGPIN / 2.0)  # ~0.1895 m
-DELTA_ACKERMANN_MAX = math.atan(WHEELBASE / R_MIN_TURN)                        # ~0.6103 rad (~34.97 deg)
+# Kinematic turning radius at inside wheel lock (39.9 deg servo limit -> 37.65 deg virtual center at 40% Ackermann)
+# R_min = L / tan(delta_max)
+R_MIN_TURN = WHEELBASE / math.tan(MAX_STEERING_RAD)                              # ~0.1717 m
+DELTA_STEERING_MAX = MAX_STEERING_RAD                                            # ~0.6571 rad (~37.65 deg)
+DELTA_ACKERMANN_MAX = DELTA_STEERING_MAX                                         # backward-compatible alias
 
 # Friction-limited minimum crawl / tightest cornering speed: v = sqrt(a_lat_max * R_min)
-V_MIN_CRUISE = math.sqrt(LAT_ACCEL_MAX * R_MIN_TURN)                           # ~1.232 m/s dynamic cornering floor
+V_MIN_CRUISE = math.sqrt(LAT_ACCEL_MAX * R_MIN_TURN)                           # ~1.166 m/s dynamic cornering floor
 
 # PTK 9497 MG-D Digital Servo Specifications (at 8.4V HV)
 # Spec: ~0.068 s / 60 deg -> (pi/3) / 0.068 = ~15.4 rad/s slew rate
@@ -242,9 +245,9 @@ def compute_steering_aggressiveness(d_straight: float, steer_error_rad: float = 
 # ==============================================================================
 # 7. NON-BLOCKING STUCK & REVERSE RECOVERY MANAGER
 # ==============================================================================
-RECOVERY_STEER_ANGLE_RAD = MAX_ACKERMANN_RAD # radians (~34.97 deg) steering lock during reverse arc (maps to 39.9 deg servo)
+RECOVERY_STEER_ANGLE_RAD = MAX_STEERING_RAD # radians (~39.9 deg) parallel steering lock during reverse arc
 # Friction circle velocity limit for reverse pivot arc: v = sqrt(a_lat_max * R_min)
-RECOVERY_REVERSE_SPEED_MPS = V_MIN_CRUISE # ~1.232 m/s dynamic cornering floor
+RECOVERY_REVERSE_SPEED_MPS = V_MIN_CRUISE # ~1.121 m/s dynamic cornering floor
 RECOVERY_STALL_CONFIRM_S = 0.15      # seconds of low forward speed before engaging recovery
 RECOVERY_FRONT_BLOCKED_M = 0.25      # meters front clearance threshold to detect forward stall
 RECOVERY_REVERSE_STROKE_MAX_S = 0.6 # seconds maximum reverse stroke failsafe

@@ -1,6 +1,6 @@
 """
 ================================================================================
-  4WD ELECTRONIC DIFFERENTIAL & TRUE ACKERMANN KINEMATICS MODULE
+  4WD ELECTRONIC DIFFERENTIAL & 40% ACKERMANN KINEMATICS MODULE
   Real-time geometric speed allocation and BNO08x gyro slip detection
   for Folkrace Robot in Webots.
 ================================================================================
@@ -18,6 +18,7 @@ try:
         MAX_SERVO_RAD,
         MAX_ACKERMANN_RAD,
         MAX_STEERING_RAD,
+        ACKERMANN_PERCENT,
         MOTOR_DIR,
         V_MAX_WHEEL,
         SERVO_MAX_SPEED_RAD_S,
@@ -32,6 +33,7 @@ except ImportError:
         MAX_SERVO_RAD,
         MAX_ACKERMANN_RAD,
         MAX_STEERING_RAD,
+        ACKERMANN_PERCENT,
         MOTOR_DIR,
         V_MAX_WHEEL,
         SERVO_MAX_SPEED_RAD_S,
@@ -47,13 +49,15 @@ SLIP_UNDERSTEER = "UNDERSTEER"
 
 class ElectronicDifferential4WD:
     """
-    Computes exact independent Ackermann steering angles and 4-wheel rotational speeds,
-    handles standstill guards, proportional saturation scaling, and IMU gross slip detection.
+    Computes 40% Ackermann steering angles and 4-wheel rotational speeds with
+    electronic differential, handles standstill guards, proportional saturation
+    scaling, and IMU gross slip detection.
     """
 
     def __init__(self, wheelbase=WHEELBASE, track_rear=TRACK_REAR, track_front=TRACK_FRONT,
                  track_kingpin=TRACK_KINGPIN, wheel_radius=WHEEL_RADIUS,
-                 max_steer=MAX_ACKERMANN_RAD, max_servo_angle=MAX_SERVO_RAD,
+                 max_steer=MAX_STEERING_RAD, max_servo_angle=MAX_SERVO_RAD,
+                 ackermann_percent=ACKERMANN_PERCENT,
                  motor_dir=MOTOR_DIR, v_max=V_MAX_WHEEL,
                  thresh_spin=THRESH_SPIN, max_servo_rate=SERVO_MAX_SPEED_RAD_S):
         self.L = wheelbase
@@ -63,6 +67,7 @@ class ElectronicDifferential4WD:
         self.R_w = wheel_radius
         self.max_steer = max_steer
         self.max_servo_angle = max_servo_angle
+        self.ackermann_percent = ackermann_percent
         self.motor_dir = motor_dir
         self.v_max = v_max
         self.thresh_spin = thresh_spin
@@ -101,13 +106,15 @@ class ElectronicDifferential4WD:
         tan_d = math.tan(delta)
         omega_cmd = (target_v * tan_d) / self.L
 
-        # 3. 100% Exact Geometric Ackermann Front Steering Angles
+        # 3. 40% Geometric Ackermann Front Steering Angles
         if abs(tan_d) > 1e-4:
             half_Wk_sin = (self.W_k * 0.5) * sin_d
             L_cos = self.L * cos_d
             L_sin = self.L * sin_d
-            steer_left = math.atan2(L_sin, L_cos - half_Wk_sin)
-            steer_right = math.atan2(L_sin, L_cos + half_Wk_sin)
+            steer_left_true = math.atan2(L_sin, L_cos - half_Wk_sin)
+            steer_right_true = math.atan2(L_sin, L_cos + half_Wk_sin)
+            steer_left = delta + self.ackermann_percent * (steer_left_true - delta)
+            steer_right = delta + self.ackermann_percent * (steer_right_true - delta)
             steer_left = max(-self.max_servo_angle, min(steer_left, self.max_servo_angle))
             steer_right = max(-self.max_servo_angle, min(steer_right, self.max_servo_angle))
         else:
@@ -129,7 +136,6 @@ class ElectronicDifferential4WD:
             }
 
         # 5. 4-Wheel Linear Speed Allocation (Forward & Reverse)
-        sign_v = 1.0 if target_v >= 0.0 else -1.0
         half_Wr_omega = omega_cmd * (self.W_r * 0.5)
         half_Wf_omega = omega_cmd * (self.W_f * 0.5)
 
@@ -137,13 +143,14 @@ class ElectronicDifferential4WD:
         v_RL = target_v - half_Wr_omega
         v_RR = target_v + half_Wr_omega
 
-        # Front axle speeds (vector hypotenuse along steered wheel orientation)
+        # Front axle speeds (vector projection along steered wheel orientations)
         fl_x = target_v - half_Wf_omega
         fr_x = target_v + half_Wf_omega
         front_y = self.L * omega_cmd
 
-        v_FL = sign_v * math.hypot(fl_x, front_y)
-        v_FR = sign_v * math.hypot(fr_x, front_y)
+        # Project hub velocities onto each wheel's individual heading angle
+        v_FL = fl_x * math.cos(steer_left) + front_y * math.sin(steer_left)
+        v_FR = fr_x * math.cos(steer_right) + front_y * math.sin(steer_right)
 
         # 6. Proportional Saturation Scaling (Preserve turning radius when near motor RPM limit)
         v_peak = max(abs(v_FL), abs(v_FR), abs(v_RL), abs(v_RR))

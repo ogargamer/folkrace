@@ -51,6 +51,7 @@ from planner_config import (
     MAX_SERVO_RAD,
     MAX_ACKERMANN_RAD,
     MAX_STEERING_RAD,
+    ACKERMANN_PERCENT,
     WHEELBASE,
     TRACK_REAR,
     TRACK_FRONT,
@@ -240,8 +241,9 @@ class FolkraceVehicle:
             track_front=TRACK_FRONT,
             track_kingpin=TRACK_KINGPIN,
             wheel_radius=WHEEL_RADIUS,
-            max_steer=MAX_ACKERMANN_RAD,
+            max_steer=MAX_STEERING_RAD,
             max_servo_angle=MAX_SERVO_RAD,
+            ackermann_percent=ACKERMANN_PERCENT,
             motor_dir=MOTOR_DIR,
             v_max=V_MAX_WHEEL,
         )
@@ -700,8 +702,10 @@ class FolkraceVehicle:
                 and min_fwd_dist < 0.20
             ):
                 _arc_cl = self.recovery_manager.evaluate_costmap_escape_arcs(hazard_mask, self.costmap)
+                _is_l_pin, _is_r_pin = self.recovery_manager.evaluate_pinned_state(hazard_mask, self.costmap, tof_readings)
                 _side = self.recovery_manager.resolve_escape_steer_dir(
-                    arc_clearance=_arc_cl, heading_err=float(theta_g)
+                    arc_clearance=_arc_cl, heading_err=float(theta_g),
+                    is_left_pinned=_is_l_pin, is_right_pinned=_is_r_pin,
                 )
                 _target_bc_yaw = self.last_aww_status.target_recovery_yaw if self.last_aww_status else None
                 self.recovery_manager.trigger_emergency_recovery(
@@ -713,6 +717,11 @@ class FolkraceVehicle:
                     target_breadcrumb_yaw=_target_bc_yaw,
                     current_yaw=gyaw_curr,
                     front_clearance_m=min_fwd_dist,
+                    hazard_mask=hazard_mask,
+                    costmap_obj=self.costmap,
+                    cached_tofs=tof_readings,
+                    is_left_pinned=_is_l_pin,
+                    is_right_pinned=_is_r_pin,
                 )
 
             # Recovery Manager at 60 Hz (Kinematic Escape Arc Costmap Evaluation & CORRECTIVE_180)
@@ -793,8 +802,8 @@ class FolkraceVehicle:
 
                     steer_aggressiveness = float(max(0.85, min(1.0, dist_scale * err_scale)))
                     self.active_steer = max(
-                        -MAX_ACKERMANN_RAD,
-                        min(MAX_ACKERMANN_RAD, self.active_steer + steer_aggressiveness * steer_delta),
+                        -MAX_STEERING_RAD,
+                        min(MAX_STEERING_RAD, self.active_steer + steer_aggressiveness * steer_delta),
                     )
                     self.mode_desc = "OPTION_2_SL_MPC"
 

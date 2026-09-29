@@ -110,6 +110,88 @@ def test_smart_reverse_recovery():
     assert is_rec is True
     assert steer_cmd < 0.0, f"Expected negative steer (RIGHT) when right-pinned, got {steer_cmd}"
 
+    # Case 3A-Grid: Sparse Grid Cell Pinned Wall Escape (Inflated costmap front-corner checks)
+    class DummyCostmap:
+        res = 0.010
+        x_min = -1.25
+        y_min = 0.00
+
+    dummy_cm = DummyCostmap()
+    h, w = 190, 250
+    tofs_nominal = {"tof_front_left_4.1deg": 0.50, "tof_front_right_4.1deg": 0.50}
+
+    # Left pinned grid test: mark left C-space corner (-0.035, 0.10) in hazard_mask
+    mask_l_pinned = np.zeros((h, w), dtype=np.uint8)
+    col_l = int(round((-0.035 - dummy_cm.x_min) / dummy_cm.res))
+    row_l = int(round((0.10 - dummy_cm.y_min) / dummy_cm.res))
+    mask_l_pinned[row_l, col_l] = 1
+
+    is_l, is_r = rec.evaluate_pinned_state(mask_l_pinned, dummy_cm, tofs_nominal)
+    assert is_l is True and is_r is False, f"Expected is_left_pinned=True, got l={is_l}, r={is_r}"
+
+    # Breadcrumb wants to turn right in reverse (target_breadcrumb_yaw = +0.5 rad -> heading_err > 0 -> steer RIGHT)
+    # But LEFT is pinned: steering right in reverse swings front-left nose into the left wall.
+    # Therefore, left-pinned overrides and forces steer LEFT (> 0) to swing nose away from left wall!
+    rec.state = StuckRecoveryState.PIVOT_REVERSE
+    rec.stroke_timer = 0.1
+    is_rec, v_cmd, steer_cmd = rec.update(
+        dt=0.016, current_v=-1.0, commanded_v=-1.0,
+        hazard_mask=mask_l_pinned, costmap_obj=dummy_cm,
+        cached_tofs=tofs_nominal, current_yaw=0.0,
+        target_breadcrumb_yaw=+0.5,
+    )
+    print(f"  [Case 3A-Grid - Left Pinned Override] Steer: {steer_cmd:+.3f} rad (Target: > 0 steer LEFT to swing nose away from left wall)")
+    assert is_rec is True
+    assert steer_cmd > 0.0, f"Expected positive steer (LEFT) when left-pinned via grid, got {steer_cmd}"
+
+    # Right pinned grid test: mark right C-space corner (+0.035, 0.10) in hazard_mask
+    mask_r_pinned = np.zeros((h, w), dtype=np.uint8)
+    col_r = int(round((+0.035 - dummy_cm.x_min) / dummy_cm.res))
+    row_r = int(round((0.10 - dummy_cm.y_min) / dummy_cm.res))
+    mask_r_pinned[row_r, col_r] = 1
+
+    is_l, is_r = rec.evaluate_pinned_state(mask_r_pinned, dummy_cm, tofs_nominal)
+    assert is_r is True and is_l is False, f"Expected is_right_pinned=True, got l={is_l}, r={is_r}"
+
+    # Breadcrumb wants to turn left in reverse (target_breadcrumb_yaw = -0.5 rad -> heading_err < 0 -> steer LEFT)
+    # But RIGHT is pinned: steering left in reverse swings front-right nose into the right wall.
+    # Therefore, right-pinned overrides and forces steer RIGHT (< 0) to swing nose away from right wall!
+    is_rec, v_cmd, steer_cmd = rec.update(
+        dt=0.016, current_v=-1.0, commanded_v=-1.0,
+        hazard_mask=mask_r_pinned, costmap_obj=dummy_cm,
+        cached_tofs=tofs_nominal, current_yaw=0.0,
+        target_breadcrumb_yaw=-0.5,
+    )
+    print(f"  [Case 3A-Grid - Right Pinned Override] Steer: {steer_cmd:+.3f} rad (Target: < 0 steer RIGHT to swing nose away from right wall)")
+    assert is_rec is True
+    assert steer_cmd < 0.0, f"Expected negative steer (RIGHT) when right-pinned via grid, got {steer_cmd}"
+
+    # When RIGHT is pinned, but breadcrumb wants to steer RIGHT (+0.5 rad -> steer RIGHT):
+    # When RIGHT is pinned, but breadcrumb wants to steer RIGHT (+0.5 rad -> steer RIGHT):
+    # Front nose swings LEFT (away from the right wall), so right obstacle does NOT pin it!
+    # Car safely executes RIGHT steer lock (< 0) towards the breadcrumb!
+    is_rec, v_cmd, steer_cmd = rec.update(
+        dt=0.016, current_v=-1.0, commanded_v=-1.0,
+        hazard_mask=mask_r_pinned, costmap_obj=dummy_cm,
+        cached_tofs=tofs_nominal, current_yaw=0.0,
+        target_breadcrumb_yaw=+0.5,
+    )
+    print(f"  [Case 3A-Grid - Right Obstacle Non-Interfering] Steer: {steer_cmd:+.3f} rad (Target: < 0 steer RIGHT towards breadcrumb)")
+    assert is_rec is True
+    assert steer_cmd < 0.0, f"Expected negative steer (RIGHT) towards breadcrumb when right obstacle does not pin swing, got {steer_cmd}"
+
+    # Both pinned test: both left and right obstacles present
+    mask_both_pinned = mask_l_pinned | mask_r_pinned
+    is_rec, v_cmd, steer_cmd = rec.update(
+        dt=0.016, current_v=-1.0, commanded_v=-1.0,
+        hazard_mask=mask_both_pinned, costmap_obj=dummy_cm,
+        cached_tofs=tofs_nominal, current_yaw=0.0,
+        target_breadcrumb_yaw=+0.5,
+    )
+    print(f"  [Case 3A-Grid - Both Pinned] Steer: {steer_cmd:+.3f} rad (Target: 0.0 straight back)")
+    assert is_rec is True
+    assert steer_cmd == 0.0, f"Expected 0.0 steer (straight back) when both sides are pinned, got {steer_cmd}"
+
     # Case 3B: Free Reverse Breadcrumb Tracking (> 3cm) with Inverted Steering Law
     tofs_open = {
         "tof_front_left_4.1deg": 0.20,
