@@ -38,8 +38,8 @@ MAX_PARALLEL_STEER_RAD = 0.696386 # radians (+- 39.9 deg physical servo lock)
 MAX_ACKERMANN_RAD = MAX_STEERING_RAD    # backward-compatible alias to MAX_STEERING_RAD
 MAX_SERVO_RATE_RAD_S = 10.5    # rad/s maximum steering slew rate
 MOTOR_DIR = -1.0               # Webots motor sign (-1.0 pushes vehicle forward)
-V_MAX_WHEEL = 5.500            # m/s physical maximum wheel velocity (200 rad/s * 0.0275m)
-V_MAX_CRUISE = 5.50            # m/s maximum straight-line cruising speed (matches 5.5m/s motor ceiling)
+V_MAX_WHEEL = 5.0            # m/s physical maximum wheel velocity (200 rad/s * 0.0275m)
+V_MAX_CRUISE = V_MAX_WHEEL           # m/s maximum straight-line cruising speed (matches 5.5m/s motor ceiling)
 
 # ==============================================================================
 # 2. TIRE & VEHICLE DYNAMICS LIMITS
@@ -51,9 +51,9 @@ ALPHA_PEAK = 0.220             # radians (~12.6 degrees dynamic peak tire slip a
 # --- UNIFIED FRICTION-DERIVED ACCELERATION & SERVO LIMITS ---
 # Master Traction Limit: Base Acceleration = TIRE_MU * GRAVITY_G (~8.34 m/s^2 @ mu=0.85)
 A_MAX_BASE = TIRE_MU * GRAVITY_G
-ACCEL_FWD_RATIO = 0.9                  # 85% of mu*g for smooth forward motor acceleration without wheel spin
+ACCEL_FWD_RATIO = 0.95                  # 85% of mu*g for smooth forward motor acceleration without wheel spin
 BRAKE_DECEL_RATIO = 1.00                # 100% of mu*g for maximum braking / stopping deceleration
-LAT_ACCEL_RATIO = 0.95                  # 95% of mu*g for dynamic cornering limit
+LAT_ACCEL_RATIO = 1.00                  # 95% of mu*g for dynamic cornering limit
 
 ACCEL_FWD_MAX = ACCEL_FWD_RATIO * A_MAX_BASE      # ~7.09 m/s^2 forward motor acceleration limit
 BRAKE_DECEL_MAX = BRAKE_DECEL_RATIO * A_MAX_BASE  # ~8.34 m/s^2 braking / deceleration limit
@@ -159,7 +159,7 @@ TRACK_CORRIDOR_WIDTH_M = 1.00  # meters standard walled race corridor width
 GAP_PROGRESS_MARGIN_M = 0.164  # meters: 1.0m + 0.164m = 1.164m threshold for definitive open corridor
 GAP_DIST_EXP_K = 0.717         # exponential growth scaling factor for distance beyond threshold
 STRAIGHT_LOCK_DIST_M = 1.70    # meters: forward clearance on both 4.1 deg ToFs to lock full speed straight
-STRAIGHT_LOCK_SPEED_MPS = 5.50 # m/s: top speed cruising when straight locked
+STRAIGHT_LOCK_SPEED_MPS = V_MAX_CRUISE # m/s: top speed cruising when straight locked
 
 # Dual-Path Candidate Selection & Smart Challenger Arbitration (Option 2 SL-MPC)
 ALT_MIN_SEPARATION_M = 0.052   # meters: minimum lateral separation between primary and challenger target lines
@@ -262,7 +262,9 @@ RECOVERY_ARC_LOOKAHEAD_M = 0.146     # meters length of kinematic escape arcs pr
 # 8. ANTI-WRONG-WAY & U-TURN DISCRIMINATION WATCHDOG
 # ==============================================================================
 ANTI_WRONG_WAY_MODE = "OPTION_1_BREADCRUMB"
-AWW_BREADCRUMB_LOOKBACK_M = 8.0      # meters of recent historical path retained
+AWW_BREADCRUMB_LOOKBACK_M = 8.0      # meters baseline historical path retained
+AWW_BREADCRUMB_DURATION_SCALE = 0.6  # scale factor for how fast breadcrumbs disappear (0.6x = disappears 1.67x faster / 60% retention)
+AWW_BREADCRUMB_LIFETIME_SCALE = AWW_BREADCRUMB_DURATION_SCALE  # alias for breadcrumb lifetime scale
 AWW_BREADCRUMB_SPACING_M = 0.05      # meters minimum spatial spacing between breadcrumb nodes
 AWW_CORRIDOR_HALF_WIDTH_M = 0.25     # meters corridor half-width threshold for path overlap
 AWW_REVERSE_CONE_ANGLE_DEG = 45.0    # degrees heading divergence threshold for opposing alignment
@@ -272,8 +274,8 @@ AWW_FLOW_DECAY_S = 4.0               # seconds lifetime of forward flow vectors
 AWW_LATERAL_SEPARATION_MIN_M = 0.40  # meters minimum corridor lateral shift across a 180° turn
 AWW_AUTO_CORRECT_180_ENABLED = True  # whether watchdog automatically triggers CORRECTIVE_180
 AWW_CORRECTIVE_180_SPEED_MPS = V_MIN_CRUISE  # m/s target speed during corrective 180 spin (matches traction floor)
-AWW_CORRECTIVE_180_STEER_RAD = 0.60  # radians steering angle during corrective 180 spin
-AWW_HISTORY_WINDOW_S = 3.5           # seconds sliding time window for trajectory history
+AWW_BREADCRUMB_MAX_TIMEOUT_S = 6.0    # seconds maximum timeout before breadcrumb history expires
+AWW_HISTORY_WINDOW_S = AWW_BREADCRUMB_MAX_TIMEOUT_S  # backward-compatible alias (6.0 s)
 AWW_LOOKAHEAD_M = 1.0                # meters forward projection for wrong-way checking
 
 # 9. Narrow-Cone Early Gap Exit Sentry

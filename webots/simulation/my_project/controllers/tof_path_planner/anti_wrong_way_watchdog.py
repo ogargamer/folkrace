@@ -27,40 +27,52 @@ try:
     from .planner_config import (
         ANTI_WRONG_WAY_MODE,
         AWW_BREADCRUMB_LOOKBACK_M,
+        AWW_BREADCRUMB_DURATION_SCALE,
         AWW_BREADCRUMB_SPACING_M,
         AWW_HISTORY_WINDOW_S,
+        AWW_BREADCRUMB_MAX_TIMEOUT_S,
         AWW_EARLY_EXIT_MIN_GAP_M,
         AWW_EARLY_EXIT_CONE_DEG,
         AWW_EARLY_EXIT_OPPOSING_DEG,
         GRID_X_MIN,
         GRID_Y_MIN,
         GRID_RES,
+        V_MIN_CRUISE,
+        V_MAX_CRUISE,
     )
 except ImportError:
     try:
         from planner_config import (
             ANTI_WRONG_WAY_MODE,
             AWW_BREADCRUMB_LOOKBACK_M,
+            AWW_BREADCRUMB_DURATION_SCALE,
             AWW_BREADCRUMB_SPACING_M,
             AWW_HISTORY_WINDOW_S,
+            AWW_BREADCRUMB_MAX_TIMEOUT_S,
             AWW_EARLY_EXIT_MIN_GAP_M,
             AWW_EARLY_EXIT_CONE_DEG,
             AWW_EARLY_EXIT_OPPOSING_DEG,
             GRID_X_MIN,
             GRID_Y_MIN,
             GRID_RES,
+            V_MIN_CRUISE,
+            V_MAX_CRUISE,
         )
     except ImportError:
         ANTI_WRONG_WAY_MODE = "OPTION_1_BREADCRUMB"
         AWW_BREADCRUMB_LOOKBACK_M = 8.0
+        AWW_BREADCRUMB_DURATION_SCALE = 0.6
         AWW_BREADCRUMB_SPACING_M = 0.05
-        AWW_HISTORY_WINDOW_S = 3.5
+        AWW_BREADCRUMB_MAX_TIMEOUT_S = 6.0
+        AWW_HISTORY_WINDOW_S = 6.0
         AWW_EARLY_EXIT_MIN_GAP_M = 1.0
         AWW_EARLY_EXIT_CONE_DEG = 20.0
         AWW_EARLY_EXIT_OPPOSING_DEG = 110.0
         GRID_X_MIN = -1.25
         GRID_Y_MIN = 0.00
         GRID_RES = 0.010
+        V_MIN_CRUISE = 1.166
+        V_MAX_CRUISE = 5.00
 
 
 class WrongWayOptionMode(str, Enum):
@@ -113,29 +125,48 @@ class BreadcrumbWatchdog:
     track hairpins separated by walls.
     """
 
-    # Speed clamp range for dynamic window calculation:
-    #   below V_MIN the window stops growing (avoids infinite duration at standstill)
-    #   above V_MAX the window stops shrinking (maintains minimum coverage at high speed)
-    _V_MIN_MPS: float = 0.20   # m/s - slowest speed used in t = d/v
-    _V_MAX_MPS: float = 3.00   # m/s - fastest speed used in t = d/v
+    # Speed limits anchored to vehicle operational envelope from planner_config:
+    _V_MIN_MPS: float = float(V_MIN_CRUISE)   # m/s dynamic cornering floor (~1.17 m/s)
+    _V_MAX_MPS: float = float(V_MAX_CRUISE)   # m/s maximum straight-line cruising speed (5.00 m/s)
 
     def __init__(
         self,
         lookback_m: float = AWW_BREADCRUMB_LOOKBACK_M,
         spacing_m: float = AWW_BREADCRUMB_SPACING_M,
-        max_history_s: float = AWW_HISTORY_WINDOW_S,
+        max_history_s: float = AWW_BREADCRUMB_MAX_TIMEOUT_S,
         cone_angle_deg: float = 50.0,
+        duration_scale: float = AWW_BREADCRUMB_DURATION_SCALE,
+        max_timeout_s: float = AWW_BREADCRUMB_MAX_TIMEOUT_S,
         **kwargs,
     ):
-        self.lookback_m = max(8.0, lookback_m)
+        self.lookback_m = float(lookback_m)
+        self.duration_scale = float(kwargs.get("duration_scale", kwargs.get("lifetime_scale", duration_scale)))
         self.spacing_m = spacing_m
-        self.max_history_s = max_history_s  # initial fallback; updated dynamically per call
+        self.max_timeout_s = float(kwargs.get("max_timeout_s", kwargs.get("max_history_s", max_timeout_s)))
+        self.max_history_s = self.max_timeout_s
         self.cone_angle_rad = math.radians(cone_angle_deg)
 
         self.breadcrumbs: deque[Breadcrumb] = deque()
         self.cumulative_dist_m = 0.0
         self.last_x: Optional[float] = None
         self.last_y: Optional[float] = None
+
+    @property
+    def effective_lookback_m(self) -> float:
+        """
+        Effective spatial lookback distance accounting for duration_scale (how fast breadcrumbs disappear).
+        Enforces a sensible minimum of 1.5m to ensure sufficient points for detection.
+        """
+        return max(1.5, self.lookback_m * self.duration_scale)
+
+    def set_duration_scale(self, scale: float):
+        """Dynamically updates how fast breadcrumbs disappear."""
+        self.duration_scale = max(0.05, float(scale))
+
+    def set_max_timeout(self, timeout_s: float):
+        """Dynamically updates maximum breadcrumb history timeout."""
+        self.max_timeout_s = max(0.5, float(timeout_s))
+        self.max_history_s = self.max_timeout_s
 
     def reset(self):
         self.breadcrumbs.clear()
@@ -160,12 +191,12 @@ class BreadcrumbWatchdog:
         if (state not in ("DRIVE", "NORMAL_DRIVE")) or v < 0.25 or abs(yaw_rate) > 3.5:
             return
 
-        # Dynamic history window based on speed
-        speed = max(self._V_MIN_MPS, min(abs(v), self._V_MAX_MPS))
-        effective_lookback = max(self.lookback_m, 8.0)
-        self.max_history_s = effective_lookback / speed
+        # Effective spatial lookback distance accounting for duration scale
+        effective_lookback = self.effective_lookback_m
+        # Max history timeout (default 6.0s from planner_config prevents premature queue wipe during maneuvers)
+        self.max_history_s = self.max_timeout_s
 
-        # Prune points older than dynamic rolling history window or exceeding max spatial lookback
+        # Prune points exceeding max timeout (6.0s) or exceeding spatial lookback (4.8m @ 0.6x)
         while self.breadcrumbs and (
             (now_s - self.breadcrumbs[0].timestamp) > self.max_history_s
             or (self.cumulative_dist_m - self.breadcrumbs[0].s_dist) > effective_lookback
@@ -266,10 +297,11 @@ class BreadcrumbWatchdog:
         sightline_rays: List[Dict[str, Any]] = []
         confirmed_candidates: List[Breadcrumb] = []
 
+        effective_lookback = self.effective_lookback_m
         for bc in reversed(self.breadcrumbs):
-            # 1. Odometry gate: Delta S in [0.80m, 8.0m]
+            # 1. Odometry gate: Delta S in [0.80m, effective_lookback]
             delta_s = self.cumulative_dist_m - bc.s_dist
-            if not (0.80 <= delta_s <= 8.0):
+            if not (0.80 <= delta_s <= effective_lookback):
                 continue
 
             # 2. World to vehicle frame: (+Y forward, +X right)
@@ -488,11 +520,31 @@ class AntiWrongWayWatchdog:
 
     CONFIRM_STEPS_THRESHOLD = 5  # Require >= 5 consecutive steps (~42 ms @ 120 Hz)
 
-    def __init__(self, mode: str = ANTI_WRONG_WAY_MODE):
+    def __init__(
+        self,
+        mode: str = ANTI_WRONG_WAY_MODE,
+        lookback_m: float = AWW_BREADCRUMB_LOOKBACK_M,
+        duration_scale: float = AWW_BREADCRUMB_DURATION_SCALE,
+        max_timeout_s: float = AWW_BREADCRUMB_MAX_TIMEOUT_S,
+        **kwargs,
+    ):
         self.mode = mode
-        self.breadcrumb_watchdog = BreadcrumbWatchdog()
+        self.breadcrumb_watchdog = BreadcrumbWatchdog(
+            lookback_m=lookback_m,
+            duration_scale=duration_scale,
+            max_timeout_s=max_timeout_s,
+            **kwargs,
+        )
         self.latest_status = WrongWayStatus()
         self.consecutive_ww_steps = 0
+
+    def set_duration_scale(self, scale: float):
+        """Dynamically updates how fast breadcrumbs disappear."""
+        self.breadcrumb_watchdog.set_duration_scale(scale)
+
+    def set_max_timeout(self, timeout_s: float):
+        """Dynamically updates maximum breadcrumb history timeout."""
+        self.breadcrumb_watchdog.set_max_timeout(timeout_s)
 
     def set_mode(self, mode: str):
         self.mode = mode
@@ -648,10 +700,12 @@ class AntiWrongWayWatchdog:
             x, y, yaw, hazard_mask=hazard_mask, now_s=now_s
         )
         n_bc = len(self.breadcrumb_watchdog.breadcrumbs)
+        eff_lookback = self.breadcrumb_watchdog.effective_lookback_m
+        dur_scale = self.breadcrumb_watchdog.duration_scale
         thought_bc = (
-            f"Trail has {n_bc} points ({self.breadcrumb_watchdog.lookback_m:.1f}m window). Unobstructed line-of-sight to opposing trail confirmed (score: {score_bc:.2f}) -> IN-LANE WRONG-WAY DETECTED! Action: Spin 180° back."
+            f"Trail has {n_bc} points ({eff_lookback:.1f}m window @ {dur_scale:.2f}x). Unobstructed line-of-sight to opposing trail confirmed (score: {score_bc:.2f}) -> IN-LANE WRONG-WAY DETECTED! Action: Spin 180° back."
             if ww_bc else
-            f"Trail has {n_bc} points ({self.breadcrumb_watchdog.lookback_m:.1f}m window). Raycast scan: forward corridor is clear or adjacent lane blocked by wall. Heading towards open track."
+            f"Trail has {n_bc} points ({eff_lookback:.1f}m window @ {dur_scale:.2f}x). Raycast scan: forward corridor is clear or adjacent lane blocked by wall. Heading towards open track."
         )
 
         trail_pts = [[round(p.x, 3), round(p.y, 3)] for p in list(self.breadcrumb_watchdog.breadcrumbs)[::2]]
@@ -669,6 +723,8 @@ class AntiWrongWayWatchdog:
                 "trail_count": n_bc,
                 "target_yaw": round(float(target_yaw_bc), 3),
                 "sightlines": rays_bc,
+                "duration_scale": round(float(dur_scale), 2),
+                "effective_lookback_m": round(float(eff_lookback), 2),
                 "thought": thought_bc,
             },
             "opt2": {

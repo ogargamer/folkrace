@@ -27,6 +27,8 @@ from anti_wrong_way_watchdog import (
     Breadcrumb,
     WrongWayOptionMode,
     wrap_to_pi,
+    AWW_BREADCRUMB_DURATION_SCALE,
+    AWW_BREADCRUMB_MAX_TIMEOUT_S,
 )
 from stuck_recovery_manager import StuckRecoveryManager, StuckRecoveryState
 
@@ -506,11 +508,73 @@ def test_early_gap_exit_sentry():
     print("  -> Narrow-Cone Early Gap Exit Sentry: PASSED (100% verified)")
 
 
+def test_breadcrumb_duration_scale():
+    print("\n--- Testing Breadcrumb Duration Scale & Max Timeout ---")
+    assert AWW_BREADCRUMB_DURATION_SCALE == 0.6, f"Expected default scale 0.6x, got {AWW_BREADCRUMB_DURATION_SCALE}"
+    assert AWW_BREADCRUMB_MAX_TIMEOUT_S == 6.0, f"Expected default max timeout 6.0s, got {AWW_BREADCRUMB_MAX_TIMEOUT_S}"
+
+    # 1. Compare 1.0x baseline vs 0.6x faster disappearance
+    dog_10 = BreadcrumbWatchdog(lookback_m=8.0, duration_scale=1.0)
+    dog_06 = BreadcrumbWatchdog(lookback_m=8.0, duration_scale=0.6)
+
+    assert dog_10.effective_lookback_m == 8.0
+    assert abs(dog_06.effective_lookback_m - 4.8) < 1e-4, f"Expected 4.8m effective lookback, got {dog_06.effective_lookback_m}"
+
+    # Simulate racing speed drive: robot drives 7.0 meters (from Y=0.0 to Y=7.0 at 2.0 m/s, taking 3.5s <= 6.0s timeout)
+    # Track perimeter is ~6.0m, so at 7.0m it has completed a full lap
+    t = 0.0
+    for i in range(141):
+        y = i * 0.05  # up to 7.0m
+        dog_10.add_point(0.0, y, yaw=0.0, v=2.0, now_s=t, state="DRIVE")
+        dog_06.add_point(0.0, y, yaw=0.0, v=2.0, now_s=t, state="DRIVE")
+        t += 0.025  # 140 * 0.025 = 3.5s total (within 6.0s timeout)
+
+    # In dog_10 (8.0m lookback):
+    # Total distance is 7.0m <= 8.0m, so breadcrumb from start of lap (Y=0.0) is STILL RETAINED!
+    oldest_10 = dog_10.breadcrumbs[0].y
+    print(f"  [1.0x Scale] Oldest Breadcrumb at Y = {oldest_10:.2f} m (Lap Start at Y=0.0m is STILL RETAINED)")
+    assert oldest_10 == 0.0, "Baseline 1.0x should retain start of lap across 7m track"
+
+    # In dog_06 (4.8m lookback, 0.6x):
+    # Distance window is 4.8m, so points older than 7.0 - 4.8 = 2.2m have disappeared!
+    oldest_06 = dog_06.breadcrumbs[0].y
+    print(f"  [0.6x Scale] Oldest Breadcrumb at Y = {oldest_06:.2f} m (Lap Start at Y=0.0m has DISAPPEARED)")
+    assert oldest_06 >= 2.15, f"Expected oldest point >= 2.15m (start of lap pruned), got {oldest_06}"
+
+    # Test 6.0s timeout expires stale breadcrumbs during prolonged standstill (> 6.0s)
+    dog_timeout = BreadcrumbWatchdog(lookback_m=8.0, duration_scale=1.0, max_timeout_s=6.0)
+    dog_timeout.add_point(0.0, 0.0, yaw=0.0, v=1.5, now_s=0.0, state="DRIVE")
+    dog_timeout.add_point(0.0, 0.1, yaw=0.0, v=1.5, now_s=0.1, state="DRIVE")
+    # Prolonged standstill for 6.5s
+    dog_timeout.add_point(0.0, 0.2, yaw=0.0, v=1.5, now_s=6.6, state="DRIVE")
+    # First point at t=0.0 must be expired (6.6s > 6.0s timeout)
+    assert dog_timeout.breadcrumbs[0].timestamp >= 0.1, "Point at t=0.0 should expire after >6.0s timeout"
+    print("  [6.0s Timeout] Verified: Points older than 6.0s timeout safely expire during prolonged standstill")
+
+    # 2. Dynamic runtime update via set_duration_scale
+    dog_06.set_duration_scale(0.4)
+    assert abs(dog_06.effective_lookback_m - 3.2) < 1e-4
+
+    # 3. Watchdog coordinator interface & detailed telemetry check
+    watchdog = AntiWrongWayWatchdog(duration_scale=0.6)
+    assert watchdog.breadcrumb_watchdog.duration_scale == 0.6
+    watchdog.set_duration_scale(0.5)
+    assert watchdog.breadcrumb_watchdog.duration_scale == 0.5
+
+    telem = watchdog.get_detailed_telemetry(0.0, 0.0, 0.0, v_est=1.0, yaw_rate=0.0)
+    assert "duration_scale" in telem["opt1"]
+    assert telem["opt1"]["duration_scale"] == 0.5
+    assert "0.50x" in telem["opt1"]["thought"]
+
+    print("  -> Breadcrumb Duration Scale: PASSED (0.6x parameter verified, prevents full-lap overlap on small tracks)")
+
+
 if __name__ == "__main__":
     print("================================================================================")
     print("  RUNNING ANTI-WRONG-WAY & U-TURN DISCRIMINATION TEST SUITE")
     print("================================================================================")
     test_option1_breadcrumb()
+    test_breadcrumb_duration_scale()
     test_early_gap_exit_sentry()
     test_smart_reverse_recovery()
     test_unified_coordinator_and_benchmark()
