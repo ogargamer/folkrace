@@ -221,7 +221,49 @@ def test_smart_reverse_recovery():
     assert v_cmd_fwd > 0.0, f"Expected positive forward velocity after clearance opened, got {v_cmd_fwd}"
     print("  [Case 3E - Reverse Support Resumes Forward 180] PASSED: Resumes forward 180 after clearance achieved")
 
-    print("  -> Smart Reverse Recovery: PASSED (Kinematics, Open Side & Reverse Support 100% verified)")
+    # Case 3F: Aligned reverse NEVER steers 0 (steers away from wall / towards open side)
+    rec.state = StuckRecoveryState.PIVOT_REVERSE
+    rec.stroke_timer = 0.05
+    rec.preferred_yaw_sign = -1.0  # open side right
+    tofs_mid = {
+        "tof_front_left_4.1deg": 0.15,
+        "tof_front_right_4.1deg": 0.15,
+    }
+    # Aligned: target_breadcrumb_yaw = 0.0, current_yaw = 0.0
+    is_rec, v_cmd, steer_cmd = rec.update(
+        dt=0.016, current_v=-0.5, commanded_v=-1.0, cached_tofs=tofs_mid, current_yaw=0.0, target_breadcrumb_yaw=0.0
+    )
+    print(f"  [Case 3F - Aligned Reverse Never Steers 0] Steer: {steer_cmd:+.3f} rad (Expected non-zero: abs > 0)")
+    assert is_rec is True
+    assert abs(steer_cmd) > 0.1, f"Expected non-zero steering during aligned reverse, got {steer_cmd}"
+
+    # Case 3G: Clearance Exit (Front >= 0.25m AND Any ToF >= 0.60m) & Zero-Steer Handover Handshake
+    rec.state = StuckRecoveryState.PIVOT_REVERSE
+    rec.stroke_timer = 0.10
+    tofs_cleared = {
+        "tof_front_left_4.1deg": 0.30,   # >= 0.25m front
+        "tof_front_right_4.1deg": 0.30,  # >= 0.25m front
+        "tof_front_left_82.9deg": 0.65,  # >= 0.60m any-ToF
+    }
+    # Step 1: Clearance triggers DECEL_AND_CENTER; physical active_steer is still turned (0.40 rad)
+    is_rec, v_cmd, steer_cmd = rec.update(
+        dt=0.016, current_v=-0.5, commanded_v=-1.0, cached_tofs=tofs_cleared, active_steer=0.40, current_yaw=0.0
+    )
+    assert rec.state == StuckRecoveryState.DECEL_AND_CENTER, f"Expected DECEL_AND_CENTER, got {rec.state}"
+    assert is_rec is True, "Recovery manager must maintain control while wheels are centering"
+    assert v_cmd == 0.0, f"Expected 0.0 speed commanded during centering, got {v_cmd}"
+    print(f"  [Case 3G - Handshake Holding] State: {rec.state}, v_cmd: {v_cmd}, is_recovering: {is_rec}")
+
+    # Step 2: Wheels finish slewing back to center (active_steer = 0.01 rad)
+    rec.current_cmd_steer = 0.0
+    is_rec, v_cmd, steer_cmd = rec.update(
+        dt=0.016, current_v=-0.05, commanded_v=0.0, cached_tofs=tofs_cleared, active_steer=0.01, current_yaw=0.0
+    )
+    assert rec.state == StuckRecoveryState.NORMAL_DRIVE, f"Expected NORMAL_DRIVE after wheels centered, got {rec.state}"
+    assert is_rec is False, "Expected is_recovering = False cleanly handing off to planner"
+    print(f"  [Case 3G - Handshake Release] State: {rec.state}, is_recovering: {is_rec} (Clean handoff to planner)")
+
+    print("  -> Smart Reverse Recovery: PASSED (Kinematics, Open Side, Non-Zero Aligned Steer & Handshake 100% verified)")
 
 
 def test_option2_kinematic_arc():

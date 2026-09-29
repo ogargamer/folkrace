@@ -243,14 +243,14 @@ def compute_steering_aggressiveness(d_straight: float, steer_error_rad: float = 
 # 7. NON-BLOCKING STUCK & REVERSE RECOVERY MANAGER
 # ==============================================================================
 RECOVERY_STEER_ANGLE_RAD = MAX_ACKERMANN_RAD # radians (~34.97 deg) steering lock during reverse arc (maps to 39.9 deg servo)
-# Friction circle velocity limit for reverse pivot arc: v = sqrt(mu * g * (L / tan(delta)))
-RECOVERY_REVERSE_SPEED_MPS = float(math.sqrt(0.86 * 9.81 * (WHEELBASE / max(0.01, math.tan(RECOVERY_STEER_ANGLE_RAD))))) # ~1.31 m/s
+# Friction circle velocity limit for reverse pivot arc: v = sqrt(a_lat_max * R_min)
+RECOVERY_REVERSE_SPEED_MPS = V_MIN_CRUISE # ~1.232 m/s dynamic cornering floor
 RECOVERY_STALL_CONFIRM_S = 0.15      # seconds of low forward speed before engaging recovery
 RECOVERY_FRONT_BLOCKED_M = 0.25      # meters front clearance threshold to detect forward stall
 RECOVERY_REVERSE_STROKE_MAX_S = 0.6 # seconds maximum reverse stroke failsafe
 RECOVERY_TOTAL_TIMEOUT_S = 0.8      # seconds maximum total recovery duration before forced exit
 RECOVERY_CLEARANCE_EXIT_M = 0.25     # meters (25cm) minimum forward clearance to conclude reverse
-RECOVERY_ANY_TOF_EXIT_M = 0.40       # meters (40cm) minimum clearance on at least one ToF sensor to conclude reverse
+RECOVERY_ANY_TOF_EXIT_M = 0.60       # meters (60cm) minimum clearance on at least one ToF sensor to conclude reverse
 RECOVERY_EXIT_MIN_TIME_S = 0.0       # seconds minimum recovery stroke time before clearance check
 RECOVERY_SERVO_SLEW_RAD_S = SERVO_MAX_SPEED_RAD_S  # rad/s PTK 9497 8.4V centering slew rate (15.4 rad/s)
 RECOVERY_ARC_LOOKAHEAD_M = 0.146     # meters length of kinematic escape arcs projected on costmap (GA Champion)
@@ -268,7 +268,7 @@ AWW_FLOW_GRID_RES_M = 0.05           # meters grid cell resolution for direction
 AWW_FLOW_DECAY_S = 4.0               # seconds lifetime of forward flow vectors
 AWW_LATERAL_SEPARATION_MIN_M = 0.40  # meters minimum corridor lateral shift across a 180° turn
 AWW_AUTO_CORRECT_180_ENABLED = True  # whether watchdog automatically triggers CORRECTIVE_180
-AWW_CORRECTIVE_180_SPEED_MPS = 1.20  # m/s target speed during corrective 180 spin
+AWW_CORRECTIVE_180_SPEED_MPS = V_MIN_CRUISE  # m/s target speed during corrective 180 spin (matches traction floor)
 AWW_CORRECTIVE_180_STEER_RAD = 0.60  # radians steering angle during corrective 180 spin
 AWW_HISTORY_WINDOW_S = 3.5           # seconds sliding time window for trajectory history
 AWW_LOOKAHEAD_M = 1.0                # meters forward projection for wrong-way checking

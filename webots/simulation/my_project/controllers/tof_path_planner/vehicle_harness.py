@@ -247,6 +247,7 @@ class FolkraceVehicle:
         )
         self.recovery_manager = StuckRecoveryManager(
             reverse_speed_m_s=RECOVERY_REVERSE_SPEED_MPS,
+            forward_speed_m_s=V_MIN_CRUISE,
             steer_angle_rad=RECOVERY_STEER_ANGLE_RAD,
             clearance_exit_m=RECOVERY_CLEARANCE_EXIT_M,
             any_tof_exit_m=RECOVERY_ANY_TOF_EXIT_M,

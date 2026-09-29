@@ -19,8 +19,6 @@ try:
         MAX_STEERING_RAD,
         RECOVERY_REVERSE_SPEED_MPS,
         RECOVERY_STEER_ANGLE_RAD,
-        RECOVERY_STALL_CONFIRM_S,
-        RECOVERY_FRONT_BLOCKED_M,
         RECOVERY_REVERSE_STROKE_MAX_S,
         RECOVERY_TOTAL_TIMEOUT_S,
         RECOVERY_CLEARANCE_EXIT_M,
@@ -28,9 +26,8 @@ try:
         RECOVERY_EXIT_MIN_TIME_S,
         RECOVERY_SERVO_SLEW_RAD_S,
         RECOVERY_ARC_LOOKAHEAD_M,
-        BRAKE_DECEL_MAX,
-        ACCEL_FWD_MAX,
         TOF_MAX_RANGE_M,
+        V_MIN_CRUISE,
     )
 except ImportError:
     from planner_config import (
@@ -38,8 +35,6 @@ except ImportError:
         MAX_STEERING_RAD,
         RECOVERY_REVERSE_SPEED_MPS,
         RECOVERY_STEER_ANGLE_RAD,
-        RECOVERY_STALL_CONFIRM_S,
-        RECOVERY_FRONT_BLOCKED_M,
         RECOVERY_REVERSE_STROKE_MAX_S,
         RECOVERY_TOTAL_TIMEOUT_S,
         RECOVERY_CLEARANCE_EXIT_M,
@@ -47,9 +42,8 @@ except ImportError:
         RECOVERY_EXIT_MIN_TIME_S,
         RECOVERY_SERVO_SLEW_RAD_S,
         RECOVERY_ARC_LOOKAHEAD_M,
-        BRAKE_DECEL_MAX,
-        ACCEL_FWD_MAX,
         TOF_MAX_RANGE_M,
+        V_MIN_CRUISE,
     )
 
 
@@ -78,12 +72,11 @@ class StuckRecoveryManager:
     def __init__(
         self,
         reverse_speed_m_s: float = RECOVERY_REVERSE_SPEED_MPS,
+        forward_speed_m_s: float = V_MIN_CRUISE,
         steer_angle_rad: float = RECOVERY_STEER_ANGLE_RAD,
         clearance_exit_m: float = RECOVERY_CLEARANCE_EXIT_M,
         any_tof_exit_m: float = RECOVERY_ANY_TOF_EXIT_M,
         servo_slew_rad_s: float = RECOVERY_SERVO_SLEW_RAD_S,
-        brake_decel_max: float = BRAKE_DECEL_MAX,
-        accel_fwd_max: float = ACCEL_FWD_MAX,
         wheelbase_m: float = WHEELBASE,
         max_steer_rad: float = MAX_STEERING_RAD,
         arc_lookahead_m: float = RECOVERY_ARC_LOOKAHEAD_M,
@@ -91,14 +84,12 @@ class StuckRecoveryManager:
     ):
         self.state = StuckRecoveryState.NORMAL_DRIVE
         self.reverse_speed = float(reverse_speed_m_s)
+        self.forward_speed = float(forward_speed_m_s)
         self.steer_angle = float(steer_angle_rad)
         self.clearance_exit_m = float(clearance_exit_m)
         self.any_tof_exit_m = float(any_tof_exit_m)
         self.servo_slew_rad_s = float(servo_slew_rad_s)
-        self.brake_decel_max = float(brake_decel_max)
-        self.accel_fwd_max = float(accel_fwd_max)
 
-        self.stall_timer = 0.0
         self.stroke_timer = 0.0
         self.total_recovery_timer = 0.0
         self.preferred_yaw_sign = 1.0
@@ -109,7 +100,6 @@ class StuckRecoveryManager:
 
         # Anti-Wrong-Way CORRECTIVE_180 tracking & Reverse Support
         self.target_corrective_yaw: Optional[float] = None
-        self.corrective_start_yaw: float = 0.0
         self.last_corrective_yaw: float = 0.0
         self.corrective_accumulated_turn: float = 0.0
         self.corrective_substate: str = "FORWARD"  # "FORWARD" or "REVERSE"
@@ -180,32 +170,6 @@ class StuckRecoveryManager:
         d_right = _trace(self._arc_pts_right)
         d_center = _trace(self._arc_pts_center)
         return (d_left, d_right, d_center)
-
-    def get_costmap_forward_clearance(
-        self,
-        hazard_mask: Optional[np.ndarray],
-        costmap_obj: Optional[Any],
-        max_dist_m: float = 0.50,
-    ) -> float:
-        """Raytraces directly along vehicle centerline forward from front bumper on costmap hazard mask."""
-        if hazard_mask is None or costmap_obj is None:
-            return TOF_MAX_RANGE_M
-        res = getattr(costmap_obj, "res", 0.015)
-        x_min = getattr(costmap_obj, "x_min", -1.25)
-        y_min = getattr(costmap_obj, "y_min", -0.10)
-        h, w = hazard_mask.shape
-
-        n_steps = int(math.ceil(max_dist_m / res))
-        for step in range(n_steps):
-            s = step * res
-            py = self.bumper_y + s
-            px = 0.0
-            col = int(round((px - x_min) / res))
-            row = int(round((py - y_min) / res))
-            if 0 <= row < h and 0 <= col < w:
-                if hazard_mask[row, col] > 0:
-                    return float(s)
-        return float(max_dist_m)
 
     @staticmethod
     def resolve_escape_steer_dir(
@@ -298,6 +262,48 @@ class StuckRecoveryManager:
 
         return 1.0
 
+    def compute_reverse_steer(
+        self,
+        min_l_tof: float = TOF_MAX_RANGE_M,
+        min_r_tof: float = TOF_MAX_RANGE_M,
+        current_yaw: float = 0.0,
+        target_yaw: Optional[float] = None,
+        current_v: float = 0.0,
+        preferred_sign: Optional[float] = None,
+    ) -> float:
+        """
+        Contained Single Source of Truth for Reverse Steering Arbitration:
+        1. Wall Pin Avoidance (side ToF <= 3.5cm): Physical unpin takes absolute priority.
+           Steers towards the pinned wall to pivot the front nose away in reverse.
+        2. Breadcrumb / Target Corridor Curve (|heading_err| > 10 deg):
+           Inverted Ackermann steering law guides the vehicle along the curved corridor.
+        3. Aligned (|heading_err| <= 10 deg) or No Target:
+           NEVER steer 0! Pivots front nose away from the wall / towards the open side.
+        """
+        # Tier 1: Wall Pin Avoidance (Unpin Maneuver)
+        is_left_tight = (min_l_tof <= 0.035)
+        is_right_tight = (min_r_tof <= 0.035)
+        if is_left_tight and (not is_right_tight or min_l_tof <= min_r_tof):
+            # Left wall pinned: steer LEFT (+delta_max) -> front nose swings RIGHT away from wall
+            return +self.steer_angle
+        if is_right_tight:
+            # Right wall pinned: steer RIGHT (-delta_max) -> front nose swings LEFT away from wall
+            return -self.steer_angle
+
+        # Tier 2: Breadcrumb / Target Corridor Curve Guidance
+        if target_yaw is not None:
+            heading_err = wrap_to_pi(target_yaw - current_yaw)
+            if abs(heading_err) > math.radians(10.0):
+                # In reverse (v < 0), psi_dot = (v / L) * tan(delta), so steer_sign = -sign(y_err)
+                steer_sign = -1.0 if heading_err > 0.0 else 1.0
+                return steer_sign * self.steer_angle
+
+        # Tier 3: Aligned (|heading_err| <= 10 deg) or No Target
+        # NEVER steer 0! Follow previous reverse away from wall logic (towards open side):
+        pref = preferred_sign if preferred_sign is not None else self.preferred_yaw_sign
+        steer_sign = pref if current_v > 0.1 else -pref
+        return steer_sign * self.steer_angle
+
     def trigger_emergency_recovery(
         self,
         heading_err: float = 0.0,
@@ -320,10 +326,12 @@ class StuckRecoveryManager:
         else:
             self.preferred_yaw_sign = -1.0
 
-        # When driving forward (current_v > 0.1 m/s), steer towards escape opening (away from obstacle);
-        # when reversing (current_v <= 0.1 m/s), steer opposite to pivot the front nose away in reverse.
-        steer_sign = self.preferred_yaw_sign if current_v > 0.1 else -self.preferred_yaw_sign
-        target_steer = steer_sign * self.steer_angle
+        target_steer = self.compute_reverse_steer(
+            current_yaw=current_yaw,
+            target_yaw=target_breadcrumb_yaw,
+            current_v=current_v,
+            preferred_sign=self.preferred_yaw_sign,
+        )
 
         if instant_reverse:
             self.current_cmd_v = -self.reverse_speed
@@ -355,7 +363,6 @@ class StuckRecoveryManager:
         self.stroke_timer = 0.0
         self.total_recovery_timer = 0.0
         self.target_corrective_yaw = target_yaw
-        self.corrective_start_yaw = current_yaw
         self.last_corrective_yaw = current_yaw
         self.corrective_accumulated_turn = 0.0
         self.corrective_reverse_timer = 0.0
@@ -374,10 +381,15 @@ class StuckRecoveryManager:
         if front_clearance_m < 0.22:
             self.corrective_substate = "REVERSE"
             self.current_cmd_v = -self.reverse_speed
-            self.current_cmd_steer = -self.corrective_steer_dir * self.steer_angle
+            self.current_cmd_steer = self.compute_reverse_steer(
+                current_yaw=current_yaw,
+                target_yaw=self.target_corrective_yaw,
+                current_v=-self.reverse_speed,
+                preferred_sign=self.corrective_steer_dir,
+            )
         else:
             self.corrective_substate = "FORWARD"
-            self.current_cmd_v = 1.20
+            self.current_cmd_v = self.forward_speed
             self.current_cmd_steer = self.corrective_steer_dir * self.steer_angle
 
     def engage_corrective_reverse(self):
@@ -411,6 +423,7 @@ class StuckRecoveryManager:
         d_straight_tof = TOF_MAX_RANGE_M
         min_l_tof = TOF_MAX_RANGE_M
         min_r_tof = TOF_MAX_RANGE_M
+        max_any_tof = 0.0
         if cached_tofs:
             if isinstance(cached_tofs, dict):
                 d_l_41 = cached_tofs.get("tof_front_left_4.1deg", TOF_MAX_RANGE_M)
@@ -422,12 +435,17 @@ class StuckRecoveryManager:
                     min_l_tof = min(l_vals)
                 if r_vals:
                     min_r_tof = min(r_vals)
+                all_vals = [float(v) for v in cached_tofs.values()]
+                if all_vals:
+                    max_any_tof = max(all_vals)
             elif isinstance(cached_tofs, (list, tuple, np.ndarray)):
                 d_straight_tof = min(cached_tofs) if len(cached_tofs) > 0 else TOF_MAX_RANGE_M
                 half = len(cached_tofs) // 2
                 if half > 0:
                     min_l_tof = float(min(cached_tofs[:half]))
                     min_r_tof = float(min(cached_tofs[half:]))
+                if len(cached_tofs) > 0:
+                    max_any_tof = float(max(cached_tofs))
 
         # 2. Project Max Steering Lock Escape Arcs onto Costmap Hazard Mask
         d_esc_l, d_esc_r, d_esc_c = self.evaluate_costmap_escape_arcs(hazard_mask, costmap_obj)
@@ -454,7 +472,6 @@ class StuckRecoveryManager:
         if self.state != StuckRecoveryState.CORRECTIVE_180:
             if self.total_recovery_timer >= RECOVERY_TOTAL_TIMEOUT_S and d_straight_tof >= self.clearance_exit_m:
                 self.state = StuckRecoveryState.NORMAL_DRIVE
-                self.stall_timer = 0.0
                 self.stroke_timer = 0.0
                 self.total_recovery_timer = 0.0
                 return False, 0.0, 0.0
@@ -462,47 +479,34 @@ class StuckRecoveryManager:
         # PHASE 1: PIVOT REVERSE ARC
         if self.state == StuckRecoveryState.PIVOT_REVERSE:
             # Stop reversing when front ToF clearance opens up (>= clearance_exit_m and not front_blocked)
+            # AND at least one other ToF sensor opens up (>= any_tof_exit_m, default 0.60m)
             front_cleared = (d_straight_tof >= self.clearance_exit_m and not front_blocked)
+            any_tof_cleared = (max_any_tof >= self.any_tof_exit_m) or (
+                cached_tofs is not None and len(cached_tofs) <= 2 and max_any_tof >= self.clearance_exit_m
+            )
             has_sufficient_clearance = (
                 self.stroke_timer >= RECOVERY_EXIT_MIN_TIME_S
                 and front_cleared
+                and any_tof_cleared
             )
             stroke_timeout = (self.stroke_timer >= RECOVERY_REVERSE_STROKE_MAX_S)
 
             if has_sufficient_clearance or stroke_timeout:
-                self.state = StuckRecoveryState.NORMAL_DRIVE
-                self.stall_timer = 0.0
+                self.state = StuckRecoveryState.DECEL_AND_CENTER
                 self.stroke_timer = 0.0
-                self.total_recovery_timer = 0.0
                 self.current_cmd_v = 0.0
                 self.current_cmd_steer = 0.0
-                return False, 0.0, 0.0
+                return True, 0.0, 0.0
 
             target_v = -self.reverse_speed
-
-            # Smart Reverse Arbitration:
-            # 1. Tightly Pinned (<= 3 cm): Physical obstacle avoidance takes priority.
-            #    Steer to pivot the front nose away from the pinned wall.
-            #    - Left tight (<= 0.03 m): steer LEFT (delta = +delta_max) so nose rotates Right.
-            #    - Right tight (<= 0.03 m): steer RIGHT (delta = -delta_max) so nose rotates Left.
-            is_left_tight = (min_l_tof <= 0.03)
-            is_right_tight = (min_r_tof <= 0.03)
-
-            if is_left_tight and (not is_right_tight or min_l_tof <= min_r_tof):
-                target_steer = +self.steer_angle
-            elif is_right_tight:
-                target_steer = -self.steer_angle
-            # 2. Free Maneuvering (> 3 cm): Steer using breadcrumb forward corridor tangent vector.
-            #    Inverted Steering Law for Reverse (v < 0):
-            #      psi_dot = (v / L) * tan(delta)
-            #      Because v < 0, steer_sign = -sign(e_psi) to guarantee negative feedback convergence.
-            elif target_breadcrumb_yaw is not None:
-                target_heading_err = wrap_to_pi(target_breadcrumb_yaw - current_yaw)
-                steer_sign = -1.0 if target_heading_err > 0.0 else 1.0
-                target_steer = steer_sign * self.steer_angle
-            else:
-                steer_sign = self.preferred_yaw_sign if current_v > 0.1 else -self.preferred_yaw_sign
-                target_steer = steer_sign * self.steer_angle
+            target_steer = self.compute_reverse_steer(
+                min_l_tof=min_l_tof,
+                min_r_tof=min_r_tof,
+                current_yaw=current_yaw,
+                target_yaw=target_breadcrumb_yaw,
+                current_v=current_v,
+                preferred_sign=self.preferred_yaw_sign,
+            )
 
             self.current_cmd_v = target_v
             self.current_cmd_steer = target_steer
@@ -528,7 +532,6 @@ class StuckRecoveryManager:
             # Global failsafe timeout for corrective 180 (3.0s with clear front, or 4.5s unconditional)
             if (self.total_recovery_timer >= 3.0 and d_straight_tof >= 0.20) or self.total_recovery_timer >= 4.5:
                 self.state = StuckRecoveryState.NORMAL_DRIVE
-                self.stall_timer = 0.0
                 self.stroke_timer = 0.0
                 self.total_recovery_timer = 0.0
                 self.current_cmd_v = 0.0
@@ -539,14 +542,15 @@ class StuckRecoveryManager:
             if self.corrective_substate == "FORWARD":
                 # Exit condition: turned sufficiently, front ToF open (>= clearance_exit_m) and not blocked
                 front_cleared = (d_straight_tof >= self.clearance_exit_m and not front_blocked)
-                if is_turn_sufficient and front_cleared and not is_front_imminent_obstacle:
-                    self.state = StuckRecoveryState.NORMAL_DRIVE
-                    self.stall_timer = 0.0
+                any_tof_cleared = (max_any_tof >= self.any_tof_exit_m) or (
+                    cached_tofs is not None and len(cached_tofs) <= 2 and max_any_tof >= self.clearance_exit_m
+                )
+                if is_turn_sufficient and front_cleared and any_tof_cleared and not is_front_imminent_obstacle:
+                    self.state = StuckRecoveryState.DECEL_AND_CENTER
                     self.stroke_timer = 0.0
-                    self.total_recovery_timer = 0.0
                     self.current_cmd_v = 0.0
                     self.current_cmd_steer = 0.0
-                    return False, 0.0, 0.0
+                    return True, 0.0, 0.0
 
                 # Obstacle detection during forward turn:
                 # Do NOT trigger stall during forward grace period while accelerating from reverse!
@@ -555,53 +559,40 @@ class StuckRecoveryManager:
 
                 if is_wall_collision or is_stalled:
                     # Obstacle encountered: engage reverse logic to support the 180!
-                    self.corrective_substate = "REVERSE"
-                    self.corrective_reverse_timer = 0.0
-                    self.corrective_reverse_stroke_count += 1
+                    self.engage_corrective_reverse()
                     # Fall through to execute reverse command in this cycle
 
             # --- SUBSTATE B: REVERSE SUPPORT PHASE ---
             if self.corrective_substate == "REVERSE":
                 self.corrective_reverse_timer += dt
 
-                # Reverse arbitration & obstacle avoidance:
-                is_left_tight = (min_l_tof <= 0.035)
-                is_right_tight = (min_r_tof <= 0.035)
-
-                if is_left_tight and (not is_right_tight or min_l_tof <= min_r_tof):
-                    # Pivot front nose away from left wall: steer LEFT in reverse
-                    target_steer = +self.steer_angle
-                elif is_right_tight:
-                    # Pivot front nose away from right wall: steer RIGHT in reverse
-                    target_steer = -self.steer_angle
-                elif self.target_corrective_yaw is not None:
-                    # Closed-loop reverse steering toward target yaw:
-                    # In reverse (v < 0), psi_dot = (v / L) * tan(delta), so steer_sign = -sign(y_err)
-                    target_heading_err = wrap_to_pi(self.target_corrective_yaw - current_yaw)
-                    steer_sign = -1.0 if target_heading_err > 0.0 else 1.0
-                    target_steer = steer_sign * self.steer_angle
-                else:
-                    # 3-point turn kinematics: reverse opposite to forward steer dir
-                    target_steer = -self.corrective_steer_dir * self.steer_angle
-
                 target_v = -self.reverse_speed
+                target_steer = self.compute_reverse_steer(
+                    min_l_tof=min_l_tof,
+                    min_r_tof=min_r_tof,
+                    current_yaw=current_yaw,
+                    target_yaw=self.target_corrective_yaw,
+                    current_v=current_v,
+                    preferred_sign=self.corrective_steer_dir,
+                )
 
                 # Check if reverse has created enough front clearance or reached stroke limit
                 front_cleared = (d_straight_tof >= self.clearance_exit_m and not front_blocked)
+                any_tof_cleared = (max_any_tof >= self.any_tof_exit_m) or (
+                    cached_tofs is not None and len(cached_tofs) <= 2 and max_any_tof >= self.clearance_exit_m
+                )
                 has_min_reverse_time = (self.corrective_reverse_timer >= RECOVERY_EXIT_MIN_TIME_S)
                 reverse_timeout = (self.corrective_reverse_timer >= RECOVERY_REVERSE_STROKE_MAX_S)
 
                 # Did reverse pivot itself complete alignment?
-                if is_turn_sufficient and front_cleared and not is_front_imminent_obstacle:
-                    self.state = StuckRecoveryState.NORMAL_DRIVE
-                    self.stall_timer = 0.0
+                if is_turn_sufficient and front_cleared and any_tof_cleared and not is_front_imminent_obstacle:
+                    self.state = StuckRecoveryState.DECEL_AND_CENTER
                     self.stroke_timer = 0.0
-                    self.total_recovery_timer = 0.0
                     self.current_cmd_v = 0.0
                     self.current_cmd_steer = 0.0
-                    return False, 0.0, 0.0
+                    return True, 0.0, 0.0
 
-                if (front_cleared and has_min_reverse_time) or reverse_timeout:
+                if (front_cleared and any_tof_cleared and has_min_reverse_time) or reverse_timeout:
                     # Reverse clearance achieved! Switch back to forward 180 arc
                     self.corrective_substate = "FORWARD"
                     self.stroke_timer = 0.0
@@ -613,7 +604,7 @@ class StuckRecoveryManager:
                         self.corrective_steer_dir = 1.0 if diff_arc > 0.0 else -1.0
                         self.preferred_yaw_sign = self.corrective_steer_dir
 
-                    target_v = 1.20
+                    target_v = self.forward_speed
                     target_steer = self.corrective_steer_dir * self.steer_angle
                     self.current_cmd_v = target_v
                     self.current_cmd_steer = target_steer
@@ -624,20 +615,37 @@ class StuckRecoveryManager:
                 return True, self.current_cmd_v, self.current_cmd_steer
 
             # Default forward execution in Substate A:
-            target_v = 1.20
+            target_v = self.forward_speed
             target_steer = self.corrective_steer_dir * self.steer_angle
             self.current_cmd_v = target_v
             self.current_cmd_steer = target_steer
             return True, self.current_cmd_v, self.current_cmd_steer
 
-        # PHASE 3: DECELERATE SPEED TO 0 WHILE CENTERING SERVO (Direct Handshake fallback)
+        # PHASE 3: DECELERATE SPEED TO 0 WHILE CENTERING SERVO
         elif self.state == StuckRecoveryState.DECEL_AND_CENTER:
-            self.state = StuckRecoveryState.NORMAL_DRIVE
-            self.stall_timer = 0.0
-            self.stroke_timer = 0.0
-            self.total_recovery_timer = 0.0
+            self.stroke_timer += dt
+            self.total_recovery_timer += dt
             self.current_cmd_v = 0.0
-            self.current_cmd_steer = 0.0
-            return False, 0.0, 0.0
+
+            # Slew commanded steering toward 0.0 radians at physical servo slew rate
+            dsteer_step = self.servo_slew_rad_s * dt
+            if abs(self.current_cmd_steer) <= dsteer_step:
+                self.current_cmd_steer = 0.0
+            else:
+                self.current_cmd_steer -= math.copysign(dsteer_step, self.current_cmd_steer)
+
+            # Wait until steering physically and commanded gets to 0.0
+            is_centered = (abs(active_steer) <= 0.04) and (abs(self.current_cmd_steer) <= 0.02)
+            phase_timeout = (self.stroke_timer >= 0.25)
+
+            if is_centered or phase_timeout:
+                self.state = StuckRecoveryState.NORMAL_DRIVE
+                self.stroke_timer = 0.0
+                self.total_recovery_timer = 0.0
+                self.current_cmd_v = 0.0
+                self.current_cmd_steer = 0.0
+                return False, 0.0, 0.0
+
+            return True, self.current_cmd_v, self.current_cmd_steer
 
         return False, 0.0, 0.0
