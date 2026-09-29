@@ -21,6 +21,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
+import numpy as np
+
 try:
     from .planner_config import (
         ANTI_WRONG_WAY_MODE,
@@ -37,6 +39,9 @@ try:
         AWW_CORRECTIVE_180_STEER_RAD,
         AWW_HISTORY_WINDOW_S,
         AWW_LOOKAHEAD_M,
+        GRID_X_MIN,
+        GRID_Y_MIN,
+        GRID_RES,
     )
 except ImportError:
     try:
@@ -55,10 +60,13 @@ except ImportError:
             AWW_CORRECTIVE_180_STEER_RAD,
             AWW_HISTORY_WINDOW_S,
             AWW_LOOKAHEAD_M,
+            GRID_X_MIN,
+            GRID_Y_MIN,
+            GRID_RES,
         )
     except ImportError:
         ANTI_WRONG_WAY_MODE = "DISABLED"
-        AWW_BREADCRUMB_LOOKBACK_M = 4.0
+        AWW_BREADCRUMB_LOOKBACK_M = 8.0
         AWW_BREADCRUMB_SPACING_M = 0.05
         AWW_CORRIDOR_HALF_WIDTH_M = 0.25
         AWW_REVERSE_CONE_ANGLE_DEG = 45.0
@@ -71,6 +79,9 @@ except ImportError:
         AWW_CORRECTIVE_180_STEER_RAD = 0.60
         AWW_HISTORY_WINDOW_S = 3.0
         AWW_LOOKAHEAD_M = 1.0
+        GRID_X_MIN = -1.25
+        GRID_Y_MIN = 0.00
+        GRID_RES = 0.010
 
 
 class WrongWayOptionMode(str, Enum):
@@ -98,6 +109,7 @@ class Breadcrumb:
     yaw: float
     v: float
     timestamp: float
+    s_dist: float = 0.0
 
 
 @dataclass
@@ -110,6 +122,7 @@ class WrongWayStatus:
     turning_radius_m: float = 999.0
     lateral_separation_m: float = 0.0
     overlap_score: float = 0.0
+    sightline_rays: List[Dict[str, Any]] = field(default_factory=list)
 
 
 # ==============================================================================
@@ -118,12 +131,16 @@ class WrongWayStatus:
 class BreadcrumbWatchdog:
     """
     Option 1: Maintains a dead-reckoned trail of recent vehicle positions.
-    Keeps a rolling history (AWW_HISTORY_WINDOW_S) so closed-loop track laps do not overlap.
-    When looking forward after a turn or backup, casts a test point (AWW_LOOKAHEAD_M) ahead:
-    - If facing directly opposite to the historical path within corridor tolerance,
-      flags an in-lane wrong-way reversal.
-    - If confirmed, commands an immediate second 180 pivot to point back into open forward flow.
+    Evaluates Line-of-Sight (LOS) 2D Bresenham raycasting against the inflated costmap
+    (hazard_mask) to confirm in-corridor wrong-way reversals while rejecting adjacent-lane
+    track hairpins separated by walls.
     """
+
+    # Speed clamp range for dynamic window calculation:
+    #   below V_MIN the window stops growing (avoids infinite duration at standstill)
+    #   above V_MAX the window stops shrinking (maintains minimum coverage at high speed)
+    _V_MIN_MPS: float = 0.20   # m/s  – slowest speed used in t = d/v
+    _V_MAX_MPS: float = 3.00   # m/s  – fastest speed used in t = d/v
 
     def __init__(
         self,
@@ -135,16 +152,17 @@ class BreadcrumbWatchdog:
         max_history_s: float = AWW_HISTORY_WINDOW_S,
         lookahead_m: float = AWW_LOOKAHEAD_M,
     ):
-        self.lookback_m = lookback_m
+        self.lookback_m = max(8.0, lookback_m)
         self.spacing_m = spacing_m
         self.corridor_half_width_m = corridor_half_width_m
         self.cone_angle_rad = math.radians(cone_angle_deg)
         self.auto_correct_180 = auto_correct_180
-        self.max_history_s = max_history_s
+        self.max_history_s = max_history_s  # initial fallback; updated dynamically per call
         self.lookahead_m = lookahead_m
 
         self.breadcrumbs: deque[Breadcrumb] = deque()
         self.total_distance_logged_m = 0.0
+        self.cumulative_dist_m = 0.0
         self.last_x: Optional[float] = None
         self.last_y: Optional[float] = None
         self.is_recovering_180 = False
@@ -153,17 +171,43 @@ class BreadcrumbWatchdog:
     def reset(self):
         self.breadcrumbs.clear()
         self.total_distance_logged_m = 0.0
+        self.cumulative_dist_m = 0.0
         self.last_x = None
         self.last_y = None
         self.is_recovering_180 = False
+        self.recovery_target_yaw = 0.0
 
-    def add_point(self, x: float, y: float, yaw: float, v: float, now_s: float):
-        # Prune points older than rolling history window (AWW_HISTORY_WINDOW_S)
-        while self.breadcrumbs and (now_s - self.breadcrumbs[0].timestamp) > self.max_history_s:
+    def add_point(
+        self,
+        x: float,
+        y: float,
+        yaw: float,
+        v: float,
+        now_s: float,
+        state: str = "DRIVE",
+        yaw_rate: float = 0.0,
+    ):
+        # Anti-Contamination Gating:
+        # Breadcrumbs are only recorded during valid forward racing (state == NORMAL_DRIVE/DRIVE,
+        # v >= 0.25 m/s, and |yaw_rate| <= 3.5 rad/s).
+        # Trail additions freeze during spins, collisions, or reverse maneuvers.
+        if (state not in ("DRIVE", "NORMAL_DRIVE")) or v < 0.25 or abs(yaw_rate) > 3.5:
+            return
+
+        # Dynamic history window based on speed
+        speed = max(self._V_MIN_MPS, min(abs(v), self._V_MAX_MPS))
+        effective_lookback = max(self.lookback_m, 8.0)
+        self.max_history_s = effective_lookback / speed
+
+        # Prune points older than dynamic rolling history window or exceeding max spatial lookback
+        while self.breadcrumbs and (
+            (now_s - self.breadcrumbs[0].timestamp) > self.max_history_s
+            or (self.cumulative_dist_m - self.breadcrumbs[0].s_dist) > effective_lookback
+        ):
             self.breadcrumbs.popleft()
 
         if self.last_x is None:
-            self.breadcrumbs.append(Breadcrumb(x, y, yaw, v, now_s))
+            self.breadcrumbs.append(Breadcrumb(x, y, yaw, v, now_s, s_dist=self.cumulative_dist_m))
             self.last_x = x
             self.last_y = y
             return
@@ -173,78 +217,157 @@ class BreadcrumbWatchdog:
         dist = math.hypot(dx, dy)
 
         if dist >= self.spacing_m:
-            self.breadcrumbs.append(Breadcrumb(x, y, yaw, v, now_s))
+            self.cumulative_dist_m += dist
             self.total_distance_logged_m += dist
+            self.breadcrumbs.append(Breadcrumb(x, y, yaw, v, now_s, s_dist=self.cumulative_dist_m))
             self.last_x = x
             self.last_y = y
 
-            # Prune points exceeding rolling time window or max buffer
-            while self.breadcrumbs and (now_s - self.breadcrumbs[0].timestamp) > self.max_history_s:
+            while self.breadcrumbs and (
+                (now_s - self.breadcrumbs[0].timestamp) > self.max_history_s
+                or (self.cumulative_dist_m - self.breadcrumbs[0].s_dist) > effective_lookback
+            ):
                 self.breadcrumbs.popleft()
+
+    @staticmethod
+    def _bresenham_raycast_clear(
+        r0: int, c0: int, r1: int, c1: int, hazard_mask: np.ndarray
+    ) -> bool:
+        """
+        Discrete 2D Bresenham raycast from (r0, c0) to (r1, c1) across hazard_mask.
+        Allows a 2-pixel tolerance at the start to clear any noise on origin cell.
+        Returns True if unobstructed (all checked cells have hazard_mask == 0).
+        """
+        h, w = hazard_mask.shape
+        dr = abs(r1 - r0)
+        dc = abs(c1 - c0)
+        sr = 1 if r0 < r1 else -1
+        sc = 1 if c0 < c1 else -1
+        err = dc - dr
+        r, c = r0, c0
+        step = 0
+
+        while True:
+            if 0 <= r < h and 0 <= c < w:
+                if step > 2:
+                    if hazard_mask[r, c] > 0:
+                        return False
+            else:
+                return False
+
+            if r == r1 and c == c1:
+                break
+
+            e2 = 2 * err
+            if e2 > -dr:
+                err -= dr
+                c += sc
+            if e2 < dc:
+                err += dc
+                r += sr
+            step += 1
+
+        return True
 
     def check_wrong_way(
         self,
         current_x: float,
         current_y: float,
         current_yaw: float,
-        lookahead_m: Optional[float] = None,
+        hazard_mask: Optional[np.ndarray] = None,
         now_s: Optional[float] = None,
-    ) -> Tuple[bool, float, float]:
+        lookahead_m: Optional[float] = None,
+        **kwargs,
+    ) -> Tuple[bool, float, float, List[Dict[str, Any]]]:
         """
-        Evaluates whether looking forward along current heading points directly
-        at the exact track corridor location the vehicle came from in reverse.
-        Returns: (is_wrong_way, overlap_score, target_recovery_yaw)
+        Line-of-Sight Raycasting on Inflated Costmap (hazard_mask).
+        Evaluates candidate breadcrumbs:
+          - Odometry gate: Delta S in [0.80 m, 8.0 m] excludes points under chassis and far laps.
+          - Spatial search envelope: Euclidean distance d in [0.40 m, 1.70 m], y_v in [0.40 m, 1.70 m],
+            forward cone |angle| <= 50 deg.
+          - Direct 2D Bresenham raycast across hazard_mask.
+          - Heading opposition check: diff >= 110 deg.
+        Returns: (is_wrong_way, confidence, target_recovery_yaw, sightline_rays)
         """
         if len(self.breadcrumbs) < 5:
-            return False, 0.0, 0.0
+            return False, 0.0, 0.0, []
 
-        target_lookahead = self.lookahead_m if lookahead_m is None else lookahead_m
-
-        # Project point forward along current vehicle heading
         cos_yaw = math.cos(current_yaw)
         sin_yaw = math.sin(current_yaw)
-        fwd_x = current_x + target_lookahead * cos_yaw
-        fwd_y = current_y + target_lookahead * sin_yaw
 
-        matching_points = 0
-        total_tested = 0
-        min_origin_dist = 999.0
+        # Origin cell in local costmap grid
+        col_0 = int(math.floor((0.0 - GRID_X_MIN) / GRID_RES + 0.5))
+        row_0 = int(math.floor((0.0 - GRID_Y_MIN) / GRID_RES + 0.5))
 
-        # Check historical breadcrumbs (strictly within the rolling history window)
+        sightline_rays: List[Dict[str, Any]] = []
+        confirmed_candidates: List[Breadcrumb] = []
+
         for bc in reversed(self.breadcrumbs):
-            if now_s is not None and (now_s - bc.timestamp) > self.max_history_s:
+            # 1. Odometry gate: Delta S in [0.80m, 8.0m]
+            delta_s = self.cumulative_dist_m - bc.s_dist
+            if not (0.80 <= delta_s <= 8.0):
                 continue
 
-            # Distance from vehicle center to breadcrumb - ignore nearby breadcrumbs (< 0.50m)
-            # so immediate local points right around the car don't trip false alarms
-            d_center = math.hypot(bc.x - current_x, bc.y - current_y)
-            if d_center < 0.50:
+            # 2. World to vehicle frame: (+Y forward, +X right)
+            dx = bc.x - current_x
+            dy = bc.y - current_y
+            xv = cos_yaw * dx + sin_yaw * dy
+            yv = -sin_yaw * dx + cos_yaw * dy
+
+            # Euclidean distance from robot origin
+            d = math.hypot(xv, yv)
+
+            # 3. Spatial search envelope:
+            # Euclidean distance d in [0.40m, 1.70m], forward yv in [0.40m, 1.70m], |angle| <= 50 deg
+            if d < 0.40 or d > 1.70 or yv < 0.40 or yv > 1.70:
                 continue
 
-            total_tested += 1
+            angle_rad = math.atan2(xv, yv)
+            if abs(angle_rad) > math.radians(50.0):
+                continue
 
-            # Distance from the forward lookahead point (1.0m ahead) to this historical breadcrumb
-            d_fwd = math.hypot(bc.x - fwd_x, bc.y - fwd_y)
-            if d_fwd < min_origin_dist:
-                min_origin_dist = d_fwd
+            # 4. Heading opposition: diff >= 110 deg
+            heading_diff = abs(wrap_to_pi(current_yaw - bc.yaw))
+            is_opposing = (heading_diff >= math.radians(110.0))
 
-            # If the forward lookahead point is within track corridor radius of the past path
-            if d_fwd <= self.corridor_half_width_m:
-                # Heading difference between current orientation and recorded breadcrumb orientation
-                heading_diff = abs(wrap_to_pi(current_yaw - bc.yaw))
-                # If headings are opposing (facing backwards down the corridor >= 110 deg)
-                if heading_diff >= math.radians(110.0):
-                    matching_points += 1
+            # 5. Raycast cell target in costmap
+            col_tgt = int(math.floor((xv - GRID_X_MIN) / GRID_RES + 0.5))
+            row_tgt = int(math.floor((yv - GRID_Y_MIN) / GRID_RES + 0.5))
 
-        if total_tested >= 3 and matching_points >= 1:
-            overlap_score = min(1.0, float(matching_points) / 3.0)
-            if overlap_score >= 0.50 or min_origin_dist <= 0.20:
-                # Confirmed: the point 0.5m forward is where we came from!
-                # Target recovery yaw is spinning 180 back to original forward racing flow
-                target_yaw = wrap_to_pi(current_yaw + math.pi)
-                return True, max(overlap_score, 0.85), target_yaw
+            if hazard_mask is not None:
+                h_m, w_m = hazard_mask.shape
+                if 0 <= row_tgt < h_m and 0 <= col_tgt < w_m:
+                    is_clear = self._bresenham_raycast_clear(row_0, col_0, row_tgt, col_tgt, hazard_mask)
+                else:
+                    is_clear = False
+            else:
+                is_clear = True
 
-        return False, 0.0, 0.0
+            ray_info = {
+                "x": float(bc.x),
+                "y": float(bc.y),
+                "xv": float(xv),
+                "yv": float(yv),
+                "dist": float(d),
+                "delta_s": float(delta_s),
+                "clear": bool(is_clear),
+                "opposing": bool(is_opposing),
+                "heading_diff_deg": float(math.degrees(heading_diff)),
+                "target_yaw": float(bc.yaw),
+            }
+            sightline_rays.append(ray_info)
+
+            if is_clear and is_opposing:
+                confirmed_candidates.append(bc)
+
+        if confirmed_candidates:
+            count_confirmed = len(confirmed_candidates)
+            confidence = min(1.0, 0.70 + 0.10 * count_confirmed)
+            # Corridor tangent vector of closest confirmed breadcrumb
+            target_recovery_yaw = confirmed_candidates[0].yaw
+            return True, confidence, target_recovery_yaw, sightline_rays
+
+        return False, 0.0, 0.0, sightline_rays
 
 
 # ==============================================================================
@@ -569,6 +692,9 @@ class AntiWrongWayWatchdog:
         yaw_rate: float,
         cached_tofs: Optional[Any] = None,
         now_s: Optional[float] = None,
+        hazard_mask: Optional[np.ndarray] = None,
+        state: str = "DRIVE",
+        **kwargs,
     ) -> WrongWayStatus:
         """
         Executes one update step of the active anti-wrong-way detection mode.
@@ -581,8 +707,8 @@ class AntiWrongWayWatchdog:
             self.consecutive_ww_steps = 0
             return self.latest_status
 
-        # 1. Option 1: Breadcrumb logging (rolling 5s history)
-        self.breadcrumb_watchdog.add_point(x, y, yaw, v_est, now_s)
+        # 1. Option 1: Breadcrumb logging with anti-contamination gating
+        self.breadcrumb_watchdog.add_point(x, y, yaw, v_est, now_s, state=state, yaw_rate=yaw_rate)
 
         # 2. Option 3: Directional flow stamping (when moving forward)
         if v_est > 0.30:
@@ -593,7 +719,10 @@ class AntiWrongWayWatchdog:
 
         # Evaluate based on active mode
         if self.mode == WrongWayOptionMode.OPTION_1_BREADCRUMB:
-            is_ww, score, target_yaw = self.breadcrumb_watchdog.check_wrong_way(x, y, yaw, lookahead_m=AWW_LOOKAHEAD_M, now_s=now_s)
+            is_ww, score, target_yaw, rays = self.breadcrumb_watchdog.check_wrong_way(
+                x, y, yaw, hazard_mask=hazard_mask, now_s=now_s
+            )
+            status.sightline_rays = rays
             if is_ww:
                 status.is_wrong_way = True
                 status.confidence = score
@@ -635,8 +764,10 @@ class AntiWrongWayWatchdog:
 
         elif self.mode == WrongWayOptionMode.OPTION_COMBINED_HYBRID:
             # Multi-layered ensemble:
-            # 1. Option 1 overlap check (configured lookahead)
-            ww_bc, score_bc, target_yaw_bc = self.breadcrumb_watchdog.check_wrong_way(x, y, yaw, lookahead_m=AWW_LOOKAHEAD_M, now_s=now_s)
+            # 1. Option 1 overlap & LOS raycast check
+            ww_bc, score_bc, target_yaw_bc, rays_bc = self.breadcrumb_watchdog.check_wrong_way(
+                x, y, yaw, hazard_mask=hazard_mask, now_s=now_s
+            )
             # 2. Option 4 lateral separation check
             ww_lat, lat_m = self.lateral_watchdog.update(x, y, yaw, yaw_rate)
             # 3. Option 2 kinematic check
@@ -649,6 +780,7 @@ class AntiWrongWayWatchdog:
             status.turning_radius_m = r_m
             status.lateral_separation_m = lat_m
             status.overlap_score = score_bc
+            status.sightline_rays = rays_bc
 
             if ww_bc:
                 status.is_wrong_way = True
@@ -697,6 +829,7 @@ class AntiWrongWayWatchdog:
         v_est: float,
         yaw_rate: float,
         now_s: Optional[float] = None,
+        hazard_mask: Optional[np.ndarray] = None,
     ) -> Dict[str, Any]:
         """
         Generates rich visual and narrative telemetry for every option simultaneously
@@ -705,13 +838,15 @@ class AntiWrongWayWatchdog:
         if now_s is None:
             now_s = time.time()
 
-        # Option 1: Breadcrumb
-        ww_bc, score_bc, target_yaw_bc = self.breadcrumb_watchdog.check_wrong_way(x, y, yaw, lookahead_m=AWW_LOOKAHEAD_M)
+        # Option 1: Breadcrumb LOS raycast
+        ww_bc, score_bc, target_yaw_bc, rays_bc = self.breadcrumb_watchdog.check_wrong_way(
+            x, y, yaw, hazard_mask=hazard_mask, now_s=now_s
+        )
         n_bc = len(self.breadcrumb_watchdog.breadcrumbs)
         thought_bc = (
-            f"Trail has {n_bc} points ({AWW_HISTORY_WINDOW_S:.1f}s window). Point {AWW_LOOKAHEAD_M:.1f}m forward matches origin path with overlap score {score_bc:.2f} (>= 0.50 threshold) -> IN-LANE WRONG-WAY DETECTED! Action: Spin 180° back."
+            f"Trail has {n_bc} points ({self.breadcrumb_watchdog.lookback_m:.1f}m window). Unobstructed line-of-sight to opposing trail confirmed (score: {score_bc:.2f}) -> IN-LANE WRONG-WAY DETECTED! Action: Spin 180° back."
             if ww_bc else
-            f"Trail has {n_bc} points ({AWW_HISTORY_WINDOW_S:.1f}s window). Point {AWW_LOOKAHEAD_M:.1f}m forward overlap score: {score_bc:.2f} (< 0.50 threshold). Heading towards open track."
+            f"Trail has {n_bc} points ({self.breadcrumb_watchdog.lookback_m:.1f}m window). Raycast scan: forward corridor is clear or adjacent lane blocked by wall. Heading towards open track."
         )
 
         # Option 2: Kinematic Arc
@@ -755,11 +890,12 @@ class AntiWrongWayWatchdog:
             "action": self.latest_status.corrective_action,
             "target_yaw": round(float(self.latest_status.target_recovery_yaw or 0.0), 3),
             "opt1": {
-                "name": "Option 1: Breadcrumb Trail Overlap",
+                "name": "Option 1: Breadcrumb Trail Overlap & LOS Raycast",
                 "score": round(float(score_bc), 3),
                 "is_tripped": bool(ww_bc),
                 "trail_count": n_bc,
                 "target_yaw": round(float(target_yaw_bc), 3),
+                "sightlines": rays_bc,
                 "thought": thought_bc,
             },
             "opt2": {

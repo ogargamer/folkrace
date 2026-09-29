@@ -195,18 +195,6 @@ def run_racing_studio(robot: any, vehicle: FolkraceVehicle) -> None:
                     elif k == ord('1'):
                         vehicle.watchdog.set_mode("OPTION_1_BREADCRUMB")
                         print("\n>>> [KEYBOARD] AWW WATCHDOG: OPTION_1_BREADCRUMB", flush=True)
-                    elif k == ord('2'):
-                        vehicle.watchdog.set_mode("OPTION_2_KINEMATIC_ARC")
-                        print("\n>>> [KEYBOARD] AWW WATCHDOG: OPTION_2_KINEMATIC_ARC", flush=True)
-                    elif k == ord('3'):
-                        vehicle.watchdog.set_mode("OPTION_3_FLOW_COSTMAP")
-                        print("\n>>> [KEYBOARD] AWW WATCHDOG: OPTION_3_FLOW_COSTMAP", flush=True)
-                    elif k == ord('4'):
-                        vehicle.watchdog.set_mode("OPTION_4_LATERAL_SEPARATION")
-                        print("\n>>> [KEYBOARD] AWW WATCHDOG: OPTION_4_LATERAL_SEPARATION", flush=True)
-                    elif k == ord('5'):
-                        vehicle.watchdog.set_mode("OPTION_COMBINED_HYBRID")
-                        print("\n>>> [KEYBOARD] AWW WATCHDOG: OPTION_COMBINED_HYBRID", flush=True)
                     elif k == ord('0'):
                         vehicle.watchdog.set_mode("DISABLED")
                         print("\n>>> [KEYBOARD] AWW WATCHDOG: DISABLED", flush=True)
@@ -246,7 +234,7 @@ def run_racing_studio(robot: any, vehicle: FolkraceVehicle) -> None:
                 elif c == "toggle_back_pillar":
                     toggle_back_pillar()
                 elif c == "set_watchdog_mode":
-                    mode_name = cmd_pkt.get("mode", "OPTION_COMBINED_HYBRID")
+                    mode_name = cmd_pkt.get("mode", "OPTION_1_BREADCRUMB")
                     vehicle.watchdog.set_mode(mode_name)
                     print(f"[Racing Studio] Watchdog mode set to: {mode_name}", flush=True)
                 elif c == "reset_robot":

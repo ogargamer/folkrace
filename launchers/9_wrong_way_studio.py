@@ -14,11 +14,7 @@
   Interactive Controls (via GUI or Webots 3D view):
     [F] : Toggle FRONT PILLAR (Raise / Lower obstacle)
     [B] : Toggle BACK PILLAR  (Raise / Lower obstacle)
-    [1] : Option 1 - Breadcrumb Overlap & Auto 180 Correction
-    [2] : Option 2 - Kinematic Minimum Arc Radius Filter (R >= R_min)
-    [3] : Option 3 - Directional Flow Costmap Stamping
-    [4] : Option 4 - Lateral Corridor Separation Watchdog
-    [5] : Option Combined Hybrid (All layers active)
+    [1] : Breadcrumb Line-of-Sight Overlap & Auto 180 Correction
     [0] : Disable Watchdog (Pass-through)
     [R] : Reset Robot Pose
 

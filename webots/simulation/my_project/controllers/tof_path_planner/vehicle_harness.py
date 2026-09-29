@@ -652,43 +652,70 @@ class FolkraceVehicle:
                     yaw_rate=self.cached_yaw_rate,
                     cached_tofs=tof_readings,
                     now_s=sim_time,
+                    hazard_mask=enlarged_hazard_mask,
+                    state=self.recovery_manager.state,
                 )
                 self.last_aww_status = aww_status
 
-                # Trigger CORRECTIVE_180 if wrong-way is confirmed and not already performing corrective turn
-                if aww_status.is_wrong_way and self.recovery_manager.state != StuckRecoveryState.CORRECTIVE_180:
+                # Trigger CORRECTIVE_180 if in NORMAL_DRIVE and wrong-way is confirmed.
+                # Chooses to do the 180 towards the more open side (costmap escape arcs + ToFs).
+                # Supported by reverse logic if front clearance is tight (< 0.22m) or obstacle hit.
+                if (
+                    aww_status.is_wrong_way
+                    and self.recovery_manager.state == StuckRecoveryState.NORMAL_DRIVE
+                ):
                     def wrap_to_pi(a):
                         return math.atan2(math.sin(a), math.cos(a))
                     tgt_yaw = aww_status.target_recovery_yaw if aww_status.target_recovery_yaw is not None else wrap_to_pi(gyaw_curr + math.pi)
                     yaw_diff = wrap_to_pi(tgt_yaw - gyaw_curr)
-                    steer_sign = 1.0 if yaw_diff >= 0.0 else -1.0
+                    arc_cl = self.recovery_manager.evaluate_costmap_escape_arcs(hazard_mask, self.costmap)
+                    open_side = self.recovery_manager.resolve_open_side(
+                        arc_clearance=arc_cl,
+                        cached_tofs=tof_readings,
+                        heading_err=yaw_diff,
+                    )
+                    min_fwd_clearance = min(tof_readings.values()) if tof_readings else 1.0
                     self.recovery_manager.trigger_corrective_180(
                         target_yaw=tgt_yaw,
-                        steer_sign=steer_sign,
+                        steer_sign=open_side,
                         current_yaw=gyaw_curr,
+                        arc_clearance=arc_cl,
+                        cached_tofs=tof_readings,
+                        front_clearance_m=min_fwd_clearance,
                     )
             else:
                 gx_curr, gy_curr, gyaw_curr = self.get_ground_truth_pose()
                 self.last_aww_status = None
 
             # Shield Reverse Trigger: if all 5-step evasion arcs (Step-0 + Step-2) are blocked
-            # → pre-trigger emergency recovery before the normal update evaluates costmap arcs
+            # → pre-trigger emergency recovery before the normal update evaluates costmap arcs.
+            # ONLY triggers in NORMAL_DRIVE when physical front clearance is actually blocked (< 0.20m).
+            # When already in recovery (PIVOT_REVERSE or CORRECTIVE_180), recovery_manager is in full control!
             _shield_cur = plan_res.get("shield", {})
-            if _shield_cur.get("reverse_suggested", False) and \
-               self.recovery_manager.state == StuckRecoveryState.NORMAL_DRIVE:
+            min_fwd_dist = min(tof_readings.values()) if tof_readings else 1.0
+            if (
+                _shield_cur.get("reverse_suggested", False)
+                and self.recovery_manager.state == StuckRecoveryState.NORMAL_DRIVE
+                and min_fwd_dist < 0.20
+            ):
                 _arc_cl = self.recovery_manager.evaluate_costmap_escape_arcs(hazard_mask, self.costmap)
                 _side = self.recovery_manager.resolve_escape_steer_dir(
                     arc_clearance=_arc_cl, heading_err=float(theta_g)
                 )
+                _target_bc_yaw = self.last_aww_status.target_recovery_yaw if self.last_aww_status else None
                 self.recovery_manager.trigger_emergency_recovery(
                     heading_err=float(theta_g),
                     steer_dir=_side,
                     current_v=self.v_est,
                     current_steer=current_physical_steer,
                     instant_reverse=True,
+                    target_breadcrumb_yaw=_target_bc_yaw,
+                    current_yaw=gyaw_curr,
+                    front_clearance_m=min_fwd_dist,
                 )
 
             # Recovery Manager at 60 Hz (Kinematic Escape Arc Costmap Evaluation & CORRECTIVE_180)
+            target_breadcrumb_yaw = self.last_aww_status.target_recovery_yaw if self.last_aww_status else None
             is_recovering, rec_v, rec_steer = self.recovery_manager.update(
                 dt=DT_PLANNER,
                 current_v=self.v_est,
@@ -699,6 +726,7 @@ class FolkraceVehicle:
                 hazard_mask=hazard_mask,
                 costmap_obj=self.costmap,
                 current_yaw=gyaw_curr,
+                target_breadcrumb_yaw=target_breadcrumb_yaw,
             )
 
             if override_speed is not None:
@@ -821,7 +849,10 @@ class FolkraceVehicle:
             v_est=self.v_est,
             yaw_rate=self.cached_yaw_rate,
             now_s=sim_time,
+            hazard_mask=self.last_enlarged_hazard,
         )
+        aww_detailed["corrective_substate"] = getattr(self.recovery_manager, "corrective_substate", "FORWARD")
+        aww_detailed["corrective_steer_dir"] = getattr(self.recovery_manager, "corrective_steer_dir", 1.0)
 
         if not full_telemetry:
             telemetry = {

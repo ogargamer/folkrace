@@ -258,8 +258,8 @@ RECOVERY_ARC_LOOKAHEAD_M = 0.146     # meters length of kinematic escape arcs pr
 # ==============================================================================
 # 8. ANTI-WRONG-WAY & U-TURN DISCRIMINATION WATCHDOG
 # ==============================================================================
-ANTI_WRONG_WAY_MODE = "DISABLED"
-AWW_BREADCRUMB_LOOKBACK_M = 4.0      # meters of recent historical path retained
+ANTI_WRONG_WAY_MODE = "OPTION_1_BREADCRUMB"
+AWW_BREADCRUMB_LOOKBACK_M = 8.0      # meters of recent historical path retained
 AWW_BREADCRUMB_SPACING_M = 0.05      # meters minimum spatial spacing between breadcrumb nodes
 AWW_CORRIDOR_HALF_WIDTH_M = 0.25     # meters corridor half-width threshold for path overlap
 AWW_REVERSE_CONE_ANGLE_DEG = 45.0    # degrees heading divergence threshold for opposing alignment

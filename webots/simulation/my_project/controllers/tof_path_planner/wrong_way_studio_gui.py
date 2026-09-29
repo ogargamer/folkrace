@@ -70,6 +70,8 @@ class WrongWayRadarCanvas(QtWidgets.QWidget):
         self.is_wrong_way = bool(aww_data.get("is_wrong_way", False))
         self.trail = aww_data.get("trail", [])
 
+        opt1 = aww_data.get("opt1", {})
+        self.sightlines = opt1.get("sightlines", [])
         opt2 = aww_data.get("opt2", {})
         self.turn_radius_m = float(opt2.get("radius_m", 0.50))
         self.min_radius_m = float(opt2.get("min_radius_m", 0.32))
@@ -129,6 +131,27 @@ class WrongWayRadarCanvas(QtWidgets.QWidget):
                 p2 = self.world_to_screen(self.trail[i+1][0], self.trail[i+1][1], cx, cy, scale)
                 if (-50 <= p1.x() <= w + 50 or -50 <= p2.x() <= w + 50) and (-50 <= p1.y() <= h + 50 or -50 <= p2.y() <= h + 50):
                     painter.drawLine(p1, p2)
+
+        # 4b. Line-of-Sight Raycasts to Candidate Breadcrumbs
+        if getattr(self, "sightlines", None):
+            for ray in self.sightlines:
+                rx_w = ray.get("x", 0.0)
+                ry_w = ray.get("y", 0.0)
+                is_clear = ray.get("clear", True)
+                is_opp = ray.get("opposing", False)
+                p_tgt = self.world_to_screen(rx_w, ry_w, cx, cy, scale)
+                if is_clear and is_opp:
+                    # Unobstructed opposing candidate: neon cyan/green line
+                    painter.setPen(QPen(QColor(0, 255, 180, 200), 2.0, Qt.SolidLine))
+                    painter.drawLine(QPointF(cx, cy), p_tgt)
+                    painter.setBrush(QBrush(QColor(0, 255, 180)))
+                    painter.drawEllipse(p_tgt, 3.5, 3.5)
+                elif not is_clear:
+                    # Blocked by wall/obstacle: dark red dashed line with square marker
+                    painter.setPen(QPen(QColor(255, 60, 60, 100), 1.2, Qt.DashLine))
+                    painter.drawLine(QPointF(cx, cy), p_tgt)
+                    painter.setBrush(QBrush(QColor(255, 60, 60, 160)))
+                    painter.drawRect(QRectF(p_tgt.x() - 2.5, p_tgt.y() - 2.5, 5, 5))
 
         # 5. Front & Back Pillar Markers
         self._draw_pillar_marker(painter, FRONT_PILLAR_WORLD_POS[0], FRONT_PILLAR_WORLD_POS[1],
@@ -344,11 +367,7 @@ class WrongWayStudioGUI(QMainWindow):
 
         self.cb_mode = QComboBox()
         self.cb_mode.addItems([
-            "OPTION_COMBINED_HYBRID",
             "OPTION_1_BREADCRUMB",
-            "OPTION_2_KINEMATIC_ARC",
-            "OPTION_3_FLOW_COSTMAP",
-            "OPTION_4_LATERAL_SEPARATION",
             "DISABLED",
         ])
         self.cb_mode.currentTextChanged.connect(self._on_mode_changed)
@@ -811,14 +830,22 @@ class WrongWayStudioGUI(QMainWindow):
         curr_yaw = pose[2] if len(pose) > 2 else 0.0
         yaw_err_deg = math.degrees(math.atan2(math.sin(tgt_yaw - curr_yaw), math.cos(tgt_yaw - curr_yaw)))
 
-        if is_ww or action == "CORRECTIVE_180":
-            self.lbl_verdict.setText(f"🚨 WRONG-WAY DETECTED BY {det_by}! EXECUTING 180° REVERSAL")
+        is_rec_180 = (is_ww or action == "CORRECTIVE_180" or pkt.get("recovery_state") == "CORRECTIVE_180")
+        if is_rec_180:
+            c_sub = aww.get("corrective_substate", "FORWARD")
+            c_dir = "LEFT" if aww.get("corrective_steer_dir", 1.0) > 0 else "RIGHT"
+            sub_desc = f"180° REVERSAL ({c_dir} Arc - {c_sub})"
+            self.lbl_verdict.setText(f"🚨 WRONG-WAY DETECTED BY {det_by}! EXECUTING 180° REVERSAL ({c_dir})")
             self.lbl_verdict.setStyleSheet("font-size: 13px; font-weight: bold; color: #ff5252;")
-            self.lbl_action.setText(f"Action: CORRECTIVE_180 | Yaw Error to Forward Flow: {yaw_err_deg:+.1f}° | Target Yaw: {math.degrees(tgt_yaw):+.1f}°")
-            self.lbl_authority.setText("Steering Authority: MAXIMUM AUTHORITY (+-24.5° Full Reverse Arc Lock)")
-            self.lbl_authority.setStyleSheet("font-size: 11px; color: #ffd166; font-weight: bold;")
+            self.lbl_action.setText(f"Action: CORRECTIVE_180 ({c_sub}) | Dir: {c_dir} (Open Side) | Yaw Error: {yaw_err_deg:+.1f}° | Target Yaw: {math.degrees(tgt_yaw):+.1f}°")
+            if c_sub == "REVERSE":
+                self.lbl_authority.setText("Steering Authority: REVERSE SUPPORT PHASE (Backing away from obstacle / wall)")
+                self.lbl_authority.setStyleSheet("font-size: 11px; color: #ff9100; font-weight: bold;")
+            else:
+                self.lbl_authority.setText("Steering Authority: MAXIMUM AUTHORITY (+-24.5° Full Corrective Arc Lock)")
+                self.lbl_authority.setStyleSheet("font-size: 11px; color: #ffd166; font-weight: bold;")
             self.grp_master.setStyleSheet("QGroupBox { font-size: 12px; font-weight: bold; color: #ff5252; border: 2px solid #ff5252; border-radius: 6px; margin-top: 6px; padding-top: 10px; background-color: #2b1114; }")
-            self.chip_status[1].setText(f"180° REVERSAL ({det_by})")
+            self.chip_status[1].setText(sub_desc)
             self.chip_status[1].setStyleSheet("font-size: 12px; color: #ff5252; font-weight: bold; font-family: Consolas; border: none;")
         else:
             self.lbl_verdict.setText("🟢 ALL SYSTEMS CLEAR — FORWARD RACING")
