@@ -250,8 +250,8 @@ RECOVERY_STEER_ANGLE_RAD = MAX_STEERING_RAD # radians (~39.9 deg) parallel steer
 RECOVERY_REVERSE_SPEED_MPS = V_MIN_CRUISE # ~1.121 m/s dynamic cornering floor
 RECOVERY_STALL_CONFIRM_S = 0.15      # seconds of low forward speed before engaging recovery
 RECOVERY_FRONT_BLOCKED_M = 0.25      # meters front clearance threshold to detect forward stall
-RECOVERY_REVERSE_STROKE_MAX_S = 0.6 # seconds maximum reverse stroke failsafe
-RECOVERY_TOTAL_TIMEOUT_S = 0.8      # seconds maximum total recovery duration before forced exit
+RECOVERY_REVERSE_STROKE_MAX_S = 1.0 # seconds maximum reverse stroke failsafe
+RECOVERY_TOTAL_TIMEOUT_S = 1.2      # seconds maximum total recovery duration before forced exit
 RECOVERY_CLEARANCE_EXIT_M = 0.25     # meters (25cm) minimum forward clearance to conclude reverse
 RECOVERY_ANY_TOF_EXIT_M = 0.60       # meters (60cm) minimum clearance on at least one ToF sensor to conclude reverse
 RECOVERY_EXIT_MIN_TIME_S = 0.0       # seconds minimum recovery stroke time before clearance check
@@ -275,4 +275,9 @@ AWW_CORRECTIVE_180_SPEED_MPS = V_MIN_CRUISE  # m/s target speed during correctiv
 AWW_CORRECTIVE_180_STEER_RAD = 0.60  # radians steering angle during corrective 180 spin
 AWW_HISTORY_WINDOW_S = 3.5           # seconds sliding time window for trajectory history
 AWW_LOOKAHEAD_M = 1.0                # meters forward projection for wrong-way checking
+
+# 9. Narrow-Cone Early Gap Exit Sentry
+AWW_EARLY_EXIT_MIN_GAP_M = 1.0        # meters minimum scouted gap distance to qualify as long-path early exit
+AWW_EARLY_EXIT_CONE_DEG = 20.0        # degrees total narrow cone width (±10 deg) oriented along candidate gap vector
+AWW_EARLY_EXIT_OPPOSING_DEG = 110.0   # degrees heading divergence threshold for opposing breadcrumbs in gap corridor
 

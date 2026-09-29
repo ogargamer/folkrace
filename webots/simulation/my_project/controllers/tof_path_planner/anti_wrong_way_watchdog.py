@@ -39,6 +39,9 @@ try:
         AWW_CORRECTIVE_180_STEER_RAD,
         AWW_HISTORY_WINDOW_S,
         AWW_LOOKAHEAD_M,
+        AWW_EARLY_EXIT_MIN_GAP_M,
+        AWW_EARLY_EXIT_CONE_DEG,
+        AWW_EARLY_EXIT_OPPOSING_DEG,
         GRID_X_MIN,
         GRID_Y_MIN,
         GRID_RES,
@@ -60,6 +63,9 @@ except ImportError:
             AWW_CORRECTIVE_180_STEER_RAD,
             AWW_HISTORY_WINDOW_S,
             AWW_LOOKAHEAD_M,
+            AWW_EARLY_EXIT_MIN_GAP_M,
+            AWW_EARLY_EXIT_CONE_DEG,
+            AWW_EARLY_EXIT_OPPOSING_DEG,
             GRID_X_MIN,
             GRID_Y_MIN,
             GRID_RES,
@@ -79,6 +85,9 @@ except ImportError:
         AWW_CORRECTIVE_180_STEER_RAD = 0.60
         AWW_HISTORY_WINDOW_S = 3.0
         AWW_LOOKAHEAD_M = 1.0
+        AWW_EARLY_EXIT_MIN_GAP_M = 1.0
+        AWW_EARLY_EXIT_CONE_DEG = 20.0
+        AWW_EARLY_EXIT_OPPOSING_DEG = 110.0
         GRID_X_MIN = -1.25
         GRID_Y_MIN = 0.00
         GRID_RES = 0.010
@@ -123,6 +132,8 @@ class WrongWayStatus:
     lateral_separation_m: float = 0.0
     overlap_score: float = 0.0
     sightline_rays: List[Dict[str, Any]] = field(default_factory=list)
+    early_exit_gap: Optional[Tuple[float, float]] = None
+    early_exit_found: bool = False
 
 
 # ==============================================================================
@@ -368,6 +379,147 @@ class BreadcrumbWatchdog:
             return True, confidence, target_recovery_yaw, sightline_rays
 
         return False, 0.0, 0.0, sightline_rays
+
+    def check_gap_channel(
+        self,
+        current_x: float,
+        current_y: float,
+        current_yaw: float,
+        gap_xg: float,
+        gap_yg: float,
+        cone_deg: float = AWW_EARLY_EXIT_CONE_DEG,
+        opposing_deg: float = AWW_EARLY_EXIT_OPPOSING_DEG,
+        min_gap_dist: float = AWW_EARLY_EXIT_MIN_GAP_M,
+        max_reach_margin_m: float = 0.80,
+    ) -> Tuple[bool, int, List[Dict[str, Any]]]:
+        """
+        Narrow-Cone Early Gap Exit Sentry (Spatial Channel Filter).
+        Evaluates whether a narrow cone centered directly along the scouted gap vector (gap_xg, gap_yg)
+        contains historical breadcrumbs with opposing heading (diff >= opposing_deg).
+
+        Key Requirements & Architecture:
+          - Target-Centered Narrow Cone: The narrow cone (±cone_deg/2, default ±10 deg = 20 deg total)
+            is oriented along the vector towards (gap_xg, gap_yg) in the vehicle frame, NOT the robot's heading.
+          - Obstacle Immunity: Purely spatial/geometric without Bresenham raycasting against the hazard mask.
+            Obstacles, pillars, or opponent robots in the line of sight will not hide or blind the sentry
+            to historical opposing breadcrumbs in that channel.
+          - Odometry Gate: Requires Delta S >= 0.80m to exclude breadcrumbs under the chassis.
+
+        Returns:
+          (has_opposing_breadcrumbs, opposing_count, matching_breadcrumbs)
+          - has_opposing_breadcrumbs: True if opposing breadcrumbs lie within the gap channel (wrong-way path).
+                                      False if channel is completely clear of opposing breadcrumbs.
+        """
+        if len(self.breadcrumbs) < 5:
+            return False, 0, []
+
+        gap_dist = math.hypot(gap_xg, gap_yg)
+        gap_angle_v = math.atan2(gap_xg, gap_yg)
+        half_cone_rad = math.radians(cone_deg / 2.0)
+        opposing_rad = math.radians(opposing_deg)
+
+        cos_yaw = math.cos(current_yaw)
+        sin_yaw = math.sin(current_yaw)
+
+        # Breadcrumbs are evaluated up to the gap distance plus corridor reach margin
+        max_eval_dist = max(gap_dist + max_reach_margin_m, 2.50)
+
+        matching_bcs: List[Dict[str, Any]] = []
+
+        for bc in reversed(self.breadcrumbs):
+            # 1. Odometry gate: Delta S >= 0.80m excludes points under chassis and recent travel
+            delta_s = self.cumulative_dist_m - bc.s_dist
+            if delta_s < 0.80:
+                continue
+
+            # 2. Transform breadcrumb to vehicle frame (+Y forward, +X right)
+            dx = bc.x - current_x
+            dy = bc.y - current_y
+            xv = cos_yaw * dx + sin_yaw * dy
+            yv = -sin_yaw * dx + cos_yaw * dy
+
+            d_bc = math.hypot(xv, yv)
+            if d_bc < 0.30 or d_bc > max_eval_dist:
+                continue
+
+            # 3. Narrow cone angular divergence relative to candidate gap vector
+            bc_angle_v = math.atan2(xv, yv)
+            angle_diff_from_gap = abs(wrap_to_pi(bc_angle_v - gap_angle_v))
+            if angle_diff_from_gap > half_cone_rad:
+                continue
+
+            # 4. Heading opposition check
+            heading_diff = abs(wrap_to_pi(current_yaw - bc.yaw))
+            if heading_diff >= opposing_rad:
+                matching_bcs.append({
+                    "x": float(bc.x),
+                    "y": float(bc.y),
+                    "xv": float(xv),
+                    "yv": float(yv),
+                    "dist": float(d_bc),
+                    "gap_angle_deg": float(math.degrees(gap_angle_v)),
+                    "bc_angle_deg": float(math.degrees(bc_angle_v)),
+                    "angle_diff_deg": float(math.degrees(angle_diff_from_gap)),
+                    "heading_diff_deg": float(math.degrees(heading_diff)),
+                    "delta_s": float(delta_s),
+                })
+
+        has_opposing = len(matching_bcs) > 0
+        return has_opposing, len(matching_bcs), matching_bcs
+
+    def is_gap_early_exit(
+        self,
+        current_x: float,
+        current_y: float,
+        current_yaw: float,
+        gap_xg: float,
+        gap_yg: float,
+        min_gap_dist: float = AWW_EARLY_EXIT_MIN_GAP_M,
+        cone_deg: float = AWW_EARLY_EXIT_CONE_DEG,
+        opposing_deg: float = AWW_EARLY_EXIT_OPPOSING_DEG,
+    ) -> Tuple[bool, Dict[str, Any]]:
+        """
+        Determines if candidate gap qualifies as a valid early exit.
+        Condition: gap distance >= min_gap_dist (1.0m) AND narrow cone towards gap
+        does not contain historical opposing breadcrumbs.
+        """
+        gap_dist = math.hypot(gap_xg, gap_yg)
+        if gap_dist < min_gap_dist:
+            return False, {
+                "is_exit": False,
+                "reason": "GAP_TOO_SHORT",
+                "gap_dist": float(gap_dist),
+                "min_gap_dist": float(min_gap_dist),
+                "opposing_count": 0,
+            }
+
+        has_opposing, count, bcs = self.check_gap_channel(
+            current_x=current_x,
+            current_y=current_y,
+            current_yaw=current_yaw,
+            gap_xg=gap_xg,
+            gap_yg=gap_yg,
+            cone_deg=cone_deg,
+            opposing_deg=opposing_deg,
+            min_gap_dist=min_gap_dist,
+        )
+
+        if has_opposing:
+            return False, {
+                "is_exit": False,
+                "reason": "OPPOSING_BREADCRUMBS_IN_CHANNEL",
+                "gap_dist": float(gap_dist),
+                "opposing_count": int(count),
+                "breadcrumbs": bcs,
+            }
+
+        return True, {
+            "is_exit": True,
+            "reason": "SAFE_EARLY_EXIT",
+            "gap_dist": float(gap_dist),
+            "opposing_count": 0,
+            "breadcrumbs": [],
+        }
 
 
 # ==============================================================================
@@ -694,6 +846,7 @@ class AntiWrongWayWatchdog:
         now_s: Optional[float] = None,
         hazard_mask: Optional[np.ndarray] = None,
         state: str = "DRIVE",
+        candidate_gaps: Optional[List[Any]] = None,
         **kwargs,
     ) -> WrongWayStatus:
         """
@@ -807,6 +960,27 @@ class AntiWrongWayWatchdog:
                 status.target_recovery_yaw = wrap_to_pi(yaw + math.pi)
                 status.corrective_action = "CORRECTIVE_180"
 
+        # Check Candidate Gaps for Long-Path Early Exits (Narrow-Cone Sentry)
+        # ONLY active if facing wrong way or executing CORRECTIVE_180!
+        is_wrong_way_situation = status.is_wrong_way or (state == "CORRECTIVE_180")
+        c_gaps = candidate_gaps or kwargs.get("candidate_gaps", None)
+        if is_wrong_way_situation and c_gaps:
+            for c_gap in c_gaps:
+                if isinstance(c_gap, (list, tuple)) and len(c_gap) >= 2:
+                    gx, gy = float(c_gap[0]), float(c_gap[1])
+                    is_exit, _ = self.is_gap_early_exit(x, y, yaw, gx, gy)
+                    if is_exit:
+                        status.early_exit_found = True
+                        status.early_exit_gap = (gx, gy)
+                        break
+
+        # If a safe forward early exit is verified, suppress wrong-way trigger
+        if status.early_exit_found and status.is_wrong_way:
+            status.is_wrong_way = False
+            status.confidence = 0.0
+            status.corrective_action = "EARLY_GAP_EXIT"
+            self.consecutive_ww_steps = 0
+
         # Multi-step confirmation filter:
         # Requires wrong way to be detected for >= CONFIRM_STEPS_THRESHOLD consecutive steps
         if status.is_wrong_way:
@@ -820,6 +994,52 @@ class AntiWrongWayWatchdog:
 
         self.latest_status = status
         return status
+
+    def check_gap_channel(
+        self,
+        current_x: float,
+        current_y: float,
+        current_yaw: float,
+        gap_xg: float,
+        gap_yg: float,
+        cone_deg: float = AWW_EARLY_EXIT_CONE_DEG,
+        opposing_deg: float = AWW_EARLY_EXIT_OPPOSING_DEG,
+        min_gap_dist: float = AWW_EARLY_EXIT_MIN_GAP_M,
+    ) -> Tuple[bool, int, List[Dict[str, Any]]]:
+        """Exposes Narrow-Cone Early Gap Exit Sentry from BreadcrumbWatchdog."""
+        return self.breadcrumb_watchdog.check_gap_channel(
+            current_x=current_x,
+            current_y=current_y,
+            current_yaw=current_yaw,
+            gap_xg=gap_xg,
+            gap_yg=gap_yg,
+            cone_deg=cone_deg,
+            opposing_deg=opposing_deg,
+            min_gap_dist=min_gap_dist,
+        )
+
+    def is_gap_early_exit(
+        self,
+        current_x: float,
+        current_y: float,
+        current_yaw: float,
+        gap_xg: float,
+        gap_yg: float,
+        min_gap_dist: float = AWW_EARLY_EXIT_MIN_GAP_M,
+        cone_deg: float = AWW_EARLY_EXIT_CONE_DEG,
+        opposing_deg: float = AWW_EARLY_EXIT_OPPOSING_DEG,
+    ) -> Tuple[bool, Dict[str, Any]]:
+        """Evaluates whether candidate gap qualifies as a safe long-path early exit."""
+        return self.breadcrumb_watchdog.is_gap_early_exit(
+            current_x=current_x,
+            current_y=current_y,
+            current_yaw=current_yaw,
+            gap_xg=gap_xg,
+            gap_yg=gap_yg,
+            min_gap_dist=min_gap_dist,
+            cone_deg=cone_deg,
+            opposing_deg=opposing_deg,
+        )
 
     def get_detailed_telemetry(
         self,
@@ -922,6 +1142,10 @@ class AntiWrongWayWatchdog:
                 "min_lateral_m": AWW_LATERAL_SEPARATION_MIN_M,
                 "is_tripped": bool(ww_lat),
                 "thought": thought_lat,
+            },
+            "early_exit": {
+                "found": bool(self.latest_status.early_exit_found),
+                "gap": [round(float(v), 3) for v in self.latest_status.early_exit_gap] if self.latest_status.early_exit_gap else None,
             },
             "trail": trail_pts[-60:] if trail_pts else [],
         }

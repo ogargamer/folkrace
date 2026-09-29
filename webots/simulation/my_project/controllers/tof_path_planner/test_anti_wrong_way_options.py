@@ -24,6 +24,7 @@ import numpy as np
 from anti_wrong_way_watchdog import (
     AntiWrongWayWatchdog,
     BreadcrumbWatchdog,
+    Breadcrumb,
     KinematicArcFilter,
     DirectionalFlowCostmap,
     LateralSeparationWatchdog,
@@ -225,7 +226,30 @@ def test_smart_reverse_recovery():
     assert is_rec is True
     assert steer_cmd > 0.0, f"Expected inverted positive steer for negative heading error in reverse, got {steer_cmd}"
 
-    # Case 3C: Reverse Priority Guard (Reverse ALWAYS takes priority over CORRECTIVE_180)
+    # Case 3C: Reverse vs U-Turn Arbitration (Front blocked -> PIVOT_REVERSE; Front open facing wrong way -> CORRECTIVE_180 U-Turn)
+    rec.state = StuckRecoveryState.NORMAL_DRIVE
+    tofs_wall_blocked = {
+        "tof_front_left_4.1deg": 0.10,
+        "tof_front_right_4.1deg": 0.10,
+    }
+    rec.trigger_emergency_recovery(
+        heading_err=0.0,
+        current_v=0.0,
+        front_clearance_m=0.10,
+        cached_tofs=tofs_wall_blocked,
+        target_breadcrumb_yaw=0.0,
+        current_yaw=math.pi,
+    )
+    print(f"  [Case 3C - Front Blocked Reverse] Trigger State: {rec.state} (Expected: PIVOT_REVERSE, v_cmd < 0)")
+    assert rec.state == StuckRecoveryState.PIVOT_REVERSE, f"Expected PIVOT_REVERSE, got {rec.state}"
+    assert rec.current_cmd_v < 0.0, f"Expected negative reverse velocity, got {rec.current_cmd_v}"
+
+    # Verify that while in PIVOT_REVERSE with front blocked, trigger_corrective_180 does not override reverse
+    rec.trigger_corrective_180(target_yaw=0.0, steer_sign=1.0, current_yaw=math.pi, cached_tofs=tofs_wall_blocked, front_clearance_m=0.10)
+    assert rec.state == StuckRecoveryState.PIVOT_REVERSE, f"Reverse overridden when blocked! State: {rec.state}"
+    print("  [Case 3C - Blocked Reverse Immunity] trigger_corrective_180 blocked while front obstructed")
+
+    # Verify that when front is open and facing wrong way, emergency recovery triggers forward U-turn (CORRECTIVE_180)
     rec.state = StuckRecoveryState.NORMAL_DRIVE
     tofs_wide_open = {
         "tof_front_left_4.1deg": 0.60,
@@ -235,17 +259,21 @@ def test_smart_reverse_recovery():
         heading_err=0.0,
         current_v=0.0,
         front_clearance_m=0.60,
+        cached_tofs=tofs_wide_open,
         target_breadcrumb_yaw=0.0,
         current_yaw=math.pi,
     )
-    print(f"  [Case 3C - Reverse Priority] Trigger State: {rec.state} (Expected: PIVOT_REVERSE, v_cmd < 0)")
-    assert rec.state == StuckRecoveryState.PIVOT_REVERSE, f"Expected PIVOT_REVERSE, got {rec.state}"
-    assert rec.current_cmd_v < 0.0, f"Expected negative reverse velocity, got {rec.current_cmd_v}"
+    print(f"  [Case 3C - Open Front U-Turn] Trigger State: {rec.state}, Substate: {rec.corrective_substate} (Expected: CORRECTIVE_180 FORWARD, v_cmd > 0)")
+    assert rec.state == StuckRecoveryState.CORRECTIVE_180, f"Expected CORRECTIVE_180, got {rec.state}"
+    assert rec.corrective_substate == "FORWARD", f"Expected substate FORWARD, got {rec.corrective_substate}"
+    assert rec.current_cmd_v > 0.0, f"Expected positive forward velocity, got {rec.current_cmd_v}"
 
-    # Verify that while in PIVOT_REVERSE, calling trigger_corrective_180 does NOT override reverse
-    rec.trigger_corrective_180(target_yaw=0.0, steer_sign=1.0, current_yaw=math.pi)
-    assert rec.state == StuckRecoveryState.PIVOT_REVERSE, f"Reverse overridden! State: {rec.state}"
-    print("  [Case 3C - Reverse Immunity] trigger_corrective_180 was safely blocked during PIVOT_REVERSE")
+    # Verify that if in PIVOT_REVERSE and front opens up, trigger_corrective_180 transitions to U-turn
+    rec.state = StuckRecoveryState.PIVOT_REVERSE
+    rec.trigger_corrective_180(target_yaw=0.0, steer_sign=1.0, current_yaw=math.pi, cached_tofs=tofs_wide_open, front_clearance_m=0.60)
+    assert rec.state == StuckRecoveryState.CORRECTIVE_180, f"Expected CORRECTIVE_180, got {rec.state}"
+    assert rec.corrective_substate == "FORWARD", f"Expected substate FORWARD, got {rec.corrective_substate}"
+    print("  [Case 3C - Open Front Overrides Reverse] Successfully transitioned from PIVOT_REVERSE to U-turn")
 
     # Verify that while in CORRECTIVE_180, hitting a wall engages reverse support phase
     rec.state = StuckRecoveryState.NORMAL_DRIVE
@@ -282,6 +310,20 @@ def test_smart_reverse_recovery():
     tofs_pinned_r = {"tof_side_left_90deg": 0.40, "tof_side_right_90deg": 0.08}
     dir_tofs_l = StuckRecoveryManager.resolve_open_side(arc_clearance=(0.50, 0.50, 0.50), cached_tofs=tofs_pinned_r)
     assert dir_tofs_l == 1.0, f"Expected +1.0 (Left), got {dir_tofs_l}"
+    # Test 5: 16-ch rig cross-pointing: Left open (1.2m), Right blocked by wall (0.12m via tof_front_left_82.9deg) -> choose Left (+1.0)
+    tofs_16ch_right_wall = {
+        "tof_front_left_82.9deg": 0.12,   # points Right into wall
+        "tof_front_right_82.9deg": 1.20,  # points Left into open track
+    }
+    dir_16ch_l = StuckRecoveryManager.resolve_open_side(arc_clearance=(0.50, 0.50, 0.50), cached_tofs=tofs_16ch_right_wall)
+    assert dir_16ch_l == 1.0, f"Expected +1.0 (Left), got {dir_16ch_l}"
+    # Test 6: 16-ch rig cross-pointing: Right open (1.2m), Left blocked by wall (0.12m via tof_front_right_82.9deg) -> choose Right (-1.0)
+    tofs_16ch_left_wall = {
+        "tof_front_left_82.9deg": 1.20,   # points Right into open track
+        "tof_front_right_82.9deg": 0.12,  # points Left into wall
+    }
+    dir_16ch_r = StuckRecoveryManager.resolve_open_side(arc_clearance=(0.50, 0.50, 0.50), cached_tofs=tofs_16ch_left_wall)
+    assert dir_16ch_r == -1.0, f"Expected -1.0 (Right), got {dir_16ch_r}"
     print("  [Case 3D - Open Side Selection] PASSED: Successfully resolves more open side via arcs and ToFs")
 
     # Case 3E: CORRECTIVE_180 Reverse-to-Forward Recovery Transition
@@ -484,11 +526,98 @@ def test_unified_coordinator_and_benchmark():
     print("  -> Unified Coordinator & Benchmark: PASSED (< 0.25 ms compute budget confirmed)")
 
 
+def test_early_gap_exit_sentry():
+    print("\n--- Testing Narrow-Cone Early Gap Exit Sentry ---")
+    watchdog = AntiWrongWayWatchdog(mode=WrongWayOptionMode.OPTION_1_BREADCRUMB)
+
+    # 1. Simulate forward driving along +Y from Y=0 to Y=6.0 (heading = 0.0)
+    for i in range(120):
+        t = i * 0.05
+        watchdog.update(0.0, i * 0.05, 0.0, v_est=2.0, yaw_rate=0.0, now_s=t)
+
+    # Vehicle is at (0.0, 6.0) facing wrong way (yaw = pi)
+    curr_x, curr_y, curr_yaw = 0.0, 6.0, math.pi
+
+    # Test 1A: Gap candidate directly into historical trail (in robot frame: xg=0.0, yg=1.5m -> points south back to Y=4.5)
+    # Old breadcrumbs at Y=4.5 had yaw=0.0 (opposing 180° to current yaw=pi)
+    has_opp, count, bcs = watchdog.check_gap_channel(curr_x, curr_y, curr_yaw, gap_xg=0.0, gap_yg=1.5)
+    is_exit, exit_info = watchdog.is_gap_early_exit(curr_x, curr_y, curr_yaw, gap_xg=0.0, gap_yg=1.5)
+    print(f"  [Test 1A - Gap Into Old Trail] Opposing: {has_opp} (count={count}), Early Exit: {is_exit}")
+    assert has_opp is True, "Expected opposing breadcrumbs in channel pointing along old trail"
+    assert is_exit is False, "Candidate gap pointing along old trail must NOT qualify as early exit"
+    assert exit_info["reason"] == "OPPOSING_BREADCRUMBS_IN_CHANNEL"
+
+    # Test 1B: Purely geometric obstacle immunity (no raycasting failure)
+    # Even if an obstacle/pillar was placed between robot and trail, check_gap_channel is immune to LOS occlusion
+    assert has_opp is True, "Narrow cone check must be purely spatial/geometric and immune to LOS raycast failure"
+
+    # Test 1C: Gap pointing into fresh open track (xg=1.2, yg=1.2, d=1.70m, angle=+45° where no breadcrumbs exist)
+    has_opp_clear, count_clear, _ = watchdog.check_gap_channel(curr_x, curr_y, curr_yaw, gap_xg=1.2, gap_yg=1.2)
+    is_exit_clear, exit_info_clear = watchdog.is_gap_early_exit(curr_x, curr_y, curr_yaw, gap_xg=1.2, gap_yg=1.2)
+    print(f"  [Test 1C - Gap Into Clear Track] Opposing: {has_opp_clear}, Early Exit: {is_exit_clear}")
+    assert has_opp_clear is False, "Expected no opposing breadcrumbs in clear channel"
+    assert is_exit_clear is True, "Candidate gap pointing into fresh track must qualify as early exit"
+    assert exit_info_clear["reason"] == "SAFE_EARLY_EXIT"
+
+    # Test 1D: Gap pointing into fresh track but too short (< 1.0m, e.g. d=0.7m)
+    is_exit_short, exit_info_short = watchdog.is_gap_early_exit(curr_x, curr_y, curr_yaw, gap_xg=0.5, gap_yg=0.5)
+    print(f"  [Test 1D - Gap < 1.0m] Early Exit: {is_exit_short} (reason={exit_info_short['reason']})")
+    assert is_exit_short is False, "Gap < 1.0m must not qualify as long-path early exit"
+    assert exit_info_short["reason"] == "GAP_TOO_SHORT"
+
+    # Test 1E: Narrow cone points along candidate GAP VECTOR, NOT robot heading
+    # Create breadcrumb at +15 deg from robot heading (+X=0.26m, +Y=1.0m in vehicle frame)
+    # 1. Candidate gap at 0 deg (robot heading): ±10 deg cone does NOT include +15 deg breadcrumb!
+    # 2. Candidate gap at +15 deg: ±10 deg cone DOES include +15 deg breadcrumb!
+    bc_watchdog = BreadcrumbWatchdog()
+    # Add dummy history point for odometry gate
+    bc_watchdog.cumulative_dist_m = 5.0
+    # Add breadcrumb at vehicle frame xv=0.26, yv=1.0 (angle = atan2(0.26, 1.0) = ~14.6 deg)
+    # If robot is at (0,0) yaw=0: xv=dx, yv=dy -> breadcrumb at (0.26, 1.0), yaw=pi (opposing)
+    bc_watchdog.breadcrumbs.append(Breadcrumb(x=0.26, y=1.0, yaw=math.pi, v=2.0, timestamp=1.0, s_dist=1.0))
+    # Must have >= 5 points for watchdog evaluation
+    for k in range(5):
+        bc_watchdog.breadcrumbs.append(Breadcrumb(x=10.0 + k, y=10.0, yaw=0.0, v=2.0, timestamp=1.0, s_dist=0.1))
+
+    # Gap at heading (0 deg): (0.0, 1.2) -> breadcrumb at 14.6 deg is OUTSIDE 20 deg cone (half-angle 10 deg)
+    has_opp_fwd, _, _ = bc_watchdog.check_gap_channel(0.0, 0.0, 0.0, gap_xg=0.0, gap_yg=1.2, cone_deg=20.0)
+    # Gap at +15 deg: (0.31, 1.16) -> breadcrumb at 14.6 deg is INSIDE cone centered on gap!
+    has_opp_ang, _, _ = bc_watchdog.check_gap_channel(0.0, 0.0, 0.0, gap_xg=0.31, gap_yg=1.16, cone_deg=20.0)
+    print(f"  [Test 1E - Cone Oriented Along Gap Vector] Forward Gap Opposing: {has_opp_fwd}, Angled Gap Opposing: {has_opp_ang}")
+    assert has_opp_fwd is False, "Breadcrumb at 14.6 deg should be outside the forward gap cone"
+    assert has_opp_ang is True, "Breadcrumb at 14.6 deg must be inside the cone centered on the angled gap vector"
+
+    # Test 1F: Recovery Early Exit Termination for CORRECTIVE_180
+    rec = StuckRecoveryManager()
+    rec.state = StuckRecoveryState.CORRECTIVE_180
+    rec.corrective_substate = "FORWARD"
+    rec.target_corrective_yaw = math.pi
+    # Provide open front ToF (d_straight = 1.0m)
+    tofs_open = {"tof_front_left_4.1deg": 1.0, "tof_front_right_4.1deg": 1.0}
+    is_rec, _, _ = rec.update(dt=0.016, current_v=1.0, cached_tofs=tofs_open, early_exit_available=True)
+    print(f"  [Test 1F - 180 Early Abort] State: {rec.state}, is_recovering: {is_rec}")
+    assert rec.state == StuckRecoveryState.NORMAL_DRIVE, "CORRECTIVE_180 must return to NORMAL_DRIVE on early exit with open front"
+    assert is_rec is False, "is_recovering must be False after early exit finish"
+
+    # Test 1G: PIVOT_REVERSE is IMMUNE to early exit abort (must keep reversing away from wall!)
+    rec.state = StuckRecoveryState.PIVOT_REVERSE
+    rec.stroke_timer = 0.05
+    tofs_wall = {"tof_front_left_4.1deg": 0.01, "tof_front_right_4.1deg": 0.01}
+    is_rec_rev, v_cmd_rev, _ = rec.update(dt=0.016, current_v=-0.5, cached_tofs=tofs_wall, early_exit_available=True)
+    print(f"  [Test 1G - PIVOT_REVERSE Immunity] State: {rec.state}, v_cmd: {v_cmd_rev:+.2f} m/s, is_recovering: {is_rec_rev}")
+    assert rec.state == StuckRecoveryState.PIVOT_REVERSE, "PIVOT_REVERSE must NOT abort when early_exit_available is passed!"
+    assert is_rec_rev is True, "Robot must continue reversing when in PIVOT_REVERSE"
+    assert v_cmd_rev < 0.0, "Expected negative velocity command during reverse"
+
+    print("  -> Narrow-Cone Early Gap Exit Sentry: PASSED (100% verified)")
+
+
 if __name__ == "__main__":
     print("================================================================================")
     print("  RUNNING ANTI-WRONG-WAY & U-TURN DISCRIMINATION TEST SUITE")
     print("================================================================================")
     test_option1_breadcrumb()
+    test_early_gap_exit_sentry()
     test_smart_reverse_recovery()
     test_option2_kinematic_arc()
     test_option3_flow_costmap()

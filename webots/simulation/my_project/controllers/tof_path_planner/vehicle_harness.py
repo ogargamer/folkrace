@@ -291,6 +291,7 @@ class FolkraceVehicle:
         self.last_gap_info = (0.0, 1.0, 0.50, 0.0)
         self.last_plan_res = {}
         self.last_tofs = {name: TOF_MAX_RANGE_M for name in TOF_SENSOR_NAMES}
+        self.cached_f_tof = TOF_MAX_RANGE_M
 
         # Anti-Wrong-Way Watchdog
         self.watchdog = AntiWrongWayWatchdog()
@@ -567,6 +568,7 @@ class FolkraceVehicle:
                 "dynamic_obstacles": [],
                 "obs_telem": {},
                 "recovery_state": "NORMAL",
+                "f_tof": round(float(min(tof_readings.get("tof_front_left_4.1deg", TOF_MAX_RANGE_M), tof_readings.get("tof_front_right_4.1deg", TOF_MAX_RANGE_M))), 2),
                 "plan": {},
             }
             return telemetry, False
@@ -591,9 +593,16 @@ class FolkraceVehicle:
         if self.step_counter % PLANNER_DECIMATION == 0:
             planner_ran = True
 
-            # Read ToF Sensor Array (16 channels at 60 Hz planner rate)
             tof_readings = self.read_tof_sensors()
 
+        f_tof = min(
+            tof_readings.get("tof_front_left_4.1deg", tof_readings.get("tof_fl_3", TOF_MAX_RANGE_M)),
+            tof_readings.get("tof_front_right_4.1deg", tof_readings.get("tof_fr_3", TOF_MAX_RANGE_M)),
+        )
+        self.cached_f_tof = f_tof
+
+        # 60 Hz Control Tick (Decimation = 2)
+        if self.step_counter % PLANNER_DECIMATION == 0:
             prob_map, hazard_mask, map_ms = self.costmap.process_tof_frame(tof_readings)
             self.cached_map_ms = map_ms
 
@@ -644,6 +653,18 @@ class FolkraceVehicle:
             raw_target_steer = float(plan_res.get("cmd_steer_rad", 0.0))
             raw_target_speed = float(plan_res.get("cmd_speed_mps", self.v_cruise_min))
 
+            min_fwd_dist = min(
+                tof_readings.get("tof_front_left_4.1deg", 1.0),
+                tof_readings.get("tof_front_right_4.1deg", 1.0),
+            ) if tof_readings else 1.0
+
+            # Candidate Gap Scout Targets for Early Exit Evaluation (Only when front is open!)
+            candidate_gaps = []
+            if min_fwd_dist >= 0.50:
+                for tgt in (getattr(self.gap_scout, "last_targets", []) or []):
+                    if isinstance(tgt, (list, tuple)) and len(tgt) >= 2:
+                        candidate_gaps.append((float(tgt[0]), float(tgt[1])))
+
             # Anti-Wrong-Way Watchdog (only if enabled)
             if getattr(self.watchdog, "mode", "DISABLED") != "DISABLED":
                 gx_curr, gy_curr, gyaw_curr = self.get_ground_truth_pose()
@@ -657,8 +678,18 @@ class FolkraceVehicle:
                     now_s=sim_time,
                     hazard_mask=enlarged_hazard_mask,
                     state=self.recovery_manager.state,
+                    candidate_gaps=candidate_gaps,
                 )
                 self.last_aww_status = aww_status
+
+                # Early Gap Exit: abort U-turn ONLY if in CORRECTIVE_180 with open front (never cancel PIVOT_REVERSE!)
+                if (
+                    aww_status.early_exit_found
+                    and self.recovery_manager.state == StuckRecoveryState.CORRECTIVE_180
+                    and getattr(self.recovery_manager, "corrective_substate", "") == "FORWARD"
+                    and min_fwd_dist >= 0.80
+                ):
+                    self.recovery_manager.finish_recovery_early()
 
                 # Trigger CORRECTIVE_180 if in NORMAL_DRIVE and wrong-way is confirmed.
                 # Chooses to do the 180 towards the more open side (costmap escape arcs + ToFs).
@@ -672,12 +703,15 @@ class FolkraceVehicle:
                     tgt_yaw = aww_status.target_recovery_yaw if aww_status.target_recovery_yaw is not None else wrap_to_pi(gyaw_curr + math.pi)
                     yaw_diff = wrap_to_pi(tgt_yaw - gyaw_curr)
                     arc_cl = self.recovery_manager.evaluate_costmap_escape_arcs(hazard_mask, self.costmap)
+                    is_l_pin, is_r_pin = self.recovery_manager.evaluate_pinned_state(hazard_mask, self.costmap, tof_readings)
                     open_side = self.recovery_manager.resolve_open_side(
                         arc_clearance=arc_cl,
                         cached_tofs=tof_readings,
                         heading_err=yaw_diff,
+                        is_left_pinned=is_l_pin,
+                        is_right_pinned=is_r_pin,
                     )
-                    min_fwd_clearance = min(tof_readings.values()) if tof_readings else 1.0
+                    min_fwd_clearance = min_fwd_dist
                     self.recovery_manager.trigger_corrective_180(
                         target_yaw=tgt_yaw,
                         steer_sign=open_side,
@@ -690,16 +724,19 @@ class FolkraceVehicle:
                 gx_curr, gy_curr, gyaw_curr = self.get_ground_truth_pose()
                 self.last_aww_status = None
 
-            # Shield Reverse Trigger: if all 5-step evasion arcs (Step-0 + Step-2) are blocked
-            # → pre-trigger emergency recovery before the normal update evaluates costmap arcs.
-            # ONLY triggers in NORMAL_DRIVE when physical front clearance is actually blocked (< 0.20m).
-            # When already in recovery (PIVOT_REVERSE or CORRECTIVE_180), recovery_manager is in full control!
+            # Shield Reverse or Physical Wall Contact / Stall Trigger:
+            # 1) All 5-step evasion arcs blocked (reverse_suggested == True) and front clearance < 0.20m
+            # 2) Physical front bumper wall collision (min_fwd_dist <= 0.05m)
+            # 3) Front obstructed (< 0.20m) while stalled against obstacle (v_est < 0.35 m/s while commanding forward)
             _shield_cur = plan_res.get("shield", {})
-            min_fwd_dist = min(tof_readings.values()) if tof_readings else 1.0
+            is_stall = (min_fwd_dist < 0.20 and self.v_est < 0.35 and raw_target_speed > 0.5)
+            is_wall_contact = (min_fwd_dist <= 0.05)
+            shield_reverse = (_shield_cur.get("reverse_suggested", False) and min_fwd_dist < 0.20)
+            should_reverse = (shield_reverse or is_wall_contact or is_stall)
+
             if (
-                _shield_cur.get("reverse_suggested", False)
+                should_reverse
                 and self.recovery_manager.state == StuckRecoveryState.NORMAL_DRIVE
-                and min_fwd_dist < 0.20
             ):
                 _arc_cl = self.recovery_manager.evaluate_costmap_escape_arcs(hazard_mask, self.costmap)
                 _is_l_pin, _is_r_pin = self.recovery_manager.evaluate_pinned_state(hazard_mask, self.costmap, tof_readings)
@@ -726,6 +763,12 @@ class FolkraceVehicle:
 
             # Recovery Manager at 60 Hz (Kinematic Escape Arc Costmap Evaluation & CORRECTIVE_180)
             target_breadcrumb_yaw = self.last_aww_status.target_recovery_yaw if self.last_aww_status else None
+            is_early_exit = bool(
+                self.last_aww_status
+                and self.last_aww_status.early_exit_found
+                and self.recovery_manager.state == StuckRecoveryState.CORRECTIVE_180
+                and min_fwd_dist >= 0.80
+            )
             is_recovering, rec_v, rec_steer = self.recovery_manager.update(
                 dt=DT_PLANNER,
                 current_v=self.v_est,
@@ -737,6 +780,7 @@ class FolkraceVehicle:
                 costmap_obj=self.costmap,
                 current_yaw=gyaw_curr,
                 target_breadcrumb_yaw=target_breadcrumb_yaw,
+                early_exit_available=is_early_exit,
             )
 
             if override_speed is not None:
@@ -750,7 +794,16 @@ class FolkraceVehicle:
                 target_speed = rec_v
                 target_steer = rec_steer
                 self.active_steer = rec_steer
-                self.mode_desc = f"RECOVERY_{getattr(self.recovery_manager.state, 'name', self.recovery_manager.state)}"
+                rec_state = getattr(self.recovery_manager.state, 'name', self.recovery_manager.state)
+                if rec_state == "CORRECTIVE_180":
+                    sub = getattr(self.recovery_manager, "corrective_substate", "FORWARD")
+                    self.mode_desc = f"RECOVERY_180_{sub}"
+                elif rec_state == "PIVOT_REVERSE":
+                    self.mode_desc = "RECOVERY_PIVOT_REVERSE"
+                elif rec_state == "DECEL_AND_CENTER":
+                    self.mode_desc = "RECOVERY_DECEL_CENTER"
+                else:
+                    self.mode_desc = f"RECOVERY_{rec_state}"
                 self.was_recovering = True
                 if hasattr(self.planner, "reset_active_target"):
                     self.planner.reset_active_target()
@@ -885,6 +938,7 @@ class FolkraceVehicle:
                 "map_ms": round(float(self.cached_map_ms), 2),
                 "recovery_state": str(getattr(self.recovery_manager.state, "name", self.recovery_manager.state)),
                 "watchdog_mode": str(getattr(self.watchdog.mode, "name", self.watchdog.mode)),
+                "f_tof": round(float(self.cached_f_tof), 2),
                 "aww": aww_detailed,
             }
             return telemetry, planner_ran
@@ -942,6 +996,7 @@ class FolkraceVehicle:
             "steer_rad": round(float(self.cached_target_steer), 4),
             "steer_actual_deg": round(math.degrees(float(getattr(self.ediff, "current_steer_rad", self.active_steer))), 2),
             "pose": [float(gx), float(gy), float(gyaw)],
+            "f_tof": round(float(min(tof_readings.get("tof_front_left_4.1deg", 1.0), tof_readings.get("tof_front_right_4.1deg", 1.0))), 3) if tof_readings else 1.0,
             "gap": g_gap,
             "targets": g_targets,
             "plan_ms": round(float(self.cached_plan_ms), 2),
@@ -956,6 +1011,7 @@ class FolkraceVehicle:
             "corridor_left": to_py(self.last_plan_res.get("corridor_left", [])),
             "corridor_right": to_py(self.last_plan_res.get("corridor_right", [])),
             "shield": to_py(self.last_plan_res.get("shield", {})),
+            "f_tof": round(float(self.cached_f_tof), 2),
             "grid_shape": [int(s) for s in prob_down.shape],
             "grid_bounds": [float(GRID_X_MIN), float(GRID_X_MAX), float(GRID_Y_MIN), float(GRID_Y_MAX)],
             "grid_data": grid_compressed,
