@@ -37,7 +37,7 @@
     }
   },
   "genes": {
-    "v_cruise_max": 5.5,
+    "v_cruise_max": 5.0,
     "v_cruise_min": 1.223,
     "horizon_N": 30,
     "dt": 0.017,
@@ -70,7 +70,7 @@
     "alt_aperture_bias": 0.752,
     "alt_switch_hysteresis": 24.499,
     "straight_lock_dist": 1.7,
-    "straight_lock_speed": 5.5,
+    "straight_lock_speed": 5.0,
     "aggr_dist_far_m": 1.72,
     "aggr_dist_close_m": 1.078,
     "aggr_min_scale": 0.811,

@@ -29,7 +29,7 @@ from electronic_diff_4wd import ElectronicDifferential4WD
 from cpp_smart_hybrid_costmap import CppSmartHybridCostmap
 from imu_encoder_fusion import IMUEncoderFusion
 from tof_gap_scout import ToFGapScout
-from planner_option2_sl_mpc import CurvilinearSLMPC
+from planner_sl_mpc import CurvilinearSLMPC
 from stuck_recovery_manager import StuckRecoveryManager, StuckRecoveryState
 from anti_wrong_way_watchdog import AntiWrongWayWatchdog
 from dynamic_obstacle_tracker import DynamicObstacleTracker
@@ -279,7 +279,7 @@ class FolkraceVehicle:
         self.cached_target_speed = self.v_cruise_min
         self.rate_limited_speed = 0.0
         self.was_recovering = False
-        self.mode_desc = "OPTION_2_SL_MPC"
+        self.mode_desc = "SL_MPC"
         self.cached_plan_ms = 0.0
         self.cached_map_ms = 0.0
         self.v_est = 0.0
@@ -448,7 +448,7 @@ class FolkraceVehicle:
         self.cached_target_speed = self.v_cruise_min
         self.rate_limited_speed = 0.0
         self.was_recovering = False
-        self.mode_desc = "OPTION_2_SL_MPC"
+        self.mode_desc = "SL_MPC"
         self.stall_counter = 0
         self.v_est = 0.0
         self.cached_yaw_rate = 0.0
@@ -540,7 +540,7 @@ class FolkraceVehicle:
                 "time_step": self.step_counter,
                 "sim_time": round(float(sim_time), 3),
                 "mode": "WARMUP",
-                "planner": "OPTION2_SL_MPC",
+                "planner": "SL_MPC",
                 "status": "WARMUP",
                 "v_est": 0.0,
                 "v_fused": 0.0,
@@ -858,7 +858,7 @@ class FolkraceVehicle:
                         -MAX_STEERING_RAD,
                         min(MAX_STEERING_RAD, self.active_steer + steer_aggressiveness * steer_delta),
                     )
-                    self.mode_desc = "OPTION_2_SL_MPC"
+                    self.mode_desc = "SL_MPC"
 
             self.cached_target_speed = target_speed
             self.cached_target_steer = self.active_steer
@@ -922,7 +922,7 @@ class FolkraceVehicle:
                 "time_step": self.step_counter,
                 "sim_time": round(float(sim_time), 3),
                 "mode": self.mode_desc,
-                "planner": "OPTION2_SL_MPC",
+                "planner": "SL_MPC",
                 "status": self.last_plan_res.get("status", "OK"),
                 "v_est": round(float(self.v_est), 3),
                 "v_fused": round(float(self.v_est), 3),
@@ -984,7 +984,7 @@ class FolkraceVehicle:
             "time_step": self.step_counter,
             "sim_time": round(float(sim_time), 3),
             "mode": self.mode_desc,
-            "planner": "OPTION2_SL_MPC",
+            "planner": "SL_MPC",
             "status": self.last_plan_res.get("status", "OK"),
             "v_est": round(float(self.v_est), 3),
             "v_fused": round(float(self.v_est), 3),

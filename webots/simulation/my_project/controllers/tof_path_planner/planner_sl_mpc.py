@@ -1,8 +1,8 @@
 """
 ================================================================================
-  OPTION 2 (C++ NATIVE ENGINE): CURVILINEAR SLACK-CONSTRAINED SL-MPC
+  C++ NATIVE ENGINE: CURVILINEAR SLACK-CONSTRAINED SL-MPC
   - Native AVX2 C++ implementation via ctypes and embedded OSQP solver
-  - High-performance replacement for planner_option2_sl_mpc.py
+  - High-performance replacement for Python prototype
   - Sub-millisecond compute budget (~0.3 ms vs ~26 ms Python)
 ================================================================================
 """
@@ -16,48 +16,44 @@ import numpy as np
 
 try:
     from .planner_config import (
-        OPT2_HORIZON_N,
-        OPT2_DT,
-        OPT2_Q_PROGRESS,
-        OPT2_Q_CTE,
-        OPT2_Q_HEADING,
-        OPT2_R_STEER,
-        OPT2_R_ACCEL,
-        OPT2_R_STEER_RATE,
-        OPT2_MU_FRICTION,
-        OPT2_V_CORNER_FACTOR,
-        OPT2_PP_BLEND_GAIN,
-        OPT2_LOOKAHEAD_BLEND_M,
-        OPT2_V_CRUISE_MAX,
-        OPT2_V_CRUISE_MIN,
-        OPT2_STRAIGHT_LOCK_DIST_M,
-        OPT2_STRAIGHT_LOCK_SPEED_MPS,
-        OPT2_ALT_SWITCH_HYSTERESIS,
-        OPT2_ALT_MIN_SEPARATION_M,
-        OPT2_ALT_APERTURE_BIAS,
+        MPC_HORIZON_N,
+        MPC_DT,
+        MPC_Q_PROGRESS,
+        MPC_Q_CTE,
+        MPC_Q_HEADING,
+        MPC_R_STEER,
+        MPC_R_ACCEL,
+        MPC_R_STEER_RATE,
+        MPC_MU_FRICTION,
+        MPC_V_CORNER_FACTOR,
+        MPC_V_CRUISE_MAX,
+        MPC_V_CRUISE_MIN,
+        MPC_STRAIGHT_LOCK_DIST_M,
+        MPC_STRAIGHT_LOCK_SPEED_MPS,
+        MPC_ALT_SWITCH_HYSTERESIS,
+        MPC_ALT_MIN_SEPARATION_M,
+        MPC_ALT_APERTURE_BIAS,
         DT_PLANNER,
     )
 except ImportError:
     from planner_config import (
-        OPT2_HORIZON_N,
-        OPT2_DT,
-        OPT2_Q_PROGRESS,
-        OPT2_Q_CTE,
-        OPT2_Q_HEADING,
-        OPT2_R_STEER,
-        OPT2_R_ACCEL,
-        OPT2_R_STEER_RATE,
-        OPT2_MU_FRICTION,
-        OPT2_V_CORNER_FACTOR,
-        OPT2_PP_BLEND_GAIN,
-        OPT2_LOOKAHEAD_BLEND_M,
-        OPT2_V_CRUISE_MAX,
-        OPT2_V_CRUISE_MIN,
-        OPT2_STRAIGHT_LOCK_DIST_M,
-        OPT2_STRAIGHT_LOCK_SPEED_MPS,
-        OPT2_ALT_SWITCH_HYSTERESIS,
-        OPT2_ALT_MIN_SEPARATION_M,
-        OPT2_ALT_APERTURE_BIAS,
+        MPC_HORIZON_N,
+        MPC_DT,
+        MPC_Q_PROGRESS,
+        MPC_Q_CTE,
+        MPC_Q_HEADING,
+        MPC_R_STEER,
+        MPC_R_ACCEL,
+        MPC_R_STEER_RATE,
+        MPC_MU_FRICTION,
+        MPC_V_CORNER_FACTOR,
+        MPC_V_CRUISE_MAX,
+        MPC_V_CRUISE_MIN,
+        MPC_STRAIGHT_LOCK_DIST_M,
+        MPC_STRAIGHT_LOCK_SPEED_MPS,
+        MPC_ALT_SWITCH_HYSTERESIS,
+        MPC_ALT_MIN_SEPARATION_M,
+        MPC_ALT_APERTURE_BIAS,
         DT_PLANNER,
     )
 
@@ -155,32 +151,30 @@ if CPP_AVAILABLE and _lib is not None:
 
 class CppCurvilinearSLMPC:
     """
-    High-Performance Native C++ Option 2 Curvilinear SL-MPC Planner.
+    High-Performance Native C++ Curvilinear SL-MPC Planner.
     100% Drop-In Compatible with CurvilinearSLMPC.
     """
 
     def __init__(
         self,
         costmap_engine: any = None,
-        horizon_N: int = OPT2_HORIZON_N,
-        dt: float = OPT2_DT,
-        q_progress: float = OPT2_Q_PROGRESS,
-        q_cte: float = OPT2_Q_CTE,
-        q_heading: float = OPT2_Q_HEADING,
-        r_steer: float = OPT2_R_STEER,
-        r_accel: float = OPT2_R_ACCEL,
-        r_steer_rate: float = OPT2_R_STEER_RATE,
-        mu_friction: float = OPT2_MU_FRICTION,
-        v_corner_factor: float = OPT2_V_CORNER_FACTOR,
-        pure_pursuit_blend_gain: float = OPT2_PP_BLEND_GAIN,
-        lookahead_blend_m: float = OPT2_LOOKAHEAD_BLEND_M,
-        v_cruise_max: float = OPT2_V_CRUISE_MAX,
-        v_cruise_min: float = OPT2_V_CRUISE_MIN,
-        straight_lock_dist_m: float = OPT2_STRAIGHT_LOCK_DIST_M,
-        straight_lock_speed_mps: float = OPT2_STRAIGHT_LOCK_SPEED_MPS,
-        alt_switch_hysteresis: float = OPT2_ALT_SWITCH_HYSTERESIS,
-        alt_min_separation_m: float = OPT2_ALT_MIN_SEPARATION_M,
-        alt_aperture_bias: float = OPT2_ALT_APERTURE_BIAS,
+        horizon_N: int = MPC_HORIZON_N,
+        dt: float = MPC_DT,
+        q_progress: float = MPC_Q_PROGRESS,
+        q_cte: float = MPC_Q_CTE,
+        q_heading: float = MPC_Q_HEADING,
+        r_steer: float = MPC_R_STEER,
+        r_accel: float = MPC_R_ACCEL,
+        r_steer_rate: float = MPC_R_STEER_RATE,
+        mu_friction: float = MPC_MU_FRICTION,
+        v_corner_factor: float = MPC_V_CORNER_FACTOR,
+        v_cruise_max: float = MPC_V_CRUISE_MAX,
+        v_cruise_min: float = MPC_V_CRUISE_MIN,
+        straight_lock_dist_m: float = MPC_STRAIGHT_LOCK_DIST_M,
+        straight_lock_speed_mps: float = MPC_STRAIGHT_LOCK_SPEED_MPS,
+        alt_switch_hysteresis: float = MPC_ALT_SWITCH_HYSTERESIS,
+        alt_min_separation_m: float = MPC_ALT_MIN_SEPARATION_M,
+        alt_aperture_bias: float = MPC_ALT_APERTURE_BIAS,
         **kwargs,
     ):
         self._costmap = costmap_engine
@@ -194,8 +188,6 @@ class CppCurvilinearSLMPC:
         self.r_steer_rate = float(r_steer_rate)
         self.mu_friction = float(mu_friction)
         self.v_corner_factor = float(v_corner_factor)
-        self.pure_pursuit_blend_gain = float(pure_pursuit_blend_gain)
-        self.lookahead_blend_m = float(lookahead_blend_m)
         self.v_cruise_max = float(v_cruise_max)
         self.v_cruise_min = float(v_cruise_min)
         self.straight_lock_dist_m = float(straight_lock_dist_m)

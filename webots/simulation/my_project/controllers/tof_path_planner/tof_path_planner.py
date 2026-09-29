@@ -297,7 +297,7 @@ def run_racing_studio(robot: any, vehicle: FolkraceVehicle) -> None:
                 last_telemetry_time = sim_time
 
                 telemetry["obstacles"] = [[round(ox, 3), round(oy, 3)] for (ox, oy) in obs_positions]
-                telemetry["active_planner"] = "OPTION2_SL_MPC"
+                telemetry["active_planner"] = "SL_MPC"
                 telemetry["sim_time"] = round(sim_time, 2)
                 telemetry["telemetry_hz"] = telemetry_hz
                 telemetry["front_pillar"] = bool(front_pillar_active)
@@ -551,7 +551,7 @@ def run_champion_preview(robot: any, vehicle: FolkraceVehicle) -> None:
                 last_telemetry_time = sim_time
 
                 telemetry["obstacles"] = [[round(ox, 3), round(oy, 3)] for (ox, oy) in obs_positions]
-                telemetry["active_planner"] = "OPTION2_SL_MPC"
+                telemetry["active_planner"] = "SL_MPC"
                 telemetry["sim_time"] = round(sim_time, 2)
                 telemetry["telemetry_hz"] = telemetry_hz
                 telemetry["sim_speed"] = round(float(sim_speed_mult), 2)

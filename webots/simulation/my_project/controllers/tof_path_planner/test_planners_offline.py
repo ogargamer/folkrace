@@ -26,7 +26,7 @@ for p in [CURR_DIR, CONTROLLERS_DIR, PROJECT_DIR, WORKSPACE_ROOT]:
         sys.path.insert(0, p)
 
 from cpp_smart_hybrid_costmap import CppSmartHybridCostmap
-from planner_option2_sl_mpc import CurvilinearSLMPC
+from planner_sl_mpc import CurvilinearSLMPC
 
 cm = CppSmartHybridCostmap()
 mpc = CurvilinearSLMPC(cm)

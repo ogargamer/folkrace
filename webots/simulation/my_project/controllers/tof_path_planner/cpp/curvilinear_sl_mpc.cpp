@@ -32,9 +32,9 @@ static constexpr double GRAVITY_G_CONST = 9.81;
 static constexpr double MAX_STEERING_RAD_CONST =
     0.657137; // ~37.65 deg 40% Ackermann center limit (yields 39.9 deg inside servo)
 static constexpr double MAX_SERVO_RATE_RAD_S_CONST = 15.4;
-static constexpr double OPT2_WEIGHT_SLACK_EPS_CONST = 500.0;
-static constexpr double OPT2_FRICTION_OCTAGON_C1_CONST = 1.2;
-static constexpr double OPT2_TARGET_SPEED_MPS_CONST = 4.50;
+static constexpr double MPC_WEIGHT_SLACK_EPS_CONST = 500.0;
+static constexpr double MPC_FRICTION_OCTAGON_C1_CONST = 1.2;
+static constexpr double MPC_TARGET_SPEED_MPS_CONST = 4.50;
 static constexpr double V_MIN_CRUISE_CONST = 0.60;
 static constexpr double V_MAX_CRUISE_CONST = 5.50;
 static constexpr double DT_PLANNER_CONST = 1.0 / 60.0;
@@ -910,7 +910,7 @@ public:
     // Friction envelope limits
     double lat_accel_max = 0.95 * mu_friction * GRAVITY_G_CONST;
     double max_Fx = mu_friction * VEHICLE_MASS_CONST * GRAVITY_G_CONST;
-    double c1 = OPT2_FRICTION_OCTAGON_C1_CONST;
+    double c1 = MPC_FRICTION_OCTAGON_C1_CONST;
     double s_fx = 1.0 / std::max(max_Fx, 1e-3);
 
     // Update Diamond entries in A_data
@@ -940,7 +940,7 @@ public:
       q_vec[ix + 3] += -w_v_k * vk_target;
       P_data[VX_P_INDICES[k]] = w_v_k;
       int ie_c = (N + 1) * nx + N * nu + k;
-      q_vec[ie_c] += OPT2_WEIGHT_SLACK_EPS_CONST;
+      q_vec[ie_c] += MPC_WEIGHT_SLACK_EPS_CONST;
     }
 
     double w_progress = (v_ref < 2.0) ? (q_progress * 0.35) : q_progress;

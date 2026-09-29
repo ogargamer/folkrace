@@ -97,7 +97,7 @@ STALL_MAX_DURATION_S: float = 1.50
 
 OPTION_2_SL_MPC_GENE_SPECS: List[Tuple[str, float, float, type, float, str]] = [
     # Speeds & Limits
-    ("v_cruise_max",         5.5,   5.5,   float,  5.5,   "Max straight clearing speed (m/s)"),
+    ("v_cruise_max",         5.0,   5.0,   float,  5.0,   "Max straight clearing speed (m/s)"),
     ("v_cruise_min",         1.223,   1.223,   float,  1.223,  "Min corner crawl speed (m/s)"),
     # Horizon & Discretization (Fixed at N=30, dt=1/60s to match native C++ OSQP codegen)
     ("horizon_N",           30.0,   30.0,    int,   30.0,    "MPC prediction horizon steps (fixed at 30 in native QP tables)"),
@@ -135,8 +135,8 @@ OPTION_2_SL_MPC_GENE_SPECS: List[Tuple[str, float, float, type, float, str]] = [
     ("alt_aperture_bias",    0.50,   4.00,   float,  1.785,  "Challenger aperture width bias multiplier"),
     ("alt_switch_hysteresis",1.00,  50.00,   float,  2.367,  "MPC cost reduction threshold needed to switch lines"),
     # Fast Straight-Line Lock
-    ("straight_lock_dist",   1.70,   1.70,   float,  1.70,   "Forward clearance (m) to lock straight line acceleration"),
-    ("straight_lock_speed",  5.50,   5.50,   float,  5.50,   "Speed ceiling (m/s) when straight-line locked"),
+    ("straight_lock_dist",   1.72,   1.72,   float,  1.72,   "Forward clearance (m) to lock straight line acceleration"),
+    ("straight_lock_speed",  5.00,   5.00,   float,  5.00,   "Speed ceiling (m/s) when straight-line locked"),
     # Straight Quieting & Anti-Oscillation Adaptive Steering Response
     ("aggr_dist_far_m",      1.72,   1.72,   float,  1.72,   "Forward clearance distance (m) to engage max straight quieting"),
     ("aggr_dist_close_m",    0.80,   1.30,   float,  1.064,  "Emergency distance threshold (m) below which 100% steering authority is engaged"),
