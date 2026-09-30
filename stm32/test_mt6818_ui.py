@@ -39,6 +39,8 @@ import subprocess
 import shutil
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
+import csv
+import random
 import serial
 import serial.tools.list_ports
 
@@ -382,7 +384,7 @@ class MT6818DashboardGUI:
         self.benchmark_thread = None
         self.benchmark_results = []
         self.benchmark_progress_var = tk.DoubleVar(value=0.0)
-        self.benchmark_status_var = tk.StringVar(value="Ready for 2-Min PID Benchmark")
+        self.benchmark_status_var = tk.StringVar(value="Ready for 5-Min GA Auto-Tuner or 18-Stage Sweep (D=0, LPF 0.8-3.0ms)")
 
         # Symmetry & Phase Angle Equalizer State
         self.current_zero_angle_rad = 0.11275
@@ -593,24 +595,29 @@ class MT6818DashboardGUI:
         info_txt = "PWM Carrier: 25.0 kHz | Pole Pairs: 11 (GM3506) | Align Volt: 3.0V | SPI Baud: 4.0 MHz | Pins: PA8,PA9,PA10,PB3 EN"
         tk.Label(hw_info_card, text=info_txt, font=("Segoe UI", 8), bg="#1A2230", fg="#8A99AD", anchor="w").pack(fill="x")
 
-        # 2-Minute PID Benchmark Card
+        # 5-Minute GA Auto-Tuner & PID Benchmark Card
         bench_card = ttk.Frame(left_col, style="Card.TFrame", padding=10)
         bench_card.pack(fill="x", pady=4)
 
-        ttk.Label(bench_card, text="🧪 2-MINUTE AUTOMATED PID BENCHMARK & AUTO-TUNER", style="CardTitle.TLabel").pack(anchor="w")
+        ttk.Label(bench_card, text="🧬 5-MIN GA AUTO-TUNER & PID BENCHMARK (D=0, LPF 0.8-3.0ms)", style="CardTitle.TLabel").pack(anchor="w")
 
         bench_ctrl_row = ttk.Frame(bench_card)
         bench_ctrl_row.pack(fill="x", pady=4)
 
-        self.btn_benchmark = tk.Button(bench_ctrl_row, text="▶️ Start 2-Min PID Benchmark", font=("Segoe UI", 9, "bold"),
-                                       bg="#00E676", fg="#000", activebackground="#69F0AE", relief="flat", padx=10, pady=4,
-                                       command=self._toggle_benchmark)
-        self.btn_benchmark.pack(side="left", padx=4)
+        self.btn_benchmark = tk.Button(bench_ctrl_row, text="🧬 5-Min GA Auto-Tuner", font=("Segoe UI", 9, "bold"),
+                                       bg="#00E676", fg="#000", activebackground="#69F0AE", relief="flat", padx=8, pady=4,
+                                       command=self._toggle_ga_benchmark)
+        self.btn_benchmark.pack(side="left", padx=3)
+
+        self.btn_sweep = tk.Button(bench_ctrl_row, text="🧪 18-Stage Sweep", font=("Segoe UI", 9, "bold"),
+                                   bg="#00E5FF", fg="#000", activebackground="#84FFFF", relief="flat", padx=8, pady=4,
+                                   command=self._toggle_sweep_benchmark)
+        self.btn_sweep.pack(side="left", padx=3)
 
         self.btn_show_results = tk.Button(bench_ctrl_row, text="📊 View Leaderboard", font=("Segoe UI", 9, "bold"),
                                           bg="#7C4DFF", fg="#FFF", relief="flat", padx=8, pady=4,
                                           state="disabled", command=self._show_results_modal)
-        self.btn_show_results.pack(side="left", padx=4)
+        self.btn_show_results.pack(side="left", padx=3)
 
         self.bench_progress = ttk.Progressbar(bench_card, variable=self.benchmark_progress_var, maximum=100.0)
         self.bench_progress.pack(fill="x", pady=4)
@@ -810,12 +817,12 @@ class MT6818DashboardGUI:
 
         ttk.Label(cal_row, text="Align Volt (V):", font=("Segoe UI", 9, "bold"), background="#1A2230", foreground="#00E5FF").pack(side="left", padx=2)
         self.entry_align_v = tk.Entry(cal_row, width=6, font=("Segoe UI", 9), bg="#222D3E", fg="#00E5FF", insertbackground="#FFF")
-        self.entry_align_v.insert(0, "3.5")
+        self.entry_align_v.insert(0, "3.7")
         self.entry_align_v.pack(side="left", padx=4)
         tk.Button(cal_row, text="Set Volt", font=("Segoe UI", 8, "bold"), bg="#00E5FF", fg="#000", relief="flat",
                   command=lambda: self._set_param("y", self.entry_align_v.get())).pack(side="left", padx=2)
 
-        tk.Label(cal_row, text="(GM3506 draws ~0.50A @ 3.5V vs 0.8A @ 4.5V)", font=("Segoe UI", 8), bg="#1A2230", fg="#8A99AD").pack(side="left", padx=6)
+        tk.Label(cal_row, text="(GM3506 draws ~0.55A @ 3.7V vs 0.70A @ 4.0V boost)", font=("Segoe UI", 8), bg="#1A2230", fg="#8A99AD").pack(side="left", padx=6)
         tk.Button(cal_row, text="🔬 Run Alignment (c)", font=("Segoe UI", 8, "bold"), bg="#FFD600", fg="#000", relief="flat",
                   command=lambda: self.reader.send_cmd("c")).pack(side="right", padx=2)
 
@@ -1139,12 +1146,12 @@ class MT6818DashboardGUI:
         # -------------------------------------------------------------
         if self.chk_recalib_var.get():
             self.sym_progress_var.set(5.0)
-            self.sym_status_var.set("Phase 1/2: Running Certified 11-Pole Calibration ('c' @ 3.5V)...")
+            self.sym_status_var.set("Phase 1/2: Running Certified 11-Pole Calibration ('c' @ 3.7V)...")
             with self.reader.lock:
                 self.reader.calibrating = True
                 self.reader.last_calib_zero_angle = None
 
-            self.reader.send_cmd("y3.5")
+            self.reader.send_cmd("y3.7")
             time.sleep(0.15)
             self.reader.send_cmd("c")
 
@@ -1486,139 +1493,264 @@ class MT6818DashboardGUI:
         self.root.clipboard_append(snippet)
         messagebox.showinfo("Copied", f"Copied SimpleFOC configuration to clipboard:\n\n{snippet}")
 
-    def _toggle_benchmark(self):
+    def _reset_benchmark_buttons(self):
+        self.btn_benchmark.config(text="🧬 5-Min GA Auto-Tuner", bg="#00E676", fg="#000", state="normal")
+        if hasattr(self, 'btn_sweep'):
+            self.btn_sweep.config(text="🧪 18-Stage Sweep", bg="#00E5FF", fg="#000", state="normal")
+        if self.benchmark_results:
+            self.btn_show_results.config(state="normal")
+
+    def _toggle_ga_benchmark(self):
         if self.benchmark_running:
             self.benchmark_running = False
-            self.btn_benchmark.config(text="▶️ Start 2-Min PID Benchmark", bg="#00E676", fg="#000")
-            self.benchmark_status_var.set("Benchmark Aborted by User.")
+            self._reset_benchmark_buttons()
+            self.benchmark_status_var.set("GA Auto-Tuner Aborted by User.")
             self.reader.send_cmd("x")
         else:
             if not self.reader.connected:
                 messagebox.showerror("Connection Error", "Please connect to STM32 first!")
                 return
             self.benchmark_running = True
-            self.btn_benchmark.config(text="⏹️ Stop Benchmark", bg="#D50000", fg="#FFF")
+            self.btn_benchmark.config(text="⏹️ Stop GA Tuner", bg="#D50000", fg="#FFF")
+            if hasattr(self, 'btn_sweep'):
+                self.btn_sweep.config(state="disabled")
             self.btn_show_results.config(state="disabled")
             self.benchmark_results = []
-            self.benchmark_thread = threading.Thread(target=self._run_benchmark_worker, daemon=True)
+            self.benchmark_thread = threading.Thread(target=self._run_ga_benchmark_worker, daemon=True)
             self.benchmark_thread.start()
 
-    def _run_benchmark_worker(self):
-        presets = [
-            {"name": "GM3506 Baseline Smooth", "p": 0.08, "i": 0.80, "d": 0.000, "tf": 0.035, "target": 80.0},
-            {"name": "GM3506 Optimal Balanced","p": 0.12, "i": 1.20, "d": 0.001, "tf": 0.015, "target": 80.0},
-            {"name": "Crisp Direct Tracking", "p": 0.15, "i": 1.50, "d": 0.001, "tf": 0.020, "target": 80.0},
-            {"name": "High Integral Authority","p": 0.10, "i": 2.00, "d": 0.001, "tf": 0.025, "target": 80.0},
-            {"name": "Ultra-Fast LPF Response", "p": 0.12, "i": 1.20, "d": 0.000, "tf": 0.010, "target": 80.0},
-            {"name": "Heavy Damped Smooth",   "p": 0.10, "i": 1.00, "d": 0.002, "tf": 0.030, "target": 80.0},
-            {"name": "High Speed 150 RPM",    "p": 0.12, "i": 1.20, "d": 0.001, "tf": 0.015, "target": 150.0},
-            {"name": "High Speed 250 RPM",    "p": 0.14, "i": 1.50, "d": 0.001, "tf": 0.015, "target": 250.0},
-            {"name": "Aggressive High-P",     "p": 0.18, "i": 1.80, "d": 0.001, "tf": 0.015, "target": 80.0},
-            {"name": "Gentle Low-Current",    "p": 0.06, "i": 0.60, "d": 0.000, "tf": 0.025, "target": 80.0},
-            {"name": "Precise D-Damped",      "p": 0.12, "i": 1.00, "d": 0.003, "tf": 0.020, "target": 80.0},
-            {"name": "Maximum Velocity 400",  "p": 0.15, "i": 1.50, "d": 0.001, "tf": 0.015, "target": 400.0},
-        ]
+    def _toggle_sweep_benchmark(self):
+        if self.benchmark_running:
+            self.benchmark_running = False
+            self._reset_benchmark_buttons()
+            self.benchmark_status_var.set("Benchmark Sweep Aborted by User.")
+            self.reader.send_cmd("x")
+        else:
+            if not self.reader.connected:
+                messagebox.showerror("Connection Error", "Please connect to STM32 first!")
+                return
+            self.benchmark_running = True
+            if hasattr(self, 'btn_sweep'):
+                self.btn_sweep.config(text="⏹️ Stop Sweep", bg="#D50000", fg="#FFF")
+            self.btn_benchmark.config(state="disabled")
+            self.btn_show_results.config(state="disabled")
+            self.benchmark_results = []
+            self.benchmark_thread = threading.Thread(target=self._run_sweep_benchmark_worker, daemon=True)
+            self.benchmark_thread.start()
 
-        total_stages = len(presets)
-        stage_duration = 10.0
-        settle_time = 2.5
+    def _toggle_benchmark(self):
+        self._toggle_ga_benchmark()
+
+    def _evaluate_candidate(self, p, i, d, tf, target_rpm, stage_duration=2.8, settle_time=0.9, origin_label=""):
+        self.reader.send_cmd(f"p{p:.4f}")
+        time.sleep(0.04)
+        self.reader.send_cmd(f"i{i:.4f}")
+        time.sleep(0.04)
+        self.reader.send_cmd(f"d{d:.4f}")
+        time.sleep(0.04)
+        self.reader.send_cmd(f"f{tf:.5f}")
+        time.sleep(0.04)
+        self.reader.send_cmd(f"t{target_rpm:.1f}")
+
+        def _update_ui_entries():
+            self.entry_p.delete(0, "end"); self.entry_p.insert(0, f"{p:.4f}")
+            self.entry_i.delete(0, "end"); self.entry_i.insert(0, f"{i:.4f}")
+            self.entry_d.delete(0, "end"); self.entry_d.insert(0, f"{d:.4f}")
+            self.entry_f.delete(0, "end"); self.entry_f.insert(0, f"{tf:.5f}")
+            self.entry_target.delete(0, "end"); self.entry_target.insert(0, f"{target_rpm:.1f}")
+        self.root.after(0, _update_ui_entries)
+
+        stage_start = time.time()
+        samples = []
+
+        while time.time() - stage_start < stage_duration:
+            if not self.benchmark_running:
+                return None
+
+            elapsed = time.time() - stage_start
+            with self.reader.lock:
+                act = getattr(self.reader, "last_actual_rpm", 0.0)
+                uq = getattr(self.reader, "last_uq", 0.0)
+
+            # Safety Watchdog: abort runaway oscillation
+            if elapsed > 0.6 and abs(act - target_rpm) > 90.0:
+                self.reader.send_cmd("t0")
+                time.sleep(0.1)
+                return {
+                    "origin": origin_label, "p": p, "i": i, "d": d, "tf": tf, "tf_ms": tf * 1000.0,
+                    "target": target_rpm, "mean_speed": act, "mae": 150.0, "std_dev": 99.0,
+                    "ripple_pk_pk": 190.0, "mean_uq": uq, "score": 999.0, "status": "⚠️ UNSTABLE"
+                }
+
+            if elapsed >= settle_time:
+                samples.append((act, uq))
+
+            time.sleep(0.04)
+
+        if not samples:
+            return None
+
+        speeds = [s[0] for s in samples]
+        uqs = [s[1] for s in samples]
+
+        mean_speed = sum(speeds) / len(speeds)
+        errors = [abs(s - target_rpm) for s in speeds]
+        mae = sum(errors) / len(errors)
+
+        variance = sum((s - mean_speed) ** 2 for s in speeds) / len(speeds)
+        std_dev = math.sqrt(variance)
+
+        ripple_pk_pk = max(speeds) - min(speeds)
+        mean_uq = sum(uqs) / len(uqs)
+        uq_var = sum((u - mean_uq) ** 2 for u in uqs) / len(uqs)
+        uq_jitter = math.sqrt(uq_var)
+
+        score = mae + (1.2 * std_dev) + (0.3 * ripple_pk_pk) + (0.5 * uq_jitter)
+
+        return {
+            "origin": origin_label,
+            "p": round(p, 4), "i": round(i, 4), "d": round(d, 4),
+            "tf": round(tf, 5), "tf_ms": round(tf * 1000.0, 2),
+            "target": target_rpm, "mean_speed": round(mean_speed, 2),
+            "mae": round(mae, 2), "std_dev": round(std_dev, 2),
+            "ripple_pk_pk": round(ripple_pk_pk, 2), "mean_uq": round(mean_uq, 2),
+            "score": round(score, 3), "status": "✅ Stable"
+        }
+
+    def _run_ga_benchmark_worker(self):
+        """
+        5-Minute Genetic Algorithm Optimizer:
+        10 Generations x 10 Individuals = 100 candidate evaluations (300s total budget).
+        Strictly enforces D=0.000, LPF Tf in [0.8ms, 3.0ms], P in [0.04, 0.30], I in [0.40, 4.00].
+        """
+        POP_SIZE = 10
+        NUM_GENS = 10
+        CANDIDATE_DURATION = 2.8
+        SETTLE_TIME = 0.9
+        TARGET_RPM = 100.0
+
+        P_MIN, P_MAX = 0.04, 0.30
+        I_MIN, I_MAX = 0.40, 4.00
+        TF_MIN, TF_MAX = 0.0008, 0.0030
+        D_VAL = 0.000
 
         self.root.after(0, lambda: self.benchmark_status_var.set("Ensuring SimpleFOC Calibration..."))
         self.reader.send_cmd("c")
-        time.sleep(1.5)
+        time.sleep(1.2)
 
-        start_bench_time = time.time()
+        seeds = [
+            {"p": 0.12, "i": 1.20, "tf": 0.0015},
+            {"p": 0.10, "i": 1.00, "tf": 0.0030},
+            {"p": 0.14, "i": 1.60, "tf": 0.0010},
+            {"p": 0.08, "i": 0.80, "tf": 0.0020},
+            {"p": 0.16, "i": 2.20, "tf": 0.0008},
+            {"p": 0.18, "i": 2.80, "tf": 0.0025},
+            {"p": 0.06, "i": 0.60, "tf": 0.0012},
+        ]
+        population = list(seeds)
+        while len(population) < POP_SIZE:
+            population.append({
+                "p": round(random.uniform(P_MIN, P_MAX), 3),
+                "i": round(random.uniform(I_MIN, I_MAX), 2),
+                "tf": round(random.uniform(TF_MIN, TF_MAX), 5)
+            })
 
-        for idx, p in enumerate(presets):
+        total_evaluations = NUM_GENS * POP_SIZE
+        eval_count = 0
+        start_time = time.time()
+        best_overall = None
+        was_aborted = False
+
+        for gen_idx in range(NUM_GENS):
             if not self.benchmark_running:
+                was_aborted = True
                 break
 
-            self.reader.send_cmd(f"p{p['p']}")
-            time.sleep(0.05)
-            self.reader.send_cmd(f"i{p['i']}")
-            time.sleep(0.05)
-            self.reader.send_cmd(f"d{p['d']}")
-            time.sleep(0.05)
-            self.reader.send_cmd(f"f{p['tf']}")
-            time.sleep(0.05)
-            self.reader.send_cmd(f"t{p['target']}")
-
-            def _update_ui_entries(preset=p):
-                self.entry_p.delete(0, "end"); self.entry_p.insert(0, str(preset['p']))
-                self.entry_i.delete(0, "end"); self.entry_i.insert(0, str(preset['i']))
-                self.entry_d.delete(0, "end"); self.entry_d.insert(0, str(preset['d']))
-                self.entry_f.delete(0, "end"); self.entry_f.insert(0, str(preset['tf']))
-                self.entry_target.delete(0, "end"); self.entry_target.insert(0, str(preset['target']))
-            self.root.after(0, _update_ui_entries)
-
-            stage_start = time.time()
-            samples = []
-
-            while time.time() - stage_start < stage_duration:
+            gen_evaluated = []
+            for ind_idx, indiv in enumerate(population):
                 if not self.benchmark_running:
+                    was_aborted = True
                     break
 
-                elapsed_in_stage = time.time() - stage_start
-                total_elapsed = time.time() - start_bench_time
-                total_progress = min(100.0, (total_elapsed / (total_stages * stage_duration)) * 100.0)
+                eval_count += 1
+                total_progress = min(99.0, (eval_count / total_evaluations) * 100.0)
+                remaining_sec = max(0, int((total_evaluations - eval_count) * (CANDIDATE_DURATION + 0.2)))
 
-                remaining_sec = max(0, int((total_stages * stage_duration) - total_elapsed))
-                def _update_status(i=idx, pr=p, prog=total_progress, rem=remaining_sec):
+                p_val, i_val, tf_val = indiv["p"], indiv["i"], indiv["tf"]
+                origin_name = f"🧬 GA Gen {gen_idx+1} [#{ind_idx+1}]"
+
+                def _update_status(g=gen_idx+1, ind=ind_idx+1, p=p_val, i=i_val, tf_ms=tf_val*1000.0,
+                                   prog=total_progress, rem=remaining_sec, b=best_overall):
                     self.benchmark_progress_var.set(prog)
+                    b_str = f" | Best: {b['score']:.2f} (P={b['p']}, I={b['i']}, Tf={b['tf_ms']}ms)" if b else ""
                     self.benchmark_status_var.set(
-                        f"Testing [{i+1}/{total_stages}] {pr['name']} (P={pr['p']}, I={pr['i']}, Tf={pr['tf']}) | "
-                        f"Target: {pr['target']} RPM | {rem}s remaining"
+                        f"🧬 GA Gen [{g}/{NUM_GENS}] Indiv [{ind}/{POP_SIZE}]: P={p:.3f}, I={i:.2f}, Tf={tf_ms:.2f}ms "
+                        f"(D=0){b_str} | ~{rem}s left"
                     )
                 self.root.after(0, _update_status)
 
-                if elapsed_in_stage >= settle_time:
-                    with self.reader.lock:
-                        act = self.reader.last_actual_rpm
-                        uq = self.reader.last_uq
-                    samples.append((act, uq))
+                res = self._evaluate_candidate(
+                    p_val, i_val, D_VAL, tf_val, TARGET_RPM,
+                    stage_duration=CANDIDATE_DURATION, settle_time=SETTLE_TIME, origin_label=origin_name
+                )
 
-                time.sleep(0.05)
+                if res is not None:
+                    gen_evaluated.append(res)
+                    self.benchmark_results.append(res)
+                    if best_overall is None or res["score"] < best_overall["score"]:
+                        best_overall = res
 
-            if samples:
-                speeds = [s[0] for s in samples]
-                uqs = [s[1] for s in samples]
-                target = p['target']
+            if not self.benchmark_running or len(gen_evaluated) < 2:
+                break
 
-                mean_speed = sum(speeds) / len(speeds)
-                errors = [abs(s - target) for s in speeds]
-                mae = sum(errors) / len(errors)
+            gen_evaluated.sort(key=lambda x: x["score"])
 
-                variance = sum((s - mean_speed) ** 2 for s in speeds) / len(speeds)
-                std_dev = math.sqrt(variance)
+            if gen_idx < NUM_GENS - 1:
+                next_pop = []
+                next_pop.append({"p": gen_evaluated[0]["p"], "i": gen_evaluated[0]["i"], "tf": gen_evaluated[0]["tf"]})
+                next_pop.append({"p": gen_evaluated[1]["p"], "i": gen_evaluated[1]["i"], "tf": gen_evaluated[1]["tf"]})
 
-                ripple_pk_pk = max(speeds) - min(speeds)
-                mean_uq = sum(uqs) / len(uqs)
+                def select_parent():
+                    cand = random.sample(gen_evaluated[:min(6, len(gen_evaluated))], 2)
+                    cand.sort(key=lambda x: x["score"])
+                    return cand[0]
 
-                score = std_dev + (0.5 * mae)
+                while len(next_pop) < POP_SIZE:
+                    p1 = select_parent()
+                    p2 = select_parent()
 
-                result_entry = {
-                    "rank": 0,
-                    "name": p['name'],
-                    "p": p['p'],
-                    "i": p['i'],
-                    "d": p['d'],
-                    "tf": p['tf'],
-                    "target": target,
-                    "mean_speed": mean_speed,
-                    "mae": mae,
-                    "std_dev": std_dev,
-                    "ripple_pk_pk": ripple_pk_pk,
-                    "mean_uq": mean_uq,
-                    "score": score
-                }
-                self.benchmark_results.append(result_entry)
+                    def cross(v1, v2, vmin, vmax):
+                        d = abs(v2 - v1)
+                        val = random.uniform(min(v1, v2) - 0.3 * d, max(v1, v2) + 0.3 * d)
+                        return max(vmin, min(vmax, val))
+
+                    cp = cross(p1["p"], p2["p"], P_MIN, P_MAX)
+                    ci = cross(p1["i"], p2["i"], I_MIN, I_MAX)
+                    ctf = cross(p1["tf"], p2["tf"], TF_MIN, TF_MAX)
+
+                    if random.random() < 0.25:
+                        cp = max(P_MIN, min(P_MAX, cp + random.gauss(0, 0.025)))
+                    if random.random() < 0.25:
+                        ci = max(I_MIN, min(I_MAX, ci + random.gauss(0, 0.35)))
+                    if random.random() < 0.25:
+                        ctf = max(TF_MIN, min(TF_MAX, ctf + random.gauss(0, 0.0003)))
+
+                    next_pop.append({"p": round(cp, 4), "i": round(ci, 3), "tf": round(ctf, 5)})
+                population = next_pop
 
         self.benchmark_running = False
-        self.reader.send_cmd("t0")
+        if was_aborted:
+            self.reader.send_cmd("x")
+        else:
+            self.reader.send_cmd("t0")
 
-        def _finish():
-            self.btn_benchmark.config(text="▶️ Start 2-Min PID Benchmark", bg="#00E676", fg="#000")
-            if self.benchmark_results:
+        def _finish(aborted=was_aborted):
+            self._reset_benchmark_buttons()
+            if aborted:
+                self.benchmark_status_var.set("GA Optimization Aborted.")
+                if self.benchmark_results:
+                    self.btn_show_results.config(state="normal")
+            elif self.benchmark_results:
                 self.benchmark_results.sort(key=lambda x: x['score'])
                 for rank_idx, r in enumerate(self.benchmark_results):
                     r['rank'] = rank_idx + 1
@@ -1626,21 +1758,123 @@ class MT6818DashboardGUI:
                 best = self.benchmark_results[0]
                 self.benchmark_progress_var.set(100.0)
                 self.benchmark_status_var.set(
-                    f"✅ Benchmark Complete! Best Preset: #{best['rank']} '{best['name']}' "
-                    f"(P={best['p']}, I={best['i']}, Tf={best['tf']} | Jitter: ±{best['std_dev']:.2f} RPM)"
+                    f"✅ 5-Min GA Complete! Winner: #{best['rank']} (P={best['p']}, I={best['i']}, Tf={best['tf_ms']}ms, D=0) "
+                    f"| Jitter: ±{best['std_dev']:.2f} RPM | MAE: ±{best['mae']:.2f} RPM"
                 )
                 self.btn_show_results.config(state="normal")
                 self.root.after(200, self._show_results_modal)
+
+        self.root.after(0, _finish)
+
+    def _run_sweep_benchmark_worker(self):
+        """
+        18-Stage Systematic Variations Benchmark:
+        Strictly tests D=0.000 across 6 LPF steps (0.8ms to 3.0ms) and curated P & I bounds.
+        """
+        presets = [
+            # Group 1: 0.8 ms LPF
+            {"name": "0.8ms Ultra-Fast Baseline",   "p": 0.10, "i": 1.00, "d": 0.000, "tf": 0.0008, "target": 80.0},
+            {"name": "0.8ms Crisp Punchy",         "p": 0.14, "i": 1.50, "d": 0.000, "tf": 0.0008, "target": 120.0},
+            {"name": "0.8ms Stiff High-Speed",     "p": 0.18, "i": 2.20, "d": 0.000, "tf": 0.0008, "target": 200.0},
+
+            # Group 2: 1.2 ms LPF
+            {"name": "1.2ms Low-Current Smooth",   "p": 0.08, "i": 0.80, "d": 0.000, "tf": 0.0012, "target": 80.0},
+            {"name": "1.2ms Balanced Track",       "p": 0.12, "i": 1.30, "d": 0.000, "tf": 0.0012, "target": 120.0},
+            {"name": "1.2ms Aggressive Sprint",    "p": 0.16, "i": 2.00, "d": 0.000, "tf": 0.0012, "target": 250.0},
+
+            # Group 3: 1.5 ms LPF
+            {"name": "1.5ms Smooth Cruiser",       "p": 0.10, "i": 1.00, "d": 0.000, "tf": 0.0015, "target": 80.0},
+            {"name": "1.5ms Folkrace Direct",      "p": 0.14, "i": 1.60, "d": 0.000, "tf": 0.0015, "target": 150.0},
+            {"name": "1.5ms High-I Authority",     "p": 0.12, "i": 2.50, "d": 0.000, "tf": 0.0015, "target": 150.0},
+
+            # Group 4: 2.0 ms LPF
+            {"name": "2.0ms Gentle Low-Vibration", "p": 0.08, "i": 0.90, "d": 0.000, "tf": 0.0020, "target": 80.0},
+            {"name": "2.0ms Balanced Optimal",     "p": 0.12, "i": 1.40, "d": 0.000, "tf": 0.0020, "target": 120.0},
+            {"name": "2.0ms High Torque Rigidity", "p": 0.18, "i": 2.40, "d": 0.000, "tf": 0.0020, "target": 250.0},
+
+            # Group 5: 2.5 ms LPF
+            {"name": "2.5ms Quiet Baseline",       "p": 0.10, "i": 1.10, "d": 0.000, "tf": 0.0025, "target": 80.0},
+            {"name": "2.5ms Stiff Load Recovery",  "p": 0.15, "i": 2.20, "d": 0.000, "tf": 0.0025, "target": 150.0},
+            {"name": "2.5ms Top-End 350 RPM",      "p": 0.16, "i": 1.80, "d": 0.000, "tf": 0.0025, "target": 350.0},
+
+            # Group 6: 3.0 ms LPF
+            {"name": "3.0ms Default Smooth",       "p": 0.12, "i": 1.20, "d": 0.000, "tf": 0.0030, "target": 80.0},
+            {"name": "3.0ms Heavy Damped Sprint",  "p": 0.15, "i": 1.80, "d": 0.000, "tf": 0.0030, "target": 180.0},
+            {"name": "3.0ms Maximum Velocity 400", "p": 0.16, "i": 1.60, "d": 0.000, "tf": 0.0030, "target": 400.0},
+        ]
+
+        total_stages = len(presets)
+        stage_duration = 6.0
+        settle_time = 1.5
+
+        self.root.after(0, lambda: self.benchmark_status_var.set("Ensuring SimpleFOC Calibration..."))
+        self.reader.send_cmd("c")
+        time.sleep(1.2)
+
+        start_time = time.time()
+        was_aborted = False
+
+        for idx, p in enumerate(presets):
+            if not self.benchmark_running:
+                was_aborted = True
+                break
+
+            total_elapsed = time.time() - start_time
+            total_progress = min(99.0, (idx / total_stages) * 100.0)
+            remaining_sec = max(0, int((total_stages - idx) * stage_duration))
+
+            def _update_status(i=idx, pr=p, prog=total_progress, rem=remaining_sec):
+                self.benchmark_progress_var.set(prog)
+                self.benchmark_status_var.set(
+                    f"🧪 Sweep [{i+1}/{total_stages}] '{pr['name']}' (P={pr['p']}, I={pr['i']}, Tf={pr['tf']*1000:.1f}ms, D=0) | "
+                    f"Target: {pr['target']:.0f} RPM | {rem}s remaining"
+                )
+            self.root.after(0, _update_status)
+
+            res = self._evaluate_candidate(
+                p["p"], p["i"], p["d"], p["tf"], p["target"],
+                stage_duration=stage_duration, settle_time=settle_time, origin_label=f"🧪 {p['name']}"
+            )
+
+            if res is not None:
+                self.benchmark_results.append(res)
+
+        self.benchmark_running = False
+        if was_aborted:
+            self.reader.send_cmd("x")
+        else:
+            self.reader.send_cmd("t0")
+
+        def _finish(aborted=was_aborted):
+            self._reset_benchmark_buttons()
+            if aborted:
+                self.benchmark_status_var.set("Benchmark Aborted.")
+                if self.benchmark_results:
+                    self.btn_show_results.config(state="normal")
+            elif self.benchmark_results:
+                self.benchmark_results.sort(key=lambda x: x['score'])
+                for rank_idx, r in enumerate(self.benchmark_results):
+                    r['rank'] = rank_idx + 1
+
+                best = self.benchmark_results[0]
+                self.benchmark_progress_var.set(100.0)
+                self.benchmark_status_var.set(
+                    f"✅ Sweep Complete! Best Preset: #{best['rank']} '{best['origin']}' "
+                    f"(P={best['p']}, I={best['i']}, Tf={best['tf_ms']}ms | Jitter: ±{best['std_dev']:.2f} RPM)"
+                )
+                self.btn_show_results.config(state="normal")
+                self.root.after(200, self._show_results_modal)
+
         self.root.after(0, _finish)
 
     def _show_results_modal(self):
         if not self.benchmark_results:
-            messagebox.showinfo("No Results", "Please run the 2-minute benchmark first!")
+            messagebox.showinfo("No Results", "Please run either the 5-minute GA tuner or variations sweep first!")
             return
 
         modal = tk.Toplevel(self.root)
-        modal.title("🏆 PID Benchmark & Speed Variation Leaderboard")
-        modal.geometry("920x530")
+        modal.title("🏆 PID Benchmark & 5-Min GA Leaderboard (D=0, LPF 0.8-3.0ms)")
+        modal.geometry("980x560")
         modal.configure(bg="#12161E")
         modal.transient(self.root)
 
@@ -1648,34 +1882,41 @@ class MT6818DashboardGUI:
         header.pack(fill="x")
 
         best = self.benchmark_results[0]
-        tk.Label(header, text="🏆 PID TUNING LEADERBOARD & VARIATION ANALYSIS", font=("Segoe UI", 14, "bold"), fg="#00E5FF", bg="#1A2230").pack(anchor="w")
-        tk.Label(header, text=f"Top Performer: #{best['rank']} {best['name']} | P={best['p']}, I={best['i']}, D={best['d']}, Tf={best['tf']} | Jitter: ±{best['std_dev']:.2f} RPM | Ripple: {best['ripple_pk_pk']:.1f} RPM",
-                 font=("Segoe UI", 10, "bold"), fg="#69F0AE", bg="#1A2230").pack(anchor="w", pady=(4, 0))
+        tk.Label(header, text="🏆 PID TUNING & SPEED VARIATION LEADERBOARD", font=("Segoe UI", 14, "bold"), fg="#00E5FF", bg="#1A2230").pack(anchor="w")
+        tk.Label(
+            header,
+            text=f"Top Performer: #{best.get('rank', 1)} {best['origin']} | P={best['p']}, I={best['i']}, D={best['d']} (D=0), "
+                 f"Tf={best['tf_ms']:.2f} ms | Jitter: ±{best['std_dev']:.2f} RPM | MAE: ±{best['mae']:.2f} RPM | Ripple: {best['ripple_pk_pk']:.1f} RPM",
+            font=("Segoe UI", 10, "bold"),
+            fg="#69F0AE",
+            bg="#1A2230"
+        ).pack(anchor="w", pady=(4, 0))
 
         table_frame = tk.Frame(modal, bg="#12161E", padx=10, pady=10)
         table_frame.pack(fill="both", expand=True)
 
-        cols = ("Rank", "Preset Name", "P Gain", "I Gain", "D Gain", "LPF Tf", "Target", "Actual", "MAE Err", "StdDev (Jitter)", "Ripple Pk-Pk")
+        cols = ("Rank", "Source / Preset", "P Gain", "I Gain", "D Gain", "LPF (ms)", "Target", "Actual", "MAE Err", "StdDev (Jitter)", "Ripple Pk-Pk", "Score")
         tree = ttk.Treeview(table_frame, columns=cols, show="headings", height=12)
 
-        col_widths = [50, 160, 60, 60, 60, 60, 65, 65, 75, 100, 90]
+        col_widths = [45, 175, 55, 55, 50, 65, 60, 60, 70, 95, 85, 60]
         for c, w in zip(cols, col_widths):
             tree.heading(c, text=c)
             tree.column(c, width=w, anchor="center")
 
         for r in self.benchmark_results:
             values = (
-                f"#{r['rank']}",
-                r['name'],
-                f"{r['p']:.2f}",
+                f"#{r.get('rank', '-')}",
+                r['origin'],
+                f"{r['p']:.3f}",
                 f"{r['i']:.2f}",
                 f"{r['d']:.3f}",
-                f"{r['tf']:.3f}",
+                f"{r['tf_ms']:.2f} ms",
                 f"{r['target']:.1f}",
                 f"{r['mean_speed']:.1f}",
                 f"±{r['mae']:.2f}",
                 f"±{r['std_dev']:.2f} RPM",
-                f"{r['ripple_pk_pk']:.1f} RPM"
+                f"{r['ripple_pk_pk']:.1f} RPM",
+                f"{r['score']:.2f}"
             )
             tree.insert("", "end", values=values)
 
@@ -1702,14 +1943,70 @@ class MT6818DashboardGUI:
             self._set_param("d", str(target_res['d']))
             self._set_param("f", str(target_res['tf']))
 
-            messagebox.showinfo("Preset Applied", f"Applied Preset #{target_res['rank']} '{target_res['name']}' to active motor controller!")
+            messagebox.showinfo("Preset Applied", f"Applied Preset #{target_res.get('rank', 1)} '{target_res['origin']}' to active motor controller!")
             modal.destroy()
 
-        tk.Button(btn_bar, text="🚀 Apply Selected / #1 Best Preset", font=("Segoe UI", 10, "bold"),
-                  bg="#00E676", fg="#000", padx=12, pady=6, relief="flat", command=apply_selected).pack(side="left", padx=5)
+        def copy_report():
+            lines = [
+                "=== PID BENCHMARK & 5-MIN GA AUTO-TUNER LEADERBOARD ===",
+                f"Top Ranked Winner: #{best.get('rank', 1)} {best['origin']} (Score: {best['score']:.2f})",
+                f"Gains: P={best['p']}, I={best['i']}, D={best['d']}, Tf={best['tf_ms']:.2f}ms",
+                f"Metrics: Jitter=±{best['std_dev']:.2f} RPM, MAE=±{best['mae']:.2f} RPM, Ripple={best['ripple_pk_pk']:.1f} RPM",
+                "----------------------------------------------------------------------------------------------------------------",
+                f"{'Rank':<5} | {'Source / Preset':<24} | {'P':<6} | {'I':<6} | {'D':<6} | {'LPF (ms)':<8} | {'Target':<6} | {'Actual':<6} | {'StdDev':<10} | {'Score':<6}",
+                "------+--------------------------+--------+--------+--------+----------+--------+--------+------------+-------"
+            ]
+            for r in self.benchmark_results:
+                lines.append(
+                    f"#{r.get('rank', '-'):<4} | {r['origin']:<24} | {r['p']:<6.3f} | {r['i']:<6.2f} | {r['d']:<6.3f} | "
+                    f"{r['tf_ms']:<8.2f} | {r['target']:<6.1f} | {r['mean_speed']:<6.1f} | ±{r['std_dev']:<8.2f} | {r['score']:<6.2f}"
+                )
+            text_rep = "\n".join(lines)
+            self.root.clipboard_clear()
+            self.root.clipboard_append(text_rep)
+            messagebox.showinfo("Report Copied", "Leaderboard text successfully copied to clipboard!")
 
-        tk.Button(btn_bar, text="Close", font=("Segoe UI", 9), bg="#455A64", fg="#FFF", padx=10, pady=6, relief="flat",
-                  command=modal.destroy).pack(side="right", padx=5)
+        def export_csv():
+            filename = filedialog.asksaveasfilename(
+                title="Save Benchmark Leaderboard CSV",
+                defaultextension=".csv",
+                filetypes=[("CSV Files", "*.csv"), ("All Files", "*.*")],
+                initialfile="pid_benchmark_results.csv"
+            )
+            if not filename:
+                return
+            try:
+                with open(filename, "w", newline="", encoding="utf-8") as f:
+                    writer = csv.writer(f)
+                    writer.writerow(["Rank", "Source_Preset", "P", "I", "D", "LPF_Tf_s", "LPF_Tf_ms", "Target_RPM", "Actual_RPM", "MAE_RPM", "StdDev_RPM", "Ripple_RPM", "Score"])
+                    for r in self.benchmark_results:
+                        writer.writerow([
+                            r.get('rank', '-'), r['origin'], r['p'], r['i'], r['d'], r['tf'], r['tf_ms'],
+                            r['target'], r['mean_speed'], r['mae'], r['std_dev'], r['ripple_pk_pk'], r['score']
+                        ])
+                messagebox.showinfo("CSV Exported", f"Successfully saved {len(self.benchmark_results)} benchmark records to {filename}!")
+            except Exception as e:
+                messagebox.showerror("Export Error", f"Failed to export CSV: {e}")
+
+        tk.Button(
+            btn_bar, text="🚀 Apply Selected / #1 Best Preset", font=("Segoe UI", 10, "bold"),
+            bg="#00E676", fg="#000", padx=12, pady=6, relief="flat", command=apply_selected
+        ).pack(side="left", padx=5)
+
+        tk.Button(
+            btn_bar, text="📋 Copy Report", font=("Segoe UI", 9, "bold"),
+            bg="#00E5FF", fg="#000", padx=10, pady=6, relief="flat", command=copy_report
+        ).pack(side="left", padx=5)
+
+        tk.Button(
+            btn_bar, text="💾 Export CSV", font=("Segoe UI", 9, "bold"),
+            bg="#FFD600", fg="#000", padx=10, pady=6, relief="flat", command=export_csv
+        ).pack(side="left", padx=5)
+
+        tk.Button(
+            btn_bar, text="Close", font=("Segoe UI", 9), bg="#455A64", fg="#FFF", padx=10, pady=6, relief="flat",
+            command=modal.destroy
+        ).pack(side="right", padx=5)
 
     def _schedule_update(self):
         try:

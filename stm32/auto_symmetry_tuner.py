@@ -100,8 +100,8 @@ class AutoSymmetryTuner:
         print("================================================================================")
         print(" PHASE 1: 11-POLE BASELINE ELECTRICAL ZERO CALIBRATION")
         print("================================================================================")
-        print("[*] Setting optimal alignment voltage: 3.50V (Current ~ 0.50A)")
-        self.send_cmd("y3.5")
+        print("[*] Setting optimal alignment voltage: 3.70V (Current ~ 0.55A)")
+        self.send_cmd("y3.7")
         time.sleep(0.1)
 
         print("[*] Triggering 11-Pole Multi-Point Calibration ('c')...")

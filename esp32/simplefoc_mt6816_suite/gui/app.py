@@ -35,7 +35,7 @@ class MT6818DashboardGUI:
         self.sensor_mode_var = tk.IntVar(value=0)
 
         self.benchmark_progress_var = tk.DoubleVar(value=0.0)
-        self.benchmark_status_var = tk.StringVar(value="Ready for 2-Min PID Benchmark")
+        self.benchmark_status_var = tk.StringVar(value="Ready for 5-Min GA Auto-Tuner or 18-Stage Sweep (D=0, LPF 0.8-3.0ms)")
 
         self.sym_status_var = tk.StringVar(value="Ready to test KV Symmetry & Phase Angle Balance.")
         self.sym_progress_var = tk.DoubleVar(value=0.0)
@@ -46,8 +46,8 @@ class MT6818DashboardGUI:
         self.calib_progress_var = tk.DoubleVar(value=0.0)
         self.calib_status_var = tk.StringVar(value="Ready for High-Precision Auto-Calibration.")
         self.calib_grade_var = tk.StringVar(value="NOT CALIBRATED")
-        self.calib_align_volt_var = tk.StringVar(value="3.5")
-        self.calib_boost_retry_var = tk.BooleanVar(value=False)
+        self.calib_align_volt_var = tk.StringVar(value="4.0")
+        self.calib_boost_retry_var = tk.BooleanVar(value=True)
         self.calib_verify_var = tk.BooleanVar(value=True)
 
         # Submodules
@@ -210,7 +210,7 @@ class MT6818DashboardGUI:
 
         ttk.Label(pid_card, text="Volt Limit:", font=("Segoe UI", 9, "bold"), background="#1A2230", foreground="#B0BEC5").grid(row=1, column=3, sticky="w", padx=2, pady=2)
         self.entry_v = tk.Entry(pid_card, width=7, font=("Segoe UI", 9), bg="#222D3E", fg="#FFF", insertbackground="#FFF")
-        self.entry_v.insert(0, "12.0")
+        self.entry_v.insert(0, "6.93")
         self.entry_v.grid(row=1, column=4, padx=2, pady=2)
         tk.Button(pid_card, text="Set V", font=("Segoe UI", 8, "bold"), bg="#00E5FF", fg="#000", relief="flat", command=lambda: self._set_param("l", self.entry_v.get())).grid(row=1, column=5, padx=2, pady=2)
 
@@ -281,27 +281,32 @@ class MT6818DashboardGUI:
         hw_info_card.pack(fill="x", pady=4)
 
         ttk.Label(hw_info_card, text="🔒 COMPILE-TIME HARDWARE CONSTANTS (EDIT IN MAIN.CPP)", style="CardTitle.TLabel").pack(anchor="w", pady=(0, 2))
-        info_txt = "PWM Carrier: 25.0 kHz | Pole Pairs: 11 (GM3506) | Align Volt: 3.5V | SPI Baud: 1.0 MHz | Driver: GPIO 15,16,17,2 EN | Sensor: GPIO 12,11,13,10 CS"
+        info_txt = "PWM Carrier: 25.0 kHz | Pole Pairs: 11 (GM3506) | Align Volt: 4.0V (4.2V Boost) | Hold: 2.4V | SPI: 4.0 MHz | Driver: GPIO 15,16,17,2 EN"
         tk.Label(hw_info_card, text=info_txt, font=("Segoe UI", 8), bg="#1A2230", fg="#8A99AD", anchor="w").pack(fill="x")
 
-        # 2-Minute PID Benchmark Card
+        # 5-Minute GA Auto-Tuner & PID Benchmark Card
         bench_card = ttk.Frame(left_col, style="Card.TFrame", padding=10)
         bench_card.pack(fill="x", pady=4)
 
-        ttk.Label(bench_card, text="🧪 2-MINUTE AUTOMATED PID BENCHMARK & AUTO-TUNER", style="CardTitle.TLabel").pack(anchor="w")
+        ttk.Label(bench_card, text="🧬 5-MIN GA AUTO-TUNER & PID BENCHMARK (D=0, LPF 0.8-3.0ms)", style="CardTitle.TLabel").pack(anchor="w")
 
         bench_ctrl_row = ttk.Frame(bench_card)
         bench_ctrl_row.pack(fill="x", pady=4)
 
-        self.btn_benchmark = tk.Button(bench_ctrl_row, text="▶️ Start 2-Min PID Benchmark", font=("Segoe UI", 9, "bold"),
-                                       bg="#00E676", fg="#000", activebackground="#69F0AE", relief="flat", padx=10, pady=4,
-                                       command=lambda: self.benchmarker.toggle(self.btn_benchmark, self.btn_show_results))
-        self.btn_benchmark.pack(side="left", padx=4)
+        self.btn_benchmark = tk.Button(bench_ctrl_row, text="🧬 5-Min GA Auto-Tuner", font=("Segoe UI", 9, "bold"),
+                                       bg="#00E676", fg="#000", activebackground="#69F0AE", relief="flat", padx=8, pady=4,
+                                       command=lambda: self.benchmarker.toggle_ga(self.btn_benchmark, self.btn_sweep, self.btn_show_results))
+        self.btn_benchmark.pack(side="left", padx=3)
+
+        self.btn_sweep = tk.Button(bench_ctrl_row, text="🧪 18-Stage Sweep", font=("Segoe UI", 9, "bold"),
+                                   bg="#00E5FF", fg="#000", activebackground="#84FFFF", relief="flat", padx=8, pady=4,
+                                   command=lambda: self.benchmarker.toggle_sweep(self.btn_sweep, self.btn_benchmark, self.btn_show_results))
+        self.btn_sweep.pack(side="left", padx=3)
 
         self.btn_show_results = tk.Button(bench_ctrl_row, text="📊 View Leaderboard", font=("Segoe UI", 9, "bold"),
                                           bg="#7C4DFF", fg="#FFF", relief="flat", padx=8, pady=4,
                                           state="disabled", command=lambda: self.benchmarker.show_results_modal(self._apply_benchmark_preset))
-        self.btn_show_results.pack(side="left", padx=4)
+        self.btn_show_results.pack(side="left", padx=3)
 
         self.bench_progress = ttk.Progressbar(bench_card, variable=self.benchmark_progress_var, maximum=100.0)
         self.bench_progress.pack(fill="x", pady=4)
@@ -554,12 +559,12 @@ class MT6818DashboardGUI:
 
         ttk.Label(cal_row, text="Align Volt (V):", font=("Segoe UI", 9, "bold"), background="#1A2230", foreground="#00E5FF").pack(side="left", padx=2)
         self.entry_align_v = tk.Entry(cal_row, width=6, font=("Segoe UI", 9), bg="#222D3E", fg="#00E5FF", insertbackground="#FFF")
-        self.entry_align_v.insert(0, "3.5")
+        self.entry_align_v.insert(0, "4.0")
         self.entry_align_v.pack(side="left", padx=4)
         tk.Button(cal_row, text="Set Volt", font=("Segoe UI", 8, "bold"), bg="#00E5FF", fg="#000", relief="flat",
                   command=lambda: self._set_param("y", self.entry_align_v.get())).pack(side="left", padx=2)
 
-        tk.Label(cal_row, text="(GM3506 draws ~0.50A @ 3.5V vs 0.8A @ 4.5V)", font=("Segoe UI", 8), bg="#1A2230", fg="#8A99AD").pack(side="left", padx=6)
+        tk.Label(cal_row, text="(GM3506 draws ~0.65A @ 4.0V vs 0.75A @ 4.2V boost | Hold 2.4V)", font=("Segoe UI", 8), bg="#1A2230", fg="#8A99AD").pack(side="left", padx=6)
         tk.Button(cal_row, text="🔬 Run Alignment (c)", font=("Segoe UI", 8, "bold"), bg="#FFD600", fg="#000", relief="flat",
                   command=lambda: self.reader.send_cmd("c")).pack(side="right", padx=2)
 
@@ -1061,18 +1066,18 @@ class MT6818DashboardGUI:
 
     def _reset_gm3506_defaults(self):
         self.entry_ramp.delete(0, "end"); self.entry_ramp.insert(0, "200.0")
-        self.entry_v.delete(0, "end"); self.entry_v.insert(0, "12.0")
+        self.entry_v.delete(0, "end"); self.entry_v.insert(0, "6.93")
         self.entry_max_rpm.delete(0, "end"); self.entry_max_rpm.insert(0, "1432.0")
         self.entry_p.delete(0, "end"); self.entry_p.insert(0, "0.12")
         self.entry_i.delete(0, "end"); self.entry_i.insert(0, "1.20")
         self.entry_d.delete(0, "end"); self.entry_d.insert(0, "0.000")
         self.entry_f.delete(0, "end"); self.entry_f.insert(0, "0.005")
         self.entry_lag.delete(0, "end"); self.entry_lag.insert(0, "35.0")
-        self.entry_kv.delete(0, "end"); self.entry_kv.insert(0, "171.9")
+        self.entry_kv.delete(0, "end"); self.entry_kv.insert(0, "122.1")
         self.entry_target.delete(0, "end"); self.entry_target.insert(0, "0.0")
 
         self.reader.send_cmd("a200.0")
-        self.reader.send_cmd("l12.0")
+        self.reader.send_cmd("l6.93")
         self.reader.send_cmd("m1432.0")
         self.reader.send_cmd("p0.12")
         self.reader.send_cmd("i1.20")
@@ -1110,7 +1115,9 @@ class MT6818DashboardGUI:
         try:
             self.btn_master_calib.config(text="🚀 1-CLICK MASTER AUTO-CALIBRATE (MULTI-METHOD)", bg="#00E676", fg="#000")
             self.btn_auto_sym.config(text="🚀 1-CLICK AUTO-EQUALIZE SYMMETRY", bg="#00E676", fg="#000")
-            self.btn_benchmark.config(text="▶️ Start 2-Min PID Benchmark", bg="#00E676", fg="#000")
+            self.btn_benchmark.config(text="🧬 5-Min GA Auto-Tuner", bg="#00E676", fg="#000", state="normal")
+            if hasattr(self, 'btn_sweep'):
+                self.btn_sweep.config(text="🧪 18-Stage Sweep", bg="#00E5FF", fg="#000", state="normal")
             self.btn_run_kv.config(text="🚀 START 18-Stage KV Sweep (k)", bg="#00E676", fg="#000")
         except Exception:
             pass

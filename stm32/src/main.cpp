@@ -389,7 +389,7 @@ void setup() {
     motor1.linkDriver(&driver1);
     motor1.linkSensor(&encoder1);
     motor1.foc_modulation = FOCModulationType::SpaceVectorPWM; // +15.5% linear voltage headroom over SinePWM
-    motor1.voltage_limit = 12.0f;
+    motor1.voltage_limit = MOTOR_POWER_SUPPLY_VOLT / 1.7320508f; // 6.93V max linear phase voltage for SpaceVectorPWM (12V / sqrt(3))
     motor1.velocity_limit = 150.0f; // 150 rad/s = 1432 RPM (eliminates 477 RPM velocity clamp)
     motor1.KV_rating = 130.0f;     // GM3506 Back-EMF Feed-Forward
     motor1.voltage_sensor_align = MOTOR_ALIGN_VOLTAGE;
@@ -400,7 +400,7 @@ void setup() {
     motor1.PID_velocity.I = 1.20f;
     motor1.PID_velocity.D = 0.001f;
     motor1.PID_velocity.output_ramp = 1000.0f;
-    motor1.PID_velocity.limit = 12.0f;
+    motor1.PID_velocity.limit = motor1.voltage_limit;
     motor1.LPF_velocity.Tf = 0.015f; // Fast 15ms filter for low electrical phase lag at 600+ RPM
 
     motor1.init();
@@ -490,8 +490,8 @@ void loop() {
 
             case 'r':
             case 'R': {
-                motor1.voltage_limit = 12.0f;
-                motor1.PID_velocity.limit = 12.0f;
+                motor1.voltage_limit = MOTOR_POWER_SUPPLY_VOLT / 1.7320508f;
+                motor1.PID_velocity.limit = motor1.voltage_limit;
                 motor1.velocity_limit = 150.0f;
                 motor1.PID_velocity.P = 0.12f;
                 motor1.PID_velocity.I = 1.20f;
@@ -500,7 +500,7 @@ void loop() {
                 motor1.LPF_velocity.Tf = 0.015f;
                 m1_target_rpm = 0.0f;
                 Serial.println("\n>>> [RESET] Restored GM3506 Optimized Defaults (12V SpaceVectorPWM):");
-                Serial.println("  Voltage Limit  : 12.0 V");
+                Serial.print("  Voltage Limit  : "); Serial.print(motor1.voltage_limit, 2); Serial.println(" V (Phase Linear Limit)");
                 Serial.println("  Velocity Limit : 1432 RPM (150 rad/s)");
                 Serial.println("  Velocity P     : 0.1200");
                 Serial.println("  Velocity I     : 1.2000");

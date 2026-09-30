@@ -20,9 +20,11 @@
 #define MOTOR_PHASE_RESISTANCE_OHM 5.60f // Phase-to-Phase / 2 = 5.6 Ohm
 #define POWER_SUPPLY_VOLTAGE 12.0f       // 12V DC Regulated Bench Supply
 #define CALIBRATION_VOLTAGE                                                    \
-  3.50f // Safe Open-Loop Calibration Step Voltage (3.5V ~ 0.45A)
+  4.00f // Default Open-Loop Calibration Step Voltage (4.0V ~ 0.65A)
 #define CALIBRATION_HOLD_VOLTAGE                                               \
-  2.0f // Thermal Relief Hold Voltage during Settle & Sample
+  2.40f // Thermal Relief Hold Voltage during Settle & Sample for LUT (2.4V)
+#define CALIBRATION_BOOST_VOLTAGE                                              \
+  4.20f // Automatic Boost Voltage on Stall / Pole-Slip Detection (4.2V)
 
 // 2. BUS & PROTOCOL SETTINGS
 #define SPI_SPEED_DEFAULT_HZ                                                   \
@@ -57,7 +59,8 @@
   50 // Serial Live Streaming Interval (50ms = 20 Hz)
 
 // 5. REAL-TIME TUNABLE DEFAULT FOC PARAMETERS
-#define DEFAULT_VOLTAGE_LIMIT 12.0f // Maximum allowable phase voltage (V)
+#define DEFAULT_VOLTAGE_LIMIT                                                  \
+  (POWER_SUPPLY_VOLTAGE / 1.7320508f) // 6.93V Maximum linear phase voltage (V) for SpaceVectorPWM
 #define DEFAULT_VELOCITY_LIMIT_RPM                                             \
   1432.0f // Maximum velocity limit (1432 RPM = 150 rad/s)
 #define DEFAULT_OUTPUT_RAMP_V_PER_S                                            \
@@ -378,7 +381,7 @@ public:
   }
 
   float getSingleTurnDeg() {
-    float rad = (correction_mode != 0) ? getSensorAngle() : getRawMechanicalAngle();
+    float rad = getMechanicalAngle();
     float d = (rad / _2PI) * 360.0f - zero_offset_deg;
     while (d < 0.0f)
       d += 360.0f;
@@ -388,8 +391,9 @@ public:
   }
 
   void zeroCurrentPosition() {
-    float rad = (correction_mode != 0) ? getSensorAngle() : getRawMechanicalAngle();
+    float rad = getMechanicalAngle();
     zero_offset_deg = (rad / _2PI) * 360.0f;
+    full_rotations = 0;
   }
 
   float getVelocity() override {
@@ -441,6 +445,7 @@ uint32_t last_telemetry_time_ms = 0;
 
 float calib_align_voltage = CALIBRATION_VOLTAGE;
 float calib_hold_voltage = CALIBRATION_HOLD_VOLTAGE;
+bool calib_user_aborted = false;
 float base_zero_electric_angle = 0.0f;
 float sensor_lag_comp_us = SENSOR_LAG_COMP_DEFAULT_US;
 float motor_kv_rating = DEFAULT_MOTOR_KV_RATING;
@@ -473,8 +478,11 @@ float getInterpolatedElectricalZero(float mech_angle_rad) {
 }
 
 // Forward Declarations
+bool calibrateComprehensiveFOCSinglePass(float align_voltage);
 bool calibrateComprehensiveFOC(float align_voltage);
+bool calibrate256PointLUTSinglePass(float align_voltage);
 bool calibrate256PointLUT(float align_voltage);
+bool calibrateDynamicContinuousSinglePass(float calib_voltage);
 bool calibrateDynamicContinuous(float calib_voltage);
 void runBenchmarkComparison();
 void printLUTMetrics();
@@ -554,9 +562,10 @@ void focTaskLoop(void *param) {
 
       foc_cycle_count++;
     } else {
-      // Motor disabled: update sensor angle for live GUI tracking, then idle
-      // briefly
+      // Motor disabled: update sensor and motion state for live GUI tracking, then idle briefly
       motor1.loopFOC();
+      motor1.shaft_angle = motor1.shaftAngle();
+      motor1.shaft_velocity = motor1.shaftVelocity();
       foc_cycle_count++;
       vTaskDelay(pdMS_TO_TICKS(1));
     }
@@ -574,24 +583,16 @@ void focTaskLoop(void *param) {
     if (now_us - last_snapshot_us >= 10000) {
       last_snapshot_us = now_us;
 
-      // Extract single-turn mechanical degree using latest sensor data without
-      // extra SPI reads
-      float norm_mech = _normalizeAngle(motor1.shaft_angle);
-      if (norm_mech < 0.0f)
-        norm_mech += _2PI;
-      float d = (norm_mech / _2PI) * 360.0f - encoder1.zero_offset_deg;
-      while (d < 0.0f)
-        d += 360.0f;
-      while (d >= 360.0f)
-        d -= 360.0f;
+      // Extract single-turn mechanical degree using calibrated sensor angle directly [0, 360)
+      float d = encoder1.getSingleTurnDeg();
 
       portENTER_CRITICAL(&telemSpinlock);
       g_telemetry.angle_deg = d;
       g_telemetry.actual_rpm = motor1.shaft_velocity * 9.54929658551f;
       g_telemetry.target_rpm = target_velocity_rpm;
       g_telemetry.target_voltage = target_voltage;
-      g_telemetry.uq = motor1.voltage.q;
-      g_telemetry.ud = motor1.voltage.d;
+      g_telemetry.uq = is_enabled ? motor1.voltage.q : 0.0f;
+      g_telemetry.ud = is_enabled ? motor1.voltage.d : 0.0f;
       g_telemetry.raw14 = encoder1.last_raw_14bit;
       g_telemetry.raw_h = encoder1.last_raw_h;
       g_telemetry.raw_l = encoder1.last_raw_l;
@@ -803,9 +804,10 @@ void dumpConfigJSON() {
 
 // KV Test State Machine
 bool kv_test_running = false;
-const float kv_voltages[] = {1.0f,  2.0f,  3.0f,  4.0f,  5.0f,   6.0f,
-                             8.0f,  10.0f, 12.0f, -1.0f, -2.0f,  -3.0f,
-                             -4.0f, -5.0f, -6.0f, -8.0f, -10.0f, -12.0f};
+// 18-stage closed-loop KV sweep (9 positive, 9 negative) strictly within
+// SpaceVectorPWM linear limit (12V / sqrt(3) ~= 6.93V) to prevent PWM clipping/saturation.
+const float kv_voltages[] = {1.0f,  1.5f,  2.0f,  2.5f,  3.0f,  3.5f,  4.0f,  5.0f,  6.0f,
+                            -1.0f, -1.5f, -2.0f, -2.5f, -3.0f, -3.5f, -4.0f, -5.0f, -6.0f};
 const int NUM_KV_STAGES = sizeof(kv_voltages) / sizeof(kv_voltages[0]);
 int kv_stage_index = 0;
 uint32_t kv_stage_start_ms = 0;
@@ -1213,7 +1215,7 @@ void printHarmonicReport() {
 // ============================================================================
 // 128-POINT NON-LINEARITY LUT CALIBRATION
 // ============================================================================
-bool calibrate256PointLUT(float align_voltage) {
+bool calibrate256PointLUTSinglePass(float align_voltage) {
   float hold_voltage = min(align_voltage, calib_hold_voltage);
   Serial.println("\n==========================================================="
                  "=====================");
@@ -1259,6 +1261,7 @@ bool calibrate256PointLUT(float align_voltage) {
     if (Serial.available()) {
       char c = Serial.read();
       if (c == 'x' || c == 'X') {
+        calib_user_aborted = true;
         motor1.setPhaseVoltage(0, 0, 0);
         driver1.disable();
         is_enabled = false;
@@ -1277,6 +1280,7 @@ bool calibrate256PointLUT(float align_voltage) {
     if (Serial.available()) {
       char c = Serial.read();
       if (c == 'x' || c == 'X') {
+        calib_user_aborted = true;
         motor1.setPhaseVoltage(0, 0, 0);
         driver1.disable();
         is_enabled = false;
@@ -1353,6 +1357,7 @@ bool calibrate256PointLUT(float align_voltage) {
     if (Serial.available()) {
       char c = Serial.read();
       if (c == 'x' || c == 'X') {
+        calib_user_aborted = true;
         motor1.setPhaseVoltage(0, 0, 0);
         driver1.disable();
         is_enabled = false;
@@ -1426,6 +1431,7 @@ bool calibrate256PointLUT(float align_voltage) {
     if (Serial.available()) {
       char c = Serial.read();
       if (c == 'x' || c == 'X') {
+        calib_user_aborted = true;
         driver1.disable();
         is_enabled = false;
         Serial.println("\n>>> 🛑 CALIBRATION ABORTED BY USER <<<");
@@ -1450,6 +1456,7 @@ bool calibrate256PointLUT(float align_voltage) {
     if (Serial.available()) {
       char c = Serial.read();
       if (c == 'x' || c == 'X') {
+        calib_user_aborted = true;
         motor1.setPhaseVoltage(0, 0, 0);
         driver1.disable();
         is_enabled = false;
@@ -1697,6 +1704,7 @@ bool calibrate256PointLUT(float align_voltage) {
     if (Serial.available()) {
       char c = Serial.read();
       if (c == 'x' || c == 'X') {
+        calib_user_aborted = true;
         driver1.disable();
         is_enabled = false;
         Serial.println("\n>>> 🛑 CALIBRATION ABORTED BY USER <<<");
@@ -1710,10 +1718,27 @@ bool calibrate256PointLUT(float align_voltage) {
   return align_ok;
 }
 
+bool calibrate256PointLUT(float align_voltage) {
+  calib_user_aborted = false;
+  bool ok = calibrate256PointLUTSinglePass(align_voltage);
+  if (!ok && align_voltage < CALIBRATION_BOOST_VOLTAGE && !calib_user_aborted) {
+    Serial.println("\n================================================================================");
+    Serial.printf("⚠️  STEPPED LUT CALIBRATION STALLED @ %.2fV!\n", align_voltage);
+    Serial.printf("⚡ AUTOMATIC TORQUE BOOST: Ramping to %.2fV and retrying sweep...\n", CALIBRATION_BOOST_VOLTAGE);
+    Serial.println("================================================================================\n");
+    delay(400);
+    ok = calibrate256PointLUTSinglePass(CALIBRATION_BOOST_VOLTAGE);
+    if (ok) {
+      calib_align_voltage = CALIBRATION_BOOST_VOLTAGE;
+    }
+  }
+  return ok;
+}
+
 // ============================================================================
 // CALIBRATION: FULL 360° BIDIRECTIONAL ROUND-TRIP SWEEP WITH DECAYING DITHER
 // ============================================================================
-bool calibrateComprehensiveFOC(float align_voltage) {
+bool calibrateComprehensiveFOCSinglePass(float align_voltage) {
   float hold_voltage = min(align_voltage, calib_hold_voltage);
   Serial.println("\n==========================================================="
                  "=====================");
@@ -1755,6 +1780,7 @@ bool calibrateComprehensiveFOC(float align_voltage) {
     if (Serial.available()) {
       char c = Serial.read();
       if (c == 'x' || c == 'X') {
+        calib_user_aborted = true;
         motor1.setPhaseVoltage(0, 0, 0);
         driver1.disable();
         is_enabled = false;
@@ -1774,6 +1800,7 @@ bool calibrateComprehensiveFOC(float align_voltage) {
     if (Serial.available()) {
       char c = Serial.read();
       if (c == 'x' || c == 'X') {
+        calib_user_aborted = true;
         motor1.setPhaseVoltage(0, 0, 0);
         driver1.disable();
         is_enabled = false;
@@ -1860,6 +1887,7 @@ bool calibrateComprehensiveFOC(float align_voltage) {
     if (Serial.available()) {
       char c = Serial.read();
       if (c == 'x' || c == 'X') {
+        calib_user_aborted = true;
         motor1.setPhaseVoltage(0, 0, 0);
         driver1.disable();
         is_enabled = false;
@@ -1908,6 +1936,7 @@ bool calibrateComprehensiveFOC(float align_voltage) {
     if (Serial.available()) {
       char c = Serial.read();
       if (c == 'x' || c == 'X') {
+        calib_user_aborted = true;
         motor1.setPhaseVoltage(0, 0, 0);
         driver1.disable();
         is_enabled = false;
@@ -2121,10 +2150,27 @@ bool calibrateComprehensiveFOC(float align_voltage) {
   return true;
 }
 
+bool calibrateComprehensiveFOC(float align_voltage) {
+  calib_user_aborted = false;
+  bool ok = calibrateComprehensiveFOCSinglePass(align_voltage);
+  if (!ok && align_voltage < CALIBRATION_BOOST_VOLTAGE && !calib_user_aborted) {
+    Serial.println("\n================================================================================");
+    Serial.printf("⚠️  ELECTRICAL ZERO ALIGNMENT STALLED @ %.2fV!\n", align_voltage);
+    Serial.printf("⚡ AUTOMATIC TORQUE BOOST: Ramping to %.2fV and retrying multi-pole alignment...\n", CALIBRATION_BOOST_VOLTAGE);
+    Serial.println("================================================================================\n");
+    delay(400);
+    ok = calibrateComprehensiveFOCSinglePass(CALIBRATION_BOOST_VOLTAGE);
+    if (ok) {
+      calib_align_voltage = CALIBRATION_BOOST_VOLTAGE;
+    }
+  }
+  return ok;
+}
+
 // ============================================================================
 // CONTINUOUS SPATIAL-BINNED HARMONIC CALIBRATION (128-SLOT SPATIAL GRID)
 // ============================================================================
-bool calibrateDynamicContinuous(float calib_voltage) {
+bool calibrateDynamicContinuousSinglePass(float calib_voltage) {
   float hold_voltage = min(calib_voltage, calib_hold_voltage);
   Serial.println("\n================================================================================");
   Serial.println(">>> 🚀 STARTING CONTINUOUS SPATIAL-BINNED HARMONIC CALIBRATION <<<");
@@ -2159,6 +2205,13 @@ bool calibrateDynamicContinuous(float calib_voltage) {
   float d_dir = theta_dir - theta_0;
   while (d_dir > _PI) d_dir -= _2PI;
   while (d_dir < -_PI) d_dir += _2PI;
+  if (fabsf(d_dir) < 0.02f) {
+    Serial.println("FAILED (No motion detected in direction qualification)!");
+    motor1.setPhaseVoltage(0, 0, 0);
+    driver1.disable();
+    is_enabled = false;
+    return false;
+  }
   int dir_sign = (d_dir >= 0.0f) ? 1 : -1;
   motor1.sensor_direction = (dir_sign == 1) ? Direction::CW : Direction::CCW;
   Serial.printf("Aligned at %.2f deg | Direction: %s\n", theta_0 * 57.2957795f, dir_sign == 1 ? "CW (+1)" : "CCW (-1)");
@@ -2172,9 +2225,7 @@ bool calibrateDynamicContinuous(float calib_voltage) {
   uint32_t rev_cnt[NUM_BINS] = {0};
 
   const float max_omega = 4.0f; // ~38 RPM
-  // Acceleration over 1 turn (2*pi rad): a = omega^2 / (2 * 2*pi) = 16 / (4*pi) = 4 / pi rad/s^2
-  const float accel = (max_omega * max_omega) / (2.0f * _2PI); // ~1.2732 rad/s^2
-  const float ramp_time_s = max_omega / accel; // ~3.1416 s
+  const float ramp_time_s = 0.8f; // Smooth 0.8s runway ramp (prevents sudden jerk/slip)
   const float cruise_time_s = (2.0f * _2PI) / max_omega; // 2 turns = 4*pi / 4.0 = pi ~ 3.1416 s
 
   const float max_slip_rad = _PI / (2.0f * (float)MOTOR_POLE_PAIRS); // ~0.1428 rad = 8.18 deg
@@ -2183,6 +2234,7 @@ bool calibrateDynamicContinuous(float calib_voltage) {
     if (Serial.available()) {
       char c = Serial.read();
       if (c == 'x' || c == 'X') {
+        calib_user_aborted = true;
         motor1.setPhaseVoltage(0, 0, 0);
         driver1.disable();
         is_enabled = false;
@@ -2476,6 +2528,23 @@ bool calibrateDynamicContinuous(float calib_voltage) {
   return true;
 }
 
+bool calibrateDynamicContinuous(float calib_voltage) {
+  calib_user_aborted = false;
+  bool ok = calibrateDynamicContinuousSinglePass(calib_voltage);
+  if (!ok && calib_voltage < CALIBRATION_BOOST_VOLTAGE && !calib_user_aborted) {
+    Serial.println("\n================================================================================");
+    Serial.printf("⚠️  HARMONIC CALIBRATION STALL / POLE-SLIP DETECTED @ %.2fV!\n", calib_voltage);
+    Serial.printf("⚡ AUTOMATIC TORQUE BOOST: Ramping to %.2fV and retrying continuous sweep...\n", CALIBRATION_BOOST_VOLTAGE);
+    Serial.println("================================================================================\n");
+    delay(400);
+    ok = calibrateDynamicContinuousSinglePass(CALIBRATION_BOOST_VOLTAGE);
+    if (ok) {
+      calib_align_voltage = CALIBRATION_BOOST_VOLTAGE;
+    }
+  }
+  return ok;
+}
+
 // ============================================================================
 // AUTOMATED 3-WAY SENSOR MODE BENCHMARK COMPARISON WITH COMMUTATION PARITY
 // ============================================================================
@@ -2687,39 +2756,51 @@ void finalizeKVTest() {
   driver1.disable();
   is_enabled = false;
 
-  float fwd_kv = 0, fwd_v0 = 0, fwd_r2 = 0;
-  float rev_kv = 0, rev_v0 = 0, rev_r2 = 0;
-  bool fwd_ok = calculateLinearRegression(fwd_v, fwd_rpm, fwd_count, fwd_kv,
-                                          fwd_v0, fwd_r2);
-  bool rev_ok = calculateLinearRegression(rev_v, rev_rpm, rev_count, rev_kv,
-                                          rev_v0, rev_r2);
+  float fwd_phase_kv = 0, fwd_v0 = 0, fwd_r2 = 0;
+  float rev_phase_kv = 0, rev_v0 = 0, rev_r2 = 0;
+  bool fwd_ok = calculateLinearRegression(fwd_v, fwd_rpm, fwd_count,
+                                          fwd_phase_kv, fwd_v0, fwd_r2);
+  bool rev_ok = calculateLinearRegression(rev_v, rev_rpm, rev_count,
+                                          rev_phase_kv, rev_v0, rev_r2);
 
-  float true_kv = 0.0f, friction_v0 = 0.0f, best_r2 = 0.0f;
+  float true_phase_kv = 0.0f, friction_v0 = 0.0f, best_r2 = 0.0f;
   if (fwd_ok && rev_ok) {
-    true_kv = (fwd_kv + rev_kv) * 0.5f;
-    friction_v0 = fabsf(fwd_v0 / fwd_kv + rev_v0 / rev_kv) * 0.5f;
+    true_phase_kv = (fwd_phase_kv + rev_phase_kv) * 0.5f;
+    friction_v0 = fabsf(fwd_v0 / fwd_phase_kv + rev_v0 / rev_phase_kv) * 0.5f;
     best_r2 = (fwd_r2 + rev_r2) * 0.5f;
   } else if (fwd_ok) {
-    true_kv = fwd_kv;
-    friction_v0 = fabsf(fwd_v0 / fwd_kv);
+    true_phase_kv = fwd_phase_kv;
+    friction_v0 = fabsf(fwd_v0 / fwd_phase_kv);
     best_r2 = fwd_r2;
   } else if (rev_ok) {
-    true_kv = rev_kv;
-    friction_v0 = fabsf(rev_v0 / rev_kv);
+    true_phase_kv = rev_phase_kv;
+    friction_v0 = fabsf(rev_v0 / rev_phase_kv);
     best_r2 = rev_r2;
   }
 
+  // Standard BLDC Motor KV rating (RPM per Volt Line-to-Line / DC Bus):
+  // SimpleFOC defines motor.KV_rating = RPM / (Uq * sqrt(3)) = Phase_KV / sqrt(3)
+  float true_kv = (true_phase_kv > 0.1f) ? (true_phase_kv / _SQRT3) : 0.0f;
+  float fwd_kv = (fwd_phase_kv > 0.1f) ? (fwd_phase_kv / _SQRT3) : 0.0f;
+  float rev_kv = (rev_phase_kv > 0.1f) ? (rev_phase_kv / _SQRT3) : 0.0f;
+
   float ke_v_s_rad = (true_kv > 0.1f) ? (60.0f / (_2PI * true_kv)) : 0.0f;
   float kt_nm_a = ke_v_s_rad;
-  float max_rpm_12v = true_kv * (12.0f - friction_v0);
+  // Maximum achievable linear speed @ 12V PSU (SpaceVectorPWM limit Uq_max = 12V / sqrt(3)):
+  float max_rpm_12v =
+      true_phase_kv * ((POWER_SUPPLY_VOLTAGE / _SQRT3) - friction_v0);
+  if (max_rpm_12v < 0.0f) max_rpm_12v = 0.0f;
   float symmetry_pct = (fwd_kv > 1.0f && rev_kv > 1.0f)
                            ? (1.0f - fabsf(fwd_kv - rev_kv) / true_kv) * 100.0f
                            : 100.0f;
 
   motor_kv_rating = true_kv;
+  motor1.KV_rating = true_kv;
 
   Serial.print("[KV_RESULT]: KV=");
   Serial.print(true_kv, 2);
+  Serial.print(", PhaseKV=");
+  Serial.print(true_phase_kv, 2);
   Serial.print(", FwdKV=");
   Serial.print(fwd_kv, 2);
   Serial.print(", RevKV=");
@@ -2840,21 +2921,33 @@ void executeCommand(String cmd) {
     dumpConfigJSON();
     return;
   }
-  if (cmd.equalsIgnoreCase("CALIB_DYN") || cmd.equalsIgnoreCase("calib_dyn")) {
+  if (cmd.startsWith("CALIB_DYN") || cmd.startsWith("calib_dyn")) {
+    float v = calib_align_voltage;
+    String arg_v = cmd.substring(9);
+    arg_v.trim();
+    if (arg_v.length() > 0 && arg_v.toFloat() > 0.0f) {
+      v = arg_v.toFloat();
+    }
     if (kv_test_running)
       abortKVTest("Interrupted by Dynamic Calibration");
     foc_paused = true;
     vTaskDelay(pdMS_TO_TICKS(15));
-    calibrateDynamicContinuous(calib_align_voltage);
+    calibrateDynamicContinuous(v);
     foc_paused = false;
     return;
   }
-  if (cmd.equalsIgnoreCase("CALIB_LUT") || cmd.equalsIgnoreCase("calib_lut")) {
+  if (cmd.startsWith("CALIB_LUT") || cmd.startsWith("calib_lut")) {
+    float v = calib_align_voltage;
+    String arg_v = cmd.substring(9);
+    arg_v.trim();
+    if (arg_v.length() > 0 && arg_v.toFloat() > 0.0f) {
+      v = arg_v.toFloat();
+    }
     if (kv_test_running)
       abortKVTest("Interrupted by LUT Calibration");
     foc_paused = true;
     vTaskDelay(pdMS_TO_TICKS(15));
-    calibrate256PointLUT(calib_align_voltage);
+    calibrate256PointLUT(v);
     foc_paused = false;
     return;
   }
@@ -3265,7 +3358,7 @@ void setup() {
 
   // Initialize Inverter Driver
   driver1.voltage_power_supply = POWER_SUPPLY_VOLTAGE;
-  driver1.voltage_limit = DEFAULT_VOLTAGE_LIMIT;
+  driver1.voltage_limit = POWER_SUPPLY_VOLTAGE; // Inverter bus rail limit (12.0V)
   driver1.init();
 
   // Initialize MT6816 SPI Sensor
@@ -3277,7 +3370,8 @@ void setup() {
   motor1.foc_modulation = FOCModulationType::SpaceVectorPWM;
   motor1.controller = MotionControlType::velocity;
 
-  motor1.voltage_limit = DEFAULT_VOLTAGE_LIMIT;
+  motor1.voltage_limit = DEFAULT_VOLTAGE_LIMIT; // 6.93V linear SpaceVectorPWM phase voltage limit
+  motor1.KV_rating = motor_kv_rating;
   motor1.velocity_limit = (DEFAULT_VELOCITY_LIMIT_RPM * 0.104719755f);
   motor1.PID_velocity.P = DEFAULT_PID_P;
   motor1.PID_velocity.I = DEFAULT_PID_I;

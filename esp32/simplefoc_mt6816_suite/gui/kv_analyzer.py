@@ -86,6 +86,7 @@ class KVAnalyzer:
                 f.write("# ====================================================================\n")
                 if res:
                     f.write(f"# True Motor KV: {res.get('KV', 0):.2f} RPM/V\n")
+                    f.write(f"# Phase KV (Uq): {res.get('PhaseKV', res.get('KV', 0) * 1.7320508):.2f} RPM/V\n")
                     f.write(f"# Forward KV (CW): {res.get('FwdKV', 0):.2f} RPM/V\n")
                     f.write(f"# Reverse KV (CCW): {res.get('RevKV', 0):.2f} RPM/V\n")
                     f.write(f"# Linearity (R^2): {res.get('R2', 0):.5f}\n")
@@ -143,7 +144,7 @@ class KVAnalyzer:
             cards["lbl_r2_tag"].config(text=f"R² Fit: {r2_val:.5f} | KV: {kv_val:.1f} RPM/V")
 
         current_rows = len(kv_tree.get_children())
-        slope = kv_res.get('KV', 130.0) if kv_res else 130.0
+        slope = kv_res.get('PhaseKV', kv_res.get('KV', 130.0) * 1.7320508) if kv_res else (130.0 * 1.7320508)
         v0 = kv_res.get('V0', 0.0) if kv_res else 0.0
 
         if len(kv_pts) > current_rows:

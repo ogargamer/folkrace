@@ -52,7 +52,7 @@ class Calibrator:
         try:
             align_v = float(self.align_volt_var.get().strip())
         except Exception:
-            align_v = 3.5
+            align_v = 4.0
 
         # Step 0: Pre-Flight Hardware Qualification
         self.root.after(0, lambda: [
@@ -85,7 +85,7 @@ class Calibrator:
 
         # Retry with higher voltage if stalled or cogging occurred
         if not lut_success and self.boost_retry_var.get() and self.running:
-            boost_v = min(4.0, align_v + 0.5)
+            boost_v = min(4.2, align_v + 0.2)
             self.root.after(0, lambda bv=boost_v: self.status_var.set(f"⚠️ LUT Retrying with Boost Voltage {bv:.1f}V to overcome cogging/stiction..."))
             time.sleep(2.0)
             lut_success = self._execute_firmware_sweep(f"w{boost_v:.2f}", timeout_sec=200)
@@ -93,14 +93,14 @@ class Calibrator:
         # METHOD 2: 11-POLE ROUND-TRIP ALIGNMENT ('c') FALLBACK (IF LUT FAILED)
         c_success = lut_success
         if not lut_success and self.running:
-            fallback_v = min(4.0, align_v + 0.4)
+            fallback_v = min(4.2, align_v + 0.2)
             self.root.after(0, lambda fv=fallback_v: self.status_var.set(f"Step 2/5: Fallback to High-Torque 11-Pole Round-Trip Alignment ({fv:.1f}V)..."))
             time.sleep(1.0)
             c_success = self._execute_firmware_sweep(f"c{fallback_v:.2f}", timeout_sec=60)
             if not c_success and self.running:
                 # Retry once more with max safe voltage
                 time.sleep(1.5)
-                c_success = self._execute_firmware_sweep("c4.00", timeout_sec=60)
+                c_success = self._execute_firmware_sweep("c4.20", timeout_sec=60)
 
         if not self.running:
             self._cleanup_ui(btn_calib)
