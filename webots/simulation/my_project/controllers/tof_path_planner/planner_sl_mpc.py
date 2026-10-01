@@ -88,7 +88,6 @@ if CPP_AVAILABLE and _lib is not None:
         ctypes.c_double, ctypes.c_double,
         ctypes.c_double, ctypes.c_double,
         ctypes.c_double, ctypes.c_double,
-        ctypes.c_double, ctypes.c_double,
     ]
     _lib.sl_mpc_create.restype = ctypes.c_void_p
 
@@ -253,8 +252,6 @@ class CppCurvilinearSLMPC:
             float(self.r_steer_rate),
             float(self.mu_friction),
             float(self.v_corner_factor),
-            float(self.pure_pursuit_blend_gain),
-            float(self.lookahead_blend_m),
             float(self.v_cruise_max),
             float(self.v_cruise_min),
             float(self.straight_lock_dist_m),
@@ -275,8 +272,6 @@ class CppCurvilinearSLMPC:
             float(self.r_steer_rate),
             float(self.mu_friction),
             float(self.v_corner_factor),
-            float(self.pure_pursuit_blend_gain),
-            float(self.lookahead_blend_m),
             float(self.v_cruise_max),
             float(self.v_cruise_min),
             float(self.straight_lock_dist_m),

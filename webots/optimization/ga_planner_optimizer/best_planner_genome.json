@@ -50,8 +50,6 @@
     "r_accel": 0.666,
     "r_steer_rate": 15.612,
     "v_corner_factor": 0.68,
-    "pp_blend_gain": 0.0,
-    "lookahead_blend_m": 0.0,
     "target_lookahead_m": 1.72,
     "w_gap_distance": 4.119,
     "w_gap_width": 2.375,

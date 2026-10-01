@@ -73,8 +73,6 @@ public:
   double r_steer_rate;
   double mu_friction;
   double v_corner_factor;
-  double pure_pursuit_blend_gain;
-  double lookahead_blend_m;
   double v_cruise_max;
   double v_cruise_min;
   double straight_lock_dist_m;
@@ -150,7 +148,6 @@ public:
                          double q_head = 8.0, double r_st = 5.0,
                          double r_acc = 2.0, double r_str_rate = 10.0,
                          double mu = TIRE_MU_CONST, double v_corner = 0.82,
-                         double pp_blend = 0.35, double lookahead_blend = 0.45,
                          double v_max = V_MAX_CRUISE_CONST,
                          double v_min = V_MIN_CRUISE_CONST,
                          double lock_dist = STRAIGHT_LOCK_DIST_M_CONST,
@@ -159,7 +156,6 @@ public:
         dt(dt_val), q_progress(q_prog), q_cte(q_lat), q_heading(q_head),
         r_steer(r_st), r_accel(r_acc), r_steer_rate(r_str_rate),
         mu_friction(mu), v_corner_factor(v_corner),
-        pure_pursuit_blend_gain(pp_blend), lookahead_blend_m(lookahead_blend),
         v_cruise_max(v_max), v_cruise_min(v_min),
         straight_lock_dist_m(lock_dist), straight_lock_speed_mps(lock_spd),
         dt_actuator(DT_PLANNER_CONST), nx(7), nu(2), best_line_count(0),
@@ -1099,23 +1095,6 @@ public:
       double delta_opt = delta_0 + v_delta_0 * dt_actuator;
       double cmd_steer = std::max(-MAX_STEERING_RAD_CONST,
                                   std::min(MAX_STEERING_RAD_CONST, delta_opt));
-
-      // Pure pursuit blend
-      if (pure_pursuit_blend_gain > 0.01) {
-        double pp_u =
-            std::min(1.0, lookahead_blend_m / std::max(0.10, L_guide));
-        HermiteState pp_s = eval_hermite(pp_u, T0_x, T0_y, xg, yg, T1_x, T1_y);
-        double pp_dist_sq = pp_s.gx * pp_s.gx + pp_s.gy * pp_s.gy;
-        double pp_steer = std::max(-MAX_STEERING_RAD_CONST,
-                                   std::min(MAX_STEERING_RAD_CONST,
-                                            2.0 * (-pp_s.gx) * WHEELBASE_CONST /
-                                                std::max(0.04, pp_dist_sq)));
-        cmd_steer =
-            std::max(-MAX_STEERING_RAD_CONST,
-                     std::min(MAX_STEERING_RAD_CONST,
-                              (1.0 - pure_pursuit_blend_gain) * cmd_steer +
-                                  pure_pursuit_blend_gain * pp_steer));
-      }
       *out_cmd_steer_rad = cmd_steer;
 
       // Optimal forward speed command
@@ -1186,15 +1165,14 @@ SL_MPC_API void *sl_mpc_create(void *costmap_handle, CostmapProbeFn probe_fn,
                                double q_cte, double q_heading, double r_steer,
                                double r_accel, double r_steer_rate,
                                double mu_friction, double v_corner_factor,
-                               double pure_pursuit_blend_gain,
-                               double lookahead_blend_m, double v_cruise_max,
-                               double v_cruise_min, double straight_lock_dist_m,
+                               double v_cruise_max, double v_cruise_min,
+                               double straight_lock_dist_m,
                                double straight_lock_speed_mps) {
   return new CurvilinearSLMPCNative(
       costmap_handle, probe_fn, horizon_N, dt, q_progress, q_cte, q_heading,
       r_steer, r_accel, r_steer_rate, mu_friction, v_corner_factor,
-      pure_pursuit_blend_gain, lookahead_blend_m, v_cruise_max, v_cruise_min,
-      straight_lock_dist_m, straight_lock_speed_mps);
+      v_cruise_max, v_cruise_min, straight_lock_dist_m,
+      straight_lock_speed_mps);
 }
 
 SL_MPC_API void sl_mpc_destroy(void *handle) {

@@ -103,7 +103,7 @@ def test_load_best_genome_and_seeding():
     # Candidate 0 must match loaded genome
     loaded_dict = loaded_g.to_dict()
     cand0_dict = pop[0].to_dict()
-    for k in ["q_progress", "q_cte", "r_steer", "pp_blend_gain"]:
+    for k in ["q_progress", "q_cte", "r_steer", "v_corner_factor"]:
         assert math.isclose(cand0_dict[k], loaded_dict[k], rel_tol=1e-3), f"Mismatch in gene {k}: {cand0_dict[k]} vs {loaded_dict[k]}"
     print("  -> Verified Candidate 0 accurately seeded with best_planner_genome.json parameters.")
 

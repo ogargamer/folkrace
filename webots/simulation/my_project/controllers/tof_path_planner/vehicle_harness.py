@@ -354,8 +354,6 @@ class FolkraceVehicle:
             r_steer_rate=float(genes.get("r_steer_rate", 10.00)),
             mu_friction=self.mu_val,
             v_corner_factor=float(genes.get("v_corner_factor", 0.95)),
-            pure_pursuit_blend_gain=float(genes.get("pp_blend_gain", 0.35)),
-            lookahead_blend_m=float(genes.get("lookahead_blend_m", 0.45)),
             v_cruise_max=self.v_cruise_max,
             v_cruise_min=self.v_cruise_min,
             straight_lock_dist_m=self.straight_lock_dist,
