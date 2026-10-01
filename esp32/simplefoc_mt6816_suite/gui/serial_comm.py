@@ -43,6 +43,9 @@ class ESP32SerialReader:
         self.last_stall_alarm = False
         self.last_stall_guard = False
         self.last_foc_khz = 0.0
+        self.last_lat_avg_us = 0.0
+        self.last_lat_max_us = 0.0
+        self.last_spikes_count = 0
         self.calibrating = False
         self.calib_stage_name = "Ready"
         self.calib_progress_pct = 0.0
@@ -546,6 +549,13 @@ class ESP32SerialReader:
                 m_foc = re.search(r'FOC:\s*([+-]?\d+\.?\d*)\s*kHz', line)
                 foc_khz = float(m_foc.group(1)) if m_foc else 0.0
 
+                m_lat = re.search(r'Lat:\s*([+-]?\d+\.?\d*)/([+-]?\d+\.?\d*)\s*us', line)
+                lat_avg = float(m_lat.group(1)) if m_lat else 0.0
+                lat_max = float(m_lat.group(2)) if m_lat else 0.0
+
+                m_spk = re.search(r'Spk:\s*(\d+)', line)
+                spk_count = int(m_spk.group(1)) if m_spk else 0
+
                 if "DISBL" in ctrl_mode:
                     pass
                 else:
@@ -567,6 +577,10 @@ class ESP32SerialReader:
                     self.last_parity_ok = parity_ok
                     if foc_khz > 0.0:
                         self.last_foc_khz = foc_khz
+                    if lat_avg > 0.0:
+                        self.last_lat_avg_us = lat_avg
+                        self.last_lat_max_us = lat_max
+                    self.last_spikes_count = spk_count
                     self.msg_count += 1
 
                     self.history_time.append(t_now)

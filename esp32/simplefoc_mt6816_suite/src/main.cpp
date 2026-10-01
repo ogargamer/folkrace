@@ -9,6 +9,7 @@
 // (CS) Thermistor   : GPIO 4 (ADC1_CH3)
 // ============================================================================
 
+#include "esp_cpu.h"
 #include "esp_task_wdt.h"
 #include <Arduino.h>
 #include <Preferences.h>
@@ -129,6 +130,7 @@ public:
   // Diagnostics & Tracking
   uint32_t total_reads;
   uint32_t parity_errors;
+  uint32_t parity_retries;
   uint32_t mag_faults;
   bool last_no_mag;
   bool last_parity_ok;
@@ -149,7 +151,7 @@ public:
         harmonic_res_pk_pk_deg(0.0f), harmonic_res_rms_deg(0.0f),
         harmonic_mean_lag_deg(0.0f), harmonic_lag_ripple_deg(0.0f),
         harmonic_max_drag_angle_deg(0.0f),
-        total_reads(0), parity_errors(0), mag_faults(0), last_no_mag(false),
+        total_reads(0), parity_errors(0), parity_retries(0), mag_faults(0), last_no_mag(false),
         last_parity_ok(true), last_raw_h(0), last_raw_l(0), last_raw_14bit(0),
         zero_offset_deg(0.0f) {
     memset(lut_errors, 0, sizeof(lut_errors));
@@ -282,8 +284,11 @@ public:
       no_mag = (l & 0x02) != 0;
       parity_ok = parityCheck(angle_data);
 
-      if (parity_ok)
+      if (parity_ok) {
+        if (retry > 0)
+          parity_retries++;
         break;
+      }
       delayMicroseconds(2);
     }
 
@@ -490,6 +495,40 @@ float readMotorTemperatureC();
 extern bool kv_test_running;
 
 // ============================================================================
+// ZERO-OVERHEAD REAL-TIME FOC TIMING & STUTTER PROFILER
+// ============================================================================
+#define FOC_SPIKE_EXEC_THRESHOLD_US     90  // Execution spike (>90us when normal is ~35-50us)
+#define FOC_SPIKE_INTERVAL_THRESHOLD_US 120 // Interval jitter spike (>120us when normal is ~50us)
+
+struct FOCProfilerStats {
+  // Window metrics (reset every telemetry window ~10ms)
+  uint32_t window_cycles_accum;
+  uint32_t window_samples;
+  uint32_t window_max_exec_cycles;
+  uint32_t window_max_interval_cycles;
+
+  // Session counters
+  uint32_t total_cycles_executed;
+  uint32_t exec_spikes_total;
+  uint32_t interval_spikes_total;
+
+  // Detailed breakdown of the single worst execution spike observed
+  uint32_t worst_spike_exec_cycles;
+  uint32_t worst_spike_zero_cycles;
+  uint32_t worst_spike_comm_cycles;
+  uint32_t worst_spike_move_cycles;
+  uint32_t worst_spike_interval_cycles;
+  uint32_t worst_spike_time_ms;
+
+  // Current values
+  float avg_exec_us;
+  float max_exec_us;
+  float max_interval_us;
+};
+
+volatile FOCProfilerStats g_foc_perf = {0};
+
+// ============================================================================
 // THREAD-SAFE DUAL-CORE FOC ISOLATION & TELEMETRY SNAPSHOT
 // ============================================================================
 portMUX_TYPE telemSpinlock = portMUX_INITIALIZER_UNLOCKED;
@@ -510,6 +549,11 @@ struct TelemetrySnapshot {
   bool kv_test;
   MotionControlType ctrl_mode;
   float foc_hz;
+  float avg_exec_us;
+  float max_exec_us;
+  float max_interval_us;
+  uint32_t exec_spikes;
+  uint32_t interval_spikes;
 };
 
 TelemetrySnapshot g_telemetry = {0};
@@ -517,8 +561,7 @@ volatile bool foc_paused = false;
 TaskHandle_t focTaskHandle = NULL;
 
 void focTaskLoop(void *param) {
-  // Disable Task Watchdog on Core 0 so continuous 15kHz FOC loop doesn't trip
-  // WDT
+  // Disable Task Watchdog on Core 0 so continuous 15kHz FOC loop doesn't trip WDT
   disableCore0WDT();
   TaskHandle_t idle_0 = xTaskGetIdleTaskHandleForCPU(0);
   if (idle_0 != NULL) {
@@ -530,13 +573,25 @@ void focTaskLoop(void *param) {
   float current_foc_hz = 0.0f;
   uint32_t last_snapshot_us = micros();
 
+  const uint32_t cpu_freq_mhz = 240;
+  const uint32_t spike_exec_thresh_cycles = FOC_SPIKE_EXEC_THRESHOLD_US * cpu_freq_mhz;
+  const uint32_t spike_int_thresh_cycles = FOC_SPIKE_INTERVAL_THRESHOLD_US * cpu_freq_mhz;
+  uint32_t last_loop_start_cycles = esp_cpu_get_ccount();
+
   while (true) {
     if (foc_paused) {
       vTaskDelay(pdMS_TO_TICKS(5));
+      last_loop_start_cycles = esp_cpu_get_ccount();
       continue;
     }
 
+    uint32_t loop_start_cycles = esp_cpu_get_ccount();
+    uint32_t interval_cycles = loop_start_cycles - last_loop_start_cycles;
+    last_loop_start_cycles = loop_start_cycles;
+
     if (is_enabled) {
+      uint32_t t0 = loop_start_cycles;
+
       // 1. 11-Pole Continuous Zero Vector + Dynamic Sensor Lag Compensation
       float zero_elec = getInterpolatedElectricalZero(motor1.shaft_angle);
       if (sensor_lag_comp_us > 0.0f) {
@@ -546,11 +601,13 @@ void focTaskLoop(void *param) {
       } else {
         motor1.zero_electric_angle = zero_elec;
       }
+      uint32_t t1 = esp_cpu_get_ccount();
 
-      // 2. High-Frequency Commutation Loop
+      // 2. High-Frequency Commutation Loop (includes SPI sensor read)
       motor1.loopFOC();
+      uint32_t t2 = esp_cpu_get_ccount();
 
-      // 3. Motion Control Move
+      // 3. Motion Control Move (PID / LPF downsampled)
       if (kv_test_running) {
         motor1.move(target_voltage);
       } else if (motor1.controller == MotionControlType::velocity) {
@@ -559,8 +616,40 @@ void focTaskLoop(void *param) {
       } else if (motor1.controller == MotionControlType::torque) {
         motor1.move(target_voltage);
       }
+      uint32_t t3 = esp_cpu_get_ccount();
 
+      uint32_t exec_cycles = t3 - t0;
       foc_cycle_count++;
+
+      // Zero-lag profiling accumulators (pure 32-bit integer arithmetic)
+      g_foc_perf.window_cycles_accum += exec_cycles;
+      g_foc_perf.window_samples++;
+      g_foc_perf.total_cycles_executed++;
+
+      if (exec_cycles > g_foc_perf.window_max_exec_cycles) {
+        g_foc_perf.window_max_exec_cycles = exec_cycles;
+      }
+      if (interval_cycles > g_foc_perf.window_max_interval_cycles && g_foc_perf.total_cycles_executed > 10) {
+        g_foc_perf.window_max_interval_cycles = interval_cycles;
+      }
+
+      // Check for execution spike
+      if (exec_cycles > spike_exec_thresh_cycles) {
+        g_foc_perf.exec_spikes_total++;
+        if (exec_cycles > g_foc_perf.worst_spike_exec_cycles) {
+          g_foc_perf.worst_spike_exec_cycles = exec_cycles;
+          g_foc_perf.worst_spike_zero_cycles = t1 - t0;
+          g_foc_perf.worst_spike_comm_cycles = t2 - t1;
+          g_foc_perf.worst_spike_move_cycles = t3 - t2;
+          g_foc_perf.worst_spike_interval_cycles = interval_cycles;
+          g_foc_perf.worst_spike_time_ms = millis();
+        }
+      }
+
+      // Check for interval jitter spike (preemption / delay)
+      if (interval_cycles > spike_int_thresh_cycles && g_foc_perf.total_cycles_executed > 10) {
+        g_foc_perf.interval_spikes_total++;
+      }
     } else {
       // Motor disabled: update sensor and motion state for live GUI tracking, then idle briefly
       motor1.loopFOC();
@@ -568,6 +657,7 @@ void focTaskLoop(void *param) {
       motor1.shaft_velocity = motor1.shaftVelocity();
       foc_cycle_count++;
       vTaskDelay(pdMS_TO_TICKS(1));
+      last_loop_start_cycles = esp_cpu_get_ccount();
     }
 
     // Measure FOC loop frequency every 250ms
@@ -586,6 +676,22 @@ void focTaskLoop(void *param) {
       // Extract single-turn mechanical degree using calibrated sensor angle directly [0, 360)
       float d = encoder1.getSingleTurnDeg();
 
+      float avg_us = 0.0f;
+      float max_us = (float)g_foc_perf.window_max_exec_cycles / (float)cpu_freq_mhz;
+      float max_int_us = (float)g_foc_perf.window_max_interval_cycles / (float)cpu_freq_mhz;
+      if (g_foc_perf.window_samples > 0) {
+        avg_us = (float)g_foc_perf.window_cycles_accum / ((float)g_foc_perf.window_samples * (float)cpu_freq_mhz);
+      }
+      g_foc_perf.avg_exec_us = avg_us;
+      g_foc_perf.max_exec_us = max_us;
+      g_foc_perf.max_interval_us = max_int_us;
+
+      // Reset window accumulators for next measurement window
+      g_foc_perf.window_cycles_accum = 0;
+      g_foc_perf.window_samples = 0;
+      g_foc_perf.window_max_exec_cycles = 0;
+      g_foc_perf.window_max_interval_cycles = 0;
+
       portENTER_CRITICAL(&telemSpinlock);
       g_telemetry.angle_deg = d;
       g_telemetry.actual_rpm = motor1.shaft_velocity * 9.54929658551f;
@@ -602,6 +708,11 @@ void focTaskLoop(void *param) {
       g_telemetry.kv_test = kv_test_running;
       g_telemetry.ctrl_mode = motor1.controller;
       g_telemetry.foc_hz = current_foc_hz;
+      g_telemetry.avg_exec_us = avg_us;
+      g_telemetry.max_exec_us = max_us;
+      g_telemetry.max_interval_us = max_int_us;
+      g_telemetry.exec_spikes = g_foc_perf.exec_spikes_total;
+      g_telemetry.interval_spikes = g_foc_perf.interval_spikes_total;
       portEXIT_CRITICAL(&telemSpinlock);
     }
   }
@@ -1687,6 +1798,7 @@ bool calibrate256PointLUTSinglePass(float align_voltage) {
     encoder1.lut_errors[i] = temp_errors[i];
   }
   encoder1.is_lut_calibrated = true;
+  encoder1.correction_mode = 1;
   Serial.println("  Status                        : ✅ 128-Point LUT ACTIVE "
                  "(all points valid)");
   Serial.println("-------------------------------------------------------------"
@@ -2147,6 +2259,41 @@ bool calibrateComprehensiveFOCSinglePass(float align_voltage) {
   driver1.disable();
   is_enabled = false;
   is_calibrated = true;
+
+  if (!encoder1.is_lut_calibrated) {
+    const float step_rad = _2PI / (float)ENCODER_LUT_SIZE;
+    const float pole_span_rad = _2PI / (float)MOTOR_POLE_PAIRS;
+    float f_a1 = 0.0f, f_b1 = 0.0f, f_a2 = 0.0f, f_b2 = 0.0f;
+    for (int i = 0; i < ENCODER_LUT_SIZE; i++) {
+      float rad = (float)i * step_rad;
+      float pole_f = rad / pole_span_rad;
+      int p0 = ((int)pole_f) % MOTOR_POLE_PAIRS;
+      int p1 = (p0 + 1) % MOTOR_POLE_PAIRS;
+      float frac = pole_f - (float)((int)pole_f);
+
+      float err0 = calibrated_pole_zeros[p0] - mean_zero_angle;
+      while (err0 > _PI) err0 -= _2PI;
+      while (err0 < -_PI) err0 += _2PI;
+      float mech_err0 = err0 / (float)MOTOR_POLE_PAIRS;
+
+      float err1 = calibrated_pole_zeros[p1] - mean_zero_angle;
+      while (err1 > _PI) err1 -= _2PI;
+      while (err1 < -_PI) err1 += _2PI;
+      float mech_err1 = err1 / (float)MOTOR_POLE_PAIRS;
+
+      float interp_err = (1.0f - frac) * mech_err0 + frac * mech_err1;
+      encoder1.lut_errors[i] = interp_err;
+      f_a1 += interp_err * cosf(rad);
+      f_b1 += interp_err * sinf(rad);
+      f_a2 += interp_err * cosf(2.0f * rad);
+      f_b2 += interp_err * sinf(2.0f * rad);
+    }
+    encoder1.fourier_A1 = 2.0f * f_a1 / (float)ENCODER_LUT_SIZE;
+    encoder1.fourier_B1 = 2.0f * f_b1 / (float)ENCODER_LUT_SIZE;
+    encoder1.fourier_A2 = 2.0f * f_a2 / (float)ENCODER_LUT_SIZE;
+    encoder1.fourier_B2 = 2.0f * f_b2 / (float)ENCODER_LUT_SIZE;
+    encoder1.is_lut_calibrated = true;
+  }
   return true;
 }
 
@@ -2255,6 +2402,7 @@ bool calibrateDynamicContinuousSinglePass(float calib_voltage) {
     uint32_t total_dur_ms = (uint32_t)(duration_s * 1000.0f);
     uint32_t phase_last_log_ms = start_ms;
     float start_omega = current_omega;
+    uint32_t slip_active_since_ms = 0;
 
     while (millis() - start_ms < total_dur_ms) {
       if (checkUserAbort()) return false;
@@ -2294,18 +2442,24 @@ bool calibrateDynamicContinuousSinglePass(float calib_voltage) {
       while (err > _PI) err -= _2PI;
       while (err < -_PI) err += _2PI;
 
-      // Defensive Pole-Slip Guard
+      // Defensive Pole-Slip Guard with 100ms Confirmation Debounce
       if (fabsf(err) > max_slip_rad) {
-        motor1.setPhaseVoltage(0, 0, 0);
-        driver1.disable();
-        is_enabled = false;
-        Serial.println("\n--------------------------------------------------------------------------------");
-        Serial.printf("❌ POLE-SLIP ABORT: |err| = %.4f rad (%.2f deg) exceeded torque pull-out limit %.4f rad (%.2f deg)!\n",
-                      fabsf(err), fabsf(err) * 57.2957795f, max_slip_rad, max_slip_rad * 57.2957795f);
-        Serial.println("   ROOT CAUSE: External torque / friction exceeded hold torque, or align voltage too low.");
-        Serial.println("   FIX: Check motor free rotation or increase voltage (e.g. 'y 4.2').");
-        Serial.println("--------------------------------------------------------------------------------\n");
-        return false;
+        if (slip_active_since_ms == 0) {
+          slip_active_since_ms = millis();
+        } else if (millis() - slip_active_since_ms >= 100) {
+          motor1.setPhaseVoltage(0, 0, 0);
+          driver1.disable();
+          is_enabled = false;
+          Serial.println("\n--------------------------------------------------------------------------------");
+          Serial.printf("❌ POLE-SLIP ABORT: |err| = %.4f rad (%.2f deg) exceeded torque pull-out limit %.4f rad (%.2f deg) sustained for >100ms!\n",
+                        fabsf(err), fabsf(err) * 57.2957795f, max_slip_rad, max_slip_rad * 57.2957795f);
+          Serial.println("   ROOT CAUSE: External torque / friction exceeded hold torque, or align voltage too low.");
+          Serial.println("   FIX: Check motor free rotation or increase voltage (e.g. 'y 4.2').");
+          Serial.println("--------------------------------------------------------------------------------\n");
+          return false;
+        }
+      } else {
+        slip_active_since_ms = 0;
       }
 
       // Spatial bin accumulation
@@ -2897,6 +3051,49 @@ void processKVStateMachine() {
   }
 }
 
+void printFOCPerfReport() {
+  const uint32_t cpu_mhz = 240;
+  float cur_avg = g_foc_perf.avg_exec_us;
+  float cur_max = g_foc_perf.max_exec_us;
+  float worst_spk_us = (float)g_foc_perf.worst_spike_exec_cycles / (float)cpu_mhz;
+  float worst_zero_us = (float)g_foc_perf.worst_spike_zero_cycles / (float)cpu_mhz;
+  float worst_comm_us = (float)g_foc_perf.worst_spike_comm_cycles / (float)cpu_mhz;
+  float worst_move_us = (float)g_foc_perf.worst_spike_move_cycles / (float)cpu_mhz;
+  float worst_int_us = (float)g_foc_perf.worst_spike_interval_cycles / (float)cpu_mhz;
+
+  Serial.println("\n========================================================");
+  Serial.println("  ESP32-S3 FOC REAL-TIME LATENCY & JITTER PROFILER");
+  Serial.println("========================================================");
+  Serial.printf("  Loop Commutation Rate    : %.1f kHz (Period: ~%.1f us)\n", 
+                g_telemetry.foc_hz * 0.001f, 
+                g_telemetry.foc_hz > 0 ? (1000000.0f / g_telemetry.foc_hz) : 0.0f);
+  Serial.printf("  Recent Avg Exec Duration : %.2f us (Active FOC Duty: ~%.1f%%)\n", 
+                cur_avg, 
+                g_telemetry.foc_hz > 0 ? (cur_avg * g_telemetry.foc_hz * 0.0001f) : 0.0f);
+  Serial.printf("  Recent Peak Exec (Window): %.2f us\n", cur_max);
+  Serial.printf("  Peak Interval (Jitter)   : %.2f us\n", g_telemetry.max_interval_us);
+  Serial.printf("  Total Loops Executed     : %u\n", g_foc_perf.total_cycles_executed);
+  Serial.println("--------------------------------------------------------");
+  Serial.printf("  Execution Spikes (>%dus) : %u\n", FOC_SPIKE_EXEC_THRESHOLD_US, g_foc_perf.exec_spikes_total);
+  Serial.printf("  Interval Spikes (>%dus)  : %u\n", FOC_SPIKE_INTERVAL_THRESHOLD_US, g_foc_perf.interval_spikes_total);
+  if (g_foc_perf.worst_spike_exec_cycles > 0) {
+    Serial.println("  [Worst Execution Spike Breakdown]:");
+    Serial.printf("    Total Spike Duration   : %.2f us (observed at T+%lu ms)\n", worst_spk_us, g_foc_perf.worst_spike_time_ms);
+    Serial.printf("    -- Zero/Lag Transform  : %.2f us\n", worst_zero_us);
+    Serial.printf("    -- loopFOC (Comm+SPI)  : %.2f us\n", worst_comm_us);
+    Serial.printf("    -- move (PID+LPF)      : %.2f us\n", worst_move_us);
+    Serial.printf("    -- Loop Interval       : %.2f us\n", worst_int_us);
+  } else {
+    Serial.println("  [Worst Execution Spike]  : None detected (Clean real-time execution).");
+  }
+  Serial.println("--------------------------------------------------------");
+  Serial.printf("  MT6816 Total Reads       : %u\n", encoder1.total_reads);
+  Serial.printf("  MT6816 Parity Retries    : %u (SPI noise/timing retry)\n", encoder1.parity_retries);
+  Serial.printf("  MT6816 Parity Failures   : %u\n", encoder1.parity_errors);
+  Serial.printf("  MT6816 Mag Faults        : %u\n", encoder1.mag_faults);
+  Serial.println("========================================================\n");
+}
+
 // ============================================================================
 // SERIAL COMMAND PROCESSOR (NON-BLOCKING WITH IMMEDIATE E-STOP)
 // ============================================================================
@@ -2909,6 +3106,24 @@ void executeCommand(String cmd) {
   String arg = cmd.substring(1);
   arg.trim();
 
+  if (cmd.equalsIgnoreCase("perf") || cmd.equalsIgnoreCase("diag") || cmd.equalsIgnoreCase("foc_perf") || cmd.equalsIgnoreCase("profile")) {
+    printFOCPerfReport();
+    return;
+  }
+  if (cmd.equalsIgnoreCase("perf_reset") || cmd.equalsIgnoreCase("diag_reset")) {
+    g_foc_perf.exec_spikes_total = 0;
+    g_foc_perf.interval_spikes_total = 0;
+    g_foc_perf.worst_spike_exec_cycles = 0;
+    g_foc_perf.worst_spike_zero_cycles = 0;
+    g_foc_perf.worst_spike_comm_cycles = 0;
+    g_foc_perf.worst_spike_move_cycles = 0;
+    g_foc_perf.worst_spike_interval_cycles = 0;
+    encoder1.parity_retries = 0;
+    encoder1.parity_errors = 0;
+    encoder1.mag_faults = 0;
+    Serial.println(">>> FOC Latency Profiler counters reset.");
+    return;
+  }
   if (cmd.equalsIgnoreCase("save")) {
     saveConfigToNVS();
     return;
@@ -3045,7 +3260,50 @@ void executeCommand(String cmd) {
   case 'u':
   case 'U': {
     if (!encoder1.is_lut_calibrated) {
-      Serial.println("[LUT_DUMP] No active LUT — run 'w' first.");
+      // Check if harmonic coefficients exist
+      float harm_mag = fabsf(encoder1.fourier_A1) + fabsf(encoder1.fourier_B1) +
+                       fabsf(encoder1.fourier_A2) + fabsf(encoder1.fourier_B2) +
+                       fabsf(encoder1.fourier_A4) + fabsf(encoder1.fourier_B4);
+      if (harm_mag > 1e-5f) {
+        const float step_rad = _2PI / (float)ENCODER_LUT_SIZE;
+        for (int i = 0; i < ENCODER_LUT_SIZE; i++) {
+          float rad = ((float)i + 0.5f) * step_rad;
+          float s1 = sinf(rad), c1 = cosf(rad);
+          float s2 = 2.0f * s1 * c1, c2 = c1 * c1 - s1 * s1;
+          float s4 = 2.0f * s2 * c2, c4 = c2 * c2 - s2 * s2;
+          encoder1.lut_errors[i] = (encoder1.fourier_A1 * c1 + encoder1.fourier_B1 * s1) +
+                                   (encoder1.fourier_A2 * c2 + encoder1.fourier_B2 * s2) +
+                                   (encoder1.fourier_A4 * c4 + encoder1.fourier_B4 * s4);
+        }
+        encoder1.is_lut_calibrated = true;
+      } else if (is_calibrated) {
+        // Synthesize from 11-pole zeros
+        const float step_rad = _2PI / (float)ENCODER_LUT_SIZE;
+        const float pole_span_rad = _2PI / (float)MOTOR_POLE_PAIRS;
+        for (int i = 0; i < ENCODER_LUT_SIZE; i++) {
+          float rad = (float)i * step_rad;
+          float pole_f = rad / pole_span_rad;
+          int p0 = ((int)pole_f) % MOTOR_POLE_PAIRS;
+          int p1 = (p0 + 1) % MOTOR_POLE_PAIRS;
+          float frac = pole_f - (float)((int)pole_f);
+
+          float err0 = calibrated_pole_zeros[p0] - base_zero_electric_angle;
+          while (err0 > _PI) err0 -= _2PI;
+          while (err0 < -_PI) err0 += _2PI;
+          float mech_err0 = err0 / (float)MOTOR_POLE_PAIRS;
+
+          float err1 = calibrated_pole_zeros[p1] - base_zero_electric_angle;
+          while (err1 > _PI) err1 -= _2PI;
+          while (err1 < -_PI) err1 += _2PI;
+          float mech_err1 = err1 / (float)MOTOR_POLE_PAIRS;
+
+          encoder1.lut_errors[i] = (1.0f - frac) * mech_err0 + frac * mech_err1;
+        }
+        encoder1.is_lut_calibrated = true;
+      }
+    }
+    if (!encoder1.is_lut_calibrated) {
+      Serial.println("[LUT_DUMP] No active calibration found — run 'CALIB_DYN', 'w', or 'c' first.");
       break;
     }
     printLUTMetrics();
@@ -3452,7 +3710,7 @@ void loop() {
     if (seg > 7)
       seg = 7;
 
-    char line_buf[256];
+    char line_buf[320];
     char target_buf[32];
     if (snap.kv_test || snap.ctrl_mode == MotionControlType::torque) {
       snprintf(target_buf, sizeof(target_buf), "%+5.2f V ",
@@ -3477,12 +3735,27 @@ void loop() {
         line_buf, sizeof(line_buf),
         "Ctrl: %-5s | Target: %s | Actual: %+6.1f RPM | Angle: %6.2f deg | "
         "Uq: %+5.2fV | Ud: %+5.2fV | Raw: %5u/16383 | Mode: %s | Mag: %s | "
-        "Parity: %s %s | FOC: %.1fkHz\r\n",
+        "Parity: %s %s | FOC: %.1fkHz | Lat: %.0f/%.0fus | Spk: %u\r\n",
         ctrl_str, target_buf, snap.actual_rpm, snap.angle_deg, snap.uq, snap.ud,
         snap.raw14, mode_buf, mag_str, parity_str, dial_segments[seg],
-        snap.foc_hz * 0.001f);
+        snap.foc_hz * 0.001f, snap.avg_exec_us, snap.max_exec_us, snap.exec_spikes);
 
     Serial.write((const uint8_t *)line_buf, strlen(line_buf));
+
+    // Asynchronous spike alert notification (runs on Core 1 without stalling Core 0)
+    static uint32_t last_alerted_spikes = 0;
+    if (snap.exec_spikes > last_alerted_spikes) {
+      last_alerted_spikes = snap.exec_spikes;
+      float spk_us = (float)g_foc_perf.worst_spike_exec_cycles / 240.0f;
+      float comm_us = (float)g_foc_perf.worst_spike_comm_cycles / 240.0f;
+      float move_us = (float)g_foc_perf.worst_spike_move_cycles / 240.0f;
+      float zero_us = (float)g_foc_perf.worst_spike_zero_cycles / 240.0f;
+      char alert_buf[220];
+      snprintf(alert_buf, sizeof(alert_buf),
+               "\n>>> [FOC-SPIKE-ALERT] Lag spike: %.1fus (comm/SPI: %.1fus, move/PID: %.1fus, zero: %.1fus) | Total Spikes: %u (Period Jitter Spikes: %u) <<<\r\n",
+               spk_us, comm_us, move_us, zero_us, snap.exec_spikes, snap.interval_spikes);
+      Serial.write((const uint8_t *)alert_buf, strlen(alert_buf));
+    }
   }
 
   // Yield to FreeRTOS on Core 1

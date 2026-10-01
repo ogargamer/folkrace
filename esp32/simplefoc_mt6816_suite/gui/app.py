@@ -187,6 +187,9 @@ class MT6818DashboardGUI:
         self.lbl_foc = tk.Label(badge_bar, text="FOC: -- kHz", font=("Segoe UI", 9, "bold"), bg="#1B5E20", fg="#69F0AE", padx=6, pady=2)
         self.lbl_foc.pack(side="left", padx=3)
 
+        self.lbl_lat = tk.Label(badge_bar, text="LAT: -- µs", font=("Segoe UI", 9, "bold"), bg="#263238", fg="#B0BEC5", padx=6, pady=2)
+        self.lbl_lat.pack(side="left", padx=3)
+
         # -------------------------------------------------------------
         # ⚙️ LIVE REAL-TIME PARAMETER TUNING PANEL (REAL-TIME OVER SERIAL)
         # -------------------------------------------------------------
@@ -855,6 +858,10 @@ class MT6818DashboardGUI:
                   bg="#FFD600", fg="#000", activebackground="#FFE57F", relief="flat", padx=10, pady=5,
                   command=self._copy_harmonic_report).pack(side="left", padx=3)
 
+        tk.Button(btn_bar, text="⏱️ FOC Profiler (perf)", font=("Segoe UI", 9, "bold"),
+                  bg="#FF9100", fg="#000", activebackground="#FFB74D", relief="flat", padx=10, pady=5,
+                  command=lambda: self.reader.send_cmd("perf")).pack(side="left", padx=3)
+
         tk.Button(btn_bar, text="💾 Save NVS", font=("Segoe UI", 8, "bold"), bg="#2979FF", fg="#FFF",
                   relief="flat", padx=8, pady=5, command=lambda: self.reader.send_cmd("save")).pack(side="right", padx=2)
         tk.Button(btn_bar, text="🔄 Load NVS", font=("Segoe UI", 8, "bold"), bg="#455A64", fg="#FFF",
@@ -1350,10 +1357,22 @@ class MT6818DashboardGUI:
 
         with self.reader.lock:
             foc_khz = getattr(self.reader, "last_foc_khz", 0.0)
+            lat_avg = getattr(self.reader, "last_lat_avg_us", 0.0)
+            lat_max = getattr(self.reader, "last_lat_max_us", 0.0)
+            spk_cnt = getattr(self.reader, "last_spikes_count", 0)
+
         if foc_khz > 0.0:
             self.lbl_foc.config(text=f"FOC: {foc_khz:.1f} kHz", bg="#00E676" if foc_khz >= 5.0 else "#FFD600", fg="#000000")
         else:
             self.lbl_foc.config(text="FOC: -- kHz", bg="#1B5E20", fg="#69F0AE")
+
+        if lat_avg > 0.0:
+            if spk_cnt == 0:
+                self.lbl_lat.config(text=f"LAT: {lat_avg:.0f}/{lat_max:.0f} µs", bg="#00897B", fg="#FFFFFF")
+            else:
+                self.lbl_lat.config(text=f"LAT: {lat_avg:.0f}/{lat_max:.0f} µs | 🚨 {spk_cnt} SPK", bg="#D50000", fg="#FFFFFF")
+        else:
+            self.lbl_lat.config(text="LAT: -- µs", bg="#263238", fg="#B0BEC5")
 
         if self.reader.connected:
             self.conn_label.config(text=f"ONLINE ({self.reader.port})", fg="#69F0AE")
