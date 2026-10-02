@@ -7,6 +7,7 @@
 """
 
 import math
+from typing import Optional, Dict, Any
 
 try:
     from .planner_config import (
@@ -74,7 +75,16 @@ class ElectronicDifferential4WD:
         self.max_servo_rate = max_servo_rate
         self.current_steer_rad = 0.0
 
-    def update(self, target_v, target_steer_rad, gyro_z_rad_s=0.0, dt=1.0 / 120.0):
+    def update(
+        self,
+        target_v: float,
+        target_steer_rad: float,
+        gyro_z_rad_s: float = 0.0,
+        dt: float = 1.0 / 120.0,
+        rear_alpha: float = 1.0,
+        v_ground_RL: Optional[float] = None,
+        v_ground_RR: Optional[float] = None,
+    ):
         """
         Calculates actuator setpoints given desired longitudinal velocity and virtual steering angle.
 
@@ -83,6 +93,9 @@ class ElectronicDifferential4WD:
             target_steer_rad (float): Desired virtual bicycle steering angle at center (rad).
             gyro_z_rad_s (float): Measured body Z-axis yaw rate from IMU/gyro (rad/s).
             dt (float): Timestep in seconds (default 1/120s for 120Hz update).
+            rear_alpha (float): Rear axle drive fraction (0.0 = ground-roll coasting, 1.0 = full drive).
+            v_ground_RL (float, optional): Local surface speed at left rear tire contact patch (m/s).
+            v_ground_RR (float, optional): Local surface speed at right rear tire contact patch (m/s).
 
         Returns:
             dict: Actuator setpoints and telemetry.
@@ -139,9 +152,17 @@ class ElectronicDifferential4WD:
         half_Wr_omega = omega_cmd * (self.W_r * 0.5)
         half_Wf_omega = omega_cmd * (self.W_f * 0.5)
 
-        # Rear axle speeds (longitudinal heading)
-        v_RL = target_v - half_Wr_omega
-        v_RR = target_v + half_Wr_omega
+        # Rear axle speeds from differential split (longitudinal heading)
+        v_diff_RL = target_v - half_Wr_omega
+        v_diff_RR = target_v + half_Wr_omega
+
+        # Ground-roll clamping: Neither rear wheel is ever commanded below local surface velocity
+        if target_v >= 0.0 and v_ground_RL is not None and v_ground_RR is not None:
+            v_RL = v_ground_RL + rear_alpha * max(0.0, v_diff_RL - v_ground_RL)
+            v_RR = v_ground_RR + rear_alpha * max(0.0, v_diff_RR - v_ground_RR)
+        else:
+            v_RL = v_diff_RL
+            v_RR = v_diff_RR
 
         # Front axle speeds (vector projection along steered wheel orientations)
         fl_x = target_v - half_Wf_omega

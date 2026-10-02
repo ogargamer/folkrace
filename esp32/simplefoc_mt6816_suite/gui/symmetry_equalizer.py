@@ -18,7 +18,7 @@ class SymmetryEqualizer:
         self.status_var = status_var
         self.on_zero_angle_updated = on_zero_angle_updated
 
-        self.current_zero_angle_rad = 0.11275
+        self.current_zero_angle_rad = 0.97555
         self.running = False
         self.thread = None
         self.fwd_rpm = 0.0

@@ -97,6 +97,14 @@ if CPP_AVAILABLE and _lib is not None:
     _lib.sl_mpc_set_costmap.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
     _lib.sl_mpc_set_costmap.restype = None
 
+    if hasattr(_lib, "sl_mpc_set_mu"):
+        _lib.sl_mpc_set_mu.argtypes = [ctypes.c_void_p, ctypes.c_double]
+        _lib.sl_mpc_set_mu.restype = None
+
+    if hasattr(_lib, "sl_mpc_reset"):
+        _lib.sl_mpc_reset.argtypes = [ctypes.c_void_p]
+        _lib.sl_mpc_reset.restype = None
+
     _lib.sl_mpc_plan.argtypes = [
         ctypes.c_void_p,
         ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_double,
@@ -282,9 +290,26 @@ class CppCurvilinearSLMPC:
             raise RuntimeError("Failed to create C++ CurvilinearSLMPCNative instance")
 
     def reset_active_target(self) -> None:
-        """Resets the currently tracked active corridor/target line."""
+        """Resets the currently tracked active corridor/target line and OSQP solver warm-start."""
         self._active_target = None
         self._last_winner = 0
+        if _lib is not None and hasattr(_lib, "sl_mpc_reset"):
+            if hasattr(self, "_handle") and self._handle:
+                _lib.sl_mpc_reset(self._handle)
+            if hasattr(self, "_handle_alt") and self._handle_alt:
+                _lib.sl_mpc_reset(self._handle_alt)
+
+    def set_dynamic_mu(self, new_mu: float) -> None:
+        """
+        Dynamically updates the tire friction coefficient governing the grip envelope
+        and OSQP solver constraints in the native C++ Curvilinear SL-MPC planner.
+        """
+        self.mu_friction = float(new_mu)
+        if _lib is not None and hasattr(_lib, "sl_mpc_set_mu"):
+            if hasattr(self, "_handle") and self._handle:
+                _lib.sl_mpc_set_mu(self._handle, ctypes.c_double(self.mu_friction))
+            if hasattr(self, "_handle_alt") and self._handle_alt:
+                _lib.sl_mpc_set_mu(self._handle_alt, ctypes.c_double(self.mu_friction))
 
     @property
     def costmap(self):

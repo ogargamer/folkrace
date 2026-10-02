@@ -220,13 +220,13 @@ class MT6818DashboardGUI:
         # Row 2: P Gain, I Gain
         ttk.Label(pid_card, text="P Gain:", font=("Segoe UI", 9, "bold"), background="#1A2230", foreground="#B0BEC5").grid(row=2, column=0, sticky="w", padx=2, pady=2)
         self.entry_p = tk.Entry(pid_card, width=7, font=("Segoe UI", 9), bg="#222D3E", fg="#FFF", insertbackground="#FFF")
-        self.entry_p.insert(0, "0.12")
+        self.entry_p.insert(0, "0.15")
         self.entry_p.grid(row=2, column=1, padx=2, pady=2)
         tk.Button(pid_card, text="Set P", font=("Segoe UI", 8, "bold"), bg="#00E5FF", fg="#000", relief="flat", command=lambda: self._set_param("p", self.entry_p.get())).grid(row=2, column=2, padx=2, pady=2)
 
         ttk.Label(pid_card, text="I Gain:", font=("Segoe UI", 9, "bold"), background="#1A2230", foreground="#B0BEC5").grid(row=2, column=3, sticky="w", padx=2, pady=2)
         self.entry_i = tk.Entry(pid_card, width=7, font=("Segoe UI", 9), bg="#222D3E", fg="#FFF", insertbackground="#FFF")
-        self.entry_i.insert(0, "1.20")
+        self.entry_i.insert(0, "1.50")
         self.entry_i.grid(row=2, column=4, padx=2, pady=2)
         tk.Button(pid_card, text="Set I", font=("Segoe UI", 8, "bold"), bg="#00E5FF", fg="#000", relief="flat", command=lambda: self._set_param("i", self.entry_i.get())).grid(row=2, column=5, padx=2, pady=2)
 
@@ -239,7 +239,7 @@ class MT6818DashboardGUI:
 
         ttk.Label(pid_card, text="LPF Tf (s):", font=("Segoe UI", 9, "bold"), background="#1A2230", foreground="#B0BEC5").grid(row=3, column=3, sticky="w", padx=2, pady=2)
         self.entry_f = tk.Entry(pid_card, width=7, font=("Segoe UI", 9), bg="#222D3E", fg="#FFF", insertbackground="#FFF")
-        self.entry_f.insert(0, "0.005")
+        self.entry_f.insert(0, "0.002")
         self.entry_f.grid(row=3, column=4, padx=2, pady=2)
         tk.Button(pid_card, text="Set Tf", font=("Segoe UI", 8, "bold"), bg="#00E5FF", fg="#000", relief="flat", command=lambda: self._set_param("f", self.entry_f.get())).grid(row=3, column=5, padx=2, pady=2)
 
@@ -265,7 +265,7 @@ class MT6818DashboardGUI:
 
         ttk.Label(pid_card, text="Motor KV:", font=("Segoe UI", 9, "bold"), background="#1A2230", foreground="#B388FF").grid(row=5, column=3, sticky="w", padx=2, pady=2)
         self.entry_kv = tk.Entry(pid_card, width=7, font=("Segoe UI", 9, "bold"), bg="#222D3E", fg="#B388FF", insertbackground="#FFF")
-        self.entry_kv.insert(0, "171.9")
+        self.entry_kv.insert(0, "123.0")
         self.entry_kv.grid(row=5, column=4, padx=2, pady=2)
         tk.Button(pid_card, text="Set KV", font=("Segoe UI", 8, "bold"), bg="#B388FF", fg="#000", relief="flat", command=lambda: self._set_param("q", self.entry_kv.get())).grid(row=5, column=5, padx=2, pady=2)
 
@@ -1175,11 +1175,11 @@ class MT6818DashboardGUI:
             "zero_electric_angle": self.symmetry_equalizer.current_zero_angle_rad,
             "sensor_direction": detected_dir,
             "sensor_lag_comp_us": lag_val,
-            "motor_kv_rating": float(self.entry_kv.get().strip() or "130.0"),
-            "pid_p": float(self.entry_p.get().strip() or "0.12"),
-            "pid_i": float(self.entry_i.get().strip() or "1.20"),
+            "motor_kv_rating": float(self.entry_kv.get().strip() or "123.0"),
+            "pid_p": float(self.entry_p.get().strip() or "0.15"),
+            "pid_i": float(self.entry_i.get().strip() or "1.50"),
             "pid_d": float(self.entry_d.get().strip() or "0.00"),
-            "lpf_tf": float(self.entry_f.get().strip() or "0.005"),
+            "lpf_tf": float(self.entry_f.get().strip() or "0.002"),
             "date": time.strftime("%Y-%m-%d %H:%M:%S")
         }
         try:

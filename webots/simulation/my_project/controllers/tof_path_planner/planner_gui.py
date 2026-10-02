@@ -45,6 +45,11 @@ from PyQt5.QtWidgets import (
 )
 
 
+def wrap_to_pi(angle_rad: float) -> float:
+    """Wraps an angle in radians into [-pi, pi]."""
+    return math.atan2(math.sin(angle_rad), math.cos(angle_rad))
+
+
 # 16-Channel Physical ToF Sensor Mounting Poses (only_front_tofs.proto)
 FRONT_TOF_SENSOR_RIG = [
     # Front-Left Array (X = -0.070 m, Y = +0.095 m, cross-pointing Right)
@@ -232,14 +237,14 @@ class PlannerCostmapCanvas(QtWidgets.QWidget):
         # Costmap metric bounds
         self.map_x_min = -1.25
         self.map_x_max = 1.25
-        self.map_y_min = -0.10
-        self.map_y_max = 2.00
+        self.map_y_min = 0.00
+        self.map_y_max = 1.90
 
-        # Viewport metric bounds
+        # Viewport metric bounds (1.80m upper bound matches maximum ToF visibility ceiling)
         self.x_min = -1.6
         self.x_max = 1.6
-        self.y_min = -0.4
-        self.y_max = 2.3
+        self.y_min = -0.85
+        self.y_max = 1.80
 
         # Grid data
         self.prob_map: Optional[np.ndarray] = None
@@ -256,6 +261,13 @@ class PlannerCostmapCanvas(QtWidgets.QWidget):
         self.targets: Optional[List[List[float]]] = None  # [[tx, ty, ap], ...]
         self.steer_deg: float = 0.0
         self.recovery_state: str = "DRIVE"
+
+        # Anti-Wrong-Way & Historical Breadcrumb Tracking
+        self.trail: List[List[float]] = []
+        self.sightlines: List[dict] = []
+        self.pose: List[float] = [0.0, 0.0, 0.0]
+        self.is_wrong_way: bool = False
+        self.target_yaw: float = 0.0
 
         # Load Kinematic Reverse Backup Logic parameters from active preview config / best genome
         self.r_min_turn = 0.1325 / max(1e-3, math.tan(0.650))
@@ -283,6 +295,8 @@ class PlannerCostmapCanvas(QtWidgets.QWidget):
         self.show_hazard = True
         self.show_chassis = True
         self.show_backup_curves = True
+        self.show_trail = True
+        self.show_sightlines = True
 
     def reload_config(self, force: bool = False) -> bool:
         """Loads recovery arc kinematics and parameters from active_preview_config.json or best_planner_genome.json."""
@@ -356,6 +370,11 @@ class PlannerCostmapCanvas(QtWidgets.QWidget):
         corridor_right: Optional[List[List[float]]] = None,
         shield_info: Optional[dict] = None,
         dynamic_obstacles: Optional[List[dict]] = None,
+        trail: Optional[List[List[float]]] = None,
+        sightlines: Optional[List[dict]] = None,
+        is_wrong_way: bool = False,
+        target_yaw: float = 0.0,
+        pose: Optional[List[float]] = None,
     ):
         if prob_map is not None:
             self.prob_map = prob_map
@@ -388,6 +407,16 @@ class PlannerCostmapCanvas(QtWidgets.QWidget):
         self.dynamic_obstacles = dynamic_obstacles or []
         self.steer_deg = float(steer_deg)
         self.recovery_state = str(recovery_state)
+
+        if trail is not None:
+            self.trail = trail
+        if sightlines is not None:
+            self.sightlines = sightlines
+        self.is_wrong_way = bool(is_wrong_way)
+        self.target_yaw = float(target_yaw)
+        if pose is not None and len(pose) >= 3:
+            self.pose = [float(pose[0]), float(pose[1]), float(pose[2])]
+
         if grid_bounds and len(grid_bounds) == 4:
             self.map_x_min, self.map_x_max, self.map_y_min, self.map_y_max = grid_bounds
         self.update()
@@ -457,12 +486,13 @@ class PlannerCostmapCanvas(QtWidgets.QWidget):
             grid_pen = QPen(QColor(50, 70, 90, 110), 1, Qt.DashLine)
             painter.setPen(grid_pen)
             painter.setFont(QFont("Consolas", 8))
-            for ym in [0.0, 0.5, 1.0, 1.5, 2.0]:
+            for ym in [-0.5, 0.0, 0.5, 1.0, 1.5, 1.8]:
                 p1 = self.world_to_screen(self.x_min, ym)
                 p2 = self.world_to_screen(self.x_max, ym)
                 painter.drawLine(p1, p2)
                 painter.setPen(QPen(QColor(100, 150, 200, 180)))
-                painter.drawText(QPointF(p1.x() + 8, p1.y() - 4), f"{ym:.1f}m")
+                lbl_text = "1.8m (ToF Limit)" if ym == 1.8 else f"{ym:.1f}m"
+                painter.drawText(QPointF(p1.x() + 8, p1.y() - 4), lbl_text)
                 painter.setPen(grid_pen)
 
             for xm in [-1.0, -0.5, 0.0, 0.5, 1.0]:
@@ -470,7 +500,7 @@ class PlannerCostmapCanvas(QtWidgets.QWidget):
                 p2 = self.world_to_screen(xm, self.y_max)
                 painter.drawLine(p1, p2)
 
-            for ring_r in [0.5, 1.0, 1.5, 2.0]:
+            for ring_r in [0.5, 1.0, 1.5, 1.8]:
                 r_tl = self.world_to_screen(-ring_r, ring_r)
                 r_br = self.world_to_screen(ring_r, -ring_r)
                 painter.setPen(QPen(QColor(60, 90, 120, 50), 1, Qt.DotLine))
@@ -822,7 +852,110 @@ class PlannerCostmapCanvas(QtWidgets.QWidget):
             p_right = self.world_to_screen(xg + width * 0.5, yg)
             painter.drawLine(p_left, p_right)
 
-        # 8. Chassis Footprint & Origin (150x200mm Robot Geometry)
+        # 10. Breadcrumb Historical Trail
+        if self.show_trail and getattr(self, "trail", None):
+            gx, gy, gyaw = self.pose if (self.pose and len(self.pose) >= 3) else (0.0, 0.0, 0.0)
+            cos_yaw = math.cos(gyaw)
+            sin_yaw = math.sin(gyaw)
+
+            local_pts = []
+            for pt in self.trail:
+                if isinstance(pt, (list, tuple)) and len(pt) >= 2:
+                    dx = float(pt[0]) - gx
+                    dy = float(pt[1]) - gy
+                    xv = cos_yaw * dx + sin_yaw * dy
+                    yv = -sin_yaw * dx + cos_yaw * dy
+                    local_pts.append((xv, yv))
+
+            # Connect newest breadcrumb to vehicle rear axle (0.0, -0.070)
+            local_pts.append((0.0, -0.070))
+
+            if len(local_pts) > 1:
+                n_pts = len(local_pts)
+                for i in range(n_pts - 1):
+                    p1 = self.world_to_screen(local_pts[i][0], local_pts[i][1])
+                    p2 = self.world_to_screen(local_pts[i + 1][0], local_pts[i + 1][1])
+
+                    # Progressive alpha: older points are translucent cyan, newer points are vivid cyan
+                    frac = (i + 1) / float(n_pts)
+                    alpha = int(70 + 170 * frac)
+                    pen_seg = QPen(QColor(0, 220, 255, alpha), 2.2, Qt.SolidLine, Qt.RoundCap)
+                    painter.setPen(pen_seg)
+                    painter.drawLine(p1, p2)
+
+                    # Subtle node dots along the trail
+                    if i % 2 == 0:
+                        painter.setPen(Qt.NoPen)
+                        painter.setBrush(QBrush(QColor(0, 229, 255, int(alpha * 0.8))))
+                        painter.drawEllipse(p1, 2.2, 2.2)
+
+        # 11. Wrong-Way Line-of-Sight Raycasts
+        if self.show_sightlines and getattr(self, "sightlines", None):
+            p_origin = self.world_to_screen(0.0, 0.095)  # Front bumper origin
+            for ray in self.sightlines:
+                rx_v = float(ray.get("xv", 0.0))
+                ry_v = float(ray.get("yv", 0.0))
+                is_clear = bool(ray.get("clear", True))
+                is_opp = bool(ray.get("opposing", False))
+                p_tgt = self.world_to_screen(rx_v, ry_v)
+
+                if is_clear and is_opp:
+                    # Unobstructed opposing candidate: vivid neon emerald/cyan line
+                    painter.setPen(QPen(QColor(0, 255, 180, 230), 2.4, Qt.SolidLine))
+                    painter.drawLine(p_origin, p_tgt)
+                    painter.setBrush(QBrush(QColor(0, 255, 180, 240)))
+                    painter.drawEllipse(p_tgt, 4.0, 4.0)
+
+                    h_diff = float(ray.get("heading_diff_deg", 0.0))
+                    painter.setFont(QFont("Consolas", 7, QFont.Bold))
+                    painter.setPen(QPen(QColor(0, 255, 180, 250)))
+                    painter.drawText(QPointF(p_tgt.x() + 5, p_tgt.y() - 3), f"LOS {h_diff:.0f}°")
+                elif not is_clear:
+                    # Blocked by wall/obstacle in costmap: dark red dashed line with square marker
+                    painter.setPen(QPen(QColor(255, 60, 60, 130), 1.2, Qt.DashLine))
+                    painter.drawLine(p_origin, p_tgt)
+                    painter.setBrush(QBrush(QColor(255, 60, 60, 160)))
+                    painter.drawRect(QRectF(p_tgt.x() - 2.5, p_tgt.y() - 2.5, 5, 5))
+
+        # 12. Corrective 180 Target Vector (Gold Arrow)
+        if self.is_wrong_way or "180" in str(self.recovery_state):
+            gx, gy, gyaw = self.pose if (self.pose and len(self.pose) >= 3) else (0.0, 0.0, 0.0)
+            tgt_world = float(getattr(self, "target_yaw", 0.0) or 0.0)
+            rel_yaw = wrap_to_pi(tgt_world - gyaw)
+
+            arrow_len_m = 0.85
+            arrow_xv = arrow_len_m * math.sin(rel_yaw)
+            arrow_yv = arrow_len_m * math.cos(rel_yaw)
+
+            p_orig = self.world_to_screen(0.0, 0.0)
+            p_arrow = self.world_to_screen(arrow_xv, arrow_yv)
+
+            painter.setPen(QPen(QColor(255, 215, 0, 240), 3.5, Qt.SolidLine))
+            painter.drawLine(p_orig, p_arrow)
+
+            # Arrowhead
+            ah_len = 14.0
+            dx_screen = p_arrow.x() - p_orig.x()
+            dy_screen = p_arrow.y() - p_orig.y()
+            screen_angle = math.atan2(dy_screen, dx_screen)
+
+            p1_head = QPointF(
+                p_arrow.x() - ah_len * math.cos(screen_angle - 0.45),
+                p_arrow.y() - ah_len * math.sin(screen_angle - 0.45),
+            )
+            p2_head = QPointF(
+                p_arrow.x() - ah_len * math.cos(screen_angle + 0.45),
+                p_arrow.y() - ah_len * math.sin(screen_angle + 0.45),
+            )
+            painter.setBrush(QBrush(QColor(255, 215, 0)))
+            painter.setPen(Qt.NoPen)
+            painter.drawPolygon(QtGui.QPolygonF([p_arrow, p1_head, p2_head]))
+
+            painter.setFont(QFont("Consolas", 8, QFont.Bold))
+            painter.setPen(QPen(QColor(255, 215, 0)))
+            painter.drawText(QPointF(p_arrow.x() + 8, p_arrow.y() + 4), "180° TARGET")
+
+        # 13. Chassis Footprint & Origin (150x200mm Robot Geometry)
         if self.show_chassis:
             car_w = 0.150
             car_l = 0.200
@@ -874,23 +1007,35 @@ class PlannerCostmapCanvas(QtWidgets.QWidget):
             painter.setBrush(QBrush(QColor(255, 50, 50)))
             painter.drawEllipse(p0, 3.5, 3.5)
 
-        # 9. Costmap Category Legend (Free / Unknown / Obstacle / C-Space)
+        # 14. Wrong-Way Alert Banner
+        if self.is_wrong_way or "180" in str(self.recovery_state):
+            painter.setFont(QFont("Segoe UI", 10, QFont.Bold))
+            banner_rect = QRectF(14, 12, 360, 26)
+            painter.setPen(QPen(QColor(255, 60, 60, 220), 1.5))
+            painter.setBrush(QBrush(QColor(40, 10, 16, 220)))
+            painter.drawRoundedRect(banner_rect, 5, 5)
+            painter.setPen(QPen(QColor(255, 80, 80)))
+            painter.drawText(banner_rect, Qt.AlignCenter, "🚨 WRONG-WAY TRIPPED — EXECUTING 180°")
+
+        # 15. Costmap Category & Breadcrumb Legend (Free / Unknown / Obstacle / C-Space / Trail / LOS Ray)
         painter.setFont(QFont("Consolas", 8, QFont.Bold))
         legend_items = [
             ("Free", QColor(14, 22, 34, 230), QColor(0, 229, 255)),
             ("Unknown", QColor(245, 215, 30, 210), QColor(20, 20, 20)),
             ("Obstacle", QColor(255, 0, 0, 250), QColor(255, 255, 255)),
             ("C-Space", QColor(255, 42, 64, 210), QColor(255, 255, 255)),
+            ("Trail", QColor(0, 220, 255, 200), QColor(10, 20, 30)),
+            ("LOS Ray", QColor(0, 255, 180, 220), QColor(10, 20, 20)),
         ]
         lx = 14
         ly = self.height() - 26
         for name, bg_col, fg_col in legend_items:
             painter.setPen(QPen(QColor(50, 70, 95, 180), 1))
             painter.setBrush(QBrush(bg_col))
-            painter.drawRoundedRect(QRectF(lx, ly, 66, 18), 3, 3)
+            painter.drawRoundedRect(QRectF(lx, ly, 60, 18), 3, 3)
             painter.setPen(QPen(fg_col))
-            painter.drawText(QRectF(lx, ly, 66, 18), Qt.AlignCenter, name)
-            lx += 72
+            painter.drawText(QRectF(lx, ly, 60, 18), Qt.AlignCenter, name)
+            lx += 66
 
 
 # ==============================================================================
@@ -1235,6 +1380,16 @@ class ComprehensivePlannerGUI(QMainWindow):
         self.chk_grid.setChecked(True)
         self.chk_grid.toggled.connect(lambda v: setattr(self.canvas, "show_grid", v) or self.canvas.update())
         disp_layout.addWidget(self.chk_grid, 5, 1)
+
+        self.chk_trail = QCheckBox("Historic Trail (Cyan)")
+        self.chk_trail.setChecked(True)
+        self.chk_trail.toggled.connect(lambda v: setattr(self.canvas, "show_trail", v) or self.canvas.update())
+        disp_layout.addWidget(self.chk_trail, 6, 0)
+
+        self.chk_sightlines = QCheckBox("Wrong-Way Rays (Cyan/Red)")
+        self.chk_sightlines.setChecked(True)
+        self.chk_sightlines.toggled.connect(lambda v: setattr(self.canvas, "show_sightlines", v) or self.canvas.update())
+        disp_layout.addWidget(self.chk_sightlines, 6, 1)
 
         panel_layout.addWidget(disp_group)
 
@@ -1603,8 +1758,20 @@ class ComprehensivePlannerGUI(QMainWindow):
             m_ms = pkt.get("map_ms", 0.0)
             status = pkt.get("status", "--")
             surviving = pkt.get("surviving", 0)
-            rec_state = pkt.get("recovery_state", mode)
+            rec_state = pkt.get("escape_state", pkt.get("recovery_state", mode))
             sim_time = pkt.get("sim_time", 0.0)
+
+            # Anti-Wrong-Way & Breadcrumb Tracking telemetry
+            aww = pkt.get("aww", {})
+            opt1 = aww.get("opt1", {}) if isinstance(aww, dict) else {}
+            trail = aww.get("trail", pkt.get("trail", [])) if isinstance(aww, dict) else pkt.get("trail", [])
+            sightlines = opt1.get("sightlines", pkt.get("sightlines", [])) if isinstance(opt1, dict) else pkt.get("sightlines", [])
+            is_wrong_way = bool(
+                (isinstance(aww, dict) and (aww.get("is_wrong_way", False) or aww.get("action", "") == "CORRECTIVE_180"))
+                or ("180" in str(rec_state))
+            )
+            target_yaw = float(aww.get("target_yaw", 0.0)) if isinstance(aww, dict) else 0.0
+            pose = pkt.get("pose", [0.0, 0.0, 0.0])
 
             self.canvas.set_data(
                 prob_map,
@@ -1622,6 +1789,11 @@ class ComprehensivePlannerGUI(QMainWindow):
                 corridor_right=corridor_right,
                 shield_info=shield_info,
                 dynamic_obstacles=dynamic_obstacles,
+                trail=trail,
+                sightlines=sightlines,
+                is_wrong_way=is_wrong_way,
+                target_yaw=target_yaw,
+                pose=pose,
             )
 
             self.lbl_mode_badge.setText(f"Mode: {mode} | Sim Time: {sim_time:.1f}s")
@@ -1630,8 +1802,11 @@ class ComprehensivePlannerGUI(QMainWindow):
                 self.lbl_gap.setText(f"Gap: ({gap[0]:+.2f}, {gap[1]:.2f})m | Width: {gap[2]*100:.1f} cm")
             self.lbl_perf.setText(f"Plan: {p_ms:.2f}ms | Costmap: {m_ms:.2f}ms | Surviving: {surviving} | {status}")
             
-            # Recovery & Shield state label (with dynamic obstacle tracker indicators)
-            if dynamic_obstacles:
+            # Recovery & Shield state label (with dynamic obstacle & wrong-way indicators)
+            if is_wrong_way:
+                self.lbl_recovery.setText("Wrong-Way: 🚨 WRONG-WAY DETECTED (Corrective 180°)")
+                self.lbl_recovery.setStyleSheet("color: #ff1744; font-weight: bold;")
+            elif dynamic_obstacles:
                 any_dyn = any(obs.get("is_dynamic", False) for obs in dynamic_obstacles)
                 max_v = max((obs.get("v_mag", 0.0) for obs in dynamic_obstacles), default=0.0)
                 n_dyn = sum(1 for obs in dynamic_obstacles if obs.get("is_dynamic", False))

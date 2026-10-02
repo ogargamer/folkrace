@@ -387,7 +387,7 @@ class MT6818DashboardGUI:
         self.benchmark_status_var = tk.StringVar(value="Ready for 5-Min GA Auto-Tuner or 18-Stage Sweep (D=0, LPF 0.8-3.0ms)")
 
         # Symmetry & Phase Angle Equalizer State
-        self.current_zero_angle_rad = 0.11275
+        self.current_zero_angle_rad = 0.97555
         self.sym_running = False
         self.sym_thread = None
         self.sym_fwd_rpm = 0.0

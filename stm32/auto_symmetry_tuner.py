@@ -132,7 +132,7 @@ class AutoSymmetryTuner:
 
         if mean_zero_found is None:
             # Fallback default
-            mean_zero_found = 0.11275
+            mean_zero_found = 0.97555
             print(f"[!] Warning: Using default base zero: {mean_zero_found:.5f} rad")
 
         self.base_zero_angle = mean_zero_found

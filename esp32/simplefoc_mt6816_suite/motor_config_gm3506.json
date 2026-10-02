@@ -1,0 +1,11 @@
+{
+  "zero_electric_angle": 0.97555,
+  "sensor_direction": -1,
+  "sensor_lag_comp_us": 35.0,
+  "motor_kv_rating": 123.0,
+  "pid_p": 0.15,
+  "pid_i": 1.5,
+  "pid_d": 0.0,
+  "lpf_tf": 0.002,
+  "date": "2026-10-02 18:07:31"
+}

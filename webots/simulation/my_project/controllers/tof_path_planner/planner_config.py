@@ -31,6 +31,8 @@ WHEELBASE: float = 0.1325              # meters (L: distance between front and r
 TRACK_REAR: float = 0.1000             # meters (lateral distance between rear wheel contact centers)
 TRACK_FRONT: float = 0.0822            # meters (lateral distance between front wheel contact centers)
 TRACK_KINGPIN: float = 0.0620          # meters (distance between front steering kingpin pivots)
+REAR_AXLE_OFFSET_M: float = -0.0700     # meters (offset along body Y-axis from chassis origin to rear axle center)
+FRONT_AXLE_OFFSET_M: float = 0.0625    # meters (offset along body Y-axis from chassis origin to front axle center)
 WHEEL_RADIUS: float = 0.0275           # meters (27.5 mm rolling radius)
 VEHICLE_MASS: float = 1.000            # kg total vehicle mass
 
@@ -233,3 +235,44 @@ AWW_HISTORY_WINDOW_S: float = AWW_BREADCRUMB_MAX_TIMEOUT_S  # Backward-compatibl
 AWW_EARLY_EXIT_MIN_GAP_M: float = 1.0          # meters minimum scouted gap distance to qualify as long-path early exit
 AWW_EARLY_EXIT_CONE_DEG: float = 20.0          # degrees total narrow cone width (±10 deg) oriented along candidate gap vector
 AWW_EARLY_EXIT_OPPOSING_DEG: float = 110.0     # degrees heading divergence threshold for opposing breadcrumbs in gap corridor
+
+
+# ==============================================================================
+# 8. DRIFT & TRACTION CONTROL (REAR OPTICAL FLOW + ACTIVE FRONT STEERING)
+# ==============================================================================
+
+ENABLE_TRACTION_DRIFT_CONTROL: bool = True
+
+# 8.1 Speed Activation Gates & Hysteresis (m/s)
+# Armed at or above dynamic cornering floor V_MIN_CRUISE (~1.204 m/s)
+V_ARM_DRIFT_MPS: float = V_MIN_CRUISE          # ~1.204 m/s entry threshold
+V_DISARM_CRAWL_MPS: float = 0.60               # Disarm only if speed drops below this AND tires have gripped
+V_CRAWL_FLOOR_MPS: float = 0.40                # Floor of the linear fade ramp (zero countersteer at or below)
+V_MIN_DRIFT_MPS: float = V_DISARM_CRAWL_MPS    # Backward-compatible alias
+
+# 8.2 Slip Angle Thresholds (Radians)
+BETA_SCRUB_RAD: float = math.radians(3.5)      # ~0.061 rad (linear tire limit)
+BETA_DRIFT_RAD: float = math.radians(7.5)      # ~0.131 rad (saturated drift entry)
+BETA_SPIN_RAD: float = math.radians(18.0)      # ~0.314 rad (critical spinout danger)
+
+# 8.3 Active Countersteering & Anti-Snap Parameters
+K_BETA: float = 1.10                           # Proportional countersteer gain on rear slip angle
+K_YAW_RATE: float = 0.06                       # Damping against measured body yaw rate (rad/s -> rad steer)
+K_YAW_DOT: float = 0.015                       # Derivative damping against yaw snap acceleration
+K_RECOVERY_RELAX: float = 0.45                 # Damping relaxation when slip angle is collapsing (0.45 * K_BETA)
+ANTI_SNAP_HOLD_TIME_S: float = 0.080           # 80 ms stateful hold latch for Schmitt trigger
+D_BETA_LP_ALPHA: float = 0.43                  # Low-pass filter smoothing factor on slip rate (~15 Hz cutoff at 125 Hz)
+
+# 8.4 Front-Axle Braking Lateral Reserve
+FRONT_LATERAL_RESERVE_MIN: float = 0.40        # Minimum lateral friction fraction reserved for front steering during rear coast
+
+# 8.5 Dynamic MU Scaling (Tire Kinetic Friction Reduction)
+ENABLE_DYNAMIC_MU_SCALING: bool = True
+MU_SLIDE_RATIO: float = 0.85                   # Minimum friction ratio (1.0 - 0.15 = 0.85 at max slip)
+MU_RECOVERY_RATE: float = 2.0                  # Rate at which effective MU recovers back to nominal (1/s)
+
+# 8.6 Continuous Rear Axle Drive Alpha (0.0 = pure ground-roll coasting, 1.0 = full 4WD drive)
+ALPHA_SLEW_DROP_RATE: float = 4.0              # Max alpha decay rate (units/s) to prevent friction-circle shock
+ALPHA_SLEW_RISE_RATE: float = 2.5              # Max alpha recovery rate (units/s) to prevent breaking traction again
+
+

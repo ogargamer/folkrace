@@ -830,7 +830,7 @@ class WrongWayStudioGUI(QMainWindow):
         curr_yaw = pose[2] if len(pose) > 2 else 0.0
         yaw_err_deg = math.degrees(math.atan2(math.sin(tgt_yaw - curr_yaw), math.cos(tgt_yaw - curr_yaw)))
 
-        is_rec_180 = (is_ww or action == "CORRECTIVE_180" or pkt.get("recovery_state") == "CORRECTIVE_180")
+        is_rec_180 = (is_ww or action == "CORRECTIVE_180" or pkt.get("escape_state", pkt.get("recovery_state")) == "CORRECTIVE_180")
         if is_rec_180:
             c_sub = aww.get("corrective_substate", "FORWARD")
             c_dir = "LEFT" if aww.get("corrective_steer_dir", 1.0) > 0 else "RIGHT"

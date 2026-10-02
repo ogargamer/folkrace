@@ -41,7 +41,7 @@
     "v_cruise_min": 1.223,
     "horizon_N": 30,
     "dt": 0.017,
-    "mu_friction": 0.89,
+    "mu_friction": 0.90,
     "r_inflation_m": 0.075,
     "q_progress": 6.809,
     "q_cte": 44.102,

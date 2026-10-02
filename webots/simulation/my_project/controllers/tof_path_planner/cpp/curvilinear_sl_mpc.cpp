@@ -1190,6 +1190,20 @@ SL_MPC_API void sl_mpc_set_costmap(void *handle, void *cm_handle,
   }
 }
 
+SL_MPC_API void sl_mpc_set_mu(void *handle, double mu) {
+  if (handle) {
+    auto *planner = static_cast<CurvilinearSLMPCNative *>(handle);
+    planner->mu_friction = mu;
+  }
+}
+
+SL_MPC_API void sl_mpc_reset(void *handle) {
+  if (handle) {
+    auto *planner = static_cast<CurvilinearSLMPCNative *>(handle);
+    planner->has_solution = false;
+  }
+}
+
 SL_MPC_API int sl_mpc_plan(void *handle, double xg, double yg, double theta_g,
                            double aperture_width, double v_current,
                            double steer_current, double yaw_rate_current,

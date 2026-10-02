@@ -135,7 +135,7 @@ class Calibrator:
             time.sleep(0.4)
             with self.reader.lock:
                 grade = self.reader.last_calib_grade or "CERTIFIED"
-                zero_a = self.reader.last_zero_electric_angle or 0.11275
+                zero_a = self.reader.last_zero_electric_angle or 0.97555
             self.root.after(0, lambda g=grade, a=zero_a: [
                 self.grade_var.set(g),
                 self.status_var.set(f"🎉 Calibration Certified! Zero: {a:.5f} rad ({a*57.29578:.1f}°) | {g} | Saved to Flash.")

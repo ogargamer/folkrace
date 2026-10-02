@@ -43,6 +43,7 @@ assert r1['cmd_steer_rad'] > 0, "C++ SL-MPC should turn LEFT (positive steer)"
 print("\n" + "=" * 80)
 print("TEST 2: TARGET ON RIGHT (xg = +0.60m, yg = 1.20m), steer_current = 0.0")
 print("=" * 80)
+mpc.reset_active_target()
 r2 = mpc.plan(xg=0.6, yg=1.2, theta_g=0.46, aperture_width=0.6, v_current=1.2, steer_current=0.0, yaw_rate_current=0.0)
 s2 = np.degrees(r2['cmd_steer_rad'])
 p2 = r2['best_line'][1]
@@ -52,6 +53,7 @@ assert r2['cmd_steer_rad'] < 0, "C++ SL-MPC should turn RIGHT (negative steer)"
 print("\n" + "=" * 80)
 print("TEST 3: COUNTER-STEER RECOVERY (Target Left, steer_current = -0.25 rad / -14.3 deg right)")
 print("=" * 80)
+mpc.reset_active_target()
 r3 = mpc.plan(xg=-0.6, yg=1.2, theta_g=-0.46, aperture_width=0.6, v_current=1.2, steer_current=-0.25, yaw_rate_current=0.0)
 s3 = np.degrees(r3['cmd_steer_rad'])
 print(f"C++ SL-MPC: steer = {s3:+6.1f} deg (slew from -14.3 deg toward positive/left)")

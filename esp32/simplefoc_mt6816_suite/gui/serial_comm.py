@@ -51,7 +51,7 @@ class ESP32SerialReader:
         self.calib_progress_pct = 0.0
         self.calib_cooldown_sec = 0
         self.last_calib_zero_angle = None
-        self.last_zero_electric_angle = 0.11275
+        self.last_zero_electric_angle = 0.97555
         self.last_calib_success = False
         self.last_calib_failed = False
         self.last_calib_grade = ""
