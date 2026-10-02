@@ -54,6 +54,7 @@
   96 // Static samples per sweep point for noise rejection
 #define ALIGNMENT_OVERSAMPLE_COUNT                                             \
   96 // Samples per pole point during electrical zero alignment
+#define CALIB_COOLDOWN_PAUSE_SEC 5 // Thermal relief cooldown duration between calibration passes (seconds)
 
 // 4. TIMING, LOOP RATES & SAMPLING FREQUENCIES
 #define TELEMETRY_STREAM_INTERVAL_MS                                           \
@@ -158,6 +159,9 @@ public:
   }
 
   void setMode(bool three_wire) {
+    if (!use_3wire) {
+      SPI.endTransaction();
+    }
     use_3wire = three_wire;
     if (use_3wire) {
       SPI.end();
@@ -167,6 +171,8 @@ public:
     } else {
       SPI.begin(PIN_SCK, PIN_MISO, PIN_MOSI, -1);
       pinMode(PIN_MISO, INPUT_PULLUP);
+      SPISettings settings(spi_speed, MSBFIRST, spi_mode);
+      SPI.beginTransaction(settings);
     }
   }
 
@@ -203,10 +209,6 @@ public:
   }
 
   void read4WireHW(int target_cs, uint8_t &h, uint8_t &l) {
-    SPISettings settings(spi_speed, MSBFIRST, spi_mode);
-
-    SPI.beginTransaction(settings);
-
     digitalWrite(target_cs, LOW);
     uint16_t rx_h = SPI.transfer16(0x8300);
     digitalWrite(target_cs, HIGH);
@@ -216,8 +218,6 @@ public:
     digitalWrite(target_cs, LOW);
     uint16_t rx_l = SPI.transfer16(0x8400);
     digitalWrite(target_cs, HIGH);
-
-    SPI.endTransaction();
 
     h = rx_h & 0xFF;
     l = rx_l & 0xFF;
@@ -386,7 +386,7 @@ public:
   }
 
   float getSingleTurnDeg() {
-    float rad = getMechanicalAngle();
+    float rad = angle_prev;
     float d = (rad / _2PI) * 360.0f - zero_offset_deg;
     while (d < 0.0f)
       d += 360.0f;
@@ -497,8 +497,8 @@ extern bool kv_test_running;
 // ============================================================================
 // ZERO-OVERHEAD REAL-TIME FOC TIMING & STUTTER PROFILER
 // ============================================================================
-#define FOC_SPIKE_EXEC_THRESHOLD_US     90  // Execution spike (>90us when normal is ~35-50us)
-#define FOC_SPIKE_INTERVAL_THRESHOLD_US 120 // Interval jitter spike (>120us when normal is ~50us)
+#define FOC_SPIKE_EXEC_THRESHOLD_US     130 // Execution spike (>130us, accommodates ~37us downsampled PID + commutation)
+#define FOC_SPIKE_INTERVAL_THRESHOLD_US 150 // Interval jitter spike (>150us when normal loop is ~30us)
 
 struct FOCProfilerStats {
   // Window metrics (reset every telemetry window ~10ms)
@@ -519,6 +519,13 @@ struct FOCProfilerStats {
   uint32_t worst_spike_move_cycles;
   uint32_t worst_spike_interval_cycles;
   uint32_t worst_spike_time_ms;
+
+  // Breakdown of the most recent execution spike observed
+  uint32_t latest_spike_exec_cycles;
+  uint32_t latest_spike_zero_cycles;
+  uint32_t latest_spike_comm_cycles;
+  uint32_t latest_spike_move_cycles;
+  uint32_t latest_spike_interval_cycles;
 
   // Current values
   float avg_exec_us;
@@ -636,6 +643,11 @@ void focTaskLoop(void *param) {
       // Check for execution spike
       if (exec_cycles > spike_exec_thresh_cycles) {
         g_foc_perf.exec_spikes_total++;
+        g_foc_perf.latest_spike_exec_cycles = exec_cycles;
+        g_foc_perf.latest_spike_zero_cycles = t1 - t0;
+        g_foc_perf.latest_spike_comm_cycles = t2 - t1;
+        g_foc_perf.latest_spike_move_cycles = t3 - t2;
+        g_foc_perf.latest_spike_interval_cycles = interval_cycles;
         if (exec_cycles > g_foc_perf.worst_spike_exec_cycles) {
           g_foc_perf.worst_spike_exec_cycles = exec_cycles;
           g_foc_perf.worst_spike_zero_cycles = t1 - t0;
@@ -1530,11 +1542,11 @@ bool calibrate256PointLUTSinglePass(float align_voltage) {
     }
   }
 
-  // --- DEDICATED THERMAL COOL-DOWN PAUSE (30s) ---
-  Serial.println("\n>>> ❄️ THERMAL COOL-DOWN PAUSE (30s): De-energizing stator "
-                 "coils to eliminate thermal drift...");
+  // --- DEDICATED THERMAL COOL-DOWN PAUSE (5s) ---
+  Serial.printf("\n>>> ❄️ THERMAL COOL-DOWN PAUSE (%ds): De-energizing stator "
+                 "coils to eliminate thermal drift...\n", CALIB_COOLDOWN_PAUSE_SEC);
   motor1.setPhaseVoltage(0, 0, 0);
-  for (int sec = 30; sec > 0; sec--) {
+  for (int sec = CALIB_COOLDOWN_PAUSE_SEC; sec > 0; sec--) {
     Serial.print("   Coil cool-down: ");
     Serial.print(sec);
     Serial.println("s remaining...");
@@ -1805,10 +1817,10 @@ bool calibrate256PointLUTSinglePass(float align_voltage) {
                  "-------------------");
 
   // Thermal cool-down pause before 11-pole electrical alignment
-  Serial.println(
-      "\n>>> ❄️ THERMAL COOL-DOWN PAUSE (30s) before 11-Pole Alignment...");
+  Serial.printf(
+      "\n>>> ❄️ THERMAL COOL-DOWN PAUSE (%ds) before 11-Pole Alignment...\n", CALIB_COOLDOWN_PAUSE_SEC);
   motor1.setPhaseVoltage(0, 0, 0);
-  for (int sec = 30; sec > 0; sec--) {
+  for (int sec = CALIB_COOLDOWN_PAUSE_SEC; sec > 0; sec--) {
     Serial.print("   Coil cool-down: ");
     Serial.print(sec);
     Serial.println("s remaining...");
@@ -3118,6 +3130,11 @@ void executeCommand(String cmd) {
     g_foc_perf.worst_spike_comm_cycles = 0;
     g_foc_perf.worst_spike_move_cycles = 0;
     g_foc_perf.worst_spike_interval_cycles = 0;
+    g_foc_perf.latest_spike_exec_cycles = 0;
+    g_foc_perf.latest_spike_zero_cycles = 0;
+    g_foc_perf.latest_spike_comm_cycles = 0;
+    g_foc_perf.latest_spike_move_cycles = 0;
+    g_foc_perf.latest_spike_interval_cycles = 0;
     encoder1.parity_retries = 0;
     encoder1.parity_errors = 0;
     encoder1.mag_faults = 0;
@@ -3650,14 +3667,29 @@ void setup() {
   // Attempt Auto-Loading from Flash
   loadConfigFromNVS();
 
-  // Launch Dedicated Real-Time FOC Task on Core 0 (Priority 22)
-  xTaskCreatePinnedToCore(focTaskLoop, "FOC_Task", 8192, NULL, 22,
+  // Launch Dedicated Real-Time FOC Task on Core 0 (Priority 24: maximum system priority)
+  xTaskCreatePinnedToCore(focTaskLoop, "FOC_Task", 8192, NULL, 24,
                           &focTaskHandle, 0);
 
   Serial.println("  System Ready. FOC Loop running on Core 0 @ high rate.");
   Serial.println("  Type 'w' for Master Fourier Calibration, 'c' for Fast "
                  "Align, 'n' for Current Trim.");
   Serial.println("==================================================\n");
+
+  // Clear boot initialization transients so startup jitter does not pollute runtime stats
+  delay(150);
+  g_foc_perf.exec_spikes_total = 0;
+  g_foc_perf.interval_spikes_total = 0;
+  g_foc_perf.worst_spike_exec_cycles = 0;
+  g_foc_perf.worst_spike_zero_cycles = 0;
+  g_foc_perf.worst_spike_comm_cycles = 0;
+  g_foc_perf.worst_spike_move_cycles = 0;
+  g_foc_perf.worst_spike_interval_cycles = 0;
+  g_foc_perf.latest_spike_exec_cycles = 0;
+  g_foc_perf.latest_spike_zero_cycles = 0;
+  g_foc_perf.latest_spike_comm_cycles = 0;
+  g_foc_perf.latest_spike_move_cycles = 0;
+  g_foc_perf.latest_spike_interval_cycles = 0;
 }
 
 void loop() {
@@ -3746,14 +3778,15 @@ void loop() {
     static uint32_t last_alerted_spikes = 0;
     if (snap.exec_spikes > last_alerted_spikes) {
       last_alerted_spikes = snap.exec_spikes;
-      float spk_us = (float)g_foc_perf.worst_spike_exec_cycles / 240.0f;
-      float comm_us = (float)g_foc_perf.worst_spike_comm_cycles / 240.0f;
-      float move_us = (float)g_foc_perf.worst_spike_move_cycles / 240.0f;
-      float zero_us = (float)g_foc_perf.worst_spike_zero_cycles / 240.0f;
-      char alert_buf[220];
+      float spk_us = (float)g_foc_perf.latest_spike_exec_cycles / 240.0f;
+      float comm_us = (float)g_foc_perf.latest_spike_comm_cycles / 240.0f;
+      float move_us = (float)g_foc_perf.latest_spike_move_cycles / 240.0f;
+      float zero_us = (float)g_foc_perf.latest_spike_zero_cycles / 240.0f;
+      float worst_us = (float)g_foc_perf.worst_spike_exec_cycles / 240.0f;
+      char alert_buf[240];
       snprintf(alert_buf, sizeof(alert_buf),
-               "\n>>> [FOC-SPIKE-ALERT] Lag spike: %.1fus (comm/SPI: %.1fus, move/PID: %.1fus, zero: %.1fus) | Total Spikes: %u (Period Jitter Spikes: %u) <<<\r\n",
-               spk_us, comm_us, move_us, zero_us, snap.exec_spikes, snap.interval_spikes);
+               "\n>>> [FOC-SPIKE-ALERT] Recent Spike: %.1fus (comm/SPI: %.1fus, move: %.1fus, zero: %.1fus | Worst: %.1fus) | Total Spikes: %u (Period Jitter Spikes: %u) <<<\r\n",
+               spk_us, comm_us, move_us, zero_us, worst_us, snap.exec_spikes, snap.interval_spikes);
       Serial.write((const uint8_t *)alert_buf, strlen(alert_buf));
     }
   }
