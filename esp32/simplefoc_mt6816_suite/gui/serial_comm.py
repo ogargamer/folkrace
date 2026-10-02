@@ -483,16 +483,18 @@ class ESP32SerialReader:
                 with self.lock:
                     self.last_sensor_direction = 1 if m_dir.group(1) == "CW" else -1
 
-        if "GRADE A+" in line or "GRADE A" in line or "GRADE B" in line or "GRADE C" in line:
+        if any(f"GRADE {g}" in line for g in ["A", "B", "C", "D", "E"]):
             with self.lock:
-                if "GRADE A+" in line:
-                    self.last_calib_grade = "GRADE A+ (Ultra-High Precision)"
-                elif "GRADE A" in line:
-                    self.last_calib_grade = "GRADE A (Excellent)"
+                if "GRADE A" in line:
+                    self.last_calib_grade = "GRADE A (Exceptional)"
                 elif "GRADE B" in line:
-                    self.last_calib_grade = "GRADE B (Good)"
+                    self.last_calib_grade = "GRADE B (Excellent)"
                 elif "GRADE C" in line:
-                    self.last_calib_grade = "GRADE C (Acceptable)"
+                    self.last_calib_grade = "GRADE C (Good)"
+                elif "GRADE D" in line:
+                    self.last_calib_grade = "GRADE D (Fair)"
+                elif "GRADE E" in line:
+                    self.last_calib_grade = "GRADE E (Marginal)"
 
         if "CALIBRATION REJECTED" in line or "GRADE F" in line:
             with self.lock:

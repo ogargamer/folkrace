@@ -500,8 +500,8 @@ extern bool kv_test_running;
 // ============================================================================
 // ZERO-OVERHEAD REAL-TIME FOC TIMING & STUTTER PROFILER
 // ============================================================================
-#define FOC_SPIKE_EXEC_THRESHOLD_US     130 // Execution spike (>130us, accommodates ~37us downsampled PID + commutation)
-#define FOC_SPIKE_INTERVAL_THRESHOLD_US 150 // Interval jitter spike (>150us when normal loop is ~30us)
+#define FOC_SPIKE_EXEC_THRESHOLD_US     180 // Execution spike threshold (>180us, leaves healthy PID+SysTick unflagged)
+#define FOC_SPIKE_INTERVAL_THRESHOLD_US 200 // Interval jitter threshold (>200us)
 
 struct FOCProfilerStats {
   // Window metrics (reset every telemetry window ~10ms)
@@ -2236,22 +2236,32 @@ bool calibrateComprehensiveFOCSinglePass(float align_voltage) {
     return false;
   }
 
-  if (std_dev_deg < 3.0f && max_hyst_deg <= 4.0f) {
+  if (std_dev_deg < 2.0f && max_hyst_deg <= 2.0f) {
     Serial.println(
-        "⭐ GRADE A+ (Ultra-Precision < 3.0 deg elec / < 0.27 deg mech)");
-    Serial.println("     DIAGNOSTIC: Commutation vectors completely decoupled; "
-                   "max torque and zero drag.");
-  } else if (std_dev_deg < 6.0f && max_hyst_deg <= 7.0f) {
+        "⭐ GRADE A (Exceptional Precision < 2.0 deg elec / < 0.18 deg mech)");
+    Serial.println("     DIAGNOSTIC: Commutation vectors flawlessly decoupled; "
+                   "maximum theoretical torque and zero drag.");
+  } else if (std_dev_deg < 4.0f && max_hyst_deg <= 4.0f) {
     Serial.println(
-        "✅ GRADE A (Competition Grade < 6.0 deg elec / < 0.55 deg mech)");
-    Serial.println("     DIAGNOSTIC: Negligible d-axis cross-talk (<10%); "
-                   "excellent high-speed efficiency.");
+        "✅ GRADE B (Excellent / Competition Grade < 4.0 deg elec / < 0.36 deg mech)");
+    Serial.println("     DIAGNOSTIC: Superb alignment; negligible d-axis cross-talk "
+                   "(<5%); maximum efficiency.");
+  } else if (std_dev_deg < 6.0f && max_hyst_deg <= 6.0f) {
+    Serial.println(
+        "✨ GRADE C (Good / Standard < 6.0 deg elec / < 0.55 deg mech)");
+    Serial.println("     DIAGNOSTIC: Solid closed-loop commutation; minimal "
+                   "parasitic loss (<8%).");
+  } else if (std_dev_deg < 8.0f && max_hyst_deg <= 8.0f) {
+    Serial.println(
+        "⚡ GRADE D (Fair / Minor Ripple < 8.0 deg elec / < 0.73 deg mech)");
+    Serial.println("     DIAGNOSTIC: Mild hysteresis / cogging ripple detected; "
+                   "minor thermal penalty under load.");
   } else {
-    Serial.println("⚠️ GRADE B (Usable — Minor thermal penalty)");
+    Serial.println("⚠️ GRADE E (Marginal / Usable — Moderate thermal penalty)");
     Serial.println("     DIAGNOSTIC: Safe to run, but expect 10-17% higher "
                    "coil heating under stall/load.");
     Serial.println("     RECOMMENDATION: Acceptable for testing; bump align "
-                   "voltage to 4.2V for A-grade.");
+                   "voltage or re-run LUT calibration for A-C grade.");
   }
 
   Serial.println("  "

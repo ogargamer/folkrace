@@ -1395,7 +1395,18 @@ class MT6818DashboardGUI:
 
         if c_grade:
             self.calib_grade_var.set(c_grade)
-            grade_col = "#69F0AE" if ("GRADE A" in c_grade or "CERTIFIED" in c_grade) else ("#FFD600" if "GRADE B" in c_grade else "#FF5252")
+            if "GRADE A" in c_grade:
+                grade_col = "#00E676"
+            elif "GRADE B" in c_grade:
+                grade_col = "#69F0AE"
+            elif "GRADE C" in c_grade or "CERTIFIED" in c_grade:
+                grade_col = "#00E5FF"
+            elif "GRADE D" in c_grade:
+                grade_col = "#FFD600"
+            elif "GRADE E" in c_grade:
+                grade_col = "#FF9100"
+            else:
+                grade_col = "#FF5252"
             self.lbl_calib_grade_badge.config(fg=grade_col)
         elif lut_is_active:
             self.calib_grade_var.set("128-PT LUT ACTIVE")
