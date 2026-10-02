@@ -471,14 +471,23 @@ public:
 
         float side_diff = 0.0f;
         if (ranges_16) {
+            // Flank walls (sensors cross-point opposite to pod origin):
             // Right pod sensors (indices 13, 14, 15) point toward LEFT flank (60.4, 71.6, 82.9 deg left)
-            float l_sum = ranges_16[15] + ranges_16[14] + ranges_16[13];
+            float l_flank = (ranges_16[15] + ranges_16[14] + ranges_16[13]) / 3.0f;
             // Left pod sensors (indices 5, 6, 7) point toward RIGHT flank (60.4, 71.6, 82.9 deg right)
-            float r_sum = ranges_16[7] + ranges_16[6] + ranges_16[5];
-            float l_mean = l_sum / 3.0f;
-            float r_mean = r_sum / 3.0f;
-            float denom = std::max(0.25f, 0.5f * (l_mean + r_mean));
-            side_diff = (l_mean - r_mean) / denom;
+            float r_flank = (ranges_16[7]  + ranges_16[6]  + ranges_16[5])  / 3.0f;
+
+            // Front corridor lookahead (sensors point mostly straight, origin side):
+            // Left pod front (idx 0: tof_front_left_4.1deg) -> Left origin
+            // Right pod front (idx 8: tof_front_right_4.1deg) -> Right origin
+            float l_front = ranges_16[0];
+            float r_front = ranges_16[8];
+
+            // Unified openness combining flank wall distance and front lookahead
+            float l_total = 0.5f * l_flank + 0.5f * l_front;
+            float r_total = 0.5f * r_flank + 0.5f * r_front;
+            float denom = std::max(0.25f, 0.5f * (l_total + r_total));
+            side_diff = (l_total - r_total) / denom;
         }
 
         float w_straight = w_align_straight;

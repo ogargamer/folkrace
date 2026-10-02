@@ -383,22 +383,30 @@ class ToFGapScout:
             center_cands = [c["dist"] for c in candidates if abs(c["rel_angle"]) < math.radians(6)]
             d_center = max(center_cands) if center_cands else max_clear_dist
 
-        # Compute side clearance asymmetry from lateral ToF sensors:
+        # Compute side clearance asymmetry from lateral and front ToF sensors:
         side_diff = 0.0
         if tof_readings:
             if "tof_front_right_82.9deg" in tof_readings:
-                # Right sensors cross-point left; Left sensors cross-point right
-                left_keys = ["tof_front_right_82.9deg", "tof_front_right_71.6deg", "tof_front_right_60.4deg"]
-                right_keys = ["tof_front_left_82.9deg", "tof_front_left_71.6deg", "tof_front_left_60.4deg"]
+                # Flank sensors cross-point opposite to pod origin:
+                left_flank_keys = ["tof_front_right_82.9deg", "tof_front_right_71.6deg", "tof_front_right_60.4deg"]
+                right_flank_keys = ["tof_front_left_82.9deg", "tof_front_left_71.6deg", "tof_front_left_60.4deg"]
+                f_l_key = "tof_front_left_4.1deg"
+                f_r_key = "tof_front_right_4.1deg"
             else:
-                left_keys = ["tof_fl_0", "tof_fl_1", "tof_bl_0", "tof_bl_1"]
-                right_keys = ["tof_fr_0", "tof_fr_1", "tof_br_0", "tof_br_1"]
-            l_vals = [tof_readings.get(k, 1.80) for k in left_keys]
-            r_vals = [tof_readings.get(k, 1.80) for k in right_keys]
-            l_mean = sum(l_vals) / len(l_vals) if l_vals else 1.80
-            r_mean = sum(r_vals) / len(r_vals) if r_vals else 1.80
-            denom = max(0.25, 0.5 * (l_mean + r_mean))
-            side_diff = (l_mean - r_mean) / denom
+                left_flank_keys = ["tof_fl_0", "tof_fl_1", "tof_bl_0", "tof_bl_1"]
+                right_flank_keys = ["tof_fr_0", "tof_fr_1", "tof_br_0", "tof_br_1"]
+                f_l_key = "tof_fl_3"
+                f_r_key = "tof_fr_3"
+            l_vals = [tof_readings.get(k, 1.80) for k in left_flank_keys]
+            r_vals = [tof_readings.get(k, 1.80) for k in right_flank_keys]
+            l_flank = sum(l_vals) / len(l_vals) if l_vals else 1.80
+            r_flank = sum(r_vals) / len(r_vals) if r_vals else 1.80
+            l_front = tof_readings.get(f_l_key, 1.80)
+            r_front = tof_readings.get(f_r_key, 1.80)
+            l_total = 0.5 * l_flank + 0.5 * l_front
+            r_total = 0.5 * r_flank + 0.5 * r_front
+            denom = max(0.25, 0.5 * (l_total + r_total))
+            side_diff = (l_total - r_total) / denom
 
         w_straight = self.w_align_straight
         straight_block_penalty = 0.0
