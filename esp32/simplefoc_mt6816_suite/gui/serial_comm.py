@@ -70,6 +70,10 @@ class ESP32SerialReader:
         self.kv_points = []
         self.kv_results = {}
 
+        # Dedicated GA Telemetry State & Sample Buffer
+        self.ga_stream_active = False
+        self.ga_samples = []
+
         self.history_time = []
         self.history_target_rpm = []
         self.history_actual_rpm = []
@@ -105,7 +109,13 @@ class ESP32SerialReader:
                     self.ser.close()
             except Exception:
                 pass
-        self.ser = None
+    def clear_ga_samples(self):
+        with self.lock:
+            self.ga_samples.clear()
+
+    def get_ga_samples(self):
+        with self.lock:
+            return list(self.ga_samples)
 
     def send_cmd(self, cmd_str):
         if self.ser and self.ser.is_open and self.connected:
@@ -177,14 +187,15 @@ class ESP32SerialReader:
                     line, buffer = buffer.split("\n", 1)
                     line = line.strip("\r")
                     if line:
-                        try:
-                            self.raw_log_queue.put_nowait(line)
-                        except queue.Full:
+                        if not line.startswith("[GA]:"):
                             try:
-                                self.raw_log_queue.get_nowait()
                                 self.raw_log_queue.put_nowait(line)
-                            except Exception:
-                                pass
+                            except queue.Full:
+                                try:
+                                    self.raw_log_queue.get_nowait()
+                                    self.raw_log_queue.put_nowait(line)
+                                except Exception:
+                                    pass
                         self._parse_line(line)
             except Exception:
                 self.connected = False
@@ -196,6 +207,33 @@ class ESP32SerialReader:
                 time.sleep(0.2)
 
     def _parse_line(self, line):
+        if line.startswith("[GA]:"):
+            try:
+                payload = line[5:].strip()
+                parts = payload.split(",")
+                act = float(parts[0])
+                uq = float(parts[1])
+                t_now = time.time()
+                with self.lock:
+                    self.last_actual_rpm = act
+                    self.last_uq = uq
+                    self.ga_samples.append((t_now, act, uq))
+                    if len(self.ga_samples) > 2000:
+                        self.ga_samples = self.ga_samples[-1000:]
+                    self.history_time.append(t_now - self.start_time)
+                    self.history_target_rpm.append(self.last_target_rpm)
+                    self.history_actual_rpm.append(act)
+                    self.history_angle.append(self.last_angle_deg)
+                    if len(self.history_time) > 150:
+                        self.history_time.pop(0)
+                        self.history_target_rpm.pop(0)
+                        self.history_actual_rpm.pop(0)
+                        self.history_angle.pop(0)
+                    self.msg_count += 1
+            except Exception:
+                pass
+            return
+
         if "SAFETY SHUTDOWN: Motor Stall" in line or "Motor stall/overload" in line or "Motor Stall / Overload" in line:
             with self.lock:
                 self.last_stall_alarm = True

@@ -35,7 +35,7 @@ class MT6818DashboardGUI:
         self.sensor_mode_var = tk.IntVar(value=0)
 
         self.benchmark_progress_var = tk.DoubleVar(value=0.0)
-        self.benchmark_status_var = tk.StringVar(value="Ready for 5-Min GA Auto-Tuner or 18-Stage Sweep (D=0, LPF 0.8-3.0ms)")
+        self.benchmark_status_var = tk.StringVar(value="Ready for Multi-Speed GA Auto-Tuner (400 RPM Base + 50/400/1000 RPM Gauntlet)")
 
         self.sym_status_var = tk.StringVar(value="Ready to test KV Symmetry & Phase Angle Balance.")
         self.sym_progress_var = tk.DoubleVar(value=0.0)

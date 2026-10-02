@@ -447,6 +447,9 @@ bool is_enabled = false;
 bool is_calibrated = false;
 bool show_telemetry = true;
 uint32_t last_telemetry_time_ms = 0;
+bool ga_stream_active = false;
+uint32_t last_ga_stream_time_ms = 0;
+uint32_t ga_stream_interval_ms = 20; // 50 Hz default optimal rate for PID GA (20ms)
 
 float calib_align_voltage = CALIBRATION_VOLTAGE;
 float calib_hold_voltage = CALIBRATION_HOLD_VOLTAGE;
@@ -3210,6 +3213,44 @@ void executeCommand(String cmd) {
     printHarmonicReport();
     return;
   }
+  if (cmd.startsWith("GA_STREAM") || cmd.startsWith("ga_stream")) {
+    String arg_s = cmd.substring(9);
+    arg_s.trim();
+    if (arg_s.equalsIgnoreCase("OFF") || arg_s.equals("0")) {
+      ga_stream_active = false;
+      Serial.println(">>> GA Dedicated Telemetry Stream: DISABLED");
+    } else {
+      int val = arg_s.toInt();
+      if (val >= 10 && val <= 200) {
+        ga_stream_interval_ms = 1000 / val;
+      } else {
+        ga_stream_interval_ms = 20; // 50 Hz default optimal rate
+      }
+      ga_stream_active = true;
+      Serial.printf(">>> GA Dedicated Telemetry Stream: ENABLED @ %lu Hz (%lu ms)\n",
+                    1000 / ga_stream_interval_ms, ga_stream_interval_ms);
+    }
+    return;
+  }
+  if (cmd.startsWith("PID_EVAL") || cmd.startsWith("pid_eval")) {
+    float p = 0, i = 0, d = 0, tf = 0, tgt = 0;
+    int parsed = sscanf(cmd.c_str() + 8, "%f %f %f %f %f", &p, &i, &d, &tf, &tgt);
+    if (parsed >= 4) {
+      motor1.PID_velocity.P = p;
+      motor1.PID_velocity.I = i;
+      motor1.PID_velocity.D = d;
+      if (tf > 0.0f) motor1.LPF_velocity.Tf = tf;
+      if (parsed >= 5) {
+        target_velocity_rpm = tgt;
+        motor1.controller = MotionControlType::velocity;
+        driver1.enable();
+        is_enabled = true;
+      }
+      Serial.printf(">>> PID_EVAL: P=%.4f I=%.4f D=%.5f Tf=%.5fs Target=%.1f RPM\n",
+                    p, i, d, tf, tgt);
+    }
+    return;
+  }
 
   switch (action) {
   case 'w':
@@ -3494,6 +3535,7 @@ void executeCommand(String cmd) {
   case 'X': {
     if (kv_test_running)
       abortKVTest("Emergency Stop");
+    ga_stream_active = false;
     target_velocity_rpm = 0.0f;
     target_voltage = 0.0f;
     motor1.setPhaseVoltage(0, 0, 0);
@@ -3586,6 +3628,8 @@ void executeCommand(String cmd) {
     Serial.println("  e             : Toggle Driver Enable/Disable");
     Serial.println("  x             : Emergency Stop & Disable Driver");
     Serial.println("  g             : Toggle Telemetry Streaming ON/OFF");
+    Serial.println("  GA_STREAM [hz]: 🧬 Dedicated High-Rate PID GA Stream (default 50 Hz, 0=OFF)");
+    Serial.println("  PID_EVAL p i d tf [tgt]: ⚡ Set all PID parameters + target atomically");
     Serial.println("==================================================\n");
     break;
   }
@@ -3701,10 +3745,24 @@ void loop() {
   // 2. Non-blocking Serial Command Processor
   processSerialCommand();
 
-  // 3. Periodic Telemetry Stream (20 Hz)
+  // 3. High-Rate Dedicated GA Telemetry Stream (Optimal Hz, compact ~18 bytes)
   uint32_t now_ms = millis();
-  if (show_telemetry &&
-      (now_ms - last_telemetry_time_ms >= TELEMETRY_STREAM_INTERVAL_MS)) {
+  if (ga_stream_active &&
+      (now_ms - last_ga_stream_time_ms >= ga_stream_interval_ms)) {
+    last_ga_stream_time_ms = now_ms;
+
+    TelemetrySnapshot snap;
+    portENTER_CRITICAL(&telemSpinlock);
+    snap = g_telemetry;
+    portEXIT_CRITICAL(&telemSpinlock);
+
+    char ga_buf[48];
+    snprintf(ga_buf, sizeof(ga_buf), "[GA]:%+6.1f,%+5.2f\r\n", snap.actual_rpm, snap.uq);
+    Serial.write((const uint8_t *)ga_buf, strlen(ga_buf));
+  }
+  // 4. Periodic Full Telemetry Stream (20 Hz, active only when GA stream is inactive)
+  else if (show_telemetry && !ga_stream_active &&
+           (now_ms - last_telemetry_time_ms >= TELEMETRY_STREAM_INTERVAL_MS)) {
     last_telemetry_time_ms = now_ms;
 
     // Snapshot from Core 0

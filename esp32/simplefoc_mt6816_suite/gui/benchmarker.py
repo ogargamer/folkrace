@@ -98,6 +98,7 @@ class BenchmarkRunner:
         self.running = False
         self.status_var.set("🛑 EMERGENCY STOP: Benchmark / GA aborted.")
         try:
+            self.reader.send_cmd("GA_STREAM 0")
             self.reader.send_cmd("x")
         except Exception:
             pass
@@ -137,21 +138,18 @@ class BenchmarkRunner:
     def _evaluate_candidate(self, p, i, d, tf, target_rpm, stage_duration=3.0, settle_time=1.0, origin_label=""):
         """
         Commands gains and measures steady-state tracking, jitter, ripple, and voltage noise.
+        Uses dedicated high-rate (50 Hz) GA stream on ESP32 without requiring full telemetry streaming.
         Includes safety watchdog that detects runaway oscillation early.
         """
-        # Apply parameters
-        self.reader.send_cmd(f"p{p:.4f}")
-        time.sleep(0.04)
-        self.reader.send_cmd(f"i{i:.4f}")
-        time.sleep(0.04)
-        self.reader.send_cmd(f"d{d:.4f}")
-        time.sleep(0.04)
-        self.reader.send_cmd(f"f{tf:.5f}")
-        time.sleep(0.04)
-        self.reader.send_cmd(f"t{target_rpm:.1f}")
+        # Clear dedicated sample buffer before stage
+        self.reader.clear_ga_samples()
+
+        # Command gains and target (use atomic PID_EVAL for zero latency + individual fallback)
+        self.reader.send_cmd(f"PID_EVAL {p:.4f} {i:.4f} {d:.4f} {tf:.5f} {target_rpm:.1f}")
+        self.reader.send_cmd(f"p{p:.4f}\ni{i:.4f}\nd{d:.4f}\nf{tf:.5f}\nt{target_rpm:.1f}")
 
         stage_start = time.time()
-        samples = []
+        polled_samples = []
 
         while time.time() - stage_start < stage_duration:
             if not self.running:
@@ -159,16 +157,17 @@ class BenchmarkRunner:
 
             elapsed = time.time() - stage_start
 
-            # Read latest telemetry
+            # Read latest telemetry for fast watchdog
             with self.reader.lock:
                 act = getattr(self.reader, "last_actual_rpm", 0.0)
                 uq = getattr(self.reader, "last_uq", 0.0)
 
-            # Safety Watchdog: If violent oscillation (>80 RPM from target after 0.5s settle)
-            if elapsed > 0.6 and abs(act - target_rpm) > 90.0:
+            # Dynamic Safety Watchdog: aborts runaway oscillation early across any target speed
+            watchdog_limit = max(35.0, target_rpm * 0.28)
+            if elapsed > 0.5 and abs(act - target_rpm) > watchdog_limit:
                 # Early abort to prevent motor heating / driver tripping
                 self.reader.send_cmd("t0")
-                time.sleep(0.1)
+                time.sleep(0.05)
                 return {
                     "origin": origin_label,
                     "p": p, "i": i, "d": d, "tf": tf, "tf_ms": tf * 1000.0,
@@ -179,13 +178,20 @@ class BenchmarkRunner:
                     "ripple_pk_pk": 190.0,
                     "mean_uq": uq,
                     "score": 999.0,
-                    "status": "⚠️ UNSTABLE (Watchdog Abort)"
+                    "status": f"⚠️ UNSTABLE @ {target_rpm:.0f} RPM"
                 }
 
             if elapsed >= settle_time:
-                samples.append((act, uq))
+                polled_samples.append((act, uq))
 
-            time.sleep(0.04)
+            time.sleep(0.02) # Responsive 50 Hz watchdog check loop
+
+        # Retrieve high-rate streaming samples captured by reader
+        captured = self.reader.get_ga_samples()
+        valid_captured = [(pt[1], pt[2]) for pt in captured if pt[0] >= (stage_start + settle_time)]
+
+        # Use high-rate captured samples if available (>= 10 samples), else fall back to polled samples
+        samples = valid_captured if len(valid_captured) >= 10 else polled_samples
 
         if not samples:
             return None
@@ -226,10 +232,62 @@ class BenchmarkRunner:
             "status": "✅ Stable"
         }
 
+    def _evaluate_multi_speed(self, p, i, d, tf, speeds=(50.0, 400.0, 1000.0), stage_duration=2.0, settle_time=0.6, origin_label="", on_speed_step_cb=None):
+        """
+        Evaluates candidate stability and tracking across 3 distinct operating regimes:
+        50 RPM (low-speed cornering), 400 RPM (cruise/base), and 1000 RPM (top-end sprint).
+        Returns combined multi-speed performance. If any speed is unstable, candidate is penalized.
+        """
+        sub_results = []
+        for spd in speeds:
+            if not self.running:
+                return None
+            if on_speed_step_cb:
+                on_speed_step_cb(spd)
+            res = self._evaluate_candidate(
+                p, i, d, tf, spd,
+                stage_duration=stage_duration, settle_time=settle_time,
+                origin_label=f"{origin_label} @ {spd:.0f} RPM"
+            )
+            if res is None or not self.running:
+                return None
+            if "UNSTABLE" in res.get("status", "") or res.get("score", 999.0) >= 500.0:
+                res["origin"] = origin_label
+                res["target"] = "50/400/1000"
+                res["status"] = f"⚠️ Unstable @ {spd:.0f} RPM"
+                return res
+            sub_results.append(res)
+
+        mean_mae = sum(r["mae"] for r in sub_results) / len(sub_results)
+        mean_std = sum(r["std_dev"] for r in sub_results) / len(sub_results)
+        mean_rip = sum(r["ripple_pk_pk"] for r in sub_results) / len(sub_results)
+        mean_uq = sum(r["mean_uq"] for r in sub_results) / len(sub_results)
+        composite_score = sum(r["score"] for r in sub_results) / len(sub_results)
+
+        return {
+            "origin": origin_label,
+            "p": round(p, 4),
+            "i": round(i, 4),
+            "d": round(d, 4),
+            "tf": round(tf, 5),
+            "tf_ms": round(tf * 1000.0, 2),
+            "target": "50/400/1000",
+            "mean_speed": round(sum(r["mean_speed"] for r in sub_results) / len(sub_results), 1),
+            "mae": round(mean_mae, 2),
+            "std_dev": round(mean_std, 2),
+            "ripple_pk_pk": round(mean_rip, 2),
+            "mean_uq": round(mean_uq, 2),
+            "score": round(composite_score, 3),
+            "scores_by_speed": {spd: r["score"] for spd, r in zip(speeds, sub_results)},
+            "status": "✅ 3-Speed Certified (50/400/1000)"
+        }
+
     def _run_ga_worker(self, btn_ga, btn_sweep, btn_results):
         """
-        5-Minute Genetic Algorithm Optimization Worker:
-        10 Generations x 10 Individuals = 100 evaluations (~300 seconds).
+        Multi-Regime Genetic Algorithm Auto-Tuner:
+        Phase 1: Base Exploration @ 400 RPM (6 Generations x 10 Individuals = 60 evaluations).
+        Phase 2: Multi-Speed Gauntlet (50, 400, and 1000 RPM) across 2 Refinement Generations
+                 seeded with the Top 10 unique elites from Phase 1.
         Bounds:
           P: [0.04, 0.30]
           I: [0.40, 4.00]
@@ -240,11 +298,18 @@ class BenchmarkRunner:
             self._reset_buttons(btn_ga, btn_sweep, btn_results)
             return
 
+        # Ensure dedicated 50 Hz GA telemetry streaming is active on ESP32 (independent of show_telemetry)
+        self.reader.send_cmd("GA_STREAM 50")
+        time.sleep(0.05)
+
         POP_SIZE = 10
-        NUM_GENS = 10
-        CANDIDATE_DURATION = 2.8
-        SETTLE_TIME = 0.9
-        TARGET_RPM = 100.0
+        NUM_BASE_GENS = 6
+        NUM_REFINE_GENS = 2
+        BASE_RPM = 400.0
+        MULTI_SPEEDS = (50.0, 400.0, 1000.0)
+
+        CANDIDATE_DURATION = 2.4
+        SETTLE_TIME = 0.7
 
         P_MIN, P_MAX = 0.04, 0.30
         I_MIN, I_MAX = 0.40, 4.00
@@ -262,7 +327,6 @@ class BenchmarkRunner:
             {"p": 0.06, "i": 0.60, "tf": 0.0012},  # Quiet Low-Current (1.2ms)
         ]
 
-        # Fill remaining slots with stratified random candidates
         population = list(seeds)
         while len(population) < POP_SIZE:
             population.append({
@@ -271,45 +335,45 @@ class BenchmarkRunner:
                 "tf": round(random.uniform(TF_MIN, TF_MAX), 5)
             })
 
-        total_evaluations = NUM_GENS * POP_SIZE
+        total_base_evals = NUM_BASE_GENS * POP_SIZE
+        total_refine_evals = NUM_REFINE_GENS * POP_SIZE
+        total_evaluations = total_base_evals + total_refine_evals
         eval_count = 0
         start_time = time.time()
         best_overall = None
         was_aborted = False
 
-        for gen_idx in range(NUM_GENS):
+        # --- PHASE 1: Base GA Exploration @ 400 RPM ---
+        for gen_idx in range(NUM_BASE_GENS):
             if not self.running:
                 was_aborted = True
                 break
 
             gen_evaluated = []
-
             for ind_idx, indiv in enumerate(population):
                 if not self.running:
                     was_aborted = True
                     break
 
                 eval_count += 1
-                total_elapsed = time.time() - start_time
                 total_progress = min(99.0, (eval_count / total_evaluations) * 100.0)
-                remaining_sec = max(0, int((total_evaluations - eval_count) * (CANDIDATE_DURATION + 0.2)))
+                remaining_sec = max(0, int((total_base_evals - eval_count) * (CANDIDATE_DURATION + 0.1) + total_refine_evals * 5.5))
 
                 p_val, i_val, tf_val = indiv["p"], indiv["i"], indiv["tf"]
-                origin_name = f"🧬 GA Gen {gen_idx+1} [#{ind_idx+1}]"
+                origin_name = f"🧬 GA Base Gen {gen_idx+1} [#{ind_idx+1}]"
 
-                # Update status
                 def _update_status(g=gen_idx+1, ind=ind_idx+1, p=p_val, i=i_val, tf_ms=tf_val*1000.0,
                                    prog=total_progress, rem=remaining_sec, b=best_overall):
                     self.progress_var.set(prog)
-                    b_str = f" | Best Score: {b['score']:.2f} (P={b['p']}, I={b['i']}, Tf={b['tf_ms']}ms)" if b else ""
+                    b_str = f" | Best: {b['score']:.2f} (P={b['p']}, I={b['i']}, Tf={b['tf_ms']}ms)" if b else ""
                     self.status_var.set(
-                        f"🧬 GA Gen [{g}/{NUM_GENS}] Indiv [{ind}/{POP_SIZE}]: P={p:.3f}, I={i:.2f}, Tf={tf_ms:.2f}ms "
-                        f"(D=0){b_str} | ~{rem}s left"
+                        f"🧬 Phase 1 Base GA [{g}/{NUM_BASE_GENS}] Indiv [{ind}/{POP_SIZE}] @ 400 RPM: "
+                        f"P={p:.3f}, I={i:.2f}, Tf={tf_ms:.2f}ms{b_str} | ~{rem}s left"
                     )
                 self.root.after(0, _update_status)
 
                 res = self._evaluate_candidate(
-                    p_val, i_val, D_VAL, tf_val, TARGET_RPM,
+                    p_val, i_val, D_VAL, tf_val, BASE_RPM,
                     stage_duration=CANDIDATE_DURATION, settle_time=SETTLE_TIME, origin_label=origin_name
                 )
 
@@ -322,17 +386,14 @@ class BenchmarkRunner:
             if not self.running or len(gen_evaluated) < 2:
                 break
 
-            # Sort current generation by fitness (lower is better)
             gen_evaluated.sort(key=lambda x: x["score"])
 
-            # Evolutionary Reproduction for next generation
-            if gen_idx < NUM_GENS - 1:
+            # Reproduction for next Phase 1 generation
+            if gen_idx < NUM_BASE_GENS - 1:
                 next_pop = []
-                # 1. Elitism: Top 2 elites survive unchanged
                 next_pop.append({"p": gen_evaluated[0]["p"], "i": gen_evaluated[0]["i"], "tf": gen_evaluated[0]["tf"]})
                 next_pop.append({"p": gen_evaluated[1]["p"], "i": gen_evaluated[1]["i"], "tf": gen_evaluated[1]["tf"]})
 
-                # 2. Tournament Selection & BLX-alpha Crossover
                 def select_parent():
                     candidates = random.sample(gen_evaluated[:min(6, len(gen_evaluated))], 2)
                     candidates.sort(key=lambda x: x["score"])
@@ -342,7 +403,6 @@ class BenchmarkRunner:
                     p1 = select_parent()
                     p2 = select_parent()
 
-                    # BLX-alpha crossover (alpha=0.3)
                     def cross(v1, v2, vmin, vmax):
                         low = min(v1, v2)
                         high = max(v1, v2)
@@ -354,7 +414,6 @@ class BenchmarkRunner:
                     child_i = cross(p1["i"], p2["i"], I_MIN, I_MAX)
                     child_tf = cross(p1["tf"], p2["tf"], TF_MIN, TF_MAX)
 
-                    # Gaussian Mutation (25% rate)
                     if random.random() < 0.25:
                         child_p = max(P_MIN, min(P_MAX, child_p + random.gauss(0, 0.025)))
                     if random.random() < 0.25:
@@ -367,10 +426,131 @@ class BenchmarkRunner:
                         "i": round(child_i, 3),
                         "tf": round(child_tf, 5)
                     })
-
                 population = next_pop
 
+        # --- PHASE 2: Multi-Speed Gauntlet (50, 400, 1000 RPM) for 2 Generations ---
+        if self.running and not was_aborted:
+            # Extract Top 10 unique elites from Phase 1
+            seen = set()
+            top_elites = []
+            stable_p1 = [r for r in self.results if "Stable" in r.get("status", "")]
+            stable_p1.sort(key=lambda x: x["score"])
+            for r in stable_p1:
+                key = (round(r["p"], 3), round(r["i"], 2), round(r["tf"], 5))
+                if key not in seen:
+                    seen.add(key)
+                    top_elites.append({"p": r["p"], "i": r["i"], "tf": r["tf"]})
+                if len(top_elites) >= POP_SIZE:
+                    break
+
+            while len(top_elites) < POP_SIZE:
+                base = top_elites[0] if top_elites else {"p": 0.12, "i": 1.2, "tf": 0.0015}
+                top_elites.append({
+                    "p": round(max(P_MIN, min(P_MAX, base["p"] + random.gauss(0, 0.02))), 3),
+                    "i": round(max(I_MIN, min(I_MAX, base["i"] + random.gauss(0, 0.3))), 2),
+                    "tf": round(max(TF_MIN, min(TF_MAX, base["tf"] + random.gauss(0, 0.0003))), 5)
+                })
+
+            multi_pop = list(top_elites)
+
+            for refine_gen in range(NUM_REFINE_GENS):
+                if not self.running:
+                    was_aborted = True
+                    break
+
+                refine_evaluated = []
+                for ind_idx, indiv in enumerate(multi_pop):
+                    if not self.running:
+                        was_aborted = True
+                        break
+
+                    eval_count += 1
+                    total_progress = min(99.0, (eval_count / total_evaluations) * 100.0)
+                    rem_refine = max(0, int((total_evaluations - eval_count) * 5.5))
+
+                    p_val, i_val, tf_val = indiv["p"], indiv["i"], indiv["tf"]
+                    origin_name = f"🧬 GA 3-Speed Gen {refine_gen+1} [#{ind_idx+1}]"
+
+                    def _update_status_multi(rg=refine_gen+1, ind=ind_idx+1, p=p_val, i=i_val, tf_ms=tf_val*1000.0,
+                                             prog=total_progress, rem=rem_refine, b=best_overall):
+                        self.progress_var.set(prog)
+                        b_str = f" | Champion: {b['score']:.2f} ({b['status']})" if b and "Certified" in b.get("status", "") else ""
+                        self.status_var.set(
+                            f"🏎️ Phase 2 [Gen {rg}/{NUM_REFINE_GENS}] Elite [{ind}/{POP_SIZE}]: Testing 50/400/1000 RPM "
+                            f"(P={p:.3f}, I={i:.2f}, Tf={tf_ms:.2f}ms){b_str} | ~{rem}s left"
+                        )
+                    self.root.after(0, _update_status_multi)
+
+                    def _on_spd(cur_spd, rg=refine_gen+1, ind=ind_idx+1, p=p_val, i=i_val, tf_ms=tf_val*1000.0, prog=total_progress):
+                        self.progress_var.set(prog)
+                        self.status_var.set(
+                            f"🏎️ Phase 2 [Gen {rg}/{NUM_REFINE_GENS}] Elite [{ind}/{POP_SIZE}] -> Testing {cur_spd:.0f} RPM "
+                            f"(P={p:.3f}, I={i:.2f}, Tf={tf_ms:.2f}ms)"
+                        )
+
+                    multi_res = self._evaluate_multi_speed(
+                        p_val, i_val, D_VAL, tf_val, speeds=MULTI_SPEEDS,
+                        stage_duration=2.0, settle_time=0.6, origin_label=origin_name,
+                        on_speed_step_cb=lambda s: self.root.after(0, lambda sp=s: _on_spd(sp))
+                    )
+
+                    if multi_res is not None:
+                        refine_evaluated.append(multi_res)
+                        self.results.append(multi_res)
+                        if "Certified" in multi_res.get("status", ""):
+                            if best_overall is None or "Certified" not in best_overall.get("status", "") or multi_res["score"] < best_overall["score"]:
+                                best_overall = multi_res
+
+                if not self.running or len(refine_evaluated) < 2:
+                    break
+
+                refine_evaluated.sort(key=lambda x: (0 if "Certified" in x.get("status", "") else 1, x["score"]))
+
+                # Reproduction for Refine Generation 2
+                if refine_gen < NUM_REFINE_GENS - 1:
+                    next_multi_pop = []
+                    next_multi_pop.append({"p": refine_evaluated[0]["p"], "i": refine_evaluated[0]["i"], "tf": refine_evaluated[0]["tf"]})
+                    next_multi_pop.append({"p": refine_evaluated[1]["p"], "i": refine_evaluated[1]["i"], "tf": refine_evaluated[1]["tf"]})
+
+                    def select_multi_parent():
+                        cands = random.sample(refine_evaluated[:min(5, len(refine_evaluated))], 2)
+                        cands.sort(key=lambda x: (0 if "Certified" in x.get("status", "") else 1, x["score"]))
+                        return cands[0]
+
+                    while len(next_multi_pop) < POP_SIZE:
+                        p1 = select_multi_parent()
+                        p2 = select_multi_parent()
+
+                        def cross(v1, v2, vmin, vmax):
+                            low = min(v1, v2)
+                            high = max(v1, v2)
+                            d = high - low
+                            val = random.uniform(low - 0.25 * d, high + 0.25 * d)
+                            return max(vmin, min(vmax, val))
+
+                        child_p = cross(p1["p"], p2["p"], P_MIN, P_MAX)
+                        child_i = cross(p1["i"], p2["i"], I_MIN, I_MAX)
+                        child_tf = cross(p1["tf"], p2["tf"], TF_MIN, TF_MAX)
+
+                        if random.random() < 0.30:
+                            child_p = max(P_MIN, min(P_MAX, child_p + random.gauss(0, 0.015)))
+                        if random.random() < 0.30:
+                            child_i = max(I_MIN, min(I_MAX, child_i + random.gauss(0, 0.20)))
+                        if random.random() < 0.30:
+                            child_tf = max(TF_MIN, min(TF_MAX, child_tf + random.gauss(0, 0.0002)))
+
+                        next_multi_pop.append({
+                            "p": round(child_p, 4),
+                            "i": round(child_i, 3),
+                            "tf": round(child_tf, 5)
+                        })
+                    multi_pop = next_multi_pop
+
         self.running = False
+        try:
+            self.reader.send_cmd("GA_STREAM 0")
+        except Exception:
+            pass
         if was_aborted:
             self.reader.send_cmd("x")
         else:
@@ -384,14 +564,16 @@ class BenchmarkRunner:
                 if self.results:
                     btn_results.config(state="normal")
             elif self.results:
-                self.results.sort(key=lambda x: x['score'])
+                # Prioritize 3-Speed Certified candidates at top of leaderboard
+                self.results.sort(key=lambda x: (0 if "Certified" in x.get("status", "") else 1, x['score']))
                 for rank_idx, r in enumerate(self.results):
                     r['rank'] = rank_idx + 1
 
                 best = self.results[0]
                 self.progress_var.set(100.0)
+                cert_str = " (3-Speed Certified @ 50, 400 & 1000 RPM)" if "Certified" in best.get("status", "") else ""
                 self.status_var.set(
-                    f"✅ 5-Min GA Complete! Winner: #{best['rank']} (P={best['p']}, I={best['i']}, Tf={best['tf_ms']}ms, D=0) "
+                    f"✅ Multi-Speed GA Complete! Winner: #{best['rank']} (P={best['p']}, I={best['i']}, Tf={best['tf_ms']}ms, D=0){cert_str} "
                     f"| Jitter: ±{best['std_dev']:.2f} RPM | MAE: ±{best['mae']:.2f} RPM"
                 )
                 btn_results.config(state="normal")
@@ -441,6 +623,10 @@ class BenchmarkRunner:
             {"name": "3.0ms Maximum Velocity 400", "p": 0.16, "i": 1.60, "d": 0.000, "tf": 0.0030, "target": 400.0},
         ]
 
+        # Ensure dedicated 50 Hz GA telemetry streaming is active on ESP32
+        self.reader.send_cmd("GA_STREAM 50")
+        time.sleep(0.05)
+
         total_stages = len(presets)
         stage_duration = 6.0
         settle_time = 1.5
@@ -473,6 +659,10 @@ class BenchmarkRunner:
                 self.results.append(res)
 
         self.running = False
+        try:
+            self.reader.send_cmd("GA_STREAM 0")
+        except Exception:
+            pass
         if was_aborted:
             self.reader.send_cmd("x")
         else:
@@ -533,12 +723,13 @@ class BenchmarkRunner:
         cols = ("Rank", "Source / Preset", "P Gain", "I Gain", "D Gain", "LPF (ms)", "Target", "Actual", "MAE Err", "StdDev (Jitter)", "Ripple Pk-Pk", "Score")
         tree = ttk.Treeview(table_frame, columns=cols, show="headings", height=12)
 
-        col_widths = [45, 175, 55, 55, 50, 65, 60, 60, 70, 95, 85, 60]
+        col_widths = [45, 190, 55, 55, 50, 65, 90, 65, 70, 95, 85, 60]
         for c, w in zip(cols, col_widths):
             tree.heading(c, text=c)
             tree.column(c, width=w, anchor="center")
 
         for r in self.results:
+            tgt_disp = f"{r['target']:.1f}" if isinstance(r.get('target'), (int, float)) else str(r.get('target', ''))
             values = (
                 f"#{r.get('rank', '-')}",
                 r['origin'],
@@ -546,7 +737,7 @@ class BenchmarkRunner:
                 f"{r['i']:.2f}",
                 f"{r['d']:.3f}",
                 f"{r['tf_ms']:.2f} ms",
-                f"{r['target']:.1f}",
+                tgt_disp,
                 f"{r['mean_speed']:.1f}",
                 f"±{r['mae']:.2f}",
                 f"±{r['std_dev']:.2f} RPM",
@@ -576,18 +767,19 @@ class BenchmarkRunner:
 
         def copy_report():
             lines = [
-                "=== PID BENCHMARK & 5-MIN GA AUTO-TUNER LEADERBOARD ===",
+                "=== PID BENCHMARK & MULTI-SPEED GA AUTO-TUNER LEADERBOARD ===",
                 f"Top Ranked Winner: #{best.get('rank', 1)} {best['origin']} (Score: {best['score']:.2f})",
                 f"Gains: P={best['p']}, I={best['i']}, D={best['d']}, Tf={best['tf_ms']:.2f}ms",
                 f"Metrics: Jitter=±{best['std_dev']:.2f} RPM, MAE=±{best['mae']:.2f} RPM, Ripple={best['ripple_pk_pk']:.1f} RPM",
                 "----------------------------------------------------------------------------------------------------------------",
-                f"{'Rank':<5} | {'Source / Preset':<24} | {'P':<6} | {'I':<6} | {'D':<6} | {'LPF (ms)':<8} | {'Target':<6} | {'Actual':<6} | {'StdDev':<10} | {'Score':<6}",
-                "------+--------------------------+--------+--------+--------+----------+--------+--------+------------+-------"
+                f"{'Rank':<5} | {'Source / Preset':<24} | {'P':<6} | {'I':<6} | {'D':<6} | {'LPF (ms)':<8} | {'Target':<12} | {'Actual':<6} | {'StdDev':<10} | {'Score':<6}",
+                "------+--------------------------+--------+--------+--------+----------+--------------+--------+------------+-------"
             ]
             for r in self.results:
+                tgt_str = f"{r['target']:<12.1f}" if isinstance(r.get('target'), (int, float)) else f"{str(r.get('target', '')):<12}"
                 lines.append(
                     f"#{r.get('rank', '-'):<4} | {r['origin']:<24} | {r['p']:<6.3f} | {r['i']:<6.2f} | {r['d']:<6.3f} | "
-                    f"{r['tf_ms']:<8.2f} | {r['target']:<6.1f} | {r['mean_speed']:<6.1f} | ±{r['std_dev']:<8.2f} | {r['score']:<6.2f}"
+                    f"{r['tf_ms']:<8.2f} | {tgt_str} | {r['mean_speed']:<6.1f} | ±{r['std_dev']:<8.2f} | {r['score']:<6.2f}"
                 )
             text_rep = "\n".join(lines)
             self.root.clipboard_clear()
