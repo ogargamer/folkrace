@@ -803,7 +803,7 @@ class FolkraceVehicle:
             _shield_cur = plan_res.get("shield", {})
             is_stall = (min_fwd_dist < 0.20 and self.v_est < 0.35 and raw_target_speed > 0.5)
             is_wall_contact = (min_fwd_dist <= 0.05)
-            shield_reverse = (_shield_cur.get("reverse_suggested", False) and min_fwd_dist < 0.20)
+            shield_reverse = bool(_shield_cur.get("reverse_suggested", False) and min_fwd_dist < 0.35)
             should_reverse = (shield_reverse or is_wall_contact or is_stall)
 
             if (
@@ -892,10 +892,12 @@ class FolkraceVehicle:
                     getattr(self.drift_controller, "current_alpha", 1.0) < 0.90 or
                     abs(current_physical_steer) > math.radians(12.0)
                 )
+                is_shield_active = bool(_shield_cur.get("active", False))
                 is_straight_locked = (
                     d_fl_lock >= self.straight_lock_dist and
                     d_fr_lock >= self.straight_lock_dist and
-                    not is_sliding
+                    not is_sliding and
+                    not is_shield_active
                 )
 
                 if is_straight_locked:
@@ -906,36 +908,46 @@ class FolkraceVehicle:
                 else:
                     target_speed = raw_target_speed
                     target_steer = raw_target_steer
-                    steer_delta = target_steer - self.active_steer
 
-                    # Progressive distance & small-offset steering aggressiveness
-                    cached_d_straight = min(
-                        tof_readings.get("tof_front_left_4.1deg", tof_readings.get("tof_fl_3", TOF_MAX_RANGE_M)),
-                        tof_readings.get("tof_front_right_4.1deg", tof_readings.get("tof_fr_3", TOF_MAX_RANGE_M)),
-                    )
-                    if cached_d_straight >= self.aggr_dist_far:
-                        dist_scale = self.aggr_min_scale
-                    elif cached_d_straight <= self.aggr_dist_close:
-                        dist_scale = 1.0
+                    if is_shield_active:
+                        # Direct emergency evasive steering without progressive rate lag or deadbands
+                        self.active_steer = max(
+                            -MAX_STEERING_RAD,
+                            min(MAX_STEERING_RAD, target_steer),
+                        )
+                        c_name = _shield_cur.get("chosen_name", "ACTIVE").replace("_", " ").upper()
+                        self.mode_desc = f"SHIELD_{c_name}"
                     else:
-                        frac = (self.aggr_dist_far - cached_d_straight) / max(0.001, (self.aggr_dist_far - self.aggr_dist_close))
-                        dist_scale = float(self.aggr_min_scale + (frac ** 1.5) * (1.0 - self.aggr_min_scale))
+                        steer_delta = target_steer - self.active_steer
 
-                    err_mag = abs(steer_delta)
-                    if err_mag <= self.steer_deadband:
-                        err_scale = 0.90
-                    elif err_mag >= 0.05:
-                        err_scale = 1.0
-                    else:
-                        err_frac = (err_mag - self.steer_deadband) / max(0.001, (0.05 - self.steer_deadband))
-                        err_scale = float(0.90 + err_frac * (1.0 - 0.90))
+                        # Progressive distance & small-offset steering aggressiveness
+                        cached_d_straight = min(
+                            tof_readings.get("tof_front_left_4.1deg", tof_readings.get("tof_fl_3", TOF_MAX_RANGE_M)),
+                            tof_readings.get("tof_front_right_4.1deg", tof_readings.get("tof_fr_3", TOF_MAX_RANGE_M)),
+                        )
+                        if cached_d_straight >= self.aggr_dist_far:
+                            dist_scale = self.aggr_min_scale
+                        elif cached_d_straight <= self.aggr_dist_close:
+                            dist_scale = 1.0
+                        else:
+                            frac = (self.aggr_dist_far - cached_d_straight) / max(0.001, (self.aggr_dist_far - self.aggr_dist_close))
+                            dist_scale = float(self.aggr_min_scale + (frac ** 1.5) * (1.0 - self.aggr_min_scale))
 
-                    steer_aggressiveness = float(max(0.85, min(1.0, dist_scale * err_scale)))
-                    self.active_steer = max(
-                        -MAX_STEERING_RAD,
-                        min(MAX_STEERING_RAD, self.active_steer + steer_aggressiveness * steer_delta),
-                    )
-                    self.mode_desc = "SL_MPC"
+                        err_mag = abs(steer_delta)
+                        if err_mag <= self.steer_deadband:
+                            err_scale = 0.90
+                        elif err_mag >= 0.05:
+                            err_scale = 1.0
+                        else:
+                            err_frac = (err_mag - self.steer_deadband) / max(0.001, (0.05 - self.steer_deadband))
+                            err_scale = float(0.90 + err_frac * (1.0 - 0.90))
+
+                        steer_aggressiveness = float(max(0.85, min(1.0, dist_scale * err_scale)))
+                        self.active_steer = max(
+                            -MAX_STEERING_RAD,
+                            min(MAX_STEERING_RAD, self.active_steer + steer_aggressiveness * steer_delta),
+                        )
+                        self.mode_desc = "SL_MPC"
 
             self.cached_target_speed = target_speed
             self.cached_target_steer = self.active_steer

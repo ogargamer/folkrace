@@ -554,6 +554,7 @@ class CppCurvilinearSLMPC:
         # ----------------------------------------------------------------------
         # 4. PACKAGE ACTIVE CONTROL COMMANDS
         # ----------------------------------------------------------------------
+        shield_is_active = bool(self._shield_active.value)
         if winner == 1:
             best_line = best_line_alt
             cmd_steer = cmd_steer_alt
@@ -562,9 +563,14 @@ class CppCurvilinearSLMPC:
             active_cost = cost_alt
         elif status_prim == 1:
             best_line = best_line_prim
-            cmd_steer = 0.0
-            cmd_speed = self.straight_lock_speed_mps
-            status_desc = "STRAIGHT_LOCKED"
+            if shield_is_active:
+                cmd_steer = cmd_steer_prim
+                cmd_speed = cmd_speed_prim
+                status_desc = "STRAIGHT_LOCKED_SHIELD_EVADE"
+            else:
+                cmd_steer = 0.0
+                cmd_speed = self.straight_lock_speed_mps
+                status_desc = "STRAIGHT_LOCKED"
             active_cost = 0.0
         elif status_prim == 0:
             best_line = best_line_prim
@@ -575,7 +581,7 @@ class CppCurvilinearSLMPC:
         else:
             best_line = best_line_prim
             cmd_steer = cmd_steer_prim
-            cmd_speed = self.v_cruise_min
+            cmd_speed = cmd_speed_prim if shield_is_active else self.v_cruise_min
             status_desc = "FALLBACK_SL_MPC"
             active_cost = cost_prim
 

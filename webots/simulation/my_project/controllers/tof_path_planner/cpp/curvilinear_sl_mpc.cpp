@@ -507,7 +507,7 @@ public:
       double avail_long_accel_sq =
           lat_accel_max * lat_accel_max - lat_accel * lat_accel;
       double max_ax =
-          (avail_long_accel_sq > 0.0) ? std::sqrt(avail_long_accel_sq) : 0.0;
+          (avail_long_accel_sq > 0.0) ? std::sqrt(avail_long_accel_sq) : (0.45 * lat_accel_max);
 
       if (v_cmd < v) {
         v = std::max(v_cmd, v - max_ax * dt_sim);
@@ -516,7 +516,10 @@ public:
       }
 
       // In robot frame: +Y forward, +X right, delta > 0 turns left (towards -X)
-      psi += (v / WHEELBASE_CONST) * std::tan(delta) * dt_sim;
+      double max_yaw_rate = (mu_friction * GRAVITY_G_CONST) / std::max(0.35, v);
+      double d_psi = (v / WHEELBASE_CONST) * std::tan(delta);
+      d_psi = std::max(-max_yaw_rate, std::min(max_yaw_rate, d_psi));
+      psi += d_psi * dt_sim;
       x -= v * std::sin(psi) *
            dt_sim; // Leftward lateral displacement for psi > 0
       y += v * std::cos(psi) * dt_sim; // Forward longitudinal displacement
@@ -529,8 +532,11 @@ public:
 
       float px = static_cast<float>(x);
       float py = static_cast<float>(y);
+      float px_f = static_cast<float>(x - 0.06 * std::sin(psi));
+      float py_f = static_cast<float>(y + 0.06 * std::cos(psi));
       if (costmap_probe_func && costmap_handle) {
-        if (costmap_probe_func(costmap_handle, &px, &py, 1) == 0) {
+        if (costmap_probe_func(costmap_handle, &px, &py, 1) == 0 ||
+            costmap_probe_func(costmap_handle, &px_f, &py_f, 1) == 0) {
           is_safe = false; // Collision
         }
       }
@@ -656,15 +662,12 @@ public:
         6.0 / 60.0; // 20% longer per step (100.0ms total over 5 steps)
     double escape_speed = 1.223; // Safe escape velocity
 
-    // 0. Straight-ahead probe from Step 2 at 0.5x decel (gate for cascade
-    // swerve decision)
+    // 0. Straight-ahead probe from Step 2 at decel ceiling
     shield_straight_safe = simulate_and_probe_branch(
         act_x_2, act_y_2, act_v_2, act_psi_2, act_delta_2,
-        act_delta_2, // keep Step 2 steer — go straight
+        act_delta_2, // keep Step 2 steer — evaluate forward course
         std::max(v_cruise_min,
-                 act_v_2 -
-                     0.5 * max_a_dec *
-                         straight_lookahead_time), // half decel over the window
+                 act_v_2 - 0.70 * max_a_dec * straight_lookahead_time),
         straight_lookahead_time, lookahead_steps, shield_straight_x,
         shield_straight_y, &shield_straight_cnt);
 
@@ -689,56 +692,57 @@ public:
         shield_k2_r_x, shield_k2_r_y, &shield_k2_r_cnt);
 
     // 3. Safety Shield Cascade:
-    // Layer A: Step 2 one side blocked AND straight blocked → steer toward open
-    // side, no braking.
-    //          If straight is clear, hold course (straight probe safe = robot
-    //          can stop in time).
-    // Layer B: Step 2 both sides blocked → emergency fallback to Step 0 safe
-    // branch,
-    //          gentle speed reduction only (focus on turning, not stopping).
-    double gentle_speed =
-        std::max(v_cruise_min, act_v * 0.85); // Slight bleed, not a hard stop
+    // If the planned course ahead is obstructed, intervene immediately!
+    double gentle_speed = std::max(v_cruise_min, act_v * 0.85);
+    double emergency_speed = std::max(v_cruise_min, act_v * 0.70);
 
-    if (!shield_k2_l_safe && shield_k2_r_safe && !shield_straight_safe) {
-      // Left blocked at Step 2 AND straight unsafe → bias right now, no braking
-      shield_active = true;
-      cmd_steer = -MAX_STEERING_RAD_CONST; // Right
-      shield_chosen_id = 1;                // k2_right
-                                           // cmd_speed unchanged — steer only
-
-    } else if (shield_k2_l_safe && !shield_k2_r_safe && !shield_straight_safe) {
-      // Right blocked at Step 2 AND straight unsafe → bias left now, no braking
-      shield_active = true;
-      cmd_steer = +MAX_STEERING_RAD_CONST; // Left
-      shield_chosen_id = 0;                // k2_left
-                                           // cmd_speed unchanged — steer only
-
-    } else if (!shield_k2_l_safe && !shield_k2_r_safe) {
-      // Both blocked at Step 2 → fall back to Step 0 immediate branch
-      if (shield_k1_l_safe && shield_k1_r_safe) {
+    if (!shield_straight_safe) {
+      if (shield_k2_l_safe && !shield_k2_r_safe) {
+        // Step 2 Left clear, Right blocked -> swerve Left
         shield_active = true;
-        cmd_steer =
-            (xg < 0.0) ? +MAX_STEERING_RAD_CONST : -MAX_STEERING_RAD_CONST;
-        shield_chosen_id = (xg < 0.0) ? 2 : 3; // k1_left or k1_right
-        cmd_speed = gentle_speed; // Gentle brake, focus on steering
-      } else if (shield_k1_l_safe) {
-        shield_active = true;
-        cmd_steer = +MAX_STEERING_RAD_CONST; // Left
-        shield_chosen_id = 2;                // k1_left
+        cmd_steer = +MAX_STEERING_RAD_CONST;
+        shield_chosen_id = 0; // k2_left
         cmd_speed = gentle_speed;
-      } else if (shield_k1_r_safe) {
+      } else if (!shield_k2_l_safe && shield_k2_r_safe) {
+        // Step 2 Right clear, Left blocked -> swerve Right
         shield_active = true;
-        cmd_steer = -MAX_STEERING_RAD_CONST; // Right
-        shield_chosen_id = 3;                // k1_right
+        cmd_steer = -MAX_STEERING_RAD_CONST;
+        shield_chosen_id = 1; // k2_right
+        cmd_speed = gentle_speed;
+      } else if (shield_k2_l_safe && shield_k2_r_safe) {
+        // BOTH Step 2 swerves clear! Swerve towards goal gap xg
+        shield_active = true;
+        if (xg < 0.0) {
+          cmd_steer = +MAX_STEERING_RAD_CONST;
+          shield_chosen_id = 0; // k2_left
+        } else {
+          cmd_steer = -MAX_STEERING_RAD_CONST;
+          shield_chosen_id = 1; // k2_right
+        }
         cmd_speed = gentle_speed;
       } else {
-        // All Step-0 branches also blocked → all evasion paths exhausted,
-        // recommend reverse
-        shield_active = true;
-        shield_chosen_id =
-            4; // ALL_BLOCKED_REVERSE: signal Python layer to trigger recovery
-        // cmd_steer/cmd_speed NOT overridden here — recovery manager handles
-        // the reverse
+        // Both Step 2 swerves blocked -> fall back to Step 0 immediate branch
+        if (shield_k1_l_safe && shield_k1_r_safe) {
+          shield_active = true;
+          cmd_steer = (xg < 0.0) ? +MAX_STEERING_RAD_CONST : -MAX_STEERING_RAD_CONST;
+          shield_chosen_id = (xg < 0.0) ? 2 : 3; // k1_left or k1_right
+          cmd_speed = emergency_speed;
+        } else if (shield_k1_l_safe) {
+          shield_active = true;
+          cmd_steer = +MAX_STEERING_RAD_CONST;
+          shield_chosen_id = 2; // k1_left
+          cmd_speed = emergency_speed;
+        } else if (shield_k1_r_safe) {
+          shield_active = true;
+          cmd_steer = -MAX_STEERING_RAD_CONST;
+          shield_chosen_id = 3; // k1_right
+          cmd_speed = emergency_speed;
+        } else {
+          // All forward evasion paths exhausted -> recommend reverse
+          shield_active = true;
+          shield_chosen_id = 4; // ALL_BLOCKED_REVERSE
+          cmd_speed = 0.0;
+        }
       }
     }
   }
