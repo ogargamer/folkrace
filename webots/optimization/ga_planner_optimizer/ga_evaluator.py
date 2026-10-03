@@ -58,6 +58,7 @@ from ga_planner_config import (
     compute_scalar_fitness,
     get_genome_class,
     BasePlannerGenome,
+    USE_TRACK2,
 )
 
 
@@ -250,6 +251,7 @@ class HeadlessWebotsWorker:
         planner_name: str,
         gene_dict: Dict[str, Any],
         duration_s: float = EVALUATION_DURATION_S,
+        use_track2: bool = USE_TRACK2,
     ) -> Tuple[float, Dict[str, Any]]:
         """Sends candidate genome to Webots supervisor and receives 20s run metrics."""
         fallback_metrics = {
@@ -279,6 +281,7 @@ class HeadlessWebotsWorker:
                     "planner": planner_name,
                     "genes": gene_dict,
                     "duration_s": duration_s,
+                    "use_track2": use_track2,
                 }) + "\n"
 
                 s.sendall(req.encode("utf-8"))
@@ -394,6 +397,7 @@ class ParallelWorkerPool:
         population_genomes: List[BasePlannerGenome],
         duration_s: float = EVALUATION_DURATION_S,
         controller: Optional[any] = None,
+        use_track2: bool = USE_TRACK2,
     ) -> List[Tuple[float, Dict[str, Any]]]:
         """Evaluates an entire generation of candidate genomes in parallel."""
         ctrl = controller or self.controller
@@ -415,7 +419,7 @@ class ParallelWorkerPool:
                 return cand_idx, -5000.0, {"crashed": True, "aborted": True}
             worker = worker_q.get()
             try:
-                fitness, metrics = worker.evaluate(planner_name, genome.to_dict(), duration_s)
+                fitness, metrics = worker.evaluate(planner_name, genome.to_dict(), duration_s, use_track2=use_track2)
                 return cand_idx, fitness, metrics
             finally:
                 worker_q.put(worker)
@@ -477,6 +481,7 @@ def run_rendered_preview(
     duration_s: float = 20.0,
     port: int = 10299,
     controller: Optional[any] = None,
+    use_track2: bool = False,
 ) -> Tuple[float, Dict[str, Any]]:
     """
     Executes a single rendered, real-time 20-second run of the specified planner in Webots GUI.
@@ -508,6 +513,7 @@ def run_rendered_preview(
             planner_name=planner_name,
             gene_dict=gene_dict,
             duration_s=duration_s,
+            use_track2=use_track2,
         )
         return fitness, metrics
     finally:

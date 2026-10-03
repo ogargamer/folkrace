@@ -28,6 +28,7 @@ from ga_planner_config import (
     EVALUATION_DURATION_S,
     ACTIVE_PLANNER,
     ALGORITHM,
+    USE_TRACK2,
 )
 
 
@@ -42,6 +43,8 @@ def main():
     parser.add_argument("--resume", action="store_true", help="Resume from last checkpoint")
     parser.add_argument("--use-best-genome", "--use-best", "--seed-from-best", dest="use_best_genome", action="store_true", help="Seed optimizer using best_planner_genome.json instead of defaults")
     parser.add_argument("--seed-file", type=str, default=None, help="Custom path to genome JSON file to seed from")
+    parser.add_argument("--no-track2", dest="use_track2", action="store_false", default=USE_TRACK2, help="Disable 2nd track (0.5 m/s obstacles) evaluations, evaluating only Track 1 (1.0 m/s)")
+    parser.add_argument("--use-track2", dest="use_track2", action="store_true", help="Enable 2nd track (0.5 m/s obstacles) evaluations alongside Track 1 (1.0 m/s)")
 
     args = parser.parse_args()
     planner_key = "OPTION_2_SL_MPC"
@@ -62,6 +65,10 @@ def main():
         cmd.append("--use-best-genome")
     if args.seed_file:
         cmd.extend(["--seed-file", args.seed_file])
+    if not args.use_track2:
+        cmd.append("--no-track2")
+    else:
+        cmd.append("--use-track2")
 
     print("=" * 80, flush=True)
     print("  LAUNCHING HEADLESS GA OPTIMIZER", flush=True)

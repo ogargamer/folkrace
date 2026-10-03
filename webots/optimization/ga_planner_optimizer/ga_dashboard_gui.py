@@ -80,6 +80,7 @@ from ga_planner_config import (
     BasePlannerGenome,
     get_genome_class,
     compute_efficiency_multiplier,
+    USE_TRACK2,
 )
 from ga_optimizer import GAController, run_genetic_algorithm, HISTORY_CSV_FILE, BEST_GENOME_FILE, CHECKPOINT_FILE
 
@@ -109,6 +110,7 @@ class GAWorkerThread(QThread):
         algorithm: str = ALGORITHM,
         use_best_genome: bool = False,
         seed_file: Optional[str] = None,
+        use_track2: bool = USE_TRACK2,
     ):
         super().__init__()
         self.planner_name = planner_name
@@ -121,6 +123,7 @@ class GAWorkerThread(QThread):
         self.algorithm = algorithm
         self.use_best_genome = use_best_genome
         self.seed_file = seed_file
+        self.use_track2 = use_track2
         self.controller = GAController()
         self.controller.on_generation_done = self._on_gen_done
         self.controller.on_status_change = self._on_status_change
@@ -146,6 +149,7 @@ class GAWorkerThread(QThread):
                 algorithm=self.algorithm,
                 use_best_genome=self.use_best_genome,
                 seed_genome_file=self.seed_file,
+                use_track2=self.use_track2,
             )
             if self.controller.abort_requested:
                 self.status_changed.emit("ABORTED")
@@ -522,6 +526,13 @@ class GADashboardGUI(QMainWindow):
         self.chk_preview.setToolTip("Runs 1 rendered 20-second trial in Webots GUI per planner before parallel headless GA.")
         header_layout.addWidget(self.chk_preview)
 
+        # 2nd Track (0.5 m/s Obstacles) Checkbox
+        self.chk_track2 = QCheckBox("2nd Track (0.5 m/s)")
+        self.chk_track2.setStyleSheet("color: #F59E0B; font-weight: bold;")
+        self.chk_track2.setToolTip("When checked, evaluates candidates on Track 1 (1.0 m/s) AND Track 2 (0.5 m/s) moving obstacles. When unchecked, evaluates Track 1 only.")
+        self.chk_track2.setChecked(USE_TRACK2)
+        header_layout.addWidget(self.chk_track2)
+
         header_layout.addSpacing(10)
 
         # Action Buttons
@@ -551,14 +562,7 @@ class GADashboardGUI(QMainWindow):
         self.btn_abort.setEnabled(False)
         self.btn_abort.clicked.connect(self.abort_ga)
 
-        self.btn_live_preview = QPushButton("LIVE PREVIEW")
-        self.btn_live_preview.setObjectName("btnLivePreview")
-        self.btn_live_preview.setStyleSheet("background-color: #0284C7; color: white; font-weight: bold; padding: 6px 12px; border-radius: 4px;")
-        self.btn_live_preview.setToolTip("Launches Webots 3D Real-Time rendered preview running the best parameters from ga_checkpoint.json.")
-        self.btn_live_preview.clicked.connect(self.launch_live_preview)
-
         header_layout.addWidget(self.btn_start)
-        header_layout.addWidget(self.btn_live_preview)
         header_layout.addWidget(self.btn_pause)
         header_layout.addWidget(self.btn_resume)
         header_layout.addWidget(self.btn_stop)
@@ -633,6 +637,7 @@ class GADashboardGUI(QMainWindow):
         resume = self.chk_resume.isChecked()
         preview = self.chk_preview.isChecked()
         seed_best = self.chk_seed_best.isChecked()
+        use_track2 = self.chk_track2.isChecked()
         algo_choice = str(self.algo_combo.currentData())
 
         self.data_by_planner.clear()
@@ -652,6 +657,7 @@ class GADashboardGUI(QMainWindow):
         self.chk_resume.setEnabled(False)
         self.chk_seed_best.setEnabled(False)
         self.chk_preview.setEnabled(False)
+        self.chk_track2.setEnabled(False)
 
         self.worker = GAWorkerThread(
             planner_name=p_name,
@@ -663,6 +669,7 @@ class GADashboardGUI(QMainWindow):
             preview=preview,
             algorithm=algo_choice,
             use_best_genome=seed_best,
+            use_track2=use_track2,
         )
         self.worker.gen_completed.connect(self.on_generation_update)
         self.worker.status_changed.connect(self.on_status_change)
@@ -698,79 +705,6 @@ class GADashboardGUI(QMainWindow):
             self.btn_stop.setEnabled(False)
             self.btn_abort.setEnabled(False)
 
-    def launch_live_preview(self):
-        """Launches Webots 3D rendered preview running the best parameters from ga_checkpoint.json."""
-        try:
-            p_name = "OPTION_2_SL_MPC"
-            ckpt_path = os.path.join(CURR_DIR, f"ga_checkpoint_{p_name.lower()}.json")
-            if not os.path.exists(ckpt_path):
-                ckpt_path = os.path.join(CURR_DIR, "ga_checkpoint.json")
-
-            best_genes = None
-            fit = "N/A"
-            metrics = {}
-            gen = 0
-            if os.path.exists(ckpt_path):
-                with open(ckpt_path, "r", encoding="utf-8") as f:
-                    d = json.load(f)
-                    best_genes = d.get("best_genome") or d.get("genes")
-                    p_name = d.get("planner", p_name)
-                    fit = d.get("best_fitness", d.get("fitness", "N/A"))
-                    metrics = d.get("best_metrics", d.get("metrics", {}))
-                    gen = d.get("generation", 0)
-
-            if not best_genes:
-                bg_path = os.path.join(CURR_DIR, f"best_genome_{p_name.lower()}.json")
-                if os.path.exists(bg_path):
-                    with open(bg_path, "r", encoding="utf-8") as f:
-                        d = json.load(f)
-                        best_genes = d.get("genes") or d.get("best_genome", {})
-                        fit = d.get("fitness", "N/A")
-                        metrics = d.get("metrics", {})
-                        gen = d.get("generation", 0)
-
-            active_cfg = {
-                "planner": p_name,
-                "fitness": fit,
-                "metrics": metrics,
-                "genes": best_genes or {},
-                "generation": gen,
-                "title": f"{p_name} Champion (Gen {gen}, Fitness {fit})",
-                "note": "Activated for live preview from GA Dashboard.",
-            }
-            active_path = os.path.join(CURR_DIR, "active_preview_config.json")
-            with open(active_path, "w", encoding="utf-8") as f:
-                json.dump(active_cfg, f, indent=2)
-
-            world_path = os.path.join(MY_PROJECT_DIR, "worlds", "track_racing.wbt")
-
-            webots_bin = WEBOTS_BINARY
-            env = os.environ.copy()
-            webots_home = r"C:\Program Files\Webots"
-            webots_bin_dir = os.path.dirname(webots_bin)
-            py_dir = os.path.dirname(sys.executable)
-            py_scripts = os.path.join(py_dir, "Scripts")
-
-            env["WEBOTS_HOME"] = webots_home
-            env["PATH"] = webots_bin_dir + os.pathsep + py_dir + os.pathsep + py_scripts + os.pathsep + env.get("PATH", "")
-            env["PYTHONPATH"] = os.pathsep.join([
-                CURR_DIR,
-                os.path.join(MY_PROJECT_DIR, "controllers", "tof_path_planner"),
-                os.path.join(CURR_DIR, "data"),
-                WORKSPACE_ROOT,
-            ])
-            env["WEBOTS_CONTROLLER_MODE"] = "preview"
-            env["PYTHONUNBUFFERED"] = "1"
-
-            cmd = [
-                webots_bin,
-                "--mode=realtime",
-                world_path,
-            ]
-            self.on_status_change(f"PREVIEW: {p_name} (Live Webots)")
-            subprocess.Popen(cmd, env=env, cwd=CURR_DIR)
-        except Exception as e:
-            self.on_status_change(f"Error launching live preview: {e}")
 
     def on_status_change(self, status: str):
         self.status_pill.setText(f" {status} ")
@@ -802,6 +736,7 @@ class GADashboardGUI(QMainWindow):
         self.chk_resume.setEnabled(True)
         self.chk_seed_best.setEnabled(True)
         self.chk_preview.setEnabled(True)
+        self.chk_track2.setEnabled(True)
         self.algo_combo.setEnabled(True)
 
     def on_generation_update(self, gen: int, planner: str, metrics: dict, genome: dict, fits: list, elapsed: float, crashes: int = 0):

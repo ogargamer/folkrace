@@ -82,6 +82,7 @@ from ga_planner_config import (
     generate_logical_initial_population,
     load_best_planner_genome,
     BasePlannerGenome,
+    USE_TRACK2,
 )
 from ga_evaluator import ParallelWorkerPool, run_rendered_preview, BASE_WORKER_PORT
 
@@ -384,6 +385,7 @@ def run_genetic_algorithm(
     algorithm: str = ALGORITHM,
     use_best_genome: bool = SEED_FROM_BEST_GENOME_DEFAULT,
     seed_genome_file: Optional[str] = None,
+    use_track2: bool = USE_TRACK2,
 ):
     """
     Executes the optimization pipeline (Single Planner or All Planners Interleaved).
@@ -392,6 +394,8 @@ def run_genetic_algorithm(
     planners_to_run = ["OPTION_2_SL_MPC"]
     is_cma = str(algorithm).upper().startswith("CMA")
     is_multi = False
+    track_mode_str = "Track 1 (1.00 m/s) + Track 2 (0.50 m/s)" if use_track2 else "Track 1 (1.00 m/s only)"
+    print(f"  Track Evaluation Mode: {track_mode_str}", flush=True)
 
     # --------------------------------------------------------------------------
     # Optional 20-Second Rendered Visual Preview (Real-Time Webots Window)
@@ -626,6 +630,7 @@ def run_genetic_algorithm(
                     population_genomes=populations[p],
                     duration_s=eval_duration_s,
                     controller=controller,
+                    use_track2=use_track2,
                 )
 
                 if controller and controller.abort_requested:
@@ -818,6 +823,8 @@ if __name__ == "__main__":
     parser.add_argument("--preview", action="store_true", help="Run 1 rendered 20s preview per planner in real-time Webots GUI before optimization")
     parser.add_argument("--use-best-genome", "--use-best", "--seed-from-best", dest="use_best_genome", action="store_true", help="Seed optimizer using webots/optimization/ga_planner_optimizer/best_planner_genome.json instead of planner defaults")
     parser.add_argument("--seed-file", "--genome-file", dest="seed_file", type=str, default=None, help="Custom path to best genome JSON file to seed from")
+    parser.add_argument("--no-track2", dest="use_track2", action="store_false", default=USE_TRACK2, help="Disable 2nd track (0.5 m/s obstacles) evaluations, evaluating only Track 1 (1.0 m/s)")
+    parser.add_argument("--use-track2", dest="use_track2", action="store_true", help="Enable 2nd track (0.5 m/s obstacles) evaluations alongside Track 1 (1.0 m/s)")
 
     args = parser.parse_args()
 
@@ -832,4 +839,5 @@ if __name__ == "__main__":
         algorithm=args.algorithm,
         use_best_genome=args.use_best_genome,
         seed_genome_file=args.seed_file,
+        use_track2=args.use_track2,
     )

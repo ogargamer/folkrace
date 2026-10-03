@@ -711,6 +711,7 @@ def run_ga_worker(robot: any, vehicle: FolkraceVehicle) -> None:
         ROBOT_START_ROT,
         TRACK1_MOVING_OBSTACLE_SPEED_MPS,
         TRACK2_MOVING_OBSTACLE_SPEED_MPS,
+        USE_TRACK2,
         compute_scalar_fitness,
         compute_efficiency_multiplier,
     )
@@ -855,10 +856,16 @@ def run_ga_worker(robot: any, vehicle: FolkraceVehicle) -> None:
         trial_metrics["fitness"] = round(compute_scalar_fitness(trial_metrics, gene_dict=gene_dict), 2)
         return trial_metrics
 
-    def evaluate_candidate(gene_dict: Dict[str, Any], duration_s: float) -> Dict[str, Any]:
+    def evaluate_candidate(gene_dict: Dict[str, Any], duration_s: float, use_track2: bool = USE_TRACK2) -> Dict[str, Any]:
         # Track 1: Primary track with moving obstacles at 1.00 m/s
         m1 = _run_single_trial(gene_dict, duration_s, obstacle_speed_mps=TRACK1_MOVING_OBSTACLE_SPEED_MPS)
         fit1 = float(m1.get("fitness", -5000.0))
+
+        if not use_track2:
+            m1_out = dict(m1)
+            m1_out["track1_metrics"] = dict(m1)
+            m1_out["track2_metrics"] = None
+            return m1_out
 
         # Track 2: Secondary track with moving obstacles at 0.50 m/s
         m2 = _run_single_trial(gene_dict, duration_s, obstacle_speed_mps=TRACK2_MOVING_OBSTACLE_SPEED_MPS)
@@ -931,7 +938,8 @@ def run_ga_worker(robot: any, vehicle: FolkraceVehicle) -> None:
             elif cmd in ("EVAL", "EVALUATE"):
                 genes = req_data.get("genes", {})
                 duration_s = float(req_data.get("duration_s", 20.0))
-                metrics = evaluate_candidate(genes, duration_s)
+                use_track2 = bool(req_data.get("use_track2", USE_TRACK2))
+                metrics = evaluate_candidate(genes, duration_s, use_track2=use_track2)
                 resp = json.dumps({"status": "OK", "metrics": metrics}) + "\n"
                 conn.sendall(resp.encode("utf-8"))
             else:
