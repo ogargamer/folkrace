@@ -304,7 +304,7 @@ class PlannerCostmapCanvas(QtWidgets.QWidget):
         max_steer_rad = 0.650  # Default ~37.2 deg (~0.65 rad)
         arc_lookahead = 0.13   # Default 0.13 m
 
-        for cand_name in ["active_preview_config.json", "best_planner_genome.json", "ga_checkpoint.json"]:
+        for cand_name in ["best_planner_genome.json", "ga_checkpoint.json"]:
             cand_file = os.path.join(GA_OPTIMIZER_DIR, cand_name)
             if os.path.isfile(cand_file):
                 try:

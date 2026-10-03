@@ -33,6 +33,7 @@ try:
         MPC_ALT_SWITCH_HYSTERESIS,
         MPC_ALT_MIN_SEPARATION_M,
         MPC_ALT_APERTURE_BIAS,
+        MPC_W_GAP_CLEAR,
         MPC_ALT_LOOKAHEAD_DEPTH_WEIGHT,
         DT_PLANNER,
     )
@@ -55,6 +56,7 @@ except ImportError:
         MPC_ALT_SWITCH_HYSTERESIS,
         MPC_ALT_MIN_SEPARATION_M,
         MPC_ALT_APERTURE_BIAS,
+        MPC_W_GAP_CLEAR,
         MPC_ALT_LOOKAHEAD_DEPTH_WEIGHT,
         DT_PLANNER,
     )
@@ -184,7 +186,7 @@ class CppCurvilinearSLMPC:
         alt_switch_hysteresis: float = MPC_ALT_SWITCH_HYSTERESIS,
         alt_min_separation_m: float = MPC_ALT_MIN_SEPARATION_M,
         alt_aperture_bias: float = MPC_ALT_APERTURE_BIAS,
-        alt_lookahead_depth_weight: float = MPC_ALT_LOOKAHEAD_DEPTH_WEIGHT,
+        w_gap_clear: float = MPC_W_GAP_CLEAR,
         **kwargs,
     ):
         self._costmap = costmap_engine
@@ -205,7 +207,7 @@ class CppCurvilinearSLMPC:
         self.alt_switch_hysteresis = float(alt_switch_hysteresis)
         self.alt_min_separation_m = float(alt_min_separation_m)
         self.alt_aperture_bias = float(alt_aperture_bias)
-        self.alt_lookahead_depth_weight = float(alt_lookahead_depth_weight)
+        self.w_gap_clear = float(kwargs.get("alt_lookahead_depth_weight", w_gap_clear))
         self.dt_actuator = DT_PLANNER
         self.nx = 7
         self.nu = 2
@@ -316,6 +318,14 @@ class CppCurvilinearSLMPC:
                 _lib.sl_mpc_set_mu(self._handle_alt, ctypes.c_double(self.mu_friction))
 
     @property
+    def alt_lookahead_depth_weight(self) -> float:
+        return self.w_gap_clear
+
+    @alt_lookahead_depth_weight.setter
+    def alt_lookahead_depth_weight(self, val: float):
+        self.w_gap_clear = float(val)
+
+    @property
     def costmap(self):
         return getattr(self, "_costmap", None)
 
@@ -391,15 +401,28 @@ class CppCurvilinearSLMPC:
             d0 = math.hypot(targets[0][0] - act_x, targets[0][1] - act_y)
             d1 = math.hypot(targets[1][0] - act_x, targets[1][1] - act_y)
 
-            # If target 1 is closer to our currently followed line, target 1 is Incumbent
-            if d1 < d0 and d1 <= 0.45:
-                prim_target = targets[1]
-                alt_target = targets[0]
-            elif d0 <= 0.45:
-                prim_target = targets[0]
-                alt_target = targets[1]
+            is_clear_0 = bool(targets[0][3]) if len(targets[0]) >= 4 else (math.hypot(targets[0][0], targets[0][1]) >= 1.60)
+            is_clear_1 = bool(targets[1][3]) if len(targets[1]) >= 4 else (math.hypot(targets[1][0], targets[1][1]) >= 1.60)
 
-        tx_prim, ty_prim, ap_prim = prim_target
+            # If target 1 is closer to our currently followed line, target 1 is Incumbent
+            # UNLESS target 1 is blocked by an obstacle while target 0 is completely clear (1.8m opening).
+            if d1 < d0 and d1 <= 0.45:
+                if (not is_clear_1) and is_clear_0:
+                    prim_target = targets[0]
+                    alt_target = targets[1]
+                else:
+                    prim_target = targets[1]
+                    alt_target = targets[0]
+            elif d0 <= 0.45:
+                if (not is_clear_0) and is_clear_1:
+                    prim_target = targets[1]
+                    alt_target = targets[0]
+                else:
+                    prim_target = targets[0]
+                    alt_target = targets[1]
+
+        tx_prim, ty_prim, ap_prim = prim_target[:3]
+        is_clear_prim = bool(prim_target[3]) if len(prim_target) >= 4 else (math.hypot(tx_prim, ty_prim) >= 1.60)
         theta_prim = math.atan2(tx_prim, max(0.20, ty_prim))
 
         # ----------------------------------------------------------------------
@@ -442,9 +465,12 @@ class CppCurvilinearSLMPC:
         cost_alt = 1e9
         best_line_alt = []
 
+        is_clear_alt = False
         if alt_target is not None and hasattr(self, "_handle_alt") and self._handle_alt:
-            tx_alt, ty_alt, ap_alt = alt_target
-            if math.hypot(tx_alt - tx_prim, ty_alt - ty_prim) >= 0.12 or abs(tx_alt - tx_prim) >= 0.08:
+            tx_alt, ty_alt, ap_alt = alt_target[:3]
+            is_clear_alt = bool(alt_target[3]) if len(alt_target) >= 4 else (math.hypot(tx_alt, ty_alt) >= 1.60)
+            min_sep = getattr(self, "alt_min_separation_m", 0.06)
+            if math.hypot(tx_alt - tx_prim, ty_alt - ty_prim) >= min_sep or abs(tx_alt - tx_prim) >= (min_sep * 0.7):
                 has_challenger = True
                 theta_alt = math.atan2(tx_alt, max(0.20, ty_alt))
                 _lib.sl_mpc_plan(
@@ -480,21 +506,29 @@ class CppCurvilinearSLMPC:
             elif primary_ok and not alt_ok:
                 # Challenger infeasible, primary safe: retain primary
                 winner = 0
-            elif primary_ok and alt_ok and status_prim == 0:
-                # Option A: Lookahead Projection Depth Credit in Line Arbitration
+            elif is_clear_alt and not is_clear_prim:
+                # Challenger reaches unobstructed open horizon while primary terminates in an obstacle:
+                # The clear opening decisively takes precedence over the obstructed path!
+                winner = 1
+            elif is_clear_prim and not is_clear_alt:
+                # Primary is unobstructed while challenger hits an obstacle:
+                # Retain primary unobstructed racing line!
+                winner = 0
+            elif primary_ok and alt_ok:
+                # Both are clear or both are obstructed: arbitrate using MPC dynamic cost with hysteresis and depth credit
                 d_prim = math.hypot(tx_prim, ty_prim)
                 d_alt = math.hypot(tx_alt, ty_alt)
                 depth_diff = d_alt - d_prim
 
                 # Base depth credit proportional to lookahead advantage
-                depth_credit = self.alt_lookahead_depth_weight * depth_diff
+                depth_credit = self.w_gap_clear * depth_diff
 
-                # Extra credit if challenger reaches unobstructed open horizon (>= 1.70m) while primary is obstructed (< 1.50m)
-                if d_alt >= 1.70 and d_prim < 1.50:
-                    depth_credit += self.alt_lookahead_depth_weight * 0.50
+                # When primary is straight-locked (status_prim == 1), C++ outputs a dummy cost of 0.0.
+                # Use a nominal straight baseline cost so challenger is not forced to overcome a 0.0 placeholder.
+                eff_cost_prim = max(cost_prim, 25.0) if status_prim == 1 else cost_prim
 
-                # Challenger must strictly beat Incumbent by hysteresis cost margin minus lookahead depth credit
-                if (cost_alt - depth_credit + self.alt_switch_hysteresis) < cost_prim:
+                # Challenger must beat Incumbent by hysteresis cost margin minus lookahead depth credit
+                if (cost_alt - depth_credit + self.alt_switch_hysteresis) < eff_cost_prim:
                     winner = 1
                 else:
                     winner = 0

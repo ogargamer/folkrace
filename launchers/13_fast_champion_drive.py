@@ -25,7 +25,6 @@ WEBOTS_DIR = os.path.join(ROOT_DIR, "webots")
 MY_PROJECT_DIR = os.path.join(WEBOTS_DIR, "simulation", "my_project")
 WORLD_PATH = os.path.join(MY_PROJECT_DIR, "worlds", "track_racing.wbt")
 GA_OPTIMIZER_DIR = os.path.join(WEBOTS_DIR, "optimization", "ga_planner_optimizer")
-ACTIVE_CONFIG_PATH = os.path.join(GA_OPTIMIZER_DIR, "active_preview_config.json")
 BEST_GENOME_PATH = os.path.join(GA_OPTIMIZER_DIR, "best_planner_genome.json")
 WEBOTS_BIN = r"C:\Program Files\Webots\msys64\mingw64\bin\webots.exe"
 
@@ -48,15 +47,6 @@ def activate_champion_config() -> bool:
         metrics = data.get("metrics", data.get("best_metrics", {}))
         planner = data.get("planner", "OPTION_2_SL_MPC")
         title = data.get("title", f"{planner} Best Champion (Fitness {fitness})")
-
-        preview_data = dict(data)
-        preview_data["genes"] = genes
-        preview_data["title"] = title
-        preview_data["source_file"] = os.path.basename(BEST_GENOME_PATH)
-
-        os.makedirs(os.path.dirname(ACTIVE_CONFIG_PATH), exist_ok=True)
-        with open(ACTIVE_CONFIG_PATH, "w", encoding="utf-8") as f:
-            json.dump(preview_data, f, indent=2)
 
         dist = metrics.get("distance_m", "N/A")
         speed = metrics.get("mean_speed_mps", "N/A")

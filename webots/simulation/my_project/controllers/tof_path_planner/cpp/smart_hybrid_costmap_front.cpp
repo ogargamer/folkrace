@@ -300,6 +300,7 @@ public:
     // ==========================================================================
     struct TargetCandidate {
         float tx, ty, dist, aperture, steer_equiv, rel_angle;
+        bool is_clear;
     };
 
     int scout_gaps(
@@ -323,7 +324,8 @@ public:
         float* out_targets_y,
         float* out_targets_aperture,
         int max_targets,
-        const uint8_t* custom_hazard_mask = nullptr
+        const uint8_t* custom_hazard_mask = nullptr,
+        float* out_targets_clear = nullptr
     ) {
         const uint8_t* active_haz = custom_hazard_mask ? custom_hazard_mask : hazard_mask.data();
         constexpr float GAP_MIN_LOOKAHEAD_M = 0.20f;
@@ -352,6 +354,7 @@ public:
                 float cos_h = std::cos(heading);
                 float sin_h = std::sin(heading);
                 float clear_dist = z;
+                bool hit_obs = false;
 
                 int n_b_steps = static_cast<int>(z / step_ds);
                 for (int s = 1; s <= n_b_steps; ++s) {
@@ -366,19 +369,21 @@ public:
                     }
                     if (active_haz[row * width + col] > 0) {
                         clear_dist = std::max(0.0f, d - step_ds);
+                        hit_obs = true;
                         break;
                     }
                 }
 
-                float eff_dist = std::max(0.05f, clear_dist - 0.075f);
+                float eff_dist = hit_obs ? std::max(0.05f, clear_dist - 0.075f) : clear_dist;
                 float tx = sx + eff_dist * cos_h;
                 float ty = std::max(0.08f, sy + eff_dist * sin_h);
                 float total_dist = std::hypot(tx, ty);
                 float rel_angle = std::atan2(tx, ty);
                 float steer_equiv = -rel_angle;
                 float aperture_m = std::max(GAP_MIN_WIDTH_M, std::min(1.20f, total_dist * 0.35f));
+                bool is_clear = (!hit_obs) && (ranges_16[i] >= 1.79f || total_dist >= (max_r - 0.05f));
 
-                candidates[n_cand++] = {tx, ty, total_dist, aperture_m, steer_equiv, rel_angle};
+                candidates[n_cand++] = {tx, ty, total_dist, aperture_m, steer_equiv, rel_angle, is_clear};
             }
         }
 
@@ -412,6 +417,7 @@ public:
                 float cos_az = std::cos(az);
                 float sin_az = std::sin(az);
                 float clear_dist = max_r;
+                bool hit_obs = false;
 
                 for (int s = 1; s <= n_steps; ++s) {
                     float d = s * step_ds;
@@ -425,19 +431,21 @@ public:
                     }
                     if (active_haz[row * width + col] > 0) {
                         clear_dist = std::max(0.0f, d - step_ds);
+                        hit_obs = true;
                         break;
                     }
                 }
 
-                float eff_dist = std::max(0.05f, clear_dist - 0.06f);
+                float eff_dist = hit_obs ? std::max(0.05f, clear_dist - 0.06f) : clear_dist;
                 float tx = ox + eff_dist * cos_az;
                 float ty = std::max(0.08f, oy + eff_dist * sin_az);
                 float total_dist = std::hypot(tx, ty);
                 float rel_angle = std::atan2(tx, ty);
                 float steer_equiv = -rel_angle;
                 float aperture_m = std::max(GAP_MIN_WIDTH_M, std::min(1.20f, total_dist * 0.30f));
+                bool is_clear = (!hit_obs);
 
-                candidates[n_cand++] = {tx, ty, total_dist, aperture_m, steer_equiv, rel_angle};
+                candidates[n_cand++] = {tx, ty, total_dist, aperture_m, steer_equiv, rel_angle, is_clear};
             }
         }
 
@@ -544,10 +552,12 @@ public:
                 neighbor_bonus = 0.30f * w_gap_width * neighbor_norm;
             }
 
+            float clear_bonus = c.is_clear ? 3.0f : 0.0f;
             float sc = w_gap_distance * dist_factor
                      + w_gap_width * width_norm
                      + neighbor_bonus
                      + side_bonus
+                     + clear_bonus
                      - center_penalty
                      - w_steer * steer_diff
                      - w_straight * straight_diff;
@@ -559,6 +569,7 @@ public:
             if (out_targets_x) out_targets_x[0] = 0.0f;
             if (out_targets_y) out_targets_y[0] = max_lookahead_m;
             if (out_targets_aperture) out_targets_aperture[0] = 0.40f;
+            if (out_targets_clear) out_targets_clear[0] = 1.0f;
             return 1;
         }
 
@@ -576,6 +587,7 @@ public:
             out_targets_x[0] = c0.tx;
             out_targets_y[0] = c0.ty;
             out_targets_aperture[0] = c0.aperture;
+            if (out_targets_clear) out_targets_clear[0] = c0.is_clear ? 1.0f : 0.0f;
             num_found = 1;
 
             if (max_targets >= 2) {
@@ -601,6 +613,7 @@ public:
                         float steer_diff = std::abs(c.steer_equiv - steer_current);
                         float straight_diff = std::abs(c.rel_angle);
                         float side_bonus_alt = (w_side_clearance * 0.45f) * side_diff * (-std::sin(c.rel_angle));
+                        float clear_bonus_alt = c.is_clear ? (3.0f * alt_aperture_bias) : 0.0f;
                         float center_penalty = 0.0f;
                         if (straight_block_penalty > 0.0f && theta_shadow > 0.001f && std::abs(c.rel_angle) < theta_shadow) {
                             float angle_ratio = 1.0f - (std::abs(c.rel_angle) / theta_shadow);
@@ -610,6 +623,7 @@ public:
                         float score_alt = w_gap_distance * dist_factor
                                         + (w_gap_width * alt_aperture_bias) * width_norm
                                         + side_bonus_alt
+                                        + clear_bonus_alt
                                         - center_penalty
                                         - w_steer * steer_diff
                                         - w_straight * straight_diff;
@@ -626,6 +640,7 @@ public:
                     out_targets_x[1] = calt.tx;
                     out_targets_y[1] = calt.ty;
                     out_targets_aperture[1] = calt.aperture;
+                    if (out_targets_clear) out_targets_clear[1] = calt.is_clear ? 1.0f : 0.0f;
                     num_found = 2;
                 }
             }
@@ -711,7 +726,8 @@ COSTMAP_API int costmap_scout_gaps(
     float* out_targets_y,
     float* out_targets_aperture,
     int max_targets,
-    const uint8_t* custom_hazard_mask
+    const uint8_t* custom_hazard_mask = nullptr,
+    float* out_targets_clear = nullptr
 ) {
     if (!handle) return 0;
     auto* cm = static_cast<SmartHybridCostmapFront*>(handle);
@@ -722,7 +738,8 @@ COSTMAP_API int costmap_scout_gaps(
         scout_obs_width_m, scout_block_dist_m, scout_straight_pen_k, scout_straight_exp_k,
         out_targets_x, out_targets_y, out_targets_aperture,
         max_targets,
-        custom_hazard_mask
+        custom_hazard_mask,
+        out_targets_clear
     );
 }
 

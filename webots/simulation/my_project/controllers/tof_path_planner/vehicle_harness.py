@@ -278,8 +278,8 @@ class FolkraceVehicle:
         self.aggr_dist_close = 1.00
         self.aggr_min_scale = 0.30
         self.steer_deadband = 0.002
-        self.straight_lock_dist = 1.70
-        self.straight_lock_speed = 5.50
+        self.straight_lock_dist = 1.80
+        self.straight_lock_speed = 5.00
         self.v_cruise_min = V_MIN_CRUISE
         self.v_cruise_max = V_MAX_CRUISE
 
@@ -325,8 +325,8 @@ class FolkraceVehicle:
         self.aggr_dist_close = float(genes.get("aggr_dist_close_m", 1.00))
         self.aggr_min_scale = float(genes.get("aggr_min_scale", 0.30))
         self.steer_deadband = float(genes.get("steer_deadband_rad", 0.002))
-        self.straight_lock_dist = float(genes.get("straight_lock_dist", 1.70))
-        self.straight_lock_speed = float(genes.get("straight_lock_speed", 5.50))
+        self.straight_lock_dist = float(genes.get("straight_lock_dist", 1.80))
+        self.straight_lock_speed = float(genes.get("straight_lock_speed", 5.00))
         self.v_cruise_min = float(genes.get("v_cruise_min", V_MIN_CRUISE))
         self.v_cruise_max = float(genes.get("v_cruise_max", V_MAX_CRUISE))
         self.cached_target_speed = self.v_cruise_min
@@ -352,6 +352,7 @@ class FolkraceVehicle:
             scout_straight_pen_k=float(genes.get("scout_straight_pen_k", 2.50)),
             scout_straight_exp_k=float(genes.get("scout_straight_exp_k", 1.50)),
             ray_origin_offset_m=float(genes.get("ray_origin_offset_m", 0.070)),
+            w_gap_clear=float(genes.get("w_gap_clear", genes.get("alt_lookahead_depth_weight", 3.00))),
         )
 
         self.planner = CurvilinearSLMPC(
@@ -373,7 +374,7 @@ class FolkraceVehicle:
             alt_switch_hysteresis=float(genes.get("alt_switch_hysteresis", 15.00)),
             alt_min_separation_m=float(genes.get("alt_min_separation_m", 0.25)),
             alt_aperture_bias=float(genes.get("alt_aperture_bias", 1.80)),
-            alt_lookahead_depth_weight=float(genes.get("alt_lookahead_depth_weight", 5.00)),
+            w_gap_clear=float(genes.get("w_gap_clear", genes.get("alt_lookahead_depth_weight", 5.00))),
         )
         self.planner.costmap = self.costmap
 
@@ -889,16 +890,9 @@ class FolkraceVehicle:
                 # Fast Straight-Line Lock (only engage when forward is clear AND chassis is not sliding sideways)
                 d_fl_lock = tof_readings.get("tof_front_left_4.1deg", tof_readings.get("tof_fl_3", 0.0))
                 d_fr_lock = tof_readings.get("tof_front_right_4.1deg", tof_readings.get("tof_fr_3", 0.0))
-                is_sliding = (
-                    getattr(self.drift_controller, "current_alpha", 1.0) < 0.90 or
-                    abs(current_physical_steer) > math.radians(12.0)
-                )
-                is_shield_active = bool(_shield_cur.get("active", False))
                 is_straight_locked = (
-                    d_fl_lock >= self.straight_lock_dist and
-                    d_fr_lock >= self.straight_lock_dist and
-                    not is_sliding and
-                    not is_shield_active
+                    d_fl_lock >= 1.79 and
+                    d_fr_lock >= 1.79
                 )
 
                 if is_straight_locked:
@@ -910,6 +904,7 @@ class FolkraceVehicle:
                     target_speed = raw_target_speed
                     target_steer = raw_target_steer
 
+                    is_shield_active = bool(_shield_cur.get("active", False))
                     if is_shield_active:
                         # Direct emergency evasive steering without progressive rate lag or deadbands
                         self.active_steer = max(
@@ -1129,8 +1124,9 @@ class FolkraceVehicle:
         xg, yg, width, theta_g = self.last_gap_info
         g_gap = [round(float(xg), 3), round(float(yg), 3), round(float(width), 3)]
         g_targets = [
-            [round(float(tx), 3), round(float(ty), 3), round(float(ap), 3)]
-            for (tx, ty, ap) in (getattr(self.gap_scout, "last_targets", []) or [])
+            [round(float(tgt[0]), 3), round(float(tgt[1]), 3), round(float(tgt[2]), 3)]
+            for tgt in (getattr(self.gap_scout, "last_targets", []) or [])
+            if isinstance(tgt, (list, tuple)) and len(tgt) >= 3
         ]
 
         telemetry = {

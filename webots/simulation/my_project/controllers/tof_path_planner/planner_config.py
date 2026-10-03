@@ -191,12 +191,13 @@ MPC_V_CRUISE_MAX: float = V_MAX_CRUISE # m/s top cruising speed ceiling (5.0 m/s
 MPC_V_CRUISE_MIN: float = V_MIN_CRUISE # m/s cornering / crawl speed floor (~1.20 m/s)
 
 # 5.4 Straight-Line Lock & Challenger Aliases
-MPC_STRAIGHT_LOCK_DIST_M: float = STRAIGHT_LOCK_DIST_M        # Forward clearance to lock straight (1.70 m)
+MPC_STRAIGHT_LOCK_DIST_M: float = 1.80                        # Forward clearance to lock straight (1.80 m)
 MPC_STRAIGHT_LOCK_SPEED_MPS: float = STRAIGHT_LOCK_SPEED_MPS  # Top speed when straight locked (5.0 m/s)
 MPC_ALT_SWITCH_HYSTERESIS: float = 24.484                     # Cost reduction needed for challenger overthrow
 MPC_ALT_MIN_SEPARATION_M: float = ALT_MIN_SEPARATION_M        # Minimum lateral separation between paths (m)
 MPC_ALT_APERTURE_BIAS: float = ALT_APERTURE_BIAS              # Challenger aperture width bias multiplier
-MPC_ALT_LOOKAHEAD_DEPTH_WEIGHT: float = 5.0                   # Conservative lookahead depth credit weight (Option A)
+MPC_W_GAP_CLEAR: float = 10.0                                 # Lookahead depth credit & clear horizon weight (m)
+MPC_ALT_LOOKAHEAD_DEPTH_WEIGHT: float = MPC_W_GAP_CLEAR      # Backward-compatible alias
 
 
 # ==============================================================================

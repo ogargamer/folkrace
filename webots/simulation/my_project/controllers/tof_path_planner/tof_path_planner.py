@@ -262,8 +262,12 @@ def run_racing_studio(robot: any, vehicle: FolkraceVehicle) -> None:
                             vehicle.planner.alpha_peak = float(p_val)
                         elif p_name == "alt_switch_hysteresis" and hasattr(vehicle.planner, "alt_switch_hysteresis"):
                             vehicle.planner.alt_switch_hysteresis = float(p_val)
-                        elif p_name == "alt_lookahead_depth_weight" and hasattr(vehicle.planner, "alt_lookahead_depth_weight"):
-                            vehicle.planner.alt_lookahead_depth_weight = float(p_val)
+                        elif p_name in ("w_gap_clear", "alt_lookahead_depth_weight"):
+                            val_f = float(p_val)
+                            if hasattr(vehicle.planner, "w_gap_clear"):
+                                vehicle.planner.w_gap_clear = val_f
+                            if hasattr(vehicle.planner, "alt_lookahead_depth_weight"):
+                                vehicle.planner.alt_lookahead_depth_weight = val_f
                         elif p_name == "alt_min_separation_m":
                             if hasattr(vehicle.gap_scout, "alt_min_separation_m"):
                                 vehicle.gap_scout.alt_min_separation_m = float(p_val)
@@ -360,14 +364,13 @@ def run_champion_preview(robot: any, vehicle: FolkraceVehicle) -> None:
     print("  FOLKRACE CHAMPION PREVIEW REPLAY RUN", flush=True)
     print("=" * 80, flush=True)
 
-    # 1. Load active champion configuration
-    active_path = os.path.join(GA_OPTIMIZER_DIR, "active_preview_config.json")
-    ckpt_path = os.path.join(GA_OPTIMIZER_DIR, "ga_checkpoint.json")
+    # 1. Load champion configuration directly from best_planner_genome.json
     best_path = os.path.join(GA_OPTIMIZER_DIR, "best_planner_genome.json")
+    ckpt_path = os.path.join(GA_OPTIMIZER_DIR, "ga_checkpoint.json")
     genes: Dict[str, Any] = {}
     title = "Default SL-MPC"
 
-    for candidate_path in [active_path, ckpt_path, best_path]:
+    for candidate_path in [best_path, ckpt_path]:
         if os.path.exists(candidate_path):
             try:
                 with open(candidate_path, "r", encoding="utf-8") as f:
@@ -529,8 +532,12 @@ def run_champion_preview(robot: any, vehicle: FolkraceVehicle) -> None:
                             vehicle.planner.alpha_peak = float(p_val)
                         elif p_name == "alt_switch_hysteresis" and hasattr(vehicle.planner, "alt_switch_hysteresis"):
                             vehicle.planner.alt_switch_hysteresis = float(p_val)
-                        elif p_name == "alt_lookahead_depth_weight" and hasattr(vehicle.planner, "alt_lookahead_depth_weight"):
-                            vehicle.planner.alt_lookahead_depth_weight = float(p_val)
+                        elif p_name in ("w_gap_clear", "alt_lookahead_depth_weight"):
+                            val_f = float(p_val)
+                            if hasattr(vehicle.planner, "w_gap_clear"):
+                                vehicle.planner.w_gap_clear = val_f
+                            if hasattr(vehicle.planner, "alt_lookahead_depth_weight"):
+                                vehicle.planner.alt_lookahead_depth_weight = val_f
                         elif p_name == "alt_min_separation_m":
                             if hasattr(vehicle.gap_scout, "alt_min_separation_m"):
                                 vehicle.gap_scout.alt_min_separation_m = float(p_val)
@@ -630,14 +637,13 @@ def run_fast_champion_drive(robot: any, vehicle: FolkraceVehicle) -> None:
     print("  FOLKRACE FAST CHAMPION PURE DRIVE (MAX PERFORMANCE)", flush=True)
     print("=" * 80, flush=True)
 
-    # 1. Load active champion configuration
-    active_path = os.path.join(GA_OPTIMIZER_DIR, "active_preview_config.json")
-    ckpt_path = os.path.join(GA_OPTIMIZER_DIR, "ga_checkpoint.json")
+    # 1. Load champion configuration directly from best_planner_genome.json
     best_path = os.path.join(GA_OPTIMIZER_DIR, "best_planner_genome.json")
+    ckpt_path = os.path.join(GA_OPTIMIZER_DIR, "ga_checkpoint.json")
     genes: Dict[str, Any] = {}
     title = "Champion SL-MPC"
 
-    for candidate_path in [active_path, ckpt_path, best_path]:
+    for candidate_path in [best_path, ckpt_path]:
         if os.path.exists(candidate_path):
             try:
                 with open(candidate_path, "r", encoding="utf-8") as f:

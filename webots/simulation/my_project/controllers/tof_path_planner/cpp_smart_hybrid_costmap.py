@@ -80,6 +80,7 @@ if hasattr(_lib, "costmap_scout_gaps"):
         ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), # out_targets_x, y, ap
         ctypes.c_int,                    # max_targets
         ctypes.POINTER(ctypes.c_uint8),  # custom_hazard_mask (optional)
+        ctypes.POINTER(ctypes.c_float),  # out_targets_clear (optional)
     ]
     _lib.costmap_scout_gaps.restype = ctypes.c_int
 
@@ -169,6 +170,7 @@ class CppSmartHybridCostmap:
         self._out_targets_x = (ctypes.c_float * 4)()
         self._out_targets_y = (ctypes.c_float * 4)()
         self._out_targets_ap = (ctypes.c_float * 4)()
+        self._out_targets_clear = (ctypes.c_float * 4)()
 
     def __del__(self):
         if hasattr(self, "_handle") and self._handle:
@@ -369,6 +371,7 @@ class CppSmartHybridCostmap:
             self._out_targets_ap,
             int(top_k),
             haz_ptr,
+            self._out_targets_clear,
         )
 
         targets = []
@@ -377,6 +380,7 @@ class CppSmartHybridCostmap:
                 float(self._out_targets_x[i]),
                 float(self._out_targets_y[i]),
                 float(self._out_targets_ap[i]),
+                bool(self._out_targets_clear[i] > 0.5),
             ))
 
         return targets

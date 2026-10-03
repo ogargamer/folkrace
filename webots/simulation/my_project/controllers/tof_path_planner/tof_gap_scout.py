@@ -153,6 +153,7 @@ class ToFGapScout:
         scout_straight_pen_k: float = 2.50,
         scout_straight_exp_k: float = 1.50,
         ray_origin_offset_m: float = 0.070,
+        w_gap_clear: float = 3.00,
         **kwargs,
     ):
         self.w_gap_distance = float(w_gap_distance)
@@ -172,6 +173,7 @@ class ToFGapScout:
         self.scout_straight_pen_k = float(scout_straight_pen_k)
         self.scout_straight_exp_k = float(scout_straight_exp_k)
         self.ray_origin_offset_m = float(ray_origin_offset_m)
+        self.w_gap_clear = float(kwargs.get("alt_lookahead_depth_weight", w_gap_clear))
         self.last_xg: float = 0.0
         self.last_yg: float = 1.20
         self.last_aperture: float = 0.50
@@ -204,7 +206,7 @@ class ToFGapScout:
             yg_prim = max(GAP_MIN_LOOKAHEAD_M, min(target_lookahead_m, 1.70))
             aperture = 0.45
         else:
-            xg_prim, yg_prim, aperture = targets[0]
+            xg_prim, yg_prim, aperture = targets[0][:3]
 
         # Raw physical target coordinates directly without EMA smoothing or midpoint blending
         self.last_xg = xg_prim
@@ -278,6 +280,7 @@ class ToFGapScout:
                 sin_h = math.sin(heading)
 
                 clear_dist = z
+                hit_obs = False
                 n_steps = int(z / step_ds)
                 for s in range(1, n_steps + 1):
                     d = s * step_ds
@@ -290,10 +293,11 @@ class ToFGapScout:
                         break
                     if hazard_mask[row, col] > 0:
                         clear_dist = max(0.0, d - step_ds)
+                        hit_obs = True
                         break
 
-                # Target at maximum clear beam distance (backed off by 7.5cm safety margin)
-                eff_dist = max(0.05, clear_dist - 0.075)
+                # Target at maximum clear beam distance (backed off by 7.5cm safety margin ONLY if obstacle hit)
+                eff_dist = max(0.05, clear_dist - 0.075) if hit_obs else clear_dist
                 tx = sx + eff_dist * cos_h
                 ty = max(0.08, sy + eff_dist * sin_h)
                 total_dist = math.hypot(tx, ty)
@@ -304,10 +308,12 @@ class ToFGapScout:
 
                 # Aperture estimation around this beam
                 aperture_m = max(GAP_MIN_WIDTH_M, min(1.20, total_dist * 0.35))
+                is_clear = (not hit_obs) and (raw_z >= 1.79 or total_dist >= (max_lookahead_m - 0.05))
                 candidates.append({
                     "tx": tx, "ty": ty, "dist": total_dist,
                     "aperture": aperture_m, "steer_equiv": steer_equiv,
                     "rel_angle": rel_angle,
+                    "is_clear": is_clear,
                 })
 
         # ----------------------------------------------------------------------
@@ -328,6 +334,7 @@ class ToFGapScout:
                 cos_az = float(cos_arr[i])
                 sin_az = float(sin_arr[i])
                 clear_dist = max_r
+                hit_obs = False
 
                 for s in range(1, n_steps + 1):
                     d = s * step_ds
@@ -340,9 +347,10 @@ class ToFGapScout:
                         break
                     if hazard_mask[row, col] > 0:
                         clear_dist = max(0.0, d - step_ds)
+                        hit_obs = True
                         break
 
-                eff_dist = max(0.05, clear_dist - 0.06)
+                eff_dist = max(0.05, clear_dist - 0.06) if hit_obs else clear_dist
                 # Physical target point in vehicle local coordinates (origin at vehicle center / rear axle)
                 tx = ox + eff_dist * cos_az
                 ty = max(0.08, oy + eff_dist * sin_az)
@@ -357,10 +365,11 @@ class ToFGapScout:
                     "tx": tx, "ty": ty, "dist": total_dist,
                     "aperture": aperture_m, "steer_equiv": steer_equiv,
                     "rel_angle": rel_angle,
+                    "is_clear": not hit_obs,
                 })
 
         if not candidates:
-            return [(0.0, max_lookahead_m, 0.40)]
+            return [(0.0, max_lookahead_m, 0.40, True)]
 
         max_clear_dist = max([c["dist"] for c in candidates])
         has_far_path = max_clear_dist > 0.85
@@ -465,11 +474,14 @@ class ToFGapScout:
                 angle_ratio = 1.0 - (abs(c["rel_angle"]) / theta_shadow)
                 center_penalty = straight_block_penalty * math.exp(self.scout_straight_exp_k * angle_ratio)
 
+            clear_bonus = self.w_gap_clear if c.get("is_clear", False) else 0.0
+
             score = (
                 self.w_gap_distance * dist_factor
                 + self.w_gap_width * width_norm
                 + neighbor_bonus
                 + side_bonus
+                + clear_bonus
                 - center_penalty
                 - w_steer * steer_diff
                 - w_straight * straight_diff
@@ -485,7 +497,7 @@ class ToFGapScout:
         if scored_candidates:
             best_score, c0 = scored_candidates[0]
             tx0, ty0, ap0 = c0["tx"], c0["ty"], c0["aperture"]
-            targets.append((tx0, ty0, ap0))
+            targets.append((tx0, ty0, ap0, bool(c0.get("is_clear", False))))
 
             if top_k >= 2:
                 # Target 1: Smart Challenger Line
@@ -514,6 +526,8 @@ class ToFGapScout:
                         width_norm = ap / 1.00
                         steer_diff = abs(c["steer_equiv"] - steer_current)
                         straight_diff = abs(c["rel_angle"])
+                        side_bonus_alt = (self.w_side_clearance * 0.45) * side_diff * (-math.sin(c["rel_angle"]))
+                        clear_bonus_alt = (self.w_gap_clear * self.alt_aperture_bias) if c.get("is_clear", False) else 0.0
                         center_penalty = 0.0
                         if straight_block_penalty > 0.0 and theta_shadow > 0.001 and abs(c["rel_angle"]) < theta_shadow:
                             angle_ratio = 1.0 - (abs(c["rel_angle"]) / theta_shadow)
@@ -523,6 +537,7 @@ class ToFGapScout:
                             self.w_gap_distance * dist_factor
                             + (self.w_gap_width * self.alt_aperture_bias) * width_norm
                             + side_bonus_alt
+                            + clear_bonus_alt
                             - center_penalty
                             - w_steer * steer_diff
                             - w_straight * straight_diff
@@ -532,29 +547,29 @@ class ToFGapScout:
                 if challenger_candidates:
                     challenger_candidates.sort(key=lambda item: item[0], reverse=True)
                     best_challenger = challenger_candidates[0][1]
-                    targets.append((best_challenger["tx"], best_challenger["ty"], best_challenger["aperture"]))
+                    targets.append((best_challenger["tx"], best_challenger["ty"], best_challenger["aperture"], bool(best_challenger.get("is_clear", False))))
                 else:
                     # Fallback: next distinct candidate by spatial separation >= 15 cm
                     for _, c in scored_candidates:
                         tx, ty, ap = c["tx"], c["ty"], c["aperture"]
                         if math.hypot(tx - tx0, ty - ty0) >= 0.15:
-                            targets.append((tx, ty, ap))
+                            targets.append((tx, ty, ap, bool(c.get("is_clear", False))))
                             break
 
                 # Additional targets if top_k > 2 requested
                 if top_k > 2:
                     for _, c in scored_candidates:
                         tx, ty, ap = c["tx"], c["ty"], c["aperture"]
-                        if any(math.hypot(tx - ex, ty - ey) < 0.18 for (ex, ey, _) in targets):
+                        if any(math.hypot(tx - ex, ty - ey) < 0.18 for (ex, ey, *_) in targets):
                             continue
-                        targets.append((tx, ty, ap))
+                        targets.append((tx, ty, ap, bool(c.get("is_clear", False))))
                         if len(targets) >= top_k:
                             break
 
         # Fallback if no target met threshold
         if not targets:
             best_c = max(candidates, key=lambda x: x["dist"])
-            targets = [(best_c["tx"], best_c["ty"], 0.40)]
+            targets = [(best_c["tx"], best_c["ty"], 0.40, bool(best_c.get("is_clear", False)))]
 
         return targets
 

@@ -132,9 +132,9 @@ OPTION_2_SL_MPC_GENE_SPECS: List[Tuple[str, float, float, type, float, str]] = [
     ("alt_min_separation_m", 0.05,   0.40,   float,  0.106,  "Min lateral separation (m) between primary and challenger lines"),
     ("alt_aperture_bias",    1.00,   4.00,   float,  1.500,  "Challenger aperture width bias multiplier"),
     ("alt_switch_hysteresis",1.00,  50.00,   float,  2.367,  "MPC cost reduction threshold needed to switch lines"),
-    ("alt_lookahead_depth_weight", 0.00, 20.00, float, 5.000, "Lookahead projection depth credit weight in dual-line arbitration"),
+    ("w_gap_clear",          0.00,  30.00,   float,  10.000, "Lookahead projection depth credit and clear gap weight in dual-line arbitration"),
     # Fast Straight-Line Lock
-    ("straight_lock_dist",   1.72,   1.72,   float,  1.72,   "Forward clearance (m) to lock straight line acceleration"),
+    ("straight_lock_dist",   1.80,   1.80,   float,  1.80,   "Forward clearance (m) to lock straight line acceleration"),
     ("straight_lock_speed",  5.00,   5.00,   float,  5.00,   "Speed ceiling (m/s) when straight-line locked"),
     # Straight Quieting & Anti-Oscillation Adaptive Steering Response
     ("aggr_dist_far_m",      1.72,   1.72,   float,  1.72,   "Forward clearance distance (m) to engage max straight quieting"),
@@ -161,6 +161,8 @@ class BasePlannerGenome:
         for name, min_v, max_v, vtype, def_v, _ in specs:
             if values and name in values:
                 self.values[name] = vtype(values[name])
+            elif values and name == "w_gap_clear" and "alt_lookahead_depth_weight" in values:
+                self.values[name] = vtype(values["alt_lookahead_depth_weight"])
             else:
                 self.values[name] = vtype(def_v)
         self.clamp_and_repair()
@@ -264,7 +266,7 @@ def generate_logical_initial_population(
             "gap_dist_exp_k": 0.60, "gap_dist_thresh_m": 0.95,
             "gap_latch_hysteresis": 1.25, "gap_latch_dist_m": 0.28,
             "alt_min_separation_m": 0.15, "alt_aperture_bias": 1.80, "alt_switch_hysteresis": 8.00,
-            "alt_lookahead_depth_weight": 5.00,
+            "w_gap_clear": 5.00,
             "straight_lock_dist": 1.70, "straight_lock_speed": 5.50,
             "aggr_dist_far_m": 1.70, "aggr_dist_close_m": 1.00, "aggr_min_scale": 0.30,
             "steer_deadband_rad": 0.002,
@@ -285,7 +287,7 @@ def generate_logical_initial_population(
             "gap_dist_exp_k": 0.70, "gap_dist_thresh_m": 0.95,
             "gap_latch_hysteresis": 1.10, "gap_latch_dist_m": 0.25,
             "alt_min_separation_m": 0.15, "alt_aperture_bias": 1.80, "alt_switch_hysteresis": 7.00,
-            "alt_lookahead_depth_weight": 6.00,
+            "w_gap_clear": 6.00,
             "straight_lock_dist": 1.65, "straight_lock_speed": 5.50,
             "aggr_dist_far_m": 1.68, "aggr_dist_close_m": 1.10, "aggr_min_scale": 0.35,
             "steer_deadband_rad": 0.002,
@@ -306,7 +308,7 @@ def generate_logical_initial_population(
             "gap_dist_exp_k": 0.50, "gap_dist_thresh_m": 0.98,
             "gap_latch_hysteresis": 1.50, "gap_latch_dist_m": 0.32,
             "alt_min_separation_m": 0.20, "alt_aperture_bias": 2.00, "alt_switch_hysteresis": 12.00,
-            "alt_lookahead_depth_weight": 4.00,
+            "w_gap_clear": 4.00,
             "straight_lock_dist": 1.75, "straight_lock_speed": 5.00,
             "aggr_dist_far_m": 1.75, "aggr_dist_close_m": 1.20, "aggr_min_scale": 0.40,
             "steer_deadband_rad": 0.003,
@@ -321,7 +323,10 @@ def generate_logical_initial_population(
             archetypes[0] = seed_genome.to_dict()
         elif isinstance(seed_genome, dict):
             genes_dict = seed_genome.get("genes") or seed_genome.get("best_genome") or seed_genome
-            archetypes[0] = dict(genes_dict)
+            arch = dict(genes_dict)
+            if "alt_lookahead_depth_weight" in arch and "w_gap_clear" not in arch:
+                arch["w_gap_clear"] = arch["alt_lookahead_depth_weight"]
+            archetypes[0] = arch
 
     population: List[BasePlannerGenome] = []
     for arch in archetypes:
