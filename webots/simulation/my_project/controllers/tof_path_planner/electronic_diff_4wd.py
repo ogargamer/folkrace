@@ -84,6 +84,7 @@ class ElectronicDifferential4WD:
         rear_alpha: float = 1.0,
         v_ground_RL: Optional[float] = None,
         v_ground_RR: Optional[float] = None,
+        is_drifting: bool = False,
     ):
         """
         Calculates actuator setpoints given desired longitudinal velocity and virtual steering angle.
@@ -96,6 +97,7 @@ class ElectronicDifferential4WD:
             rear_alpha (float): Rear axle drive fraction (0.0 = ground-roll coasting, 1.0 = full drive).
             v_ground_RL (float, optional): Local surface speed at left rear tire contact patch (m/s).
             v_ground_RR (float, optional): Local surface speed at right rear tire contact patch (m/s).
+            is_drifting (bool): True if drift or stability intervention is active.
 
         Returns:
             dict: Actuator setpoints and telemetry.
@@ -156,8 +158,12 @@ class ElectronicDifferential4WD:
         v_diff_RL = target_v - half_Wr_omega
         v_diff_RR = target_v + half_Wr_omega
 
-        # Ground-roll clamping: Neither rear wheel is ever commanded below local surface velocity
-        if target_v >= 0.0 and v_ground_RL is not None and v_ground_RR is not None:
+        # Rear axle speeds: Ground-roll clamping ONLY during drift detection
+        # When normal grip is maintained (not drifting), rear wheels brake normally with 4WD.
+        # During drift detection, rear wheels are clamped to avoid braking below ground roll
+        # (which would lock the rear axle and induce spinout).
+        is_drift_active = is_drifting or (rear_alpha < 0.99)
+        if is_drift_active and target_v >= 0.0 and v_ground_RL is not None and v_ground_RR is not None:
             v_RL = v_ground_RL + rear_alpha * max(0.0, v_diff_RL - v_ground_RL)
             v_RR = v_ground_RR + rear_alpha * max(0.0, v_diff_RR - v_ground_RR)
         else:

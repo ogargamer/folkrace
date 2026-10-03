@@ -864,7 +864,7 @@ class FolkraceVehicle:
                 self.mode_desc = "OVERRIDE_TEST"
             elif is_recovering:
                 if not self.was_recovering:
-                    self.rate_limited_speed = self.v_est
+                    self.rate_limited_speed = min(self.rate_limited_speed, self.v_est)
                 target_speed = rec_v
                 target_steer = rec_steer
                 self.active_steer = rec_steer
@@ -1010,6 +1010,7 @@ class FolkraceVehicle:
                 self.rate_limited_speed = max(self.rate_limited_speed, min(0.0, v_curr) - max_slip_lead)
 
         # 6. Electronic Differential & Ground-Roll Clamped Actuation
+        is_drift_active = (drift_res.get("mode", "GRIP") != "GRIP") or bool(drift_res.get("is_stabilizing", False))
         diff_res = self.ediff.update(
             target_v=self.rate_limited_speed,
             target_steer_rad=drift_res["steer_cmd"],
@@ -1018,6 +1019,7 @@ class FolkraceVehicle:
             rear_alpha=drift_res["rear_alpha"],
             v_ground_RL=drift_res["v_ground_RL"],
             v_ground_RR=drift_res["v_ground_RR"],
+            is_drifting=is_drift_active,
         )
 
         # 7. Apply Actuator Commands
