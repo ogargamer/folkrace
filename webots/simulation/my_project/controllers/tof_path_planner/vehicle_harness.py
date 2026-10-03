@@ -799,13 +799,13 @@ class FolkraceVehicle:
                 self.last_aww_status = None
 
             # Shield Reverse or Physical Wall Contact / Stall Trigger:
-            # 1) All 5-step evasion arcs blocked (reverse_suggested == True) and front clearance < 0.20m
+            # 1) All 5-step evasion arcs blocked (reverse_suggested == True)
             # 2) Physical front bumper wall collision (min_fwd_dist <= 0.05m)
             # 3) Front obstructed (< 0.20m) while stalled against obstacle (v_est < 0.35 m/s while commanding forward)
             _shield_cur = plan_res.get("shield", {})
             is_stall = (min_fwd_dist < 0.20 and self.v_est < 0.35 and raw_target_speed > 0.5)
             is_wall_contact = (min_fwd_dist <= 0.05)
-            shield_reverse = bool(_shield_cur.get("reverse_suggested", False) and min_fwd_dist < 0.35)
+            shield_reverse = bool(_shield_cur.get("reverse_suggested", False))
             should_reverse = (shield_reverse or is_wall_contact or is_stall)
 
             if (

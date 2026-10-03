@@ -498,15 +498,12 @@ class StuckRecoveryManager:
             is_left_pinned = l_pin if is_left_pinned is None else is_left_pinned
             is_right_pinned = r_pin if is_right_pinned is None else is_right_pinned
 
-        # Determine if facing wrong way
+        # Determine if facing wrong way (authoritatively provided by breadcrumb watchdog)
         is_facing_wrong_way = False
         yaw_diff = 0.0
         if target_breadcrumb_yaw is not None:
             yaw_diff = wrap_to_pi(target_breadcrumb_yaw - current_yaw)
             is_facing_wrong_way = abs(yaw_diff) > math.radians(75.0)
-        elif abs(heading_err) > math.radians(75.0):
-            is_facing_wrong_way = True
-            yaw_diff = heading_err
 
         # Front is considered open if clearance >= 0.22m and not pinned on both sides
         is_front_open = (d_front >= 0.22) and not (is_left_pinned and is_right_pinned)
@@ -665,9 +662,6 @@ class StuckRecoveryManager:
                 if target_breadcrumb_yaw is not None:
                     y_diff = wrap_to_pi(target_breadcrumb_yaw - current_yaw)
                     is_facing_ww = abs(y_diff) > math.radians(75.0)
-                elif abs(heading_err) > math.radians(75.0):
-                    is_facing_ww = True
-                    y_diff = heading_err
 
                 if is_facing_ww and tof.d_straight >= 0.22 and not (is_l_pinned and is_r_pinned):
                     arc_cl = self.evaluate_costmap_escape_arcs(hazard_mask, costmap_obj)
