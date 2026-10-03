@@ -262,6 +262,8 @@ def run_racing_studio(robot: any, vehicle: FolkraceVehicle) -> None:
                             vehicle.planner.alpha_peak = float(p_val)
                         elif p_name == "alt_switch_hysteresis" and hasattr(vehicle.planner, "alt_switch_hysteresis"):
                             vehicle.planner.alt_switch_hysteresis = float(p_val)
+                        elif p_name == "alt_lookahead_depth_weight" and hasattr(vehicle.planner, "alt_lookahead_depth_weight"):
+                            vehicle.planner.alt_lookahead_depth_weight = float(p_val)
                         elif p_name == "alt_min_separation_m":
                             if hasattr(vehicle.gap_scout, "alt_min_separation_m"):
                                 vehicle.gap_scout.alt_min_separation_m = float(p_val)
@@ -527,6 +529,8 @@ def run_champion_preview(robot: any, vehicle: FolkraceVehicle) -> None:
                             vehicle.planner.alpha_peak = float(p_val)
                         elif p_name == "alt_switch_hysteresis" and hasattr(vehicle.planner, "alt_switch_hysteresis"):
                             vehicle.planner.alt_switch_hysteresis = float(p_val)
+                        elif p_name == "alt_lookahead_depth_weight" and hasattr(vehicle.planner, "alt_lookahead_depth_weight"):
+                            vehicle.planner.alt_lookahead_depth_weight = float(p_val)
                         elif p_name == "alt_min_separation_m":
                             if hasattr(vehicle.gap_scout, "alt_min_separation_m"):
                                 vehicle.gap_scout.alt_min_separation_m = float(p_val)

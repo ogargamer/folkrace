@@ -196,6 +196,7 @@ MPC_STRAIGHT_LOCK_SPEED_MPS: float = STRAIGHT_LOCK_SPEED_MPS  # Top speed when s
 MPC_ALT_SWITCH_HYSTERESIS: float = 24.484                     # Cost reduction needed for challenger overthrow
 MPC_ALT_MIN_SEPARATION_M: float = ALT_MIN_SEPARATION_M        # Minimum lateral separation between paths (m)
 MPC_ALT_APERTURE_BIAS: float = ALT_APERTURE_BIAS              # Challenger aperture width bias multiplier
+MPC_ALT_LOOKAHEAD_DEPTH_WEIGHT: float = 5.0                   # Conservative lookahead depth credit weight (Option A)
 
 
 # ==============================================================================

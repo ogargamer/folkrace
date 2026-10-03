@@ -149,7 +149,7 @@ class ToFGapScout:
         alt_min_separation_m: float = ALT_MIN_SEPARATION_M,
         alt_aperture_bias: float = ALT_APERTURE_BIAS,
         scout_obs_width_m: float = 0.22,
-        scout_block_dist_m: float = 1.05,
+        scout_block_dist_m: Optional[float] = None,
         scout_straight_pen_k: float = 2.50,
         scout_straight_exp_k: float = 1.50,
         ray_origin_offset_m: float = 0.070,
@@ -168,7 +168,7 @@ class ToFGapScout:
         self.alt_min_separation_m = float(alt_min_separation_m)
         self.alt_aperture_bias = float(alt_aperture_bias)
         self.scout_obs_width_m = float(scout_obs_width_m)
-        self.scout_block_dist_m = float(scout_block_dist_m)
+        self.scout_block_dist_m = float(scout_block_dist_m) if scout_block_dist_m is not None else None
         self.scout_straight_pen_k = float(scout_straight_pen_k)
         self.scout_straight_exp_k = float(scout_straight_exp_k)
         self.ray_origin_offset_m = float(ray_origin_offset_m)
@@ -247,7 +247,7 @@ class ToFGapScout:
                 alt_min_separation_m=self.alt_min_separation_m,
                 alt_aperture_bias=self.alt_aperture_bias,
                 scout_obs_width_m=self.scout_obs_width_m,
-                scout_block_dist_m=self.scout_block_dist_m,
+                scout_block_dist_m=self.scout_block_dist_m if self.scout_block_dist_m is not None else max_lookahead_m,
                 scout_straight_pen_k=self.scout_straight_pen_k,
                 scout_straight_exp_k=self.scout_straight_exp_k,
                 top_k=top_k,
@@ -410,9 +410,10 @@ class ToFGapScout:
         w_straight = self.w_align_straight
         straight_block_penalty = 0.0
         theta_shadow = 0.0
-        if d_center < self.scout_block_dist_m:
+        eff_block_dist = self.scout_block_dist_m if self.scout_block_dist_m is not None else max_r
+        if d_center < eff_block_dist:
             theta_shadow = math.atan2(self.scout_obs_width_m * 0.5, max(d_center, 0.05))
-            straight_block_penalty = self.scout_straight_pen_k * max(0.0, (self.scout_block_dist_m - d_center) / self.scout_block_dist_m)
+            straight_block_penalty = self.scout_straight_pen_k * max(0.0, (eff_block_dist - d_center) / eff_block_dist)
 
         # Relax steer alignment penalty when facing an obstacle or turn
         w_steer = self.w_align_steer if (abs(steer_current) > 0.08 and d_center >= 1.0) else 0.20
