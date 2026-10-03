@@ -312,7 +312,7 @@ public:
         float w_align_straight,
         float w_side_clearance,
         float gap_dist_exp_k,
-        float gap_progress_margin_m,
+        float gap_dist_thresh_m,
         float alt_min_separation_m,
         float alt_aperture_bias,
         float scout_obs_width_m,
@@ -329,7 +329,6 @@ public:
         constexpr float GAP_MIN_LOOKAHEAD_M = 0.20f;
         constexpr float GAP_MAX_LOOKAHEAD_M = 1.70f;
         constexpr float GAP_MIN_WIDTH_M = 0.0f;
-        constexpr float TRACK_CORRIDOR_WIDTH_M = 1.00f;
 
         float max_r = std::min(max_lookahead_m, GAP_MAX_LOOKAHEAD_M);
         float step_ds = std::max(res * 0.8f, 0.012f);
@@ -471,21 +470,21 @@ public:
 
         float side_diff = 0.0f;
         if (ranges_16) {
-            // Flank walls (sensors cross-point opposite to pod origin):
-            // Right pod sensors (indices 13, 14, 15) point toward LEFT flank (60.4, 71.6, 82.9 deg left)
-            float l_flank = (ranges_16[15] + ranges_16[14] + ranges_16[13]) / 3.0f;
-            // Left pod sensors (indices 5, 6, 7) point toward RIGHT flank (60.4, 71.6, 82.9 deg right)
-            float r_flank = (ranges_16[7]  + ranges_16[6]  + ranges_16[5])  / 3.0f;
+            // Group 8 sensors per side:
+            // Left-side openness (indices 0 [left front ~4.1 deg] + 9..15 [right pod cross-pointing left 15.4 to 82.9 deg])
+            // Right-side openness (indices 8 [right front ~4.1 deg] + 1..7 [left pod cross-pointing right 15.4 to 82.9 deg])
+            float l_sum = ranges_16[0];
+            for (int k = 9; k <= 15; ++k) {
+                l_sum += ranges_16[k];
+            }
+            float l_total = l_sum / 8.0f;
 
-            // Front corridor lookahead (sensors point mostly straight, origin side):
-            // Left pod front (idx 0: tof_front_left_4.1deg) -> Left origin
-            // Right pod front (idx 8: tof_front_right_4.1deg) -> Right origin
-            float l_front = ranges_16[0];
-            float r_front = ranges_16[8];
+            float r_sum = ranges_16[8];
+            for (int k = 1; k <= 7; ++k) {
+                r_sum += ranges_16[k];
+            }
+            float r_total = r_sum / 8.0f;
 
-            // Unified openness combining flank wall distance and front lookahead
-            float l_total = 0.5f * l_flank + 0.5f * l_front;
-            float r_total = 0.5f * r_flank + 0.5f * r_front;
             float denom = std::max(0.25f, 0.5f * (l_total + r_total));
             side_diff = (l_total - r_total) / denom;
         }
@@ -513,7 +512,7 @@ public:
             if (c.dist < min_allowed_dist) continue;
 
             float d_cand = c.dist;
-            float d_thresh = TRACK_CORRIDOR_WIDTH_M + gap_progress_margin_m;
+            float d_thresh = gap_dist_thresh_m;
             float dist_base = d_cand / std::max(max_clear_dist, 0.10f);
             float dist_factor = (d_cand > d_thresh) ? dist_base * std::exp(gap_dist_exp_k * (d_cand - d_thresh)) : dist_base;
 
@@ -595,7 +594,7 @@ public:
                     // Must be separated by minimum distance AND not be an immediately adjacent zone
                     if ((lat_sep >= alt_min_separation_m || is_opposite_side) && (ang_sep >= MIN_ALT_ANGULAR_SEP_RAD || is_opposite_side)) {
                         float d_cand = c.dist;
-                        float d_thresh = TRACK_CORRIDOR_WIDTH_M + gap_progress_margin_m;
+                        float d_thresh = gap_dist_thresh_m;
                         float dist_base = d_cand / std::max(max_clear_dist, 0.10f);
                         float dist_factor = (d_cand > d_thresh) ? dist_base * std::exp(gap_dist_exp_k * (d_cand - d_thresh)) : dist_base;
                         float width_norm = c.aperture / 1.00f;
@@ -701,7 +700,7 @@ COSTMAP_API int costmap_scout_gaps(
     float w_align_straight,
     float w_side_clearance,
     float gap_dist_exp_k,
-    float gap_progress_margin_m,
+    float gap_dist_thresh_m,
     float alt_min_separation_m,
     float alt_aperture_bias,
     float scout_obs_width_m,
@@ -719,7 +718,7 @@ COSTMAP_API int costmap_scout_gaps(
     return cm->scout_gaps(
         ranges_16, max_lookahead_m, steer_current,
         w_gap_distance, w_gap_width, w_align_steer, w_align_straight, w_side_clearance,
-        gap_dist_exp_k, gap_progress_margin_m, alt_min_separation_m, alt_aperture_bias,
+        gap_dist_exp_k, gap_dist_thresh_m, alt_min_separation_m, alt_aperture_bias,
         scout_obs_width_m, scout_block_dist_m, scout_straight_pen_k, scout_straight_exp_k,
         out_targets_x, out_targets_y, out_targets_aperture,
         max_targets,

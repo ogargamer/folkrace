@@ -344,7 +344,7 @@ class FolkraceVehicle:
             w_align_straight=float(genes.get("w_gap_straight", 0.40)),
             w_side_clearance=float(genes.get("w_side_clearance", 2.80)),
             gap_dist_exp_k=float(genes.get("gap_dist_exp_k", 0.60)),
-            gap_progress_margin_m=float(genes.get("gap_progress_margin_m", 0.15)),
+            gap_dist_thresh_m=float(genes.get("gap_dist_thresh_m", 1.00 + genes.get("gap_progress_margin_m", 0.0) if "gap_progress_margin_m" in genes else 0.95)),
             alt_min_separation_m=float(genes.get("alt_min_separation_m", 0.25)),
             alt_aperture_bias=float(genes.get("alt_aperture_bias", 1.80)),
             scout_obs_width_m=float(genes.get("scout_obs_width_m", 0.22)),

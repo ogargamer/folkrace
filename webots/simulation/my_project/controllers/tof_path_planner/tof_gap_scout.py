@@ -38,7 +38,7 @@ try:
         WEIGHT_ALIGN_STRAIGHT,
         WEIGHT_SIDE_CLEARANCE,
         TRACK_CORRIDOR_WIDTH_M,
-        GAP_PROGRESS_MARGIN_M,
+        GAP_DIST_THRESH_M,
         GAP_DIST_EXP_K,
         ALT_MIN_SEPARATION_M,
         ALT_APERTURE_BIAS,
@@ -61,7 +61,7 @@ except ImportError:
         WEIGHT_ALIGN_STRAIGHT,
         WEIGHT_SIDE_CLEARANCE,
         TRACK_CORRIDOR_WIDTH_M,
-        GAP_PROGRESS_MARGIN_M,
+        GAP_DIST_THRESH_M,
         GAP_DIST_EXP_K,
         ALT_MIN_SEPARATION_M,
         ALT_APERTURE_BIAS,
@@ -144,7 +144,8 @@ class ToFGapScout:
         w_align_straight: float = WEIGHT_ALIGN_STRAIGHT,
         w_side_clearance: float = WEIGHT_SIDE_CLEARANCE,
         gap_dist_exp_k: float = GAP_DIST_EXP_K,
-        gap_progress_margin_m: float = GAP_PROGRESS_MARGIN_M,
+        gap_dist_thresh_m: float = GAP_DIST_THRESH_M,
+        gap_progress_margin_m: Optional[float] = None,
         alt_min_separation_m: float = ALT_MIN_SEPARATION_M,
         alt_aperture_bias: float = ALT_APERTURE_BIAS,
         scout_obs_width_m: float = 0.22,
@@ -160,7 +161,10 @@ class ToFGapScout:
         self.w_align_straight = float(w_align_straight)
         self.w_side_clearance = float(w_side_clearance)
         self.gap_dist_exp_k = float(gap_dist_exp_k)
-        self.gap_progress_margin_m = float(gap_progress_margin_m)
+        if gap_progress_margin_m is not None:
+            self.gap_dist_thresh_m = float(TRACK_CORRIDOR_WIDTH_M + gap_progress_margin_m)
+        else:
+            self.gap_dist_thresh_m = float(gap_dist_thresh_m)
         self.alt_min_separation_m = float(alt_min_separation_m)
         self.alt_aperture_bias = float(alt_aperture_bias)
         self.scout_obs_width_m = float(scout_obs_width_m)
@@ -239,7 +243,7 @@ class ToFGapScout:
                 w_align_straight=self.w_align_straight,
                 w_side_clearance=self.w_side_clearance,
                 gap_dist_exp_k=self.gap_dist_exp_k,
-                gap_progress_margin_m=self.gap_progress_margin_m,
+                gap_dist_thresh_m=self.gap_dist_thresh_m,
                 alt_min_separation_m=self.alt_min_separation_m,
                 alt_aperture_bias=self.alt_aperture_bias,
                 scout_obs_width_m=self.scout_obs_width_m,
@@ -383,28 +387,23 @@ class ToFGapScout:
             center_cands = [c["dist"] for c in candidates if abs(c["rel_angle"]) < math.radians(6)]
             d_center = max(center_cands) if center_cands else max_clear_dist
 
-        # Compute side clearance asymmetry from lateral and front ToF sensors:
+        # Compute side clearance asymmetry from lateral and front ToF sensors (8 per side):
         side_diff = 0.0
         if tof_readings:
-            if "tof_front_right_82.9deg" in tof_readings:
-                # Flank sensors cross-point opposite to pod origin:
-                left_flank_keys = ["tof_front_right_82.9deg", "tof_front_right_71.6deg", "tof_front_right_60.4deg"]
-                right_flank_keys = ["tof_front_left_82.9deg", "tof_front_left_71.6deg", "tof_front_left_60.4deg"]
-                f_l_key = "tof_front_left_4.1deg"
-                f_r_key = "tof_front_right_4.1deg"
+            if any("front" in k for k in tof_readings):
+                # 16-channel array:
+                # Left-side openness: left front 4.1deg + right pod cross-pointing left 15.4deg to 82.9deg
+                left_keys = ["tof_front_left_4.1deg"] + [f"tof_front_right_{ang}deg" for ang in [15.4, 26.6, 37.9, 49.1, 60.4, 71.6, 82.9]]
+                # Right-side openness: right front 4.1deg + left pod cross-pointing right 15.4deg to 82.9deg
+                right_keys = ["tof_front_right_4.1deg"] + [f"tof_front_left_{ang}deg" for ang in [15.4, 26.6, 37.9, 49.1, 60.4, 71.6, 82.9]]
             else:
-                left_flank_keys = ["tof_fl_0", "tof_fl_1", "tof_bl_0", "tof_bl_1"]
-                right_flank_keys = ["tof_fr_0", "tof_fr_1", "tof_br_0", "tof_br_1"]
-                f_l_key = "tof_fl_3"
-                f_r_key = "tof_fr_3"
-            l_vals = [tof_readings.get(k, 1.80) for k in left_flank_keys]
-            r_vals = [tof_readings.get(k, 1.80) for k in right_flank_keys]
-            l_flank = sum(l_vals) / len(l_vals) if l_vals else 1.80
-            r_flank = sum(r_vals) / len(r_vals) if r_vals else 1.80
-            l_front = tof_readings.get(f_l_key, 1.80)
-            r_front = tof_readings.get(f_r_key, 1.80)
-            l_total = 0.5 * l_flank + 0.5 * l_front
-            r_total = 0.5 * r_flank + 0.5 * r_front
+                left_keys = ["tof_fl_3", "tof_fr_0", "tof_fr_1", "tof_fr_2", "tof_bl_0", "tof_bl_1", "tof_bl_2", "tof_bl_3"]
+                right_keys = ["tof_fr_3", "tof_fl_0", "tof_fl_1", "tof_fl_2", "tof_br_0", "tof_br_1", "tof_br_2", "tof_br_3"]
+
+            l_vals = [tof_readings.get(k, 1.80) for k in left_keys]
+            r_vals = [tof_readings.get(k, 1.80) for k in right_keys]
+            l_total = sum(l_vals) / len(l_vals) if l_vals else 1.80
+            r_total = sum(r_vals) / len(r_vals) if r_vals else 1.80
             denom = max(0.25, 0.5 * (l_total + r_total))
             side_diff = (l_total - r_total) / denom
 
@@ -424,10 +423,10 @@ class ToFGapScout:
                 continue
 
             d_cand = c["dist"]
-            d_thresh = TRACK_CORRIDOR_WIDTH_M + self.gap_progress_margin_m
+            d_thresh = self.gap_dist_thresh_m
             dist_base = d_cand / max(max_clear_dist, 0.10)
             if d_cand > d_thresh:
-                # Slight exponential boost for distances exceeding 1.0m + margin (open track corridor towards progress)
+                # Slight exponential boost for distances exceeding threshold (open track corridor towards progress)
                 excess = d_cand - d_thresh
                 dist_factor = dist_base * math.exp(self.gap_dist_exp_k * excess)
             else:
@@ -504,7 +503,7 @@ class ToFGapScout:
                     if (lat_sep >= self.alt_min_separation_m or is_opposite_side) and (ang_sep >= min_ang_sep or is_opposite_side):
                         # Compute challenger score with aperture bias
                         d_cand = c["dist"]
-                        d_thresh = TRACK_CORRIDOR_WIDTH_M + self.gap_progress_margin_m
+                        d_thresh = self.gap_dist_thresh_m
                         dist_base = d_cand / max(max_clear_dist, 0.10)
                         if d_cand > d_thresh:
                             dist_factor = dist_base * math.exp(self.gap_dist_exp_k * (d_cand - d_thresh))

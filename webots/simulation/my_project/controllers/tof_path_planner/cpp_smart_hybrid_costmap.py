@@ -73,7 +73,7 @@ if hasattr(_lib, "costmap_scout_gaps"):
         ctypes.c_float, ctypes.c_float,  # w_gap_distance, w_gap_width
         ctypes.c_float, ctypes.c_float,  # w_align_steer, w_align_straight
         ctypes.c_float,                  # w_side_clearance
-        ctypes.c_float, ctypes.c_float,  # gap_dist_exp_k, gap_progress_margin_m
+        ctypes.c_float, ctypes.c_float,  # gap_dist_exp_k, gap_dist_thresh_m
         ctypes.c_float, ctypes.c_float,  # alt_min_separation_m, alt_aperture_bias
         ctypes.c_float, ctypes.c_float,  # scout_obs_width_m, scout_block_dist_m
         ctypes.c_float, ctypes.c_float,  # scout_straight_pen_k, scout_straight_exp_k
@@ -324,7 +324,8 @@ class CppSmartHybridCostmap:
         w_align_straight: float = 0.40,
         w_side_clearance: float = 2.80,
         gap_dist_exp_k: float = 0.60,
-        gap_progress_margin_m: float = 0.15,
+        gap_dist_thresh_m: float = 0.95,
+        gap_progress_margin_m: Optional[float] = None,
         alt_min_separation_m: float = 0.25,
         alt_aperture_bias: float = 1.80,
         scout_obs_width_m: float = 0.22,
@@ -343,6 +344,8 @@ class CppSmartHybridCostmap:
             haz_c = np.ascontiguousarray(hazard_mask, dtype=np.uint8)
             haz_ptr = haz_c.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8))
 
+        eff_thresh = float(1.00 + gap_progress_margin_m) if gap_progress_margin_m is not None else float(gap_dist_thresh_m)
+
         n_found = _lib.costmap_scout_gaps(
             self._handle,
             self.raw_ranges_c,
@@ -354,7 +357,7 @@ class CppSmartHybridCostmap:
             float(w_align_straight),
             float(w_side_clearance),
             float(gap_dist_exp_k),
-            float(gap_progress_margin_m),
+            float(eff_thresh),
             float(alt_min_separation_m),
             float(alt_aperture_bias),
             float(scout_obs_width_m),

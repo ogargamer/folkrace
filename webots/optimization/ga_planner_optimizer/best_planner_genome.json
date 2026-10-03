@@ -57,7 +57,7 @@
     "w_gap_straight": 1.423,
     "w_side_clearance": 4.683,
     "gap_dist_exp_k": 1.268,
-    "gap_progress_margin_m": 0.177,
+    "gap_dist_thresh_m": 0.95,
     "scout_obs_width_m": 0.367,
     "scout_block_dist_m": 1.397,
     "scout_straight_pen_k": 1.871,

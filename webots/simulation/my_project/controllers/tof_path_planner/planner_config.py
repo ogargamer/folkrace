@@ -154,9 +154,9 @@ WEIGHT_ALIGN_STRAIGHT: float = 0.998   # Preference for going straight when open
 WEIGHT_SIDE_CLEARANCE: float = 2.547   # Preference for steering away from close walls / side asymmetry
 
 # 4.3 Exponential Distance Preference (1.0m Walled Track Geometry)
-# Any sightline > 1.0m + margin is definitively the open racing corridor
-TRACK_CORRIDOR_WIDTH_M: float = 1.00   # meters standard walled race corridor width
-GAP_PROGRESS_MARGIN_M: float = 0.164   # meters (1.0m + 0.164m = 1.164m threshold for definitive open corridor)
+# Sightlines exceeding GAP_DIST_THRESH_M receive exponential distance reward
+TRACK_CORRIDOR_WIDTH_M: float = 1.00   # meters physical track corridor width
+GAP_DIST_THRESH_M: float = 0.95        # meters threshold distance to engage exponential gap reward
 GAP_DIST_EXP_K: float = 0.717          # Exponential growth scaling factor for distance beyond threshold
 
 # 4.4 Fast Straight-Line Lock
