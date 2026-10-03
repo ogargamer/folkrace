@@ -762,25 +762,40 @@ public:
     // Ahead >= 1.70m)
     if (yg >= straight_lock_dist_m && std::abs(xg) <= 0.20 &&
         std::abs(theta_g) <= 0.22) {
-      double cmd_steer = 0.0;
-      double cmd_speed = straight_lock_speed_mps;
-      run_shield_rollout_and_cascade(cmd_steer, cmd_speed, xg, v_bar, delta_0);
-
-      *out_cmd_steer_rad = cmd_steer;
-      *out_cmd_speed_mps = cmd_speed;
-      *out_best_cost = 0.0;
-      *out_osqp_iters = 0;
-      *out_status_code = 1; // STRAIGHT_LOCKED
-
-      best_line_count = N + 1;
-      for (int k = 0; k <= N; ++k) {
-        double u = static_cast<double>(k) / N;
-        best_line_x[k] = 0.0;
-        best_line_y[k] = 0.05 + u * (straight_lock_dist_m - 0.05);
+      // Verify front blindspot (0-40cm) is clear of obstacles before engaging straight lock
+      bool straight_clear = true;
+      if (costmap_probe_func && costmap_handle) {
+        for (double py_check = 0.05; py_check <= 0.40; py_check += 0.05) {
+          float px = 0.0f;
+          float py = static_cast<float>(py_check);
+          if (costmap_probe_func(costmap_handle, &px, &py, 1) == 0) {
+            straight_clear = false;
+            break;
+          }
+        }
       }
-      guide_line_count = 0;
-      corridor_count = 0;
-      return 1;
+
+      if (straight_clear) {
+        double cmd_steer = 0.0;
+        double cmd_speed = straight_lock_speed_mps;
+        run_shield_rollout_and_cascade(cmd_steer, cmd_speed, xg, v_bar, delta_0);
+
+        *out_cmd_steer_rad = cmd_steer;
+        *out_cmd_speed_mps = cmd_speed;
+        *out_best_cost = 0.0;
+        *out_osqp_iters = 0;
+        *out_status_code = 1; // STRAIGHT_LOCKED
+
+        best_line_count = N + 1;
+        for (int k = 0; k <= N; ++k) {
+          double u = static_cast<double>(k) / N;
+          best_line_x[k] = 0.0;
+          best_line_y[k] = 0.05 + u * (straight_lock_dist_m - 0.05);
+        }
+        guide_line_count = 0;
+        corridor_count = 0;
+        return 1;
+      }
     }
 
     // 1. Establish Curvilinear Reference Spline towards gap centroid
@@ -805,34 +820,10 @@ public:
     double lat_limit = mu_friction * GRAVITY_G_CONST * v_corner_factor;
     double a_decel = 1.00 * mu_friction * GRAVITY_G_CONST;
 
-    // Compute local curvature-limited speed ceiling at each stage k
-    double v_ref_k[N + 1];
-    for (int k = 0; k <= N; ++k) {
-      double sk = std::min(L_guide, k * v_nom * dt_val);
-      double uk = sk / std::max(L_guide, 0.01);
-      double kappa_k =
-          std::max(kappa_turn,
-                   eval_hermite_curvature(uk, T0_x, T0_y, xg, yg, T1_x, T1_y));
-      double v_corner_k = std::sqrt(lat_limit / std::max(kappa_k, 0.08));
-      v_ref_k[k] = std::min(v_cruise_max, std::max(v_cruise_min, v_corner_k));
-    }
-
-    // Backward dynamic braking pass (kinematic reachability)
-    for (int k = N - 1; k >= 0; --k) {
-      double ds_step = v_nom * dt_val;
-      double v_brake_limit =
-          std::sqrt(v_ref_k[k + 1] * v_ref_k[k + 1] + 2.0 * a_decel * ds_step);
-      v_ref_k[k] = std::min(v_ref_k[k], v_brake_limit);
-      v_ref_k[k] = std::max(
-          v_ref_k[k], v_cruise_min); // Never go below minimum cruise speed
-    }
-    double v_ref = v_ref_k[0];
-
     // Preferred bypass side
     double pref_side = (xg < 0.0) ? 1.0 : ((xg > 0.0) ? -1.0 : 0.0);
 
-    // Sample corridor bounds for each MPC horizon step k with continuous
-    // sub-stepping:
+    // Sample corridor bounds for each MPC horizon step k with continuous sub-stepping
     double d_min_bounds[N + 1];
     double d_max_bounds[N + 1];
     HermiteState step_states[N + 1];
@@ -876,6 +867,46 @@ public:
         d_max_bounds[k] = 0.10;
       }
     }
+
+    // Compute local speed ceiling at each stage k:
+    // Any dot falling inside an obstacle / C-space is assigned v_cruise_min
+    double v_ref_k[N + 1];
+    bool blocked_ahead = false;
+    for (int k = 0; k <= N; ++k) {
+      double sk = std::min(L_guide, k * v_nom * dt_val);
+      double uk = sk / std::max(L_guide, 0.01);
+
+      // Probe whether step dot k is inside obstacle / C-space
+      if (costmap_probe_func && costmap_handle) {
+        float px = static_cast<float>(step_states[k].gx);
+        float py = static_cast<float>(step_states[k].gy);
+        if (costmap_probe_func(costmap_handle, &px, &py, 1) == 0) {
+          blocked_ahead = true;
+        }
+      }
+
+      double kappa_k =
+          std::max(kappa_turn,
+                   eval_hermite_curvature(uk, T0_x, T0_y, xg, yg, T1_x, T1_y));
+      double v_corner_k = std::sqrt(lat_limit / std::max(kappa_k, 0.08));
+
+      if (blocked_ahead) {
+        v_ref_k[k] = v_cruise_min;
+      } else {
+        v_ref_k[k] = std::min(v_cruise_max, std::max(v_cruise_min, v_corner_k));
+      }
+    }
+
+    // Backward dynamic braking pass (kinematic reachability)
+    for (int k = N - 1; k >= 0; --k) {
+      double ds_step = v_nom * dt_val;
+      double v_brake_limit =
+          std::sqrt(v_ref_k[k + 1] * v_ref_k[k + 1] + 2.0 * a_decel * ds_step);
+      v_ref_k[k] = std::min(v_ref_k[k], v_brake_limit);
+      v_ref_k[k] = std::max(
+          v_ref_k[k], v_cruise_min); // Never go below minimum cruise speed
+    }
+    double v_ref = v_ref_k[0];
 
     // Zero-cost corridor & guide line populated directly from MPC horizon
     // samples
@@ -1091,17 +1122,6 @@ public:
         best_line_y[k + 1] = cur_y;
       }
 
-      // Smooth extension to target gap opening if horizon ends before gap distance
-      double dist_to_gap = std::hypot(xg - cur_x, yg - cur_y);
-      if (dist_to_gap > 0.15 && best_line_count < MAX_TRAJ_POINTS) {
-        int n_ext = std::min(12, MAX_TRAJ_POINTS - best_line_count);
-        for (int i = 1; i <= n_ext; ++i) {
-          double frac = static_cast<double>(i) / n_ext;
-          best_line_x[best_line_count] = cur_x + frac * (xg - cur_x);
-          best_line_y[best_line_count] = cur_y + frac * (yg - cur_y);
-          best_line_count++;
-        }
-      }
 
       // Optimal steering output
       double v_delta_0 = solver.solution->x[(N + 1) * nx + 1];

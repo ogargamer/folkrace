@@ -706,7 +706,7 @@ class PlannerCostmapCanvas(QtWidgets.QWidget):
                 painter.drawText(QPointF(p_origin.x() + 11, p_origin.y() + 4), "◄ REV")
 
 
-        # 8. Best / Winning Trajectory Line (Bright Gold Solid Line)
+        # 8. Best / Winning Trajectory Line (Bright Gold Solid Line with Step Dots)
         if self.show_best and self.best_line and len(self.best_line) > 1:
             best_pen = QPen(QColor(255, 215, 0, 240), 3.0, Qt.SolidLine)
             painter.setPen(best_pen)
@@ -714,6 +714,13 @@ class PlannerCostmapCanvas(QtWidgets.QWidget):
                 p1 = self.world_to_screen(self.best_line[i][0], self.best_line[i][1])
                 p2 = self.world_to_screen(self.best_line[i + 1][0], self.best_line[i + 1][1])
                 painter.drawLine(p1, p2)
+
+            # Tiny yellow step dots along the trajectory
+            painter.setPen(QPen(QColor(30, 25, 0, 220), 0.8))
+            painter.setBrush(QBrush(QColor(255, 245, 100, 255)))
+            for pt in self.best_line:
+                p = self.world_to_screen(pt[0], pt[1])
+                painter.drawEllipse(p, 2.5, 2.5)
 
         # 9. Reverse Backup Logic Checking Curves (Left Turn Arc, Right Turn Arc, Center Forward Sightline)
         if self.show_backup_curves:
