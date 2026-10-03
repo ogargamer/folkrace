@@ -789,8 +789,10 @@ public:
     double dt_val = this->dt;
 
     // Tangent vector at start:
-    double T0_x = -L_guide * std::sin(delta_0);
-    double T0_y = L_guide * std::cos(delta_0);
+    // Aligned with the vehicle body's forward axis (+Y) to ensure a smooth,
+    // monotonic reference curve without opposite-direction hook/kink artifacts.
+    double T0_x = 0.0;
+    double T0_y = L_guide;
 
     // Tangent vector at target gap opening:
     double T1_x = xg;
@@ -835,9 +837,9 @@ public:
     double d_max_bounds[N + 1];
     HermiteState step_states[N + 1];
 
-    // Front-bumper clearance margin based on initial yaw error estimate
-    double e_psi_0 = std::atan2(xg, std::max(0.35, yg));
-    double yaw_clearance_margin = LF_CONST * std::abs(std::sin(e_psi_0));
+    // Front-bumper clearance margin based on gap angle
+    double angle_to_gap = std::atan2(xg, std::max(0.35, yg));
+    double yaw_clearance_margin = LF_CONST * std::abs(std::sin(angle_to_gap));
 
     for (int k = 0; k <= N; ++k) {
       double sk = std::min(L_guide, k * v_nom * dt_val);
@@ -956,7 +958,8 @@ public:
     std::memset(l_arr, 0, sizeof(l_arr));
     std::memset(u_arr, 0, sizeof(u_arr));
 
-    // Initial state
+    // Initial state: heading error towards gap target drives the QP to steer into the turn
+    double e_psi_0 = angle_to_gap;
     double x_init[7] = {0.0, 0.0, e_psi_0, v_bar, 0.0, r_0, delta_0};
     for (int i = 0; i < 7; ++i) {
       l_arr[i] = x_init[i];
@@ -1064,32 +1067,38 @@ public:
       }
       has_solution = true;
 
-      // Extract best predicted line
+      // Extract best predicted line via forward kinematic bicycle rollout of optimal solution
       best_line_count = N + 1;
-      double last_u = 0.0;
-      for (int k = 0; k <= N; ++k) {
-        double pk_s = solver.solution->x[k * nx + 0];
-        double pk_d = solver.solution->x[k * nx + 1];
-        double uk =
-            std::max(0.0, std::min(1.0, pk_s / std::max(L_guide, 0.01)));
-        HermiteState s = eval_hermite(uk, T0_x, T0_y, xg, yg, T1_x, T1_y);
-        best_line_x[k] = s.gx + pk_d * s.nx;
-        best_line_y[k] = s.gy + pk_d * s.ny;
-        last_u = uk;
+      best_line_x[0] = 0.0;
+      best_line_y[0] = 0.0;
+      double cur_x = 0.0;
+      double cur_y = 0.0;
+      double cur_psi = 0.0;
+
+      for (int k = 0; k < N; ++k) {
+        double vk = std::max(0.10, solver.solution->x[k * nx + 3]);
+        double deltak = solver.solution->x[k * nx + 6];
+        double d_psi = (vk / WHEELBASE_CONST) * std::tan(deltak);
+        double max_yaw_rate = (mu_friction * GRAVITY_G_CONST) / std::max(0.35, vk);
+        d_psi = std::max(-max_yaw_rate, std::min(max_yaw_rate, d_psi));
+
+        double psi_mid = cur_psi + 0.5 * d_psi * dt_val;
+        cur_psi += d_psi * dt_val;
+        cur_x -= vk * std::sin(psi_mid) * dt_val;
+        cur_y += vk * std::cos(psi_mid) * dt_val;
+
+        best_line_x[k + 1] = cur_x;
+        best_line_y[k + 1] = cur_y;
       }
 
-      // Reference curve extension into gap aperture
-      if (last_u < 0.96) {
-        int n_ext =
-            std::max(6, static_cast<int>(std::round((1.0 - last_u) * 20.0)));
-        double p_d_last = solver.solution->x[N * nx + 1];
-        for (int i = 1; i < n_ext && best_line_count < MAX_TRAJ_POINTS; ++i) {
-          double u =
-              last_u + (1.0 - last_u) * (static_cast<double>(i) / (n_ext - 1));
-          HermiteState s = eval_hermite(u, T0_x, T0_y, xg, yg, T1_x, T1_y);
-          double decay = 1.0 - static_cast<double>(i) / (n_ext - 1);
-          best_line_x[best_line_count] = s.gx + (p_d_last * decay) * s.nx;
-          best_line_y[best_line_count] = s.gy + (p_d_last * decay) * s.ny;
+      // Smooth extension to target gap opening if horizon ends before gap distance
+      double dist_to_gap = std::hypot(xg - cur_x, yg - cur_y);
+      if (dist_to_gap > 0.15 && best_line_count < MAX_TRAJ_POINTS) {
+        int n_ext = std::min(12, MAX_TRAJ_POINTS - best_line_count);
+        for (int i = 1; i <= n_ext; ++i) {
+          double frac = static_cast<double>(i) / n_ext;
+          best_line_x[best_line_count] = cur_x + frac * (xg - cur_x);
+          best_line_y[best_line_count] = cur_y + frac * (yg - cur_y);
           best_line_count++;
         }
       }
