@@ -188,35 +188,73 @@ public:
         }
 
         // Step 2: Exact Continuous Float Evaluation via Precomputed Cone Cells
+        // Pass 2A: Accumulate Obstacle Hit Evidence for active returns
         for (int s_idx = 0; s_idx < 16; ++s_idx) {
             float raw_z = ranges_16[s_idx];
             float z = std::min(SENSOR_RIG[s_idx].max_range, std::max(SENSOR_RIG[s_idx].min_range, raw_z));
             bool is_hit = (z < SENSOR_RIG[s_idx].max_range - 0.01f);
+            if (!is_hit) continue;
 
-            // Halved depth expansion into unobserved space behind detected obstacle (~7.5 cm)
             float sigma_r = std::max(0.030f * z, res);
             float r_hit_min = z - 0.12f * sigma_r;
             float r_hit_max = z + std::max(0.075f, 1.25f * sigma_r);
 
             const auto& cells = sensor_cones[s_idx];
             size_t n = cells.size();
+            for (size_t i = 0; i < n; ++i) {
+                float r = cells[i].r;
+                if (r < r_hit_min) continue;
+                if (r <= r_hit_max) {
+                    log_odds[cells[i].cell_idx] += cells[i].hit_log_odds;
+                } else {
+                    break;
+                }
+            }
+        }
 
-            if (is_hit) {
+        // Pass 2B: Strict Free-Space & Negative Cone Space-Carving
+        // Any beam that is negative (or travels through open air before a hit further along)
+        // physically guarantees NO obstacle exists inside that free-flight cone.
+        // It decisively carves away phantom arcs, lateral bloat, and front overextensions.
+        for (int s_idx = 0; s_idx < 16; ++s_idx) {
+            float raw_z = ranges_16[s_idx];
+            float z = std::min(SENSOR_RIG[s_idx].max_range, std::max(SENSOR_RIG[s_idx].min_range, raw_z));
+            bool is_hit = (z < SENSOR_RIG[s_idx].max_range - 0.01f);
+
+            float r_carve_max;
+            if (!is_hit) {
+                // Entire cone guaranteed 100% empty up to max range
+                r_carve_max = SENSOR_RIG[s_idx].max_range;
+            } else {
+                // Guaranteed empty before hit distance; safety margin prevents clipping the surface
+                float sigma_r = std::max(0.030f * z, res);
+                r_carve_max = z - std::max(0.025f, 1.0f * sigma_r);
+            }
+
+            if (r_carve_max > SENSOR_RIG[s_idx].min_range) {
+                const auto& cells = sensor_cones[s_idx];
+                size_t n = cells.size();
                 for (size_t i = 0; i < n; ++i) {
-                    float r = cells[i].r;
-                    if (r < r_hit_min) {
-                        log_odds[cells[i].cell_idx] += L_FREE;
-                    } else if (r <= r_hit_max) {
-                        log_odds[cells[i].cell_idx] += cells[i].hit_log_odds;
+                    if (cells[i].r < r_carve_max) {
+                        uint32_t c_idx = cells[i].cell_idx;
+                        // Space-carve: reset/override any phantom hit evidence to confirmed free
+                        log_odds[c_idx] = std::min(log_odds[c_idx], L_FREE);
                     } else {
-                        // Beyond obstacle hit depth: stop scanning shadow
                         break;
                     }
                 }
-            } else {
-                // Entire cone is clear to max range
-                for (size_t i = 0; i < n; ++i) {
-                    log_odds[cells[i].cell_idx] += L_FREE;
+            }
+        }
+
+        // Origin Launch Clearance: Robot chassis footprint is safe
+        for (int r = 0; r < height; ++r) {
+            float cell_y = y_min + r * res + res * 0.5f;
+            if (cell_y > 0.18f) break;
+            int row_off = r * width;
+            for (int c = 0; c < width; ++c) {
+                float cell_x = x_min + c * res + res * 0.5f;
+                if (std::abs(cell_x) <= (0.10f + r_inflation_m) && cell_y >= 0.0f) {
+                    log_odds[row_off + c] = std::min(log_odds[row_off + c], L_FREE);
                 }
             }
         }
