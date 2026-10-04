@@ -22,14 +22,19 @@ import numpy as np
 # Number of parallel headless Webots workers / CPU cores to utilize
 NUM_CPU_CORES: int = 14
 
-# Population size per generation
-POPULATION_SIZE: int = 42
+# Population size per generation (168 candidates: 12 full 14-core worker batches)
+POPULATION_SIZE: int = 168
 
 # Maximum number of generations to run
 NUM_GENERATIONS: int = 9999
 
-# Evaluation duration per candidate in simulation seconds (scaled to 25.0s as population hardened)
+# Base evaluation duration per candidate in simulation seconds (starting at 25.0s)
 EVALUATION_DURATION_S: float = 25.0
+
+# Automatic Linear Evaluation Duration Scaling (+2.5s per wall-clock hour = +5.0s per 2 hours continuously)
+AUTO_SCALE_EVAL_DURATION: bool = True
+EVAL_DURATION_HOURLY_GROWTH_S: float = 2.50  # Linear seconds added per wall-clock hour (+5s every 2h)
+EVAL_DURATION_MAX_S: float = 60.0            # Maximum simulation duration ceiling
 
 # Number of evaluation runs per candidate to average (1 for deterministic, >1 if noisy)
 RUNS_PER_EVALUATION: int = 2
@@ -41,15 +46,15 @@ ALGORITHM: str = "CMA_ES"
 SEED_FROM_BEST_GENOME_DEFAULT: bool = True
 BEST_GENOME_PATH: str = os.path.join(os.path.dirname(os.path.abspath(__file__)), "best_planner_genome.json")
 
-# CMA-ES Hyperparameters (Tight exploration sigma = 0.05 around top performers)
-CMA_SIGMA0: float = 0.05             # Initial search step size in normalized [0, 1] parameter space
+# CMA-ES Hyperparameters (Wide exploration sigma = 0.30 across normalized [0, 1] parameter space)
+CMA_SIGMA0: float = 0.30             # Initial search step size in normalized [0, 1] parameter space
 CMA_RESTART_ON_CONVERGENCE: bool = True  # Automatically re-seed if search distribution collapses
 
 # Genetic Operator Rates (Used when ALGORITHM == 'GA')
-CROSSOVER_RATE: float = 0.80
-MUTATION_RATE: float = 0.18
-MUTATION_SCALE: float = 0.12     # Gaussian mutation sigma as a fraction of gene span
-ELITISM_COUNT: int = 2           # Top candidates guaranteed to survive untouched
+CROSSOVER_RATE: float = 0.85
+MUTATION_RATE: float = 0.25
+MUTATION_SCALE: float = 0.22     # Gaussian mutation sigma as a fraction of gene span
+ELITISM_COUNT: int = 4           # Top candidates guaranteed to survive untouched
 TOURNAMENT_SIZE: int = 3         # Selection pressure for GA tournament selection
 
 # Active Path Planner to Optimize (Exclusively C++ Curvilinear S-L MPC)
@@ -107,12 +112,12 @@ OPTION_2_SL_MPC_GENE_SPECS: List[Tuple[str, float, float, type, float, str]] = [
     ("mu_friction",          0.80,   0.89,   float,  0.88,  "Tire friction coefficient governing steer vs brake loads"),
     ("r_inflation_m",        0.075,  0.075,  float,  0.075,  "ToF obstacle expansion / inflation radius (0.075m - 0.120m)"),
     # MPC Objective Weights
-    ("q_progress",           2.00,  30.00,   float, 16.372,  "Longitudinal progress reward weight"),
+    ("q_progress",           0.50,  40.00,   float, 16.372,  "Longitudinal progress reward weight"),
     ("q_cte",                1.00,  60.00,   float, 39.540,  "Cross-track error penalty weight"),
     ("q_heading",            2.00,  25.00,   float, 12.685,  "Heading error penalty weight"),
     ("r_steer",              1.00,  15.00,   float,  6.174,  "Steering angle effort penalty weight"),
-    ("r_accel",              0.10,   6.00,   float,  0.641,  "Acceleration/braking effort penalty weight"),
-    ("r_steer_rate",         2.00,  35.00,   float, 17.749,  "Steering rate slew penalty weight"),
+    ("r_accel",              0.01,   6.00,   float,  0.641,  "Acceleration/braking effort penalty weight"),
+    ("r_steer_rate",         0.50,  35.00,   float, 17.749,  "Steering rate slew penalty weight"),
     ("v_corner_factor",      0.60,   0.98,   float,  0.941,  "Friction circle speed scaling for curvature"),
     # Gap Scout Parameters
     ("target_lookahead_m",   1.72,   1.72,   float,  1.72,   "Scout lookahead target projection distance (m)"),
@@ -123,16 +128,16 @@ OPTION_2_SL_MPC_GENE_SPECS: List[Tuple[str, float, float, type, float, str]] = [
     ("w_side_clearance",     0.00,   6.00,   float,  3.840,  "Gap scout side asymmetry clearance weight"),
     ("gap_dist_exp_k",       0.20,   1.50,   float,  0.813,  "Gap scout exponential distance reward factor"),
     ("gap_dist_thresh_m",    0.80,   1.30,   float,  0.950,  "Gap scout distance threshold (m) to engage exponential reward"),
-    ("scout_obs_width_m",    0.10,   0.40,   float,  0.220,  "Effective obstacle width (m) for angular shadow projection"),
+    ("scout_obs_width_m",    0.05,   0.45,   float,  0.220,  "Effective obstacle width (m) for angular shadow projection"),
     ("scout_straight_pen_k", 0.50,   5.00,   float,  2.500,  "Base straight obstacle penalty scaling factor"),
-    ("scout_straight_exp_k", 0.50,   3.00,   float,  1.500,  "Exponential curvature factor peaking at dead center (0 deg)"),
+    ("scout_straight_exp_k", 0.10,   3.00,   float,  1.500,  "Exponential curvature factor peaking at dead center (0 deg)"),
     ("gap_latch_hysteresis", 0.20,   3.50,   float,  1.769,  "Gap scout corridor latch score margin"),
     ("gap_latch_dist_m",     0.12,   0.60,   float,  0.368,  "Gap scout corridor latch spatial association radius (m)"),
     # Dual-Path Line Choice & Challenger Selection (Primary vs Alternative)
     ("alt_min_separation_m", 0.05,   0.40,   float,  0.106,  "Min lateral separation (m) between primary and challenger lines"),
     ("alt_aperture_bias",    1.00,   4.00,   float,  1.500,  "Challenger aperture width bias multiplier"),
     ("alt_switch_hysteresis",1.00,  50.00,   float,  2.367,  "MPC cost reduction threshold needed to switch lines"),
-    ("w_gap_clear",          0.00,  30.00,   float,  10.000, "Lookahead projection depth credit and clear gap weight in dual-line arbitration"),
+    ("w_gap_clear",          0.00,  50.00,   float,  10.000, "Lookahead projection depth credit and clear gap weight in dual-line arbitration"),
     # Fast Straight-Line Lock
     ("straight_lock_dist",   1.80,   1.80,   float,  1.80,   "Forward clearance (m) to lock straight line acceleration"),
     ("straight_lock_speed",  5.00,   5.00,   float,  5.00,   "Speed ceiling (m/s) when straight-line locked"),
@@ -338,7 +343,7 @@ def generate_logical_initial_population(
         base_arr = genome_cls(archetypes[0]).to_array()
         for k in range(n_remain):
             grid_frac = (k + 0.5) / n_remain
-            noise = (np.random.uniform(-0.18, 0.18, size=base_arr.shape) + (grid_frac - 0.5) * 0.40) * span
+            noise = (np.random.uniform(-0.35, 0.35, size=base_arr.shape) + (grid_frac - 0.5) * 0.50) * span
             cand_arr = np.clip(base_arr + noise, lower, upper)
             cand = genome_cls()
             cand.from_array(cand_arr)

@@ -67,6 +67,9 @@ from ga_planner_config import (
     POPULATION_SIZE,
     NUM_GENERATIONS,
     EVALUATION_DURATION_S,
+    AUTO_SCALE_EVAL_DURATION,
+    EVAL_DURATION_HOURLY_GROWTH_S,
+    EVAL_DURATION_MAX_S,
     CROSSOVER_RATE,
     MUTATION_RATE,
     MUTATION_SCALE,
@@ -485,6 +488,10 @@ def run_genetic_algorithm(
     cma_adapters: Dict[str, Optional[CMAESOptimizerAdapter]] = {}
     consecutive_crashes: Dict[str, int] = {}
 
+    # Wall-clock tracking for adaptive duration scaling (+5s every 2h)
+    opt_start_wall_time = time.time()
+    prior_elapsed_wall_s = 0.0
+
     for p in planners_to_run:
         genome_cls = get_genome_class(p)
         populations[p] = []
@@ -516,7 +523,8 @@ def run_genetic_algorithm(
                         best_fitnesses[p] = float(ckpt.get("best_fitness", -1e9))
                         best_genomes[p] = genome_cls(ckpt.get("best_genome", {}))
                         best_metrics_map[p] = ckpt.get("best_metrics", {})
-                        print(f"[Optimizer] Resuming {p} from Generation {start_gens[p]} (Best Fitness: {best_fitnesses[p]:.1f}).", flush=True)
+                        prior_elapsed_wall_s = float(ckpt.get("total_elapsed_s", 0.0))
+                        print(f"[Optimizer] Resuming {p} from Generation {start_gens[p]} (Best Fitness: {best_fitnesses[p]:.1f}, Prior Run Time: {prior_elapsed_wall_s/3600.0:.2f}h).", flush=True)
             except Exception as e:
                 print(f"[Optimizer] Checkpoint load failed for {p} ({e}), starting fresh.", flush=True)
                 populations[p] = []
@@ -622,13 +630,29 @@ def run_genetic_algorithm(
 
                 genome_cls = get_genome_class(p)
                 t_p_start = time.time()
-                print(f"\n--- [{p}] Evaluating {pop_size} Candidates on {num_cores} Workers ---", flush=True)
+
+                # Dynamic Wall-Clock Linear Duration Auto-Scaling (+2.5s/h = +5s every 2h smoothly)
+                total_elapsed_s = prior_elapsed_wall_s + (time.time() - opt_start_wall_time)
+                total_elapsed_h = total_elapsed_s / 3600.0
+                if AUTO_SCALE_EVAL_DURATION:
+                    current_eval_duration_s = min(
+                        EVAL_DURATION_MAX_S,
+                        round(eval_duration_s + (total_elapsed_h * EVAL_DURATION_HOURLY_GROWTH_S), 2),
+                    )
+                else:
+                    current_eval_duration_s = eval_duration_s
+
+                print(
+                    f"\n--- [{p}] Evaluating {pop_size} Candidates on {num_cores} Workers | "
+                    f"Duration: {current_eval_duration_s:.2f}s (Elapsed: {total_elapsed_h:.2f}h) ---",
+                    flush=True,
+                )
 
                 # 1. Parallel Evaluation of Generation
                 results = pool.evaluate_population(
                     planner_name=p,
                     population_genomes=populations[p],
-                    duration_s=eval_duration_s,
+                    duration_s=current_eval_duration_s,
                     controller=controller,
                     use_track2=use_track2,
                 )
@@ -747,7 +771,7 @@ def run_genetic_algorithm(
                         consecutive_crashes[p] = 0
 
                     if gen < num_generations - 1:
-                        populations[p] = adapter.ask(inject_baseline=True)
+                        populations[p] = adapter.ask(inject_baseline=False)
                     # Save CMA-ES state (after ask so that iteration counter and candidates are aligned)
                     cma_file = os.path.join(CURR_DIR, f"cma_state_{p.lower()}.pkl") if is_multi else os.path.join(CURR_DIR, "cma_state.pkl")
                     adapter.save_state(cma_file)
@@ -792,6 +816,8 @@ def run_genetic_algorithm(
                         "best_metrics": best_metrics_map[p],
                         "best_genome": best_genomes[p].to_dict() if best_genomes[p] else {},
                         "population": [g.to_dict() for g in populations[p]],
+                        "total_elapsed_s": round(total_elapsed_s, 1),
+                        "eval_duration_s": round(current_eval_duration_s, 1),
                     }, f, indent=2)
 
     finally:
