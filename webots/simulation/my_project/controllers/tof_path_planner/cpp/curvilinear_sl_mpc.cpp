@@ -136,6 +136,12 @@ public:
   double shield_straight_y[MAX_TRAJ_POINTS];
   bool shield_straight_safe;
 
+  // Pure zero-steering straight rollout probe
+  int shield_straight_zero_cnt;
+  double shield_straight_zero_x[MAX_TRAJ_POINTS];
+  double shield_straight_zero_y[MAX_TRAJ_POINTS];
+  bool shield_straight_zero_safe;
+
   // Independent primal & dual warm-start cache per solver instance (prevents
   // cross-contamination in dual-solve)
   bool has_solution;
@@ -164,6 +170,7 @@ public:
         shield_k1_r_cnt(0), shield_k1_r_safe(false), shield_k2_l_cnt(0),
         shield_k2_l_safe(false), shield_k2_r_cnt(0), shield_k2_r_safe(false),
         shield_straight_cnt(0), shield_straight_safe(false),
+        shield_straight_zero_cnt(0), shield_straight_zero_safe(false),
         has_solution(false) {
     // Copy constant structure of A_data
     std::memset(A_data, 0, sizeof(A_data));
@@ -519,10 +526,11 @@ public:
       double max_yaw_rate = (mu_friction * GRAVITY_G_CONST) / std::max(0.35, v);
       double d_psi = (v / WHEELBASE_CONST) * std::tan(delta);
       d_psi = std::max(-max_yaw_rate, std::min(max_yaw_rate, d_psi));
+      double psi_mid = psi + 0.5 * d_psi * dt_sim;
       psi += d_psi * dt_sim;
-      x -= v * std::sin(psi) *
+      x -= v * std::sin(psi_mid) *
            dt_sim; // Leftward lateral displacement for psi > 0
-      y += v * std::cos(psi) * dt_sim; // Forward longitudinal displacement
+      y += v * std::cos(psi_mid) * dt_sim; // Forward longitudinal displacement
 
       if (out_xs && out_ys && out_count && *out_count < MAX_TRAJ_POINTS) {
         out_xs[*out_count] = x;
@@ -580,8 +588,11 @@ public:
       act_v_1 = std::min(cmd_speed, act_v + max_a_acc * dt_sim_step);
     double v_mid_0 = 0.5 * (act_v + act_v_1);
 
+    double max_yaw_rate_0 = (mu_friction * GRAVITY_G_CONST) / std::max(0.35, v_mid_0);
     double d_psi_0 =
         (v_mid_0 / WHEELBASE_CONST) * std::tan(delta_mid_0) * dt_sim_step;
+    d_psi_0 = std::max(-max_yaw_rate_0 * dt_sim_step,
+                       std::min(max_yaw_rate_0 * dt_sim_step, d_psi_0));
     double psi_mid_0 = act_psi + 0.5 * d_psi_0;
     double act_psi_1 = act_psi + d_psi_0;
 
@@ -604,8 +615,11 @@ public:
       act_v_2 = std::min(cmd_speed, act_v_1 + max_a_acc * dt_sim_step);
     double v_mid_1 = 0.5 * (act_v_1 + act_v_2);
 
+    double max_yaw_rate_1 = (mu_friction * GRAVITY_G_CONST) / std::max(0.35, v_mid_1);
     double d_psi_1 =
         (v_mid_1 / WHEELBASE_CONST) * std::tan(delta_mid_1) * dt_sim_step;
+    d_psi_1 = std::max(-max_yaw_rate_1 * dt_sim_step,
+                       std::min(max_yaw_rate_1 * dt_sim_step, d_psi_1));
     double psi_mid_1 = act_psi_1 + 0.5 * d_psi_1;
     double act_psi_2 = act_psi_1 + d_psi_1;
 
@@ -655,21 +669,49 @@ public:
     shield_k2_r_safe = false;
     shield_straight_cnt = 0;
     shield_straight_safe = false;
+    shield_straight_zero_cnt = 0;
+    shield_straight_zero_safe = false;
 
-    double lookahead_time = 5.0 / 60.0; // 5 steps * 16.67ms = 83.3ms
-    int lookahead_steps = 5;
-    double straight_lookahead_time =
-        6.0 / 60.0; // 20% longer per step (100.0ms total over 5 steps)
+    double lookahead_time = 10.0 / 60.0; // 10 steps * 16.67ms = 166.7ms
+    int lookahead_steps = 10;
+    double straight_lookahead_time = 12.0 / 60.0; // 12 steps (200.0ms)
     double escape_speed = 1.223; // Safe escape velocity
 
-    // 0. Straight-ahead probe from Step 2 at decel ceiling
+    // 0A. Pure Zero-Steering Straight Line:
+    // Starts with 0.0 steering, heading 0.0, at vehicle origin (0, 0).
+    // An actually straight line projecting directly forward along the vehicle longitudinal axis (+Y).
+    shield_straight_zero_safe = simulate_and_probe_branch(
+        0.0, 0.0, act_v, 0.0, 0.0, // x0=0, y0=0, psi0=0, delta0=0 (starts with 0 steer!)
+        0.0, // target_steer = 0.0 (stays with 0 steer!)
+        std::max(v_cruise_min,
+                 act_v - 0.70 * max_a_dec * straight_lookahead_time),
+        straight_lookahead_time, 12, shield_straight_zero_x,
+        shield_straight_zero_y, &shield_straight_zero_cnt);
+
+    // 0B. MPC Course Follow Probe (target_steer = cmd_steer):
+    // Actively steers along planned MPC course toward cmd_steer, evaluating forward path safety.
     shield_straight_safe = simulate_and_probe_branch(
         act_x_2, act_y_2, act_v_2, act_psi_2, act_delta_2,
-        act_delta_2, // keep Step 2 steer — evaluate forward course
+        cmd_steer, // actively steer along planned course toward cmd_steer
         std::max(v_cruise_min,
                  act_v_2 - 0.70 * max_a_dec * straight_lookahead_time),
-        straight_lookahead_time, lookahead_steps, shield_straight_x,
+        straight_lookahead_time, 12, shield_straight_x,
         shield_straight_y, &shield_straight_cnt);
+
+    // Near-horizon obstacle check along MPC trajectory points (imminent collision check only)
+    if (use_mpc_step2 && shield_straight_safe && best_line_count > 2) {
+      int probe_steps = std::min(6, best_line_count - 1 - 2);
+      for (int i = 0; i <= probe_steps; ++i) {
+        float px = static_cast<float>(best_line_x[2 + i]);
+        float py = static_cast<float>(best_line_y[2 + i]);
+        if (costmap_probe_func && costmap_handle) {
+          if (costmap_probe_func(costmap_handle, &px, &py, 1) == 0) {
+            shield_straight_safe = false;
+            break;
+          }
+        }
+      }
+    }
 
     // 1. Step 0 (k=0) Evasion Micro-Rollouts from Current State (immediate)
     shield_k1_l_safe = simulate_and_probe_branch(
@@ -692,50 +734,41 @@ public:
         shield_k2_r_x, shield_k2_r_y, &shield_k2_r_cnt);
 
     // 3. Safety Shield Cascade:
-    // If the planned course ahead is obstructed, intervene immediately!
+    // Shield must only trigger when BOTH a side AND the straight line are blocked!
+    // If straight is clear -> hold course (MPC path is safe).
+    // If both sides are clear -> do not override MPC (open space on both sides).
     double gentle_speed = std::max(v_cruise_min, act_v * 0.85);
     double emergency_speed = std::max(v_cruise_min, act_v * 0.70);
 
     if (!shield_straight_safe) {
       if (shield_k2_l_safe && !shield_k2_r_safe) {
-        // Step 2 Left clear, Right blocked -> swerve Left
+        // Step 2 Left clear, Right blocked AND straight blocked -> swerve Left
         shield_active = true;
         cmd_steer = +MAX_STEERING_RAD_CONST;
         shield_chosen_id = 0; // k2_left
         cmd_speed = gentle_speed;
       } else if (!shield_k2_l_safe && shield_k2_r_safe) {
-        // Step 2 Right clear, Left blocked -> swerve Right
+        // Step 2 Right clear, Left blocked AND straight blocked -> swerve Right
         shield_active = true;
         cmd_steer = -MAX_STEERING_RAD_CONST;
         shield_chosen_id = 1; // k2_right
         cmd_speed = gentle_speed;
-      } else if (shield_k2_l_safe && shield_k2_r_safe) {
-        // BOTH Step 2 swerves clear! Swerve towards goal gap xg
-        shield_active = true;
-        if (xg < 0.0) {
-          cmd_steer = +MAX_STEERING_RAD_CONST;
-          shield_chosen_id = 0; // k2_left
-        } else {
-          cmd_steer = -MAX_STEERING_RAD_CONST;
-          shield_chosen_id = 1; // k2_right
-        }
-        cmd_speed = gentle_speed;
-      } else {
-        // Both Step 2 swerves blocked -> fall back to Step 0 immediate branch
-        if (shield_k1_l_safe && shield_k1_r_safe) {
-          shield_active = true;
-          cmd_steer = (xg < 0.0) ? +MAX_STEERING_RAD_CONST : -MAX_STEERING_RAD_CONST;
-          shield_chosen_id = (xg < 0.0) ? 2 : 3; // k1_left or k1_right
-          cmd_speed = emergency_speed;
-        } else if (shield_k1_l_safe) {
+      } else if (!shield_k2_l_safe && !shield_k2_r_safe) {
+        // Both Step 2 swerves blocked AND straight blocked -> fall back to Step 0 immediate branch
+        if (shield_k1_l_safe && !shield_k1_r_safe) {
           shield_active = true;
           cmd_steer = +MAX_STEERING_RAD_CONST;
           shield_chosen_id = 2; // k1_left
           cmd_speed = emergency_speed;
-        } else if (shield_k1_r_safe) {
+        } else if (!shield_k1_l_safe && shield_k1_r_safe) {
           shield_active = true;
           cmd_steer = -MAX_STEERING_RAD_CONST;
           shield_chosen_id = 3; // k1_right
+          cmd_speed = emergency_speed;
+        } else if (shield_k1_l_safe && shield_k1_r_safe) {
+          shield_active = true;
+          cmd_steer = (xg < 0.0) ? +MAX_STEERING_RAD_CONST : -MAX_STEERING_RAD_CONST;
+          shield_chosen_id = (xg < 0.0) ? 2 : 3; // k1_left or k1_right
           cmd_speed = emergency_speed;
         } else {
           // All forward evasion paths exhausted -> recommend reverse
@@ -744,6 +777,8 @@ public:
           cmd_speed = 0.0;
         }
       }
+      // If shield_k2_l_safe && shield_k2_r_safe:
+      // Both sides are open! Shield does NOT trigger - MPC retains control.
     }
   }
 
@@ -1105,6 +1140,7 @@ public:
       double cur_x = 0.0;
       double cur_y = 0.0;
       double cur_psi = 0.0;
+      double mpc_psi_2 = 0.0;
 
       for (int k = 0; k < N; ++k) {
         double vk = std::max(0.10, solver.solution->x[k * nx + 3]);
@@ -1120,6 +1156,12 @@ public:
 
         best_line_x[k + 1] = cur_x;
         best_line_y[k + 1] = cur_y;
+
+        if (k == 1) {
+          // Exactly at Step 2 (end of step 1 rollout):
+          // Record true heading of the vehicle along best_line
+          mpc_psi_2 = cur_psi;
+        }
       }
 
 
@@ -1148,12 +1190,6 @@ public:
 
       double mpc_x_2 = best_line_x[2];
       double mpc_y_2 = best_line_y[2];
-      double pk_s2 = solver.solution->x[2 * nx + 0];
-      double uk2 =
-          std::max(0.0, std::min(1.0, pk_s2 / std::max(L_guide, 0.01)));
-      HermiteState s2 = eval_hermite(uk2, T0_x, T0_y, xg, yg, T1_x, T1_y);
-      double psi_ref_2 = std::atan2(-s2.ny, -s2.nx);
-      double mpc_psi_2 = psi_ref_2 + solver.solution->x[2 * nx + 2];
       double mpc_v_2 = solver.solution->x[2 * nx + 3];
       double mpc_delta_2 = solver.solution->x[2 * nx + 6];
 
@@ -1301,7 +1337,10 @@ SL_MPC_API int sl_mpc_get_shield_branches(
     double *out_k2_l_ys, int *out_k2_l_cnt, int *out_k2_l_safe,
     double *out_k2_r_xs, double *out_k2_r_ys, int *out_k2_r_cnt,
     int *out_k2_r_safe, double *out_str_xs, double *out_str_ys,
-    int *out_str_cnt, int *out_str_safe, int *out_active, int *out_chosen_id) {
+    int *out_str_cnt, int *out_str_safe,
+    double *out_str_zero_xs, double *out_str_zero_ys,
+    int *out_str_zero_cnt, int *out_str_zero_safe,
+    int *out_active, int *out_chosen_id) {
   if (!handle)
     return 0;
   auto *planner = static_cast<CurvilinearSLMPCNative *>(handle);
@@ -1350,7 +1389,7 @@ SL_MPC_API int sl_mpc_get_shield_branches(
   if (out_k2_r_safe)
     *out_k2_r_safe = planner->shield_k2_r_safe ? 1 : 0;
 
-  // Straight
+  // Straight (MPC course probe)
   if (out_str_xs && out_str_ys && out_str_cnt) {
     *out_str_cnt = std::min(MAX_TRAJ_POINTS, planner->shield_straight_cnt);
     for (int i = 0; i < *out_str_cnt; ++i) {
@@ -1360,6 +1399,17 @@ SL_MPC_API int sl_mpc_get_shield_branches(
   }
   if (out_str_safe)
     *out_str_safe = planner->shield_straight_safe ? 1 : 0;
+
+  // Straight Zero (0-steering straight rollout)
+  if (out_str_zero_xs && out_str_zero_ys && out_str_zero_cnt) {
+    *out_str_zero_cnt = std::min(MAX_TRAJ_POINTS, planner->shield_straight_zero_cnt);
+    for (int i = 0; i < *out_str_zero_cnt; ++i) {
+      out_str_zero_xs[i] = planner->shield_straight_zero_x[i];
+      out_str_zero_ys[i] = planner->shield_straight_zero_y[i];
+    }
+  }
+  if (out_str_zero_safe)
+    *out_str_zero_safe = planner->shield_straight_zero_safe ? 1 : 0;
 
   if (out_active)
     *out_active = planner->shield_active ? 1 : 0;

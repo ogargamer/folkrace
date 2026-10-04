@@ -640,15 +640,32 @@ class PlannerCostmapCanvas(QtWidgets.QWidget):
                         p2 = self.world_to_screen(line[i + 1][0], line[i + 1][1])
                         painter.drawLine(p1, p2)
 
-        # 7. Emergency Shield Micro-Rollouts (2 Branches from Step 0, 2 Branches from Step 2)
+        # 7. Best / Winning Trajectory Line (Bright Gold Solid Line with Step Dots)
+        if self.show_best and self.best_line and len(self.best_line) > 1:
+            best_pen = QPen(QColor(255, 215, 0, 240), 3.0, Qt.SolidLine)
+            painter.setPen(best_pen)
+            for i in range(len(self.best_line) - 1):
+                p1 = self.world_to_screen(self.best_line[i][0], self.best_line[i][1])
+                p2 = self.world_to_screen(self.best_line[i + 1][0], self.best_line[i + 1][1])
+                painter.drawLine(p1, p2)
+
+            # Tiny yellow step dots along the trajectory
+            painter.setPen(QPen(QColor(30, 25, 0, 220), 0.8))
+            painter.setBrush(QBrush(QColor(255, 245, 100, 255)))
+            for pt in self.best_line:
+                p = self.world_to_screen(pt[0], pt[1])
+                painter.drawEllipse(p, 2.5, 2.5)
+
+        # 8. Emergency Shield Micro-Rollouts & Predictive Course Probe
         if self.show_shield and self.shield_info:
             s_active = self.shield_info.get("active", False)
             chosen_id = self.shield_info.get("chosen_id", -1)
-            all_blocked_reverse = s_active and chosen_id == 4  # All 5-step arcs exhausted → reverse
+            all_blocked_reverse = s_active and chosen_id == 4  # All evasion arcs exhausted → reverse
 
             branches = [
                 # (pts, is_safe, is_chosen, label, step_num)
-                (self.shield_info.get("straight",  []), self.shield_info.get("straight_safe",  False), False, "Straight", 0),
+                (self.shield_info.get("straight_zero", []), self.shield_info.get("straight_zero_safe", False), False, "0-Steer Straight", -1),
+                (self.shield_info.get("straight_mpc",  self.shield_info.get("straight", [])), self.shield_info.get("straight_mpc_safe", self.shield_info.get("straight_safe", False)), False, "MPC Course", 0),
                 (self.shield_info.get("k1_left",   []), self.shield_info.get("k1_left_safe",   False), s_active and chosen_id == 2, "Step 0 Left",  1),
                 (self.shield_info.get("k1_right",  []), self.shield_info.get("k1_right_safe",  False), s_active and chosen_id == 3, "Step 0 Right", 1),
                 (self.shield_info.get("k2_left",   []), self.shield_info.get("k2_left_safe",   False), s_active and chosen_id == 0, "Step 2 Left",  2),
@@ -657,10 +674,14 @@ class PlannerCostmapCanvas(QtWidgets.QWidget):
 
             for branch, is_safe, is_chosen, label, step_num in branches:
                 if len(branch) > 1:
-                    if step_num == 0:
-                        # Straight max-decel probe: white=clear, dark orange=blocked
-                        col = QColor(220, 220, 220, 180) if is_safe else QColor(255, 120, 40, 200)
-                        pen = QPen(col, 1.8, Qt.DashLine)
+                    if step_num == -1:
+                        # Pure zero-steering straight probe: dotted cyan/white if clear, orange-red dotted if blocked
+                        col = QColor(190, 220, 255, 190) if is_safe else QColor(255, 100, 50, 210)
+                        pen = QPen(col, 2.0 if is_safe else 2.6, Qt.DotLine)
+                    elif step_num == 0:
+                        # Forward MPC course probe: white/cyan dashed if clear, bright orange-red if blocked
+                        col = QColor(240, 245, 255, 220) if is_safe else QColor(255, 60, 20, 240)
+                        pen = QPen(col, 2.4 if is_safe else 3.2, Qt.DashLine)
                     elif all_blocked_reverse and step_num == 1:
                         # Step-0 branches are the reverse trigger indicator — draw bold red/magenta
                         pen = QPen(QColor(255, 30, 80, 240), 2.8, Qt.SolidLine)
@@ -679,7 +700,7 @@ class PlannerCostmapCanvas(QtWidgets.QWidget):
                         painter.drawLine(p1, p2)
 
                     if step_num > 0:
-                        # Root dot at the MPC trajectory step origin
+                        # Root dot at the trajectory step origin
                         p_root = self.world_to_screen(branch[0][0], branch[0][1])
                         painter.setPen(Qt.NoPen)
                         dot_col = QColor(255, 30, 80, 240) if all_blocked_reverse and step_num == 1 else QColor(255, 215, 0, 220)
@@ -688,9 +709,14 @@ class PlannerCostmapCanvas(QtWidgets.QWidget):
 
                     # Tip dot & collision hit marker
                     p_tip = self.world_to_screen(branch[-1][0], branch[-1][1])
-                    tip_col = QColor(0, 255, 128) if is_safe else QColor(255, 50, 50)
-                    if all_blocked_reverse and step_num == 1:
+                    if step_num == -1:
+                        tip_col = QColor(140, 230, 255) if is_safe else QColor(255, 90, 50)
+                    elif step_num == 0:
+                        tip_col = QColor(0, 255, 128) if is_safe else QColor(255, 50, 50)
+                    elif all_blocked_reverse and step_num == 1:
                         tip_col = QColor(255, 30, 80)  # Vivid red for reverse-trigger branch tips
+                    else:
+                        tip_col = QColor(0, 255, 128) if is_safe else QColor(255, 50, 50)
                     painter.setPen(Qt.NoPen)
                     painter.setBrush(QBrush(tip_col))
                     painter.drawEllipse(p_tip, 4.0 if is_chosen else 2.6, 4.0 if is_chosen else 2.6)
@@ -704,23 +730,6 @@ class PlannerCostmapCanvas(QtWidgets.QWidget):
                 painter.setFont(QFont("Consolas", 7, QFont.Bold))
                 painter.setPen(QPen(QColor(255, 30, 80, 240)))
                 painter.drawText(QPointF(p_origin.x() + 11, p_origin.y() + 4), "◄ REV")
-
-
-        # 8. Best / Winning Trajectory Line (Bright Gold Solid Line with Step Dots)
-        if self.show_best and self.best_line and len(self.best_line) > 1:
-            best_pen = QPen(QColor(255, 215, 0, 240), 3.0, Qt.SolidLine)
-            painter.setPen(best_pen)
-            for i in range(len(self.best_line) - 1):
-                p1 = self.world_to_screen(self.best_line[i][0], self.best_line[i][1])
-                p2 = self.world_to_screen(self.best_line[i + 1][0], self.best_line[i + 1][1])
-                painter.drawLine(p1, p2)
-
-            # Tiny yellow step dots along the trajectory
-            painter.setPen(QPen(QColor(30, 25, 0, 220), 0.8))
-            painter.setBrush(QBrush(QColor(255, 245, 100, 255)))
-            for pt in self.best_line:
-                p = self.world_to_screen(pt[0], pt[1])
-                painter.drawEllipse(p, 2.5, 2.5)
 
         # 9. Reverse Backup Logic Checking Curves (Left Turn Arc, Right Turn Arc, Center Forward Sightline)
         if self.show_backup_curves:

@@ -154,6 +154,7 @@ if CPP_AVAILABLE and _lib is not None:
         ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int),
         ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int),
         ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int),
+        ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int),
         ctypes.POINTER(ctypes.c_int),
         ctypes.POINTER(ctypes.c_int),
     ]
@@ -233,6 +234,8 @@ class CppCurvilinearSLMPC:
 
         self._buf_xs5 = (ctypes.c_double * self._max_pts)()
         self._buf_ys5 = (ctypes.c_double * self._max_pts)()
+        self._buf_xs6 = (ctypes.c_double * self._max_pts)()
+        self._buf_ys6 = (ctypes.c_double * self._max_pts)()
 
         self._shield_k1_l_cnt = ctypes.c_int(0)
         self._shield_k1_l_safe = ctypes.c_int(0)
@@ -246,6 +249,8 @@ class CppCurvilinearSLMPC:
 
         self._shield_straight_cnt = ctypes.c_int(0)
         self._shield_straight_safe = ctypes.c_int(0)
+        self._shield_straight_zero_cnt = ctypes.c_int(0)
+        self._shield_straight_zero_safe = ctypes.c_int(0)
 
         self._shield_active = ctypes.c_int(0)
         self._shield_chosen = ctypes.c_int(-1)
@@ -549,7 +554,7 @@ class CppCurvilinearSLMPC:
         corridor_left = [[float(self._buf_xs1[i]), float(self._buf_ys1[i])] for i in range(n_corr)]
         corridor_right = [[float(self._buf_xs2[i]), float(self._buf_ys2[i])] for i in range(n_corr)]
 
-        # Extract Emergency Shield evasion branches (Step 0 Left/Right, Step 2 Left/Right, Straight)
+        # Extract Emergency Shield evasion branches (Step 0 Left/Right, Step 2 Left/Right, MPC Straight, Zero-Steer Straight)
         _lib.sl_mpc_get_shield_branches(
             win_handle,
             self._buf_xs1, self._buf_ys1, ctypes.byref(self._shield_k1_l_cnt), ctypes.byref(self._shield_k1_l_safe),
@@ -557,6 +562,7 @@ class CppCurvilinearSLMPC:
             self._buf_xs3, self._buf_ys3, ctypes.byref(self._shield_k2_l_cnt), ctypes.byref(self._shield_k2_l_safe),
             self._buf_xs4, self._buf_ys4, ctypes.byref(self._shield_k2_r_cnt), ctypes.byref(self._shield_k2_r_safe),
             self._buf_xs5, self._buf_ys5, ctypes.byref(self._shield_straight_cnt), ctypes.byref(self._shield_straight_safe),
+            self._buf_xs6, self._buf_ys6, ctypes.byref(self._shield_straight_zero_cnt), ctypes.byref(self._shield_straight_zero_safe),
             ctypes.byref(self._shield_active), ctypes.byref(self._shield_chosen)
         )
 
@@ -565,12 +571,14 @@ class CppCurvilinearSLMPC:
         n_k2_l = int(self._shield_k2_l_cnt.value)
         n_k2_r = int(self._shield_k2_r_cnt.value)
         n_str  = int(self._shield_straight_cnt.value)
+        n_str_zero = int(self._shield_straight_zero_cnt.value)
 
         k1_left_branch  = [[float(self._buf_xs1[i]), float(self._buf_ys1[i])] for i in range(n_k1_l)] if n_k1_l > 0 else []
         k1_right_branch = [[float(self._buf_xs2[i]), float(self._buf_ys2[i])] for i in range(n_k1_r)] if n_k1_r > 0 else []
         k2_left_branch  = [[float(self._buf_xs3[i]), float(self._buf_ys3[i])] for i in range(n_k2_l)] if n_k2_l > 0 else []
         k2_right_branch = [[float(self._buf_xs4[i]), float(self._buf_ys4[i])] for i in range(n_k2_r)] if n_k2_r > 0 else []
         straight_branch = [[float(self._buf_xs5[i]), float(self._buf_ys5[i])] for i in range(n_str)]  if n_str  > 0 else []
+        straight_zero_branch = [[float(self._buf_xs6[i]), float(self._buf_ys6[i])] for i in range(n_str_zero)] if n_str_zero > 0 else []
 
         chosen_id = int(self._shield_chosen.value)
         chosen_name = None
@@ -600,6 +608,10 @@ class CppCurvilinearSLMPC:
             "k2_right_safe": bool(self._shield_k2_r_safe.value),
             "straight": straight_branch,
             "straight_safe": bool(self._shield_straight_safe.value),
+            "straight_mpc": straight_branch,
+            "straight_mpc_safe": bool(self._shield_straight_safe.value),
+            "straight_zero": straight_zero_branch,
+            "straight_zero_safe": bool(self._shield_straight_zero_safe.value),
         }
 
         # ----------------------------------------------------------------------
