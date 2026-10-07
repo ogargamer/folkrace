@@ -176,6 +176,16 @@ public:
     }
   }
 
+  void setSPISpeed(uint32_t speed_hz) {
+    spi_speed = speed_hz;
+    if (!use_3wire) {
+      SPI.endTransaction();
+      SPISettings settings(spi_speed, MSBFIRST, spi_mode);
+      SPI.beginTransaction(settings);
+    }
+  }
+
+
   void init() {
     pinMode(cs_pin, OUTPUT);
     digitalWrite(cs_pin, HIGH);
@@ -787,6 +797,7 @@ void saveConfigToNVS() {
   prefs.putFloat("pid_i", motor1.PID_velocity.I);
   prefs.putFloat("pid_d", motor1.PID_velocity.D);
   prefs.putFloat("lpf_tf", motor1.LPF_velocity.Tf);
+  prefs.putUInt("spi_speed", encoder1.spi_speed);
   prefs.putBool("is_valid", true);
   prefs.end();
 
@@ -841,6 +852,11 @@ bool loadConfigFromNVS() {
   motor1.PID_velocity.D = prefs.getFloat("pid_d", DEFAULT_PID_D);
   motor1.LPF_velocity.Tf =
       prefs.getFloat("lpf_tf", (DEFAULT_LPF_TF_MS * 0.001f));
+
+  uint32_t saved_spi = prefs.getUInt("spi_speed", SPI_SPEED_DEFAULT_HZ);
+  if (saved_spi >= 1000000 && saved_spi <= 20000000) {
+    encoder1.setSPISpeed(saved_spi);
+  }
 
   prefs.end();
 
@@ -924,6 +940,10 @@ void dumpConfigJSON() {
     if (i < ENCODER_LUT_SIZE - 1)
       Serial.print(",");
   }
+  Serial.print("],\"spi_speed_hz\":");
+  Serial.print(encoder1.spi_speed);
+  Serial.print(",\"spi_speed_mhz\":");
+  Serial.print((float)encoder1.spi_speed / 1000000.0f, 2);
   Serial.println("]}");
   Serial.println("[CONFIG_END]\n");
 }
@@ -2888,6 +2908,142 @@ void runBenchmarkComparison() {
 }
 
 // ============================================================================
+// MT6816 HIGH-SPEED SPI BUS INTEGRITY & LATENCY BENCHMARK (4 - 16 MHz)
+// ============================================================================
+void runSPISpeedBenchmark(bool keep_best = false) {
+  if (encoder1.use_3wire) {
+    Serial.println("\n[ERROR] SPI Speed Benchmark requires 4-Wire Hardware SPI mode ('b' to toggle).");
+    return;
+  }
+
+  Serial.println("\n[SPI_BENCH_START]");
+  Serial.println("================================================================================");
+  Serial.println("⚡ MT6816 SPI CLOCK FREQUENCY & BUS INTEGRITY BENCHMARK (4 - 16 MHz)");
+  Serial.println("================================================================================");
+  Serial.println(">>> Testing SPI bus stability, read latency, and parity error rates...");
+
+  bool prev_foc_paused = foc_paused;
+  bool was_enabled = is_enabled;
+  if (is_enabled) {
+    motor1.setPhaseVoltage(0, 0, 0);
+    driver1.disable();
+    is_enabled = false;
+  }
+  foc_paused = true;
+  vTaskDelay(pdMS_TO_TICKS(20));
+
+  uint32_t orig_speed = encoder1.spi_speed;
+  const uint32_t freqs[] = {4000000, 6000000, 8000000, 10000000, 12000000, 14000000, 16000000};
+  const int n_freqs = sizeof(freqs) / sizeof(freqs[0]);
+
+  struct SPITestRow {
+    float freq_mhz;
+    float latency_us;
+    uint32_t parity_errors;
+    uint32_t mag_faults;
+    uint32_t reads;
+    float err_rate_pct;
+    bool stable;
+  } rows[7];
+
+  const uint32_t TEST_READS = 2500;
+  uint32_t best_stable_speed = 4000000;
+  float base_latency_us = 0.0f;
+
+  for (int i = 0; i < n_freqs; i++) {
+    uint32_t cur_freq = freqs[i];
+    float mhz = (float)cur_freq / 1000000.0f;
+    encoder1.setSPISpeed(cur_freq);
+    delayMicroseconds(500);
+
+    // Warm-up flush
+    for (int w = 0; w < 50; w++) {
+      uint8_t dummy_h = 0, dummy_l = 0;
+      encoder1.read4WireHW(encoder1.cs_pin, dummy_h, dummy_l);
+    }
+
+    uint32_t parity_err = 0;
+    uint32_t mag_err = 0;
+
+    // Latency & stability measurement using existing benchmark timing pattern
+    uint32_t lat_start_us = micros();
+    for (uint32_t k = 0; k < TEST_READS; k++) {
+      uint8_t h = 0, l = 0;
+      encoder1.read4WireHW(encoder1.cs_pin, h, l);
+      uint16_t angle_data = ((uint16_t)h << 8) | l;
+      if (!MT6816Sensor::parityCheck(angle_data)) {
+        parity_err++;
+      }
+      if ((l & 0x02) != 0) {
+        mag_err++;
+      }
+    }
+    uint32_t lat_dur_us = micros() - lat_start_us;
+
+    float lat_us = (float)lat_dur_us / (float)TEST_READS;
+    float err_pct = ((float)parity_err / (float)TEST_READS) * 100.0f;
+    bool is_stable = (parity_err == 0 && mag_err == 0);
+
+    if (i == 0) {
+      base_latency_us = lat_us;
+    }
+
+    rows[i].freq_mhz = mhz;
+    rows[i].latency_us = lat_us;
+    rows[i].parity_errors = parity_err;
+    rows[i].mag_faults = mag_err;
+    rows[i].reads = TEST_READS;
+    rows[i].err_rate_pct = err_pct;
+    rows[i].stable = is_stable;
+
+    if (is_stable && cur_freq >= best_stable_speed) {
+      best_stable_speed = cur_freq;
+    }
+
+    // Machine-readable telemetry line
+    Serial.printf("[SPI_BENCH_RESULT]: Freq_MHz=%.1f,Latency_us=%.2f,Parity_Errors=%u,Mag_Faults=%u,Reads=%u,Err_Rate_Pct=%.3f,Stable=%d\n",
+                  mhz, lat_us, parity_err, mag_err, TEST_READS, err_pct, is_stable ? 1 : 0);
+
+    Serial.printf("  Stage %d/%d: %4.1f MHz -> Latency: %5.2f us | Parity Errors: %u | Mag Faults: %u | Status: %s\n",
+                  i + 1, n_freqs, mhz, lat_us, parity_err, mag_err, is_stable ? "✅ STABLE" : "❌ UNSTABLE");
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
+
+  // Summary Table
+  Serial.println("\n================================================================================");
+  Serial.println("🏆 SPI SPEED STABILITY & READ LATENCY LEADERBOARD (MT6816 4-WIRE SPI)");
+  Serial.println("================================================================================");
+  Serial.println("| Freq (MHz) | Latency (us) | Speedup vs 4M | Parity Err | Mag Faults | Bus Status     |");
+  Serial.println("|------------|--------------|---------------|------------|------------|----------------|");
+  for (int i = 0; i < n_freqs; i++) {
+    float speedup = (rows[i].latency_us > 0.01f && base_latency_us > 0.01f) ? (base_latency_us / rows[i].latency_us) : 1.0f;
+    Serial.printf("|   %4.1f     |    %6.2f    |     %4.2fx    |  %8u  |  %8u  | %-14s |\n",
+                  rows[i].freq_mhz, rows[i].latency_us, speedup,
+                  rows[i].parity_errors, rows[i].mag_faults,
+                  rows[i].stable ? "✅ 100% STABLE" : "❌ DATA ERRORS");
+  }
+  Serial.println("================================================================================");
+
+  float best_mhz = (float)best_stable_speed / 1000000.0f;
+  if (keep_best) {
+    encoder1.setSPISpeed(best_stable_speed);
+    Serial.printf(">>> [APPLIED] Highest stable SPI speed retained: %.1f MHz\n", best_mhz);
+  } else {
+    encoder1.setSPISpeed(orig_speed);
+    Serial.printf(">>> [RESTORED] Original SPI speed restored: %.1f MHz (Use 'spi_speed %.1f' or 'spi_test keep' to set)\n",
+                  (float)orig_speed / 1000000.0f, best_mhz);
+  }
+  Serial.println("[SPI_BENCH_END]\n");
+
+  foc_paused = prev_foc_paused;
+  if (was_enabled) {
+    driver1.enable();
+    is_enabled = true;
+  }
+}
+
+
+// ============================================================================
 // AUTOMATED CLOSED-LOOP KV RATING FINDER
 // ============================================================================
 void startKVTest() {
@@ -3113,6 +3269,9 @@ void printFOCPerfReport() {
   }
   Serial.println("--------------------------------------------------------");
   Serial.printf("  MT6816 Total Reads       : %u\n", encoder1.total_reads);
+  Serial.printf("  MT6816 SPI Master Clock  : %.1f MHz (%s)\n",
+                (float)encoder1.spi_speed * 0.000001f,
+                encoder1.use_3wire ? "3-Wire Bitbang" : "4-Wire Hardware SPI");
   Serial.printf("  MT6816 Parity Retries    : %u (SPI noise/timing retry)\n", encoder1.parity_retries);
   Serial.printf("  MT6816 Parity Failures   : %u\n", encoder1.parity_errors);
   Serial.printf("  MT6816 Mag Faults        : %u\n", encoder1.mag_faults);
@@ -3217,6 +3376,43 @@ void executeCommand(String cmd) {
     vTaskDelay(pdMS_TO_TICKS(15));
     runBenchmarkComparison();
     foc_paused = false;
+    return;
+  }
+  if (cmd.startsWith("SPI_TEST") || cmd.startsWith("spi_test") || cmd.startsWith("TEST_SPI") || cmd.startsWith("test_spi") || cmd.startsWith("SPI_BENCH") || cmd.startsWith("spi_bench")) {
+    if (kv_test_running)
+      abortKVTest("Interrupted by SPI Benchmark");
+    bool keep = (cmd.indexOf("keep") >= 0 || cmd.indexOf("KEEP") >= 0);
+    runSPISpeedBenchmark(keep);
+    return;
+  }
+  if (cmd.startsWith("SPI_SPEED") || cmd.startsWith("spi_speed")) {
+    String spd_str = cmd.substring(9);
+    spd_str.trim();
+    if (spd_str.length() == 0) {
+      Serial.printf(">>> Active MT6816 SPI Master Clock: %.2f MHz (%u Hz) | Bus: %s\n",
+                    (float)encoder1.spi_speed / 1000000.0f, encoder1.spi_speed,
+                    encoder1.use_3wire ? "3-Wire Bitbang" : "4-Wire Hardware SPI");
+    } else {
+      float val = spd_str.toFloat();
+      if (val > 0.0f) {
+        uint32_t hz = (val <= 50.0f) ? (uint32_t)(val * 1000000.0f) : (uint32_t)val;
+        if (hz < 1000000) hz = 1000000;
+        if (hz > 20000000) hz = 20000000;
+        encoder1.setSPISpeed(hz);
+        
+        // Measure sensor read latency (1000 iterations) using existing latency check pattern
+        uint32_t lat_start_us = micros();
+        volatile float dummy_angle = 0.0f;
+        for (int k = 0; k < 1000; k++) {
+          dummy_angle = encoder1.getSensorAngle();
+        }
+        uint32_t lat_dur_us = micros() - lat_start_us;
+        float read_latency_us = (float)lat_dur_us / 1000.0f;
+        
+        Serial.printf(">>> Active MT6816 SPI Clock set to %.2f MHz (%u Hz) | Read Latency: %.2f us\n",
+                      (float)encoder1.spi_speed / 1000000.0f, encoder1.spi_speed, read_latency_us);
+      }
+    }
     return;
   }
   if (cmd.equalsIgnoreCase("HARM_INFO") || cmd.equalsIgnoreCase("harm_info") || cmd.equalsIgnoreCase("HARM") || cmd.equalsIgnoreCase("harm") || cmd.equalsIgnoreCase("HARM_REPORT")) {
@@ -3606,6 +3802,8 @@ void executeCommand(String cmd) {
     Serial.println("  CALIB_LUT     : 🔬 Stepped 128-Point Dual-Pass LUT Calibration");
     Serial.println("  SET_MODE <0-2>: Set Mode: 0=Raw, 1=128-PT LUT, 2=Harmonics");
     Serial.println("  BENCH_COMPARE : 🏁 Run 3-Way Mode Comparison with Commutation Parity");
+    Serial.println("  SPI_TEST [keep]: ⚡ Benchmark SPI 4-16 MHz Latency & Bus Stability");
+    Serial.println("  SPI_SPEED <mhz>: ⚡ Set MT6816 SPI Clock Frequency (e.g. 4, 8, 12, 16)");
     Serial.println("  HARM_INFO     : 🔬 Print Full Physical Harmonic Diagnostic & Apex Report");
     Serial.println("  w [volts]     : 🔬 Master Fourier Calibration + 11-Pole "
                    "Continuous Zero");

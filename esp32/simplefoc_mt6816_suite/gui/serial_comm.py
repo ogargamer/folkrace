@@ -62,8 +62,10 @@ class ESP32SerialReader:
         # Harmonic Calibration & Benchmark State
         self.harmonic_results = {}
         self.harmonic_bins = []
-        self.bench_compare_results = []
+        self.bench_compare_results = {}
         self.last_correction_mode = 0
+        self.spi_bench_results = []
+        self.active_spi_mhz = 4.0
 
         # KV Test Streaming & Results State
         self.kv_test_active = False
@@ -361,6 +363,34 @@ class ESP32SerialReader:
                 pass
             return
 
+        if "[SPI_BENCH_START]" in line:
+            with self.lock:
+                self.spi_bench_results = []
+            return
+
+        if "[SPI_BENCH_RESULT]:" in line:
+            try:
+                res = {}
+                for item in line.split("[SPI_BENCH_RESULT]:")[1].split(","):
+                    if "=" in item:
+                        k, v = item.strip().split("=", 1)
+                        try:
+                            res[k.strip()] = float(v.strip())
+                        except ValueError:
+                            res[k.strip()] = v.strip()
+                with self.lock:
+                    self.spi_bench_results.append(res)
+            except Exception:
+                pass
+            return
+
+        if "Active MT6816 SPI Clock set to" in line or "Active MT6816 SPI Master Clock:" in line:
+            m_spi = re.search(r'([\d\.]+)\s*MHz', line)
+            if m_spi:
+                with self.lock:
+                    self.active_spi_mhz = float(m_spi.group(1))
+            return
+
         if "[BENCH_COMPARE_RESULT]:" in line:
             try:
                 res = {}
@@ -372,7 +402,10 @@ class ESP32SerialReader:
                         except ValueError:
                             res[k.strip()] = v.strip()
                 with self.lock:
-                    self.bench_compare_results.append(res)
+                    if isinstance(self.bench_compare_results, list):
+                        self.bench_compare_results = {}
+                    m_id = int(res.get("Mode", len(self.bench_compare_results)))
+                    self.bench_compare_results[m_id] = res
             except Exception:
                 pass
             return

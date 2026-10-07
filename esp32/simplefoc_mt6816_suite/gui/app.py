@@ -862,6 +862,10 @@ class MT6818DashboardGUI:
                   bg="#FF9100", fg="#000", activebackground="#FFB74D", relief="flat", padx=10, pady=5,
                   command=lambda: self.reader.send_cmd("perf")).pack(side="left", padx=3)
 
+        tk.Button(btn_bar, text="⚡ Test SPI 4-16MHz", font=("Segoe UI", 9, "bold"),
+                  bg="#FFD600", fg="#000", activebackground="#FFE57F", relief="flat", padx=10, pady=5,
+                  command=self._start_spi_bench).pack(side="left", padx=3)
+
         tk.Button(btn_bar, text="💾 Save NVS", font=("Segoe UI", 8, "bold"), bg="#2979FF", fg="#FFF",
                   relief="flat", padx=8, pady=5, command=lambda: self.reader.send_cmd("save")).pack(side="right", padx=2)
         tk.Button(btn_bar, text="🔄 Load NVS", font=("Segoe UI", 8, "bold"), bg="#455A64", fg="#FFF",
@@ -1019,6 +1023,56 @@ class MT6818DashboardGUI:
         self.bench_tree.column("temp", width=90, anchor="center")
         self.bench_tree.column("zero", width=130, anchor="center")
         self.bench_tree.pack(fill="x", pady=2)
+
+        # SPI Clock Frequency Stability & Read Latency Card (4-16 MHz)
+        spi_card = ttk.Frame(scroll_container, style="Card.TFrame", padding=10)
+        spi_card.pack(fill="x", pady=4)
+
+        spi_hdr = ttk.Frame(spi_card)
+        spi_hdr.pack(fill="x", pady=(0, 4))
+        ttk.Label(spi_hdr, text="⚡ MT6816 SPI CLOCK FREQUENCY & BUS INTEGRITY BENCHMARK (4 - 16 MHz)", style="CardTitle.TLabel").pack(side="left")
+
+        # SPI action buttons
+        spi_btn_bar = ttk.Frame(spi_card)
+        spi_btn_bar.pack(fill="x", pady=(2, 6))
+
+        tk.Button(spi_btn_bar, text="⚡ Run SPI 4-16 MHz Benchmark (SPI_TEST)", font=("Segoe UI", 9, "bold"),
+                  bg="#FFD600", fg="#000", activebackground="#FFE57F", relief="flat", padx=8, pady=4,
+                  command=self._start_spi_bench).pack(side="left", padx=3)
+
+        tk.Button(spi_btn_bar, text="🚀 Test & Keep Highest Stable", font=("Segoe UI", 9, "bold"),
+                  bg="#00E676", fg="#000", activebackground="#69F0AE", relief="flat", padx=8, pady=4,
+                  command=lambda: self.reader.send_cmd("SPI_TEST keep")).pack(side="left", padx=3)
+
+        ttk.Label(spi_btn_bar, text="Set Clock:", font=("Segoe UI", 9, "bold")).pack(side="left", padx=(10, 4))
+        for mhz in [4, 8, 12, 16]:
+            tk.Button(spi_btn_bar, text=f"{mhz} MHz", font=("Segoe UI", 8, "bold"),
+                      bg="#263238", fg="#00E5FF", activebackground="#37474F", relief="flat", padx=6, pady=3,
+                      command=lambda spd=mhz: self.reader.send_cmd(f"SPI_SPEED {spd}")).pack(side="left", padx=2)
+
+        self.lbl_spi_recommendation = tk.Label(spi_card, text="Status: Ready to test SPI bus stability (Click 'Run SPI 4-16 MHz Benchmark')",
+                                               font=("Segoe UI", 9, "bold"), bg="#1A2230", fg="#00E5FF")
+        self.lbl_spi_recommendation.pack(anchor="w", pady=(2, 4))
+
+        # SPI Treeview table
+        spi_cols = ("freq", "latency", "speedup", "errors", "mag_faults", "rate", "status")
+        self.spi_tree = ttk.Treeview(spi_card, columns=spi_cols, show="headings", height=7)
+        self.spi_tree.heading("freq", text="Clock Freq")
+        self.spi_tree.heading("latency", text="Read Latency (µs)")
+        self.spi_tree.heading("speedup", text="Speedup vs 4M")
+        self.spi_tree.heading("errors", text="Parity Errors")
+        self.spi_tree.heading("mag_faults", text="Mag Faults")
+        self.spi_tree.heading("rate", text="Error Rate (%)")
+        self.spi_tree.heading("status", text="Bus Stability")
+
+        self.spi_tree.column("freq", width=90, anchor="center")
+        self.spi_tree.column("latency", width=120, anchor="center")
+        self.spi_tree.column("speedup", width=110, anchor="center")
+        self.spi_tree.column("errors", width=100, anchor="center")
+        self.spi_tree.column("mag_faults", width=100, anchor="center")
+        self.spi_tree.column("rate", width=100, anchor="center")
+        self.spi_tree.column("status", width=140, anchor="center")
+        self.spi_tree.pack(fill="x", pady=2)
 
     def _create_card(self, parent, title, init_val, color, row, col):
         card = ttk.Frame(parent, style="Card.TFrame", padding="8 6 8 6")
@@ -1571,4 +1625,57 @@ class MT6818DashboardGUI:
                         f"{row.get('delta_temp_c', 0.0):+.2f}",
                         f"{row.get('zero_angle_rad', 0.0):.5f}"
                     ))
+
+        # Update SPI Benchmark leaderboard table
+        with self.reader.lock:
+            spi_res = list(getattr(self.reader, 'spi_bench_results', []))
+
+        if spi_res and hasattr(self, 'spi_tree'):
+            existing_spi = self.spi_tree.get_children()
+            if len(existing_spi) != len(spi_res):
+                self.spi_tree.delete(*existing_spi)
+                base_lat = None
+                best_mhz = 4.0
+                fastest_stable_lat = None
+                for row in spi_res:
+                    freq = row.get("Freq_MHz", 4.0)
+                    lat = row.get("Latency_us", 0.0)
+                    errs = int(row.get("Parity_Errors", 0))
+                    mags = int(row.get("Mag_Faults", 0))
+                    rate = row.get("Err_Rate_Pct", 0.0)
+                    is_stable = int(row.get("Stable", 0)) == 1
+
+                    if base_lat is None and lat > 0:
+                        base_lat = lat
+                    speedup_str = f"{base_lat / lat:.2f}x" if (base_lat and lat > 0.01) else "1.00x"
+
+                    if is_stable and freq >= best_mhz:
+                        best_mhz = freq
+                        fastest_stable_lat = lat
+
+                    status_str = "✅ 100% STABLE" if is_stable else f"❌ {errs} ERRORS"
+                    self.spi_tree.insert("", "end", values=(
+                        f"{freq:.1f} MHz",
+                        f"{lat:.2f} µs",
+                        speedup_str,
+                        str(errs),
+                        str(mags),
+                        f"{rate:.3f}%",
+                        status_str
+                    ))
+
+                if fastest_stable_lat is not None and base_lat:
+                    gain = base_lat / fastest_stable_lat
+                    self.lbl_spi_recommendation.config(
+                        text=f"🏆 Highest Stable SPI Clock: {best_mhz:.1f} MHz ({fastest_stable_lat:.2f} µs latency, {gain:.2f}x faster reads vs 4.0 MHz)",
+                        fg="#69F0AE"
+                    )
+
+    def _start_spi_bench(self):
+        with self.reader.lock:
+            self.reader.spi_bench_results = []
+        if hasattr(self, 'lbl_spi_recommendation'):
+            self.lbl_spi_recommendation.config(text="⏳ Testing SPI Clock frequencies (4 to 16 MHz)... Please wait ~2 seconds", fg="#FFD600")
+        self.reader.send_cmd("SPI_TEST")
+
 
