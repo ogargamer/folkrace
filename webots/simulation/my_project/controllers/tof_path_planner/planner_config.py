@@ -84,10 +84,15 @@ TIME_STEP_MS: int = 8                  # Webots basicTimeStep in ms (matches wor
 DT: float = TIME_STEP_MS / 1000.0      # Physics & fast actuator/IMU step duration (0.008 s = 8 ms)
 SIM_HZ: float = 1000.0 / TIME_STEP_MS  # Simulation physics, 4WD motors, steering, and IMU rate (125.0 Hz)
 
-PLANNER_DECIMATION: int = 2            # Run planner every 2 physics steps (125 Hz / 2 = 62.5 Hz)
-TOF_TIME_STEP_MS: int = TIME_STEP_MS * PLANNER_DECIMATION  # ToF sensor sampling interval in ms (16 ms)
-DT_PLANNER: float = TOF_TIME_STEP_MS / 1000.0              # Planner cycle duration (0.016 s = 16 ms)
-PLANNER_HZ: float = 1000.0 / TOF_TIME_STEP_MS              # ToF scan processing & trajectory planning rate (62.5 Hz)
+PLANNER_DECIMATION: int = 1            # Run planner every physics step (125.0 Hz closed-loop)
+TOF_TIME_STEP_MS: int = TIME_STEP_MS * PLANNER_DECIMATION  # ToF sensor sampling interval in ms (8 ms)
+DT_PLANNER: float = TOF_TIME_STEP_MS / 1000.0              # Planner cycle duration (0.008 s = 8 ms)
+PLANNER_HZ: float = 1000.0 / TOF_TIME_STEP_MS              # ToF scan processing & trajectory planning rate (125.0 Hz)
+
+# 3.2 Realistic Hardware Latency & Lookahead Compensation
+TOF_LATENCY_STEPS: int = 2              # 2 simulation steps = 16 ms ToF integration & transport delay
+ACTUATOR_LATENCY_STEPS: int = 1         # 1 simulation step = 8 ms intrinsic Webots ODE physics integration delay
+TOTAL_LATENCY_STEPS: int = 3            # 3 simulation steps = 24 ms total latency compensated by SE(2) lookahead projection
 
 # 3.2 C++ Smart Hybrid Costmap Bounds (Local Vehicle Coordinates, +Y Forward, +X Right)
 GRID_X_MIN: float = -1.25              # meters (lateral left boundary)
@@ -234,8 +239,8 @@ AWW_BREADCRUMB_MAX_TIMEOUT_S: float = 6.0      # seconds maximum timeout before 
 AWW_HISTORY_WINDOW_S: float = AWW_BREADCRUMB_MAX_TIMEOUT_S  # Backward-compatible alias (6.0 s)
 
 # 7.2 Narrow-Cone Early Gap Exit Sentry
-AWW_EARLY_EXIT_MIN_GAP_M: float = 1.0          # meters minimum scouted gap distance to qualify as long-path early exit
-AWW_EARLY_EXIT_CONE_DEG: float = 20.0          # degrees total narrow cone width (±10 deg) oriented along candidate gap vector
+AWW_EARLY_EXIT_MIN_GAP_M: float = 1.4          # meters minimum scouted gap distance to qualify as long-path early exit
+AWW_EARLY_EXIT_CONE_DEG: float = 30.0          # degrees total narrow cone width (±15 deg) oriented along candidate gap vector
 AWW_EARLY_EXIT_OPPOSING_DEG: float = 110.0     # degrees heading divergence threshold for opposing breadcrumbs in gap corridor
 
 

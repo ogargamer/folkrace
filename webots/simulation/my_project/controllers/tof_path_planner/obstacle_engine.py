@@ -107,7 +107,7 @@ class MovingObstacleManager:
         n_obs = len(self.obs_nodes)
         if n_obs > 0 and self.engine.total_length > 0:
             for k, field in enumerate(self.obs_nodes):
-                obs_s = (float(k + 1) * (self.engine.total_length / float(n_obs + 1)) - self.speed_mps * sim_time_s) % self.engine.total_length
+                obs_s = (float(k + 1) * (self.engine.total_length / float(n_obs + 1)) + self.speed_mps * sim_time_s) % self.engine.total_length
                 ox, oy = self.engine.get_position_at_s(obs_s)
                 field.setSFVec3f([float(ox), float(oy), self.elevation_z])
                 positions.append((float(ox), float(oy)))

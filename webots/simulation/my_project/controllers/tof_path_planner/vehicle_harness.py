@@ -14,6 +14,8 @@ import time
 import json
 import zlib
 import base64
+import copy
+import collections
 from typing import Dict, List, Optional, Tuple, Any
 import numpy as np
 
@@ -42,6 +44,9 @@ from planner_config import (
     DT_PLANNER,
     PLANNER_DECIMATION,
     TOF_TIME_STEP_MS,
+    TOF_LATENCY_STEPS,
+    ACTUATOR_LATENCY_STEPS,
+    TOTAL_LATENCY_STEPS,
     TOF_SENSOR_NAMES,
     TOF_MAX_RANGE_M,
     TOF_MIN_RANGE_M,
@@ -115,6 +120,40 @@ def read_tof_multi_ray(dev: Any, noise_pct: float = 0.02) -> float:
 
 
 read_tof_device = read_tof_multi_ray
+
+
+def wrap_to_pi(angle: float) -> float:
+    """Wraps angle in radians to [-pi, pi]."""
+    return math.atan2(math.sin(angle), math.cos(angle))
+
+
+class LatencyQueue:
+    """
+    Deterministic FIFO delay line guaranteeing exactly `steps` delay.
+    At step k, update(x_k) returns x_{k - steps}.
+    """
+
+    def __init__(self, steps: int, default_val: Any):
+        self.steps = max(0, int(steps))
+        self.queue = collections.deque([copy.deepcopy(default_val) for _ in range(self.steps)])
+
+    def update(self, new_val: Any) -> Any:
+        """Atomic push new value and pop delayed value."""
+        if self.steps <= 0:
+            return new_val
+        self.queue.append(new_val)
+        return self.queue.popleft()
+
+    def peek(self) -> Any:
+        """Peeks at the delayed element without evicting."""
+        return self.queue[0] if self.queue else None
+
+    def push(self, new_val: Any) -> Any:
+        """Alias for update() to support push-pop paradigms."""
+        return self.update(new_val)
+
+    def reset(self, default_val: Any) -> None:
+        self.queue = collections.deque([copy.deepcopy(default_val) for _ in range(self.steps)])
 
 
 class FolkraceVehicle:
@@ -304,6 +343,20 @@ class FolkraceVehicle:
         self.last_tofs = {name: TOF_MAX_RANGE_M for name in TOF_SENSOR_NAMES}
         self.cached_f_tof = TOF_MAX_RANGE_M
 
+        # Hardware Latency Buffers (2-step ToF delay + 1-step actuator lag = 3 steps total)
+        initial_tofs = {name: TOF_MAX_RANGE_M for name in TOF_SENSOR_NAMES}
+        self.tof_queue = LatencyQueue(steps=TOF_LATENCY_STEPS, default_val=initial_tofs)
+        start_x = float(self.x_est)
+        start_y = float(self.y_est)
+        start_yaw = float(self.yaw_est)
+        self.pose_history = collections.deque(
+            [(start_x, start_y, start_yaw) for _ in range(TOF_LATENCY_STEPS + 1)],
+            maxlen=TOF_LATENCY_STEPS + 1,
+        )
+        self.proj_anchor = (0.0, 0.0, 0.0)
+        self.proj_v = 0.0
+        self.proj_steer = 0.0
+
         # Anti-Wrong-Way Watchdog
         self.watchdog = AntiWrongWayWatchdog()
         self.last_aww_status = None
@@ -473,6 +526,20 @@ class FolkraceVehicle:
         self.last_obs_telem = {}
         self.last_enlarged_hazard = None
 
+        # Reset latency queues & pose history
+        initial_tofs = {name: TOF_MAX_RANGE_M for name in TOF_SENSOR_NAMES}
+        self.tof_queue.reset(initial_tofs)
+        sx = float(self.x_est)
+        sy = float(self.y_est)
+        syaw = float(self.yaw_est)
+        self.pose_history = collections.deque(
+            [(sx, sy, syaw) for _ in range(TOF_LATENCY_STEPS + 1)],
+            maxlen=TOF_LATENCY_STEPS + 1,
+        )
+        self.proj_anchor = (0.0, 0.0, 0.0)
+        self.proj_v = 0.0
+        self.proj_steer = 0.0
+
     def read_tof_sensors(self) -> Dict[str, float]:
         """Reads all 16 ToF range sensors and returns a dict mapping sensor name -> range in meters."""
         cached_tofs: Dict[str, float] = {}
@@ -487,7 +554,7 @@ class FolkraceVehicle:
                 cached_tofs[name] = val
             else:
                 cached_tofs[name] = TOF_MAX_RANGE_M
-        self.last_tofs = cached_tofs
+        self.raw_tofs = cached_tofs
         return cached_tofs
 
     def get_ground_truth_pose(self) -> Tuple[float, float, float]:
@@ -599,10 +666,10 @@ class FolkraceVehicle:
             for s in self.servos.values():
                 if s:
                     s.setPosition(0.0)
-            if self.step_counter % PLANNER_DECIMATION == 0:
-                tof_readings = self.read_tof_sensors()
-            else:
-                tof_readings = self.last_tofs
+            raw_tofs = self.read_tof_sensors()
+            tof_readings = self.tof_queue.update(raw_tofs)
+            self.last_tofs = tof_readings
+            self.pose_history.append((self.x_est, self.y_est, self.yaw_est))
             gx, gy, gyaw = self.get_ground_truth_pose()
             rear_flow = self.get_ground_truth_rear_axle_flow()
             telemetry = {
@@ -625,6 +692,9 @@ class FolkraceVehicle:
                 "steer_rad": 0.0,
                 "steer_actual_deg": 0.0,
                 "pose": [float(gx), float(gy), float(gyaw)],
+                "proj_anchor": [0.0, 0.0, 0.0],
+                "proj_v": 0.0,
+                "proj_steer_deg": 0.0,
                 "gap": [0.0, 1.0, 0.5],
                 "targets": [],
                 "plan_ms": 0.0,
@@ -660,14 +730,18 @@ class FolkraceVehicle:
         self.x_est += -self.v_est * math.sin(yaw_mid) * dt
         self.y_est +=  self.v_est * math.cos(yaw_mid) * dt
 
+        # Record current fused pose in dead-reckoning history buffer for SE(2) projection
+        self.pose_history.append((self.x_est, self.y_est, self.yaw_est))
+
         planner_ran = False
         tof_readings = self.last_tofs
 
-        # 60 Hz Control Tick (Decimation = 2)
+        # Closed-loop Control Tick (125 Hz with Decimation = 1)
         if self.step_counter % PLANNER_DECIMATION == 0:
             planner_ran = True
-
-            tof_readings = self.read_tof_sensors()
+            raw_tofs = self.read_tof_sensors()
+            tof_readings = self.tof_queue.update(raw_tofs)
+            self.last_tofs = tof_readings
 
         f_tof = min(
             tof_readings.get("tof_front_left_4.1deg", tof_readings.get("tof_fl_3", TOF_MAX_RANGE_M)),
@@ -675,7 +749,6 @@ class FolkraceVehicle:
         )
         self.cached_f_tof = f_tof
 
-        # 60 Hz Control Tick (Decimation = 2)
         if self.step_counter % PLANNER_DECIMATION == 0:
             prob_map, hazard_mask, map_ms = self.costmap.process_tof_frame(tof_readings)
             self.cached_map_ms = map_ms
@@ -697,29 +770,77 @@ class FolkraceVehicle:
             self.last_obs_telem = obs_telem
             self.last_enlarged_hazard = enlarged_hazard_mask
 
-            # Scout Forward Gaps using estimated actual physical wheel angle
+            # ------------------------------------------------------------------
+            # 3-STEP SE(2) FORWARD LOOKAHEAD PROJECTION
+            # Cancels 2-step ToF integration delay + 1-step actuator execution lag
+            # ------------------------------------------------------------------
+            # 1. Past Motion (step k-2 -> step k, 16 ms elapsed in F_sens)
+            x_past, y_past, yaw_past = self.pose_history[0]
+            x_curr, y_curr, yaw_curr = self.pose_history[-1]
+
+            delta_yaw_past = wrap_to_pi(yaw_curr - yaw_past)
+            dx_w = x_curr - x_past
+            dy_w = y_curr - y_past
+            cos_p = math.cos(yaw_past)
+            sin_p = math.sin(yaw_past)
+            dx_past = cos_p * dx_w + sin_p * dy_w
+            dy_past = -sin_p * dx_w + cos_p * dy_w
+
+            # 2. Future Motion (step k -> step k+1, 8 ms future via bicycle model)
+            v_k = self.v_est if self.recovery_manager.state != StuckRecoveryState.NORMAL_DRIVE else max(0.0, self.v_est)
+            dt_act = ACTUATOR_LATENCY_STEPS * dt
             current_physical_steer = float(self.ediff.current_steer_rad)
+            delta_yaw_future = (v_k / WHEELBASE) * math.tan(current_physical_steer) * dt_act
+            yaw_future_mid = 0.5 * delta_yaw_future
+            dx_future = -v_k * math.sin(yaw_future_mid) * dt_act
+            dy_future =  v_k * math.cos(yaw_future_mid) * dt_act
+
+            # 3. Composite 3-step projected anchor pose in F_sens
+            delta_yaw_3 = wrap_to_pi(delta_yaw_past + delta_yaw_future)
+            cos_dp = math.cos(delta_yaw_past)
+            sin_dp = math.sin(delta_yaw_past)
+            dx_3 = dx_past + (cos_dp * dx_future - sin_dp * dy_future)
+            dy_3 = dy_past + (sin_dp * dx_future + cos_dp * dy_future)
+
+            # 4. Projected actuator state (speed v_3 and steering servo angle delta_3)
+            v_3 = v_k
+            steer_cmd = float(self.cached_target_steer)
+            max_steer_delta = SERVO_MAX_SPEED_RAD_S * dt_act
+            delta_steer = max(-max_steer_delta, min(max_steer_delta, steer_cmd - current_physical_steer))
+            steer_3 = max(-MAX_STEERING_RAD, min(MAX_STEERING_RAD, current_physical_steer + delta_steer))
+
+            self.proj_anchor = (dx_3, dy_3, delta_yaw_3)
+            self.proj_v = v_3
+            self.proj_steer = steer_3
+
+            # Scout Forward Gaps using projected anchor pose in F_sens
             xg, yg, width, theta_g = self.gap_scout.scout_gap(
                 tof_readings=tof_readings,
                 hazard_mask=enlarged_hazard_mask,
                 costmap_obj=self.costmap,
                 target_lookahead_m=self.target_lookahead_m,
-                steer_current=current_physical_steer,
+                steer_current=steer_3,
                 prob_map=prob_map,
+                anchor_x=dx_3,
+                anchor_y=dy_3,
+                anchor_yaw=delta_yaw_3,
             )
             self.last_gap_info = (xg, yg, width, theta_g)
 
-            # Curvilinear SL-MPC Trajectory Optimization using estimated actual physical wheel angle
+            # Curvilinear SL-MPC Trajectory Optimization anchored at projected state
             t_plan_0 = time.perf_counter()
             plan_res = self.planner.plan(
                 xg=xg,
                 yg=yg,
                 theta_g=theta_g,
                 aperture_width=width,
-                v_current=self.v_est,
-                steer_current=current_physical_steer,
+                v_current=v_3,
+                steer_current=steer_3,
                 yaw_rate_current=self.cached_yaw_rate,
                 extra_targets=getattr(self.gap_scout, "last_targets", None),
+                x0=dx_3,
+                y0=dy_3,
+                psi0=delta_yaw_3,
             )
             self.cached_plan_ms = (time.perf_counter() - t_plan_0) * 1000.0
             self.last_plan_res = plan_res
@@ -772,8 +893,6 @@ class FolkraceVehicle:
                     aww_status.is_wrong_way
                     and self.recovery_manager.state == StuckRecoveryState.NORMAL_DRIVE
                 ):
-                    def wrap_to_pi(a):
-                        return math.atan2(math.sin(a), math.cos(a))
                     tgt_yaw = aww_status.target_recovery_yaw if aww_status.target_recovery_yaw is not None else wrap_to_pi(gyaw_curr + math.pi)
                     yaw_diff = wrap_to_pi(tgt_yaw - gyaw_curr)
                     arc_cl = self.recovery_manager.evaluate_costmap_escape_arcs(hazard_mask, self.costmap)
@@ -1081,6 +1200,9 @@ class FolkraceVehicle:
                 "steer_rad": round(float(drift_res["steer_cmd"]), 4),
                 "steer_actual_deg": round(math.degrees(float(getattr(self.ediff, "current_steer_rad", self.active_steer))), 2),
                 "pose": [float(gx), float(gy), float(gyaw)],
+                "proj_anchor": [round(float(self.proj_anchor[0]), 4), round(float(self.proj_anchor[1]), 4), round(float(self.proj_anchor[2]), 4)],
+                "proj_v": round(float(self.proj_v), 3),
+                "proj_steer_deg": round(math.degrees(float(self.proj_steer)), 2),
                 "plan_ms": round(float(self.cached_plan_ms), 2),
                 "map_ms": round(float(self.cached_map_ms), 2),
                 "escape_state": str(getattr(self.recovery_manager.state, "name", self.recovery_manager.state)),
@@ -1154,6 +1276,9 @@ class FolkraceVehicle:
             "steer_rad": round(float(drift_res["steer_cmd"]), 4),
             "steer_actual_deg": round(math.degrees(float(getattr(self.ediff, "current_steer_rad", self.active_steer))), 2),
             "pose": [float(gx), float(gy), float(gyaw)],
+            "proj_anchor": [round(float(self.proj_anchor[0]), 4), round(float(self.proj_anchor[1]), 4), round(float(self.proj_anchor[2]), 4)],
+            "proj_v": round(float(self.proj_v), 3),
+            "proj_steer_deg": round(math.degrees(float(self.proj_steer)), 2),
             "f_tof": round(float(min(tof_readings.get("tof_front_left_4.1deg", 1.0), tof_readings.get("tof_front_right_4.1deg", 1.0))), 3) if tof_readings else 1.0,
             "gap": g_gap,
             "targets": g_targets,

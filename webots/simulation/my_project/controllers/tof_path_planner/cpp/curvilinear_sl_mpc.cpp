@@ -412,26 +412,29 @@ public:
   // --------------------------------------------------------------------------
   // Evaluates Hermite Spline Reference Curve: position and left unit normal
   // --------------------------------------------------------------------------
-  static inline HermiteState eval_hermite(double u, double T0_x, double T0_y,
+  static inline HermiteState eval_hermite(double u, double x0, double y0,
+                                          double T0_x, double T0_y,
                                           double xg, double yg, double T1_x,
                                           double T1_y) {
     u = std::max(0.0, std::min(1.0, u));
     double u2 = u * u;
     double u3 = u2 * u;
 
+    double h00 = 2.0 * u3 - 3.0 * u2 + 1.0;
     double h10 = u3 - 2.0 * u2 + u;
     double h01 = -2.0 * u3 + 3.0 * u2;
     double h11 = u3 - u2;
 
-    double gx = h10 * T0_x + h01 * xg + h11 * T1_x;
-    double gy = h10 * T0_y + h01 * yg + h11 * T1_y;
+    double gx = h00 * x0 + h10 * T0_x + h01 * xg + h11 * T1_x;
+    double gy = h00 * y0 + h10 * T0_y + h01 * yg + h11 * T1_y;
 
+    double dh00 = 6.0 * u2 - 6.0 * u;
     double dh10 = 3.0 * u2 - 4.0 * u + 1.0;
     double dh01 = -6.0 * u2 + 6.0 * u;
     double dh11 = 3.0 * u2 - 2.0 * u;
 
-    double dx = dh10 * T0_x + dh01 * xg + dh11 * T1_x;
-    double dy = dh10 * T0_y + dh01 * yg + dh11 * T1_y;
+    double dx = dh00 * x0 + dh10 * T0_x + dh01 * xg + dh11 * T1_x;
+    double dy = dh00 * y0 + dh10 * T0_y + dh01 * yg + dh11 * T1_y;
 
     double t_norm = std::hypot(dx, dy);
     double nx, ny;
@@ -448,25 +451,28 @@ public:
   // --------------------------------------------------------------------------
   // Evaluates analytical curvature kappa(u) of Hermite Spline Reference Curve
   // --------------------------------------------------------------------------
-  static inline double eval_hermite_curvature(double u, double T0_x,
-                                              double T0_y, double xg, double yg,
+  static inline double eval_hermite_curvature(double u, double x0, double y0,
+                                              double T0_x, double T0_y,
+                                              double xg, double yg,
                                               double T1_x, double T1_y) {
     u = std::max(0.0, std::min(1.0, u));
     double u2 = u * u;
 
+    double dh00 = 6.0 * u2 - 6.0 * u;
     double dh10 = 3.0 * u2 - 4.0 * u + 1.0;
     double dh01 = -6.0 * u2 + 6.0 * u;
     double dh11 = 3.0 * u2 - 2.0 * u;
 
-    double dx = dh10 * T0_x + dh01 * xg + dh11 * T1_x;
-    double dy = dh10 * T0_y + dh01 * yg + dh11 * T1_y;
+    double dx = dh00 * x0 + dh10 * T0_x + dh01 * xg + dh11 * T1_x;
+    double dy = dh00 * y0 + dh10 * T0_y + dh01 * yg + dh11 * T1_y;
 
+    double d2h00 = 12.0 * u - 6.0;
     double d2h10 = 6.0 * u - 4.0;
     double d2h01 = -12.0 * u + 6.0;
     double d2h11 = 6.0 * u - 2.0;
 
-    double ddx = d2h10 * T0_x + d2h01 * xg + d2h11 * T1_x;
-    double ddy = d2h10 * T0_y + d2h01 * yg + d2h11 * T1_y;
+    double ddx = d2h00 * x0 + d2h10 * T0_x + d2h01 * xg + d2h11 * T1_x;
+    double ddy = d2h00 * y0 + d2h10 * T0_y + d2h01 * yg + d2h11 * T1_y;
 
     double speed_sq = dx * dx + dy * dy;
     double denom = std::pow(speed_sq, 1.5);
@@ -561,16 +567,17 @@ public:
       double &cmd_steer, double &cmd_speed, double xg, double v_bar,
       double delta_0, bool use_mpc_step2 = false, double mpc_x_2 = 0.0,
       double mpc_y_2 = 0.0, double mpc_psi_2 = 0.0, double mpc_v_2 = 0.0,
-      double mpc_delta_2 = 0.0) {
+      double mpc_delta_2 = 0.0, double x0 = 0.0, double y0 = 0.0,
+      double psi0 = 0.0) {
     double dt_sim_step = dt_actuator > 0.005 ? dt_actuator : (1.0 / 60.0);
     double max_delta_rate_step = MAX_SERVO_RATE_RAD_S_CONST * dt_sim_step;
     double max_a_acc = 0.85 * mu_friction * GRAVITY_G_CONST;
     double max_a_dec = 1.00 * mu_friction * GRAVITY_G_CONST;
 
-    // Actual State at t = 0 (vehicle frame origin: x=0, y=0, psi=0)
-    double act_x = 0.0;
-    double act_y = 0.0;
-    double act_psi = 0.0;
+    // Actual State at t = 0 (vehicle frame origin or projected anchor: x0, y0, psi0)
+    double act_x = x0;
+    double act_y = y0;
+    double act_psi = psi0;
     double act_v = std::max(0.0, v_bar);
     double act_delta = delta_0;
 
@@ -681,7 +688,7 @@ public:
     // Starts with 0.0 steering, heading 0.0, at vehicle origin (0, 0).
     // An actually straight line projecting directly forward along the vehicle longitudinal axis (+Y).
     shield_straight_zero_safe = simulate_and_probe_branch(
-        0.0, 0.0, act_v, 0.0, 0.0, // x0=0, y0=0, psi0=0, delta0=0 (starts with 0 steer!)
+        x0, y0, act_v, psi0, delta_0, // x0, y0, psi0, delta0
         0.0, // target_steer = 0.0 (stays with 0 steer!)
         std::max(v_cruise_min,
                  act_v - 0.70 * max_a_dec * straight_lookahead_time),
@@ -767,8 +774,8 @@ public:
           cmd_speed = emergency_speed;
         } else if (shield_k1_l_safe && shield_k1_r_safe) {
           shield_active = true;
-          cmd_steer = (xg < 0.0) ? +MAX_STEERING_RAD_CONST : -MAX_STEERING_RAD_CONST;
-          shield_chosen_id = (xg < 0.0) ? 2 : 3; // k1_left or k1_right
+          cmd_steer = ((xg - x0) < 0.0) ? +MAX_STEERING_RAD_CONST : -MAX_STEERING_RAD_CONST;
+          shield_chosen_id = ((xg - x0) < 0.0) ? 2 : 3; // k1_left or k1_right
           cmd_speed = emergency_speed;
         } else {
           // All forward evasion paths exhausted -> recommend reverse
@@ -788,21 +795,24 @@ public:
   int plan(double xg, double yg, double theta_g, double /*aperture_width*/,
            double v_current, double steer_current, double yaw_rate_current,
            double *out_cmd_steer_rad, double *out_cmd_speed_mps,
-           double *out_best_cost, int *out_osqp_iters, int *out_status_code) {
+           double *out_best_cost, int *out_osqp_iters, int *out_status_code,
+           double x0 = 0.0, double y0 = 0.0, double psi0 = 0.0) {
     double v_bar = std::max(0.0, v_current);
     double delta_0 = steer_current;
     double r_0 = yaw_rate_current;
 
     // 0. Fast Straight-Line Lock (Zero Compute Bypass when Corridor is Open
     // Ahead >= 1.70m)
-    if (yg >= straight_lock_dist_m && std::abs(xg) <= 0.20 &&
-        std::abs(theta_g) <= 0.22) {
+    if ((yg - y0) >= straight_lock_dist_m && std::abs(xg - x0) <= 0.20 &&
+        std::abs(theta_g - psi0) <= 0.22) {
       // Verify front blindspot (0-40cm) is clear of obstacles before engaging straight lock
       bool straight_clear = true;
+      float cos_psi = -static_cast<float>(std::sin(psi0));
+      float sin_psi =  static_cast<float>(std::cos(psi0));
       if (costmap_probe_func && costmap_handle) {
         for (double py_check = 0.05; py_check <= 0.40; py_check += 0.05) {
-          float px = 0.0f;
-          float py = static_cast<float>(py_check);
+          float px = static_cast<float>(x0 + py_check * cos_psi);
+          float py = static_cast<float>(y0 + py_check * sin_psi);
           if (costmap_probe_func(costmap_handle, &px, &py, 1) == 0) {
             straight_clear = false;
             break;
@@ -813,7 +823,8 @@ public:
       if (straight_clear) {
         double cmd_steer = 0.0;
         double cmd_speed = straight_lock_speed_mps;
-        run_shield_rollout_and_cascade(cmd_steer, cmd_speed, xg, v_bar, delta_0);
+        run_shield_rollout_and_cascade(cmd_steer, cmd_speed, xg, v_bar, delta_0,
+                                       false, 0, 0, 0, 0, 0, x0, y0, psi0);
 
         *out_cmd_steer_rad = cmd_steer;
         *out_cmd_speed_mps = cmd_speed;
@@ -824,8 +835,9 @@ public:
         best_line_count = N + 1;
         for (int k = 0; k <= N; ++k) {
           double u = static_cast<double>(k) / N;
-          best_line_x[k] = 0.0;
-          best_line_y[k] = 0.05 + u * (straight_lock_dist_m - 0.05);
+          double d_proj = 0.05 + u * (straight_lock_dist_m - 0.05);
+          best_line_x[k] = x0 + d_proj * cos_psi;
+          best_line_y[k] = y0 + d_proj * sin_psi;
         }
         guide_line_count = 0;
         corridor_count = 0;
@@ -834,29 +846,28 @@ public:
     }
 
     // 1. Establish Curvilinear Reference Spline towards gap centroid
-    double L_guide = std::hypot(xg, std::max(0.35, yg));
+    double L_guide = std::hypot(xg - x0, std::max(0.35, yg - y0));
     double v_nom = std::max(v_bar, 1.20);
     double dt_val = this->dt;
 
     // Tangent vector at start:
-    // Aligned with the vehicle body's forward axis (+Y) to ensure a smooth,
-    // monotonic reference curve without opposite-direction hook/kink artifacts.
-    double T0_x = 0.0;
-    double T0_y = L_guide;
+    // Aligned with the vehicle's projected heading (psi0):
+    double T0_x = -L_guide * std::sin(psi0);
+    double T0_y =  L_guide * std::cos(psi0);
 
     // Tangent vector at target gap opening:
-    double T1_x = xg;
-    double T1_y = std::max(0.35, yg);
+    double T1_x = xg - x0;
+    double T1_y = std::max(0.35, yg - y0);
 
     // Corner braking ceiling from target gap curvature and local spline
     // curvature
-    double dist_gap_sq = xg * xg + yg * yg;
-    double kappa_turn = 2.0 * std::abs(xg) / std::max(dist_gap_sq, 0.04);
+    double dist_gap_sq = (xg - x0) * (xg - x0) + (yg - y0) * (yg - y0);
+    double kappa_turn = 2.0 * std::abs(xg - x0) / std::max(dist_gap_sq, 0.04);
     double lat_limit = mu_friction * GRAVITY_G_CONST * v_corner_factor;
     double a_decel = 1.00 * mu_friction * GRAVITY_G_CONST;
 
     // Preferred bypass side
-    double pref_side = (xg < 0.0) ? 1.0 : ((xg > 0.0) ? -1.0 : 0.0);
+    double pref_side = ((xg - x0) < 0.0) ? 1.0 : (((xg - x0) > 0.0) ? -1.0 : 0.0);
 
     // Sample corridor bounds for each MPC horizon step k with continuous sub-stepping
     double d_min_bounds[N + 1];
@@ -864,13 +875,13 @@ public:
     HermiteState step_states[N + 1];
 
     // Front-bumper clearance margin based on gap angle
-    double angle_to_gap = std::atan2(xg, std::max(0.35, yg));
-    double yaw_clearance_margin = LF_CONST * std::abs(std::sin(angle_to_gap));
+    double angle_to_gap = std::atan2(xg - x0, std::max(0.35, yg - y0));
+    double yaw_clearance_margin = LF_CONST * std::abs(std::sin(angle_to_gap - psi0));
 
     for (int k = 0; k <= N; ++k) {
       double sk = std::min(L_guide, k * v_nom * dt_val);
       double uk = sk / std::max(L_guide, 0.01);
-      step_states[k] = eval_hermite(uk, T0_x, T0_y, xg, yg, T1_x, T1_y);
+      step_states[k] = eval_hermite(uk, x0, y0, T0_x, T0_y, xg, yg, T1_x, T1_y);
 
       double d_min_k, d_max_k;
       find_corridor_bounds(step_states[k].gx, step_states[k].gy,
@@ -883,7 +894,7 @@ public:
         double sk_prev = std::min(L_guide, (k - 1) * v_nom * dt_val);
         double u_mid = (0.5 * (sk_prev + sk)) / std::max(L_guide, 0.01);
         HermiteState s_mid =
-            eval_hermite(u_mid, T0_x, T0_y, xg, yg, T1_x, T1_y);
+            eval_hermite(u_mid, x0, y0, T0_x, T0_y, xg, yg, T1_x, T1_y);
         double d_min_mid, d_max_mid;
         find_corridor_bounds(s_mid.gx, s_mid.gy, s_mid.nx, s_mid.ny, pref_side,
                              d_min_mid, d_max_mid);
@@ -922,7 +933,7 @@ public:
 
       double kappa_k =
           std::max(kappa_turn,
-                   eval_hermite_curvature(uk, T0_x, T0_y, xg, yg, T1_x, T1_y));
+                   eval_hermite_curvature(uk, x0, y0, T0_x, T0_y, xg, yg, T1_x, T1_y));
       double v_corner_k = std::sqrt(lat_limit / std::max(kappa_k, 0.08));
 
       if (blocked_ahead) {
@@ -1025,7 +1036,9 @@ public:
     std::memset(u_arr, 0, sizeof(u_arr));
 
     // Initial state: heading error towards gap target drives the QP to steer into the turn
-    double e_psi_0 = angle_to_gap;
+    double e_psi_0 = angle_to_gap - psi0;
+    while (e_psi_0 > PI_CONST) e_psi_0 -= 2.0 * PI_CONST;
+    while (e_psi_0 < -PI_CONST) e_psi_0 += 2.0 * PI_CONST;
     double x_init[7] = {0.0, 0.0, e_psi_0, v_bar, 0.0, r_0, delta_0};
     for (int i = 0; i < 7; ++i) {
       l_arr[i] = x_init[i];
@@ -1135,12 +1148,12 @@ public:
 
       // Extract best predicted line via forward kinematic bicycle rollout of optimal solution
       best_line_count = N + 1;
-      best_line_x[0] = 0.0;
-      best_line_y[0] = 0.0;
-      double cur_x = 0.0;
-      double cur_y = 0.0;
-      double cur_psi = 0.0;
-      double mpc_psi_2 = 0.0;
+      best_line_x[0] = x0;
+      best_line_y[0] = y0;
+      double cur_x = x0;
+      double cur_y = y0;
+      double cur_psi = psi0;
+      double mpc_psi_2 = psi0;
 
       for (int k = 0; k < N; ++k) {
         double vk = std::max(0.10, solver.solution->x[k * nx + 3]);
@@ -1195,7 +1208,7 @@ public:
 
       run_shield_rollout_and_cascade(cmd_steer, cmd_speed, xg, v_bar, delta_0,
                                      true, mpc_x_2, mpc_y_2, mpc_psi_2, mpc_v_2,
-                                     mpc_delta_2);
+                                     mpc_delta_2, x0, y0, psi0);
 
       *out_cmd_steer_rad = cmd_steer;
       *out_cmd_speed_mps = cmd_speed;
@@ -1206,9 +1219,9 @@ public:
     *out_status_code = -1; // FALLBACK_SL_MPC
     double fb_steer = std::max(
         -MAX_STEERING_RAD_CONST,
-        std::min(MAX_STEERING_RAD_CONST, -std::atan2(xg, std::max(0.40, yg))));
+        std::min(MAX_STEERING_RAD_CONST, -std::atan2(xg - x0, std::max(0.40, yg - y0)) + psi0));
     double fb_speed = v_cruise_min;
-    run_shield_rollout_and_cascade(fb_steer, fb_speed, xg, v_bar, delta_0);
+    run_shield_rollout_and_cascade(fb_steer, fb_speed, xg, v_bar, delta_0, false, 0, 0, 0, 0, 0, x0, y0, psi0);
 
     *out_cmd_steer_rad = fb_steer;
     *out_cmd_speed_mps = fb_speed;
@@ -1216,7 +1229,7 @@ public:
     best_line_count = 16;
     for (int i = 0; i < 16; ++i) {
       double u = static_cast<double>(i) / 15.0;
-      HermiteState s = eval_hermite(u, T0_x, T0_y, xg, yg, T1_x, T1_y);
+      HermiteState s = eval_hermite(u, x0, y0, T0_x, T0_y, xg, yg, T1_x, T1_y);
       best_line_x[i] = s.gx;
       best_line_y[i] = s.gy;
     }
@@ -1285,7 +1298,24 @@ SL_MPC_API int sl_mpc_plan(void *handle, double xg, double yg, double theta_g,
   return planner->plan(xg, yg, theta_g, aperture_width, v_current,
                        steer_current, yaw_rate_current, out_cmd_steer_rad,
                        out_cmd_speed_mps, out_best_cost, out_osqp_iters,
-                       out_status_code);
+                       out_status_code, 0.0, 0.0, 0.0);
+}
+
+SL_MPC_API int sl_mpc_plan_projected(
+    void *handle, double xg, double yg, double theta_g,
+    double aperture_width, double v_current,
+    double steer_current, double yaw_rate_current,
+    double x0, double y0, double psi0,
+    double *out_cmd_steer_rad, double *out_cmd_speed_mps,
+    double *out_best_cost, int *out_osqp_iters,
+    int *out_status_code) {
+  if (!handle)
+    return 0;
+  auto *planner = static_cast<CurvilinearSLMPCNative *>(handle);
+  return planner->plan(xg, yg, theta_g, aperture_width, v_current,
+                       steer_current, yaw_rate_current, out_cmd_steer_rad,
+                       out_cmd_speed_mps, out_best_cost, out_osqp_iters,
+                       out_status_code, x0, y0, psi0);
 }
 
 SL_MPC_API int sl_mpc_get_best_line(void *handle, double *out_xs,

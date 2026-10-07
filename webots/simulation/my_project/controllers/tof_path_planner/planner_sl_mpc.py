@@ -121,6 +121,20 @@ if CPP_AVAILABLE and _lib is not None:
     ]
     _lib.sl_mpc_plan.restype = ctypes.c_int
 
+    if hasattr(_lib, "sl_mpc_plan_projected"):
+        _lib.sl_mpc_plan_projected.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_double,
+            ctypes.c_double, ctypes.c_double, ctypes.c_double,
+            ctypes.c_double, ctypes.c_double, ctypes.c_double,
+            ctypes.POINTER(ctypes.c_double),
+            ctypes.POINTER(ctypes.c_double),
+            ctypes.POINTER(ctypes.c_double),
+            ctypes.POINTER(ctypes.c_int),
+            ctypes.POINTER(ctypes.c_int),
+        ]
+        _lib.sl_mpc_plan_projected.restype = ctypes.c_int
+
     _lib.sl_mpc_get_best_line.argtypes = [
         ctypes.c_void_p,
         ctypes.POINTER(ctypes.c_double),
@@ -379,6 +393,9 @@ class CppCurvilinearSLMPC:
         steer_current: float,
         yaw_rate_current: float,
         extra_targets: Optional[List[Tuple[float, float, float]]] = None,
+        x0: float = 0.0,
+        y0: float = 0.0,
+        psi0: float = 0.0,
     ) -> Dict[str, any]:
         """
         Solves the Curvilinear SL-MPC QP using high-speed native C++ core.
@@ -428,21 +445,34 @@ class CppCurvilinearSLMPC:
 
         tx_prim, ty_prim, ap_prim = prim_target[:3]
         is_clear_prim = bool(prim_target[3]) if len(prim_target) >= 4 else (math.hypot(tx_prim, ty_prim) >= 1.60)
-        theta_prim = math.atan2(tx_prim, max(0.20, ty_prim))
+        theta_prim = math.atan2(tx_prim - x0, max(0.20, ty_prim - y0))
 
         # ----------------------------------------------------------------------
         # 1. SOLVE INCUMBENT (PRIMARY) RACING LINE
         # ----------------------------------------------------------------------
-        success_prim = _lib.sl_mpc_plan(
-            self._handle,
-            float(tx_prim), float(ty_prim), float(theta_prim), float(ap_prim),
-            float(v_current), float(steer_current), float(yaw_rate_current),
-            ctypes.byref(self._out_steer),
-            ctypes.byref(self._out_speed),
-            ctypes.byref(self._out_best_cost),
-            ctypes.byref(self._out_osqp_iters),
-            ctypes.byref(self._out_status_code),
-        )
+        if hasattr(_lib, "sl_mpc_plan_projected"):
+            success_prim = _lib.sl_mpc_plan_projected(
+                self._handle,
+                float(tx_prim), float(ty_prim), float(theta_prim), float(ap_prim),
+                float(v_current), float(steer_current), float(yaw_rate_current),
+                float(x0), float(y0), float(psi0),
+                ctypes.byref(self._out_steer),
+                ctypes.byref(self._out_speed),
+                ctypes.byref(self._out_best_cost),
+                ctypes.byref(self._out_osqp_iters),
+                ctypes.byref(self._out_status_code),
+            )
+        else:
+            success_prim = _lib.sl_mpc_plan(
+                self._handle,
+                float(tx_prim), float(ty_prim), float(theta_prim), float(ap_prim),
+                float(v_current), float(steer_current), float(yaw_rate_current),
+                ctypes.byref(self._out_steer),
+                ctypes.byref(self._out_speed),
+                ctypes.byref(self._out_best_cost),
+                ctypes.byref(self._out_osqp_iters),
+                ctypes.byref(self._out_status_code),
+            )
 
         status_prim = self._out_status_code.value
         cmd_steer_prim = float(self._out_steer.value)
@@ -477,17 +507,30 @@ class CppCurvilinearSLMPC:
             min_sep = getattr(self, "alt_min_separation_m", 0.06)
             if math.hypot(tx_alt - tx_prim, ty_alt - ty_prim) >= min_sep or abs(tx_alt - tx_prim) >= (min_sep * 0.7):
                 has_challenger = True
-                theta_alt = math.atan2(tx_alt, max(0.20, ty_alt))
-                _lib.sl_mpc_plan(
-                    self._handle_alt,
-                    float(tx_alt), float(ty_alt), float(theta_alt), float(ap_alt),
-                    float(v_current), float(steer_current), float(yaw_rate_current),
-                    ctypes.byref(self._out_steer),
-                    ctypes.byref(self._out_speed),
-                    ctypes.byref(self._out_best_cost),
-                    ctypes.byref(self._out_osqp_iters),
-                    ctypes.byref(self._out_status_code),
-                )
+                theta_alt = math.atan2(tx_alt - x0, max(0.20, ty_alt - y0))
+                if hasattr(_lib, "sl_mpc_plan_projected"):
+                    _lib.sl_mpc_plan_projected(
+                        self._handle_alt,
+                        float(tx_alt), float(ty_alt), float(theta_alt), float(ap_alt),
+                        float(v_current), float(steer_current), float(yaw_rate_current),
+                        float(x0), float(y0), float(psi0),
+                        ctypes.byref(self._out_steer),
+                        ctypes.byref(self._out_speed),
+                        ctypes.byref(self._out_best_cost),
+                        ctypes.byref(self._out_osqp_iters),
+                        ctypes.byref(self._out_status_code),
+                    )
+                else:
+                    _lib.sl_mpc_plan(
+                        self._handle_alt,
+                        float(tx_alt), float(ty_alt), float(theta_alt), float(ap_alt),
+                        float(v_current), float(steer_current), float(yaw_rate_current),
+                        ctypes.byref(self._out_steer),
+                        ctypes.byref(self._out_speed),
+                        ctypes.byref(self._out_best_cost),
+                        ctypes.byref(self._out_osqp_iters),
+                        ctypes.byref(self._out_status_code),
+                    )
                 status_alt = self._out_status_code.value
                 cmd_steer_alt = float(self._out_steer.value)
                 cmd_speed_alt = float(self._out_speed.value)

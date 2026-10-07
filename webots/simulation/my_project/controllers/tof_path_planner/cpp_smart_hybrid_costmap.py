@@ -84,6 +84,26 @@ if hasattr(_lib, "costmap_scout_gaps"):
     ]
     _lib.costmap_scout_gaps.restype = ctypes.c_int
 
+if hasattr(_lib, "costmap_scout_gaps_projected"):
+    _lib.costmap_scout_gaps_projected.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_float),  # ranges_16
+        ctypes.c_float, ctypes.c_float,  # max_lookahead_m, steer_current
+        ctypes.c_float, ctypes.c_float,  # w_gap_distance, w_gap_width
+        ctypes.c_float, ctypes.c_float,  # w_align_steer, w_align_straight
+        ctypes.c_float,                  # w_side_clearance
+        ctypes.c_float, ctypes.c_float,  # gap_dist_exp_k, gap_dist_thresh_m
+        ctypes.c_float, ctypes.c_float,  # alt_min_separation_m, alt_aperture_bias
+        ctypes.c_float, ctypes.c_float,  # scout_obs_width_m, scout_block_dist_m
+        ctypes.c_float, ctypes.c_float,  # scout_straight_pen_k, scout_straight_exp_k
+        ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), # out_targets_x, y, ap
+        ctypes.c_int,                    # max_targets
+        ctypes.POINTER(ctypes.c_uint8),  # custom_hazard_mask (optional)
+        ctypes.POINTER(ctypes.c_float),  # out_targets_clear (optional)
+        ctypes.c_float, ctypes.c_float, ctypes.c_float, # anchor_x, anchor_y, anchor_yaw
+    ]
+    _lib.costmap_scout_gaps_projected.restype = ctypes.c_int
+
 if hasattr(_lib, "costmap_probe_path"):
     _lib.costmap_probe_path.argtypes = [
         ctypes.c_void_p,
@@ -336,6 +356,9 @@ class CppSmartHybridCostmap:
         scout_straight_exp_k: float = 1.50,
         top_k: int = 2,
         hazard_mask: Optional[np.ndarray] = None,
+        anchor_x: float = 0.0,
+        anchor_y: float = 0.0,
+        anchor_yaw: float = 0.0,
     ) -> List[Tuple[float, float, float]]:
         """
         Executes C++ native gap scouting across the active hazard_mask.
@@ -348,31 +371,61 @@ class CppSmartHybridCostmap:
 
         eff_thresh = float(1.00 + gap_progress_margin_m) if gap_progress_margin_m is not None else float(gap_dist_thresh_m)
 
-        n_found = _lib.costmap_scout_gaps(
-            self._handle,
-            self.raw_ranges_c,
-            float(max_lookahead_m),
-            float(steer_current),
-            float(w_gap_distance),
-            float(w_gap_width),
-            float(w_align_steer),
-            float(w_align_straight),
-            float(w_side_clearance),
-            float(gap_dist_exp_k),
-            float(eff_thresh),
-            float(alt_min_separation_m),
-            float(alt_aperture_bias),
-            float(scout_obs_width_m),
-            float(scout_block_dist_m),
-            float(scout_straight_pen_k),
-            float(scout_straight_exp_k),
-            self._out_targets_x,
-            self._out_targets_y,
-            self._out_targets_ap,
-            int(top_k),
-            haz_ptr,
-            self._out_targets_clear,
-        )
+        if hasattr(_lib, "costmap_scout_gaps_projected"):
+            n_found = _lib.costmap_scout_gaps_projected(
+                self._handle,
+                self.raw_ranges_c,
+                float(max_lookahead_m),
+                float(steer_current),
+                float(w_gap_distance),
+                float(w_gap_width),
+                float(w_align_steer),
+                float(w_align_straight),
+                float(w_side_clearance),
+                float(gap_dist_exp_k),
+                float(eff_thresh),
+                float(alt_min_separation_m),
+                float(alt_aperture_bias),
+                float(scout_obs_width_m),
+                float(scout_block_dist_m),
+                float(scout_straight_pen_k),
+                float(scout_straight_exp_k),
+                self._out_targets_x,
+                self._out_targets_y,
+                self._out_targets_ap,
+                int(top_k),
+                haz_ptr,
+                self._out_targets_clear,
+                float(anchor_x),
+                float(anchor_y),
+                float(anchor_yaw),
+            )
+        else:
+            n_found = _lib.costmap_scout_gaps(
+                self._handle,
+                self.raw_ranges_c,
+                float(max_lookahead_m),
+                float(steer_current),
+                float(w_gap_distance),
+                float(w_gap_width),
+                float(w_align_steer),
+                float(w_align_straight),
+                float(w_side_clearance),
+                float(gap_dist_exp_k),
+                float(eff_thresh),
+                float(alt_min_separation_m),
+                float(alt_aperture_bias),
+                float(scout_obs_width_m),
+                float(scout_block_dist_m),
+                float(scout_straight_pen_k),
+                float(scout_straight_exp_k),
+                self._out_targets_x,
+                self._out_targets_y,
+                self._out_targets_ap,
+                int(top_k),
+                haz_ptr,
+                self._out_targets_clear,
+            )
 
         targets = []
         for i in range(max(1, min(n_found, top_k))):

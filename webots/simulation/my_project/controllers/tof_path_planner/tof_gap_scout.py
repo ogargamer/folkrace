@@ -187,6 +187,9 @@ class ToFGapScout:
         target_lookahead_m: float = 1.70,
         steer_current: float = 0.0,
         prob_map: Optional[np.ndarray] = None,
+        anchor_x: float = 0.0,
+        anchor_y: float = 0.0,
+        anchor_yaw: float = 0.0,
     ) -> Tuple[float, float, float, float]:
         """
         Returns primary (x_g, y_g, aperture_width_m, recovery_heading_rad).
@@ -199,11 +202,14 @@ class ToFGapScout:
             max_lookahead_m=target_lookahead_m,
             top_k=2,
             steer_current=steer_current,
+            anchor_x=anchor_x,
+            anchor_y=anchor_y,
+            anchor_yaw=anchor_yaw,
         )
 
         if not targets:
-            xg_prim = 0.0
-            yg_prim = max(GAP_MIN_LOOKAHEAD_M, min(target_lookahead_m, 1.70))
+            xg_prim = anchor_x
+            yg_prim = anchor_y + max(GAP_MIN_LOOKAHEAD_M, min(target_lookahead_m, 1.70))
             aperture = 0.45
         else:
             xg_prim, yg_prim, aperture = targets[0][:3]
@@ -214,7 +220,8 @@ class ToFGapScout:
         self.last_aperture = aperture
         self.last_targets = targets
 
-        theta_g = math.atan2(xg_prim, yg_prim)
+        raw_rel = math.atan2(xg_prim - anchor_x, max(0.20, yg_prim - anchor_y)) - anchor_yaw
+        theta_g = math.atan2(math.sin(raw_rel), math.cos(raw_rel))
         return xg_prim, yg_prim, aperture, theta_g
 
     def find_furthest_targets(
@@ -226,6 +233,9 @@ class ToFGapScout:
         top_k: int = 3,
         steer_current: float = 0.0,
         prob_map: Optional[np.ndarray] = None,
+        anchor_x: float = 0.0,
+        anchor_y: float = 0.0,
+        anchor_yaw: float = 0.0,
     ) -> List[Tuple[float, float, float]]:
         """
         Extracts furthest targets by evaluating real ToF beam sightlines and dense radial
@@ -254,6 +264,9 @@ class ToFGapScout:
                 scout_straight_exp_k=self.scout_straight_exp_k,
                 top_k=top_k,
                 hazard_mask=hazard_mask,
+                anchor_x=anchor_x,
+                anchor_y=anchor_y,
+                anchor_yaw=anchor_yaw,
             )
             return targets
 
@@ -300,10 +313,13 @@ class ToFGapScout:
                 eff_dist = max(0.05, clear_dist - 0.075) if hit_obs else clear_dist
                 tx = sx + eff_dist * cos_h
                 ty = max(0.08, sy + eff_dist * sin_h)
-                total_dist = math.hypot(tx, ty)
+                d_ax = tx - anchor_x
+                d_ay = max(0.05, ty - anchor_y)
+                total_dist = math.hypot(d_ax, d_ay)
 
-                # Heading in steering coordinates (positive = left)
-                rel_angle = math.atan2(tx, ty)
+                # Heading in steering coordinates relative to anchor (positive = left)
+                raw_rel = math.atan2(d_ax, d_ay) - anchor_yaw
+                rel_angle = math.atan2(math.sin(raw_rel), math.cos(raw_rel))
                 steer_equiv = -rel_angle
 
                 # Aperture estimation around this beam
@@ -354,10 +370,13 @@ class ToFGapScout:
                 # Physical target point in vehicle local coordinates (origin at vehicle center / rear axle)
                 tx = ox + eff_dist * cos_az
                 ty = max(0.08, oy + eff_dist * sin_az)
-                total_dist = math.hypot(tx, ty)
+                d_ax = tx - anchor_x
+                d_ay = max(0.05, ty - anchor_y)
+                total_dist = math.hypot(d_ax, d_ay)
 
-                # True relative angle from vehicle origin (0, 0) to target (tx, ty)
-                rel_angle = math.atan2(tx, ty)
+                # True relative angle from anchor to target (tx, ty)
+                raw_rel = math.atan2(d_ax, d_ay) - anchor_yaw
+                rel_angle = math.atan2(math.sin(raw_rel), math.cos(raw_rel))
                 steer_equiv = -rel_angle
                 aperture_m = max(GAP_MIN_WIDTH_M, min(1.20, total_dist * 0.30))
 
@@ -369,7 +388,7 @@ class ToFGapScout:
                 })
 
         if not candidates:
-            return [(0.0, max_lookahead_m, 0.40, True)]
+            return [(anchor_x, anchor_y + max_lookahead_m, 0.40, True)]
 
         max_clear_dist = max([c["dist"] for c in candidates])
         has_far_path = max_clear_dist > 0.85
@@ -378,14 +397,17 @@ class ToFGapScout:
         # ----------------------------------------------------------------------
         # 3. SCORE CANDIDATE TARGETS
         # ----------------------------------------------------------------------
-        # Check forward clearance directly along vehicle centerline (single raycast straight ahead)
+        # Check forward clearance directly along vehicle forward axis from anchor
         d_center = max_clear_dist
         if hazard_mask is not None:
             n_center_steps = int(max_r / step_ds)
+            cos_fwd = -math.sin(anchor_yaw)
+            sin_fwd =  math.cos(anchor_yaw)
             for s in range(1, n_center_steps + 1):
                 d = s * step_ds
-                py = 0.095 + d
-                col = int(round((0.0 - x_min) / res))
+                px = anchor_x + d * cos_fwd
+                py = anchor_y + 0.095 + d * sin_fwd
+                col = int(round((px - x_min) / res))
                 row = int(round((py - y_min) / res))
                 if row < 0 or row >= h or col < 0 or col >= w or hazard_mask[row, col] > 0:
                     d_center = max(0.0, d - step_ds)

@@ -363,7 +363,10 @@ public:
         float* out_targets_aperture,
         int max_targets,
         const uint8_t* custom_hazard_mask = nullptr,
-        float* out_targets_clear = nullptr
+        float* out_targets_clear = nullptr,
+        float anchor_x = 0.0f,
+        float anchor_y = 0.0f,
+        float anchor_yaw = 0.0f
     ) {
         const uint8_t* active_haz = custom_hazard_mask ? custom_hazard_mask : hazard_mask.data();
         constexpr float GAP_MIN_LOOKAHEAD_M = 0.20f;
@@ -415,8 +418,11 @@ public:
                 float eff_dist = hit_obs ? std::max(0.05f, clear_dist - 0.075f) : clear_dist;
                 float tx = sx + eff_dist * cos_h;
                 float ty = std::max(0.08f, sy + eff_dist * sin_h);
-                float total_dist = std::hypot(tx, ty);
-                float rel_angle = std::atan2(tx, ty);
+
+                float d_anchor_x = tx - anchor_x;
+                float d_anchor_y = std::max(0.05f, ty - anchor_y);
+                float total_dist = std::hypot(d_anchor_x, d_anchor_y);
+                float rel_angle = wrap_angle(std::atan2(d_anchor_x, d_anchor_y) - anchor_yaw);
                 float steer_equiv = -rel_angle;
                 float aperture_m = std::max(GAP_MIN_WIDTH_M, std::min(1.20f, total_dist * 0.35f));
                 bool is_clear = (!hit_obs) && (ranges_16[i] >= 1.79f || total_dist >= (max_r - 0.05f));
@@ -477,8 +483,11 @@ public:
                 float eff_dist = hit_obs ? std::max(0.05f, clear_dist - 0.06f) : clear_dist;
                 float tx = ox + eff_dist * cos_az;
                 float ty = std::max(0.08f, oy + eff_dist * sin_az);
-                float total_dist = std::hypot(tx, ty);
-                float rel_angle = std::atan2(tx, ty);
+
+                float d_anchor_x = tx - anchor_x;
+                float d_anchor_y = std::max(0.05f, ty - anchor_y);
+                float total_dist = std::hypot(d_anchor_x, d_anchor_y);
+                float rel_angle = wrap_angle(std::atan2(d_anchor_x, d_anchor_y) - anchor_yaw);
                 float steer_equiv = -rel_angle;
                 float aperture_m = std::max(GAP_MIN_WIDTH_M, std::min(1.20f, total_dist * 0.30f));
                 bool is_clear = (!hit_obs);
@@ -500,13 +509,16 @@ public:
             if (candidates[i].dist > max_clear_dist) max_clear_dist = candidates[i].dist;
         }
 
-        // Single direct raycast straight ahead (x = 0, +Y axis) on inflated costmap
+        // Single direct raycast straight ahead from anchor on inflated costmap
         float d_center = max_r;
         int n_center_steps = static_cast<int>(max_r / step_ds);
+        float cos_fwd = -std::sin(anchor_yaw);
+        float sin_fwd =  std::cos(anchor_yaw);
         for (int s = 1; s <= n_center_steps; ++s) {
             float d = s * step_ds;
-            float py = 0.095f + d;
-            int col = static_cast<int>(std::round((0.0f - x_min) / res));
+            float px = anchor_x + d * cos_fwd;
+            float py = anchor_y + 0.095f + d * sin_fwd;
+            int col = static_cast<int>(std::round((px - x_min) / res));
             int row = static_cast<int>(std::round((py - y_min) / res));
             if (col < 0 || col >= width || row < 0 || row >= height || active_haz[row * width + col] > 0) {
                 d_center = std::max(0.0f, d - step_ds);
@@ -777,7 +789,53 @@ COSTMAP_API int costmap_scout_gaps(
         out_targets_x, out_targets_y, out_targets_aperture,
         max_targets,
         custom_hazard_mask,
-        out_targets_clear
+        out_targets_clear,
+        0.0f, 0.0f, 0.0f
+    );
+}
+
+COSTMAP_API int costmap_scout_gaps_projected(
+    void* handle,
+    const float* ranges_16,
+    float max_lookahead_m,
+    float steer_current,
+    float w_gap_distance,
+    float w_gap_width,
+    float w_align_steer,
+    float w_align_straight,
+    float w_side_clearance,
+    float gap_dist_exp_k,
+    float gap_dist_thresh_m,
+    float alt_min_separation_m,
+    float alt_aperture_bias,
+    float scout_obs_width_m,
+    float scout_block_dist_m,
+    float scout_straight_pen_k,
+    float scout_straight_exp_k,
+    float* out_targets_x,
+    float* out_targets_y,
+    float* out_targets_aperture,
+    int max_targets,
+    const uint8_t* custom_hazard_mask,
+    float* out_targets_clear,
+    float anchor_x,
+    float anchor_y,
+    float anchor_yaw
+) {
+    if (!handle) return 0;
+    auto* cm = static_cast<SmartHybridCostmapFront*>(handle);
+    return cm->scout_gaps(
+        ranges_16, max_lookahead_m, steer_current,
+        w_gap_distance, w_gap_width, w_align_steer, w_align_straight, w_side_clearance,
+        gap_dist_exp_k, gap_dist_thresh_m, alt_min_separation_m, alt_aperture_bias,
+        scout_obs_width_m, scout_block_dist_m, scout_straight_pen_k, scout_straight_exp_k,
+        out_targets_x, out_targets_y, out_targets_aperture,
+        max_targets,
+        custom_hazard_mask,
+        out_targets_clear,
+        anchor_x,
+        anchor_y,
+        anchor_yaw
     );
 }
 
