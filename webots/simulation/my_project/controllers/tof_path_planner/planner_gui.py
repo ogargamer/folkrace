@@ -1166,7 +1166,47 @@ class ComprehensivePlannerGUI(QMainWindow):
 
         panel_layout.addWidget(sim_group)
 
-        # 2b. PHASE 3 DYNAMIC OBSTACLE TEST CONTROLS
+        # 2b. DYNAMIC MOVING OBSTACLES (ON RACING LINE)
+        obs_group = QGroupBox("Dynamic Moving Obstacles (Racing Line)")
+        obs_layout = QVBoxLayout(obs_group)
+
+        # Direction Control Row
+        obs_dir_row = QHBoxLayout()
+        obs_dir_row.addWidget(QLabel("Direction:"))
+        self.obs_direction = 1
+        self.btn_obs_dir = QPushButton("▶ Forward (+)")
+        self.btn_obs_dir.setStyleSheet("background-color: #1b5e20; color: #a5d6a7; font-weight: bold; padding: 5px; border-radius: 4px;")
+        self.btn_obs_dir.setToolTip("Toggle dynamic obstacle direction along track racing line: Forward (+) vs Reverse (-)")
+        self.btn_obs_dir.clicked.connect(self._toggle_obs_direction)
+        obs_dir_row.addWidget(self.btn_obs_dir)
+
+        self.btn_obs_reset = QPushButton("↺ Respawn")
+        self.btn_obs_reset.setStyleSheet("background-color: #37474f; color: #cfd8dc; font-weight: bold; padding: 5px; border-radius: 4px;")
+        self.btn_obs_reset.setToolTip("Reset moving obstacle positions to uniform track distribution")
+        self.btn_obs_reset.clicked.connect(self._reset_obs_positions)
+        obs_dir_row.addWidget(self.btn_obs_reset)
+        obs_layout.addLayout(obs_dir_row)
+
+        # Speed Control Row
+        obs_spd_label_row = QHBoxLayout()
+        obs_spd_label_row.addWidget(QLabel("Obstacle Speed:"))
+        self.lbl_obs_speed = QLabel("1.00 m/s")
+        self.lbl_obs_speed.setFont(QFont("Consolas", 10, QFont.Bold))
+        self.lbl_obs_speed.setStyleSheet("color: #ffca28;")
+        obs_spd_label_row.addWidget(self.lbl_obs_speed, alignment=Qt.AlignRight)
+        obs_layout.addLayout(obs_spd_label_row)
+
+        obs_spd_row = QHBoxLayout()
+        self.slider_obs_speed = QSlider(Qt.Horizontal)
+        self.slider_obs_speed.setRange(0, 30)  # 0.0 to 3.0 m/s with 0.1 m/s steps
+        self.slider_obs_speed.setValue(10)     # Default 1.0 m/s
+        self.slider_obs_speed.valueChanged.connect(self._on_obs_speed_slider)
+        obs_spd_row.addWidget(self.slider_obs_speed)
+        obs_layout.addLayout(obs_spd_row)
+
+        panel_layout.addWidget(obs_group)
+
+        # 2c. PHASE 3 DYNAMIC OBSTACLE TEST CONTROLS
         phase3_group = QGroupBox("Phase 3 Dynamic Obstacle Controls")
         phase3_layout = QVBoxLayout(phase3_group)
 
@@ -1705,6 +1745,29 @@ class ComprehensivePlannerGUI(QMainWindow):
         print("[GUI] Phase 3 reset pose command sent", flush=True)
         self._send_cmd({"cmd": "reset"})
 
+    def _toggle_obs_direction(self):
+        self.obs_direction = -1 if getattr(self, "obs_direction", 1) > 0 else 1
+        if self.obs_direction > 0:
+            self.btn_obs_dir.setText("▶ Forward (+)")
+            self.btn_obs_dir.setStyleSheet("background-color: #1b5e20; color: #a5d6a7; font-weight: bold; padding: 5px; border-radius: 4px;")
+        else:
+            self.btn_obs_dir.setText("◀ Reverse (-)")
+            self.btn_obs_dir.setStyleSheet("background-color: #b71c1c; color: #ffcdd2; font-weight: bold; padding: 5px; border-radius: 4px;")
+        print(f"[GUI] Dynamic obstacle direction toggled to: {'Forward (+)' if self.obs_direction > 0 else 'Reverse (-)'}", flush=True)
+        self._send_cmd({"cmd": "set_obstacle_direction", "val": int(self.obs_direction)})
+        self._send_cmd({"cmd": "set_param", "name": "obstacle_direction", "val": int(self.obs_direction)})
+
+    def _on_obs_speed_slider(self, val: int):
+        spd = val / 10.0
+        self.lbl_obs_speed.setText(f"{spd:.2f} m/s")
+        print(f"[GUI] Dynamic obstacle speed set to: {spd:.2f} m/s", flush=True)
+        self._send_cmd({"cmd": "set_obstacle_speed", "val": float(spd)})
+        self._send_cmd({"cmd": "set_param", "name": "obstacle_speed", "val": float(spd)})
+
+    def _reset_obs_positions(self):
+        print("[GUI] Reset dynamic moving obstacles positions", flush=True)
+        self._send_cmd({"cmd": "reset_obstacles"})
+
     def _update_gui(self):
         # Periodic check for updated champion/active config file (e.g. every 0.5s)
         self._cfg_check_counter = getattr(self, "_cfg_check_counter", 0) + 1
@@ -1736,6 +1799,18 @@ class ComprehensivePlannerGUI(QMainWindow):
                 self.lbl_telem_hz.setText(f"{int(pkt_hz)} Hz")
                 self.telemetry_group.setTitle(f"Live Controller Telemetry ({int(pkt_hz)} Hz)")
                 self.slider_telem_hz.blockSignals(False)
+
+            # Sync obstacle direction if received in packet
+            if "obstacle_direction" in pkt:
+                pkt_dir = int(pkt["obstacle_direction"])
+                if getattr(self, "obs_direction", 1) != pkt_dir:
+                    self.obs_direction = pkt_dir
+                    if self.obs_direction > 0:
+                        self.btn_obs_dir.setText("▶ Forward (+)")
+                        self.btn_obs_dir.setStyleSheet("background-color: #1b5e20; color: #a5d6a7; font-weight: bold; padding: 5px; border-radius: 4px;")
+                    else:
+                        self.btn_obs_dir.setText("◀ Reverse (-)")
+                        self.btn_obs_dir.setStyleSheet("background-color: #b71c1c; color: #ffcdd2; font-weight: bold; padding: 5px; border-radius: 4px;")
 
             # Decompress grid
             prob_map = None
@@ -1772,6 +1847,15 @@ class ComprehensivePlannerGUI(QMainWindow):
             dist = pkt.get("dist_m", 0.0)
             p_ms = pkt.get("plan_ms", 0.0)
             m_ms = pkt.get("map_ms", 0.0)
+            scout_ms = pkt.get("scout_ms", 0.0)
+            opt_prim_ms = pkt.get("opt_prim_ms", 0.0)
+            opt_alt_ms = pkt.get("opt_alt_ms", 0.0)
+            opt_shield_ms = pkt.get("opt_shield_ms", 0.0)
+            step_ms = pkt.get("step_ms", 0.0)
+            iters_prim = pkt.get("iters_prim", pkt.get("osqp_iters", 0))
+            iters_alt = pkt.get("iters_alt", pkt.get("osqp_iters_alt", 0))
+            step_cpu_ms = pkt.get("step_cpu_ms", 0.0)
+            gc_ms = pkt.get("gc_ms", 0.0)
             status = pkt.get("status", "--")
             surviving = pkt.get("surviving", 0)
             rec_state = pkt.get("escape_state", pkt.get("recovery_state", mode))
@@ -1816,7 +1900,10 @@ class ComprehensivePlannerGUI(QMainWindow):
             self.lbl_dyn.setText(f"Speed: {v_est:.2f} m/s (tgt: {v_tgt:.2f}) | Steer: {steer:+5.1f}°")
             if gap and len(gap) >= 3:
                 self.lbl_gap.setText(f"Gap: ({gap[0]:+.2f}, {gap[1]:.2f})m | Width: {gap[2]*100:.1f} cm")
-            self.lbl_perf.setText(f"Plan: {p_ms:.2f}ms | Costmap: {m_ms:.2f}ms | Surviving: {surviving} | {status}")
+            gc_str = f" GC:{gc_ms:.1f}ms" if gc_ms > 0.0 else ""
+            self.lbl_perf.setText(
+                f"Plan: {p_ms:.1f}ms (Map:{m_ms:.1f} Sc:{scout_ms:.1f} Prim:{opt_prim_ms:.1f} Alt:{opt_alt_ms:.1f} It:{iters_prim}/{iters_alt} Step:{step_ms:.1f}ms Cpu:{step_cpu_ms:.1f}ms{gc_str}) | Surv: {surviving} | {status}"
+            )
             
             # Recovery & Shield state label (with dynamic obstacle & wrong-way indicators)
             if is_wrong_way:

@@ -3,6 +3,7 @@
 #include <vector>
 #include <algorithm>
 #include <cstring>
+#include <chrono>
 
 #if defined(_WIN32) || defined(__CYGWIN__)
   #define COSTMAP_API __declspec(dllexport)
@@ -81,6 +82,16 @@ public:
     std::vector<uint8_t> persistence_count;
     std::vector<int> kernel_dx;
     std::vector<int> kernel_dy;
+    std::vector<int> span_dx_max;
+    std::vector<float> sigmoid_lut;
+
+    // Internal performance timers (in ms)
+    float t_step1_ms = 0.0f;
+    float t_step2a_ms = 0.0f;
+    float t_step2b_ms = 0.0f;
+    float t_step3_ms = 0.0f;
+    float t_step4_ms = 0.0f;
+    float t_total_ms = 0.0f;
 
     // Static cone cells for each of the 16 sensors (precomputed once, sorted by r)
     std::vector<ConeCell> sensor_cones[16];
@@ -103,7 +114,14 @@ public:
         unknown_mask.resize(total_cells, 1);
         persistence_count.resize(total_cells, 0);
 
-        // Precompute circular dilation structuring element
+        // Precompute fast Sigmoid LUT (2048 entries across [-10.0f, +10.0f])
+        sigmoid_lut.resize(2048);
+        for (int i = 0; i < 2048; ++i) {
+            float lo = -10.0f + static_cast<float>(i) * (20.0f / 2047.0f);
+            sigmoid_lut[i] = 1.0f / (1.0f + std::exp(-lo));
+        }
+
+        // Precompute circular dilation structuring element and horizontal spans
         inflation_cells = static_cast<int>(std::round(r_inflation_m / res));
         kernel_dx.clear();
         kernel_dy.clear();
@@ -114,6 +132,12 @@ public:
                     kernel_dy.push_back(dy);
                 }
             }
+        }
+
+        span_dx_max.resize(2 * inflation_cells + 1, 0);
+        for (int dy = -inflation_cells; dy <= inflation_cells; ++dy) {
+            int max_dx = static_cast<int>(std::round(std::sqrt(std::max(0, inflation_cells * inflation_cells - dy * dy))));
+            span_dx_max[dy + inflation_cells] = max_dx;
         }
 
         // Precompute static cone cells for each sensor (done ONCE at initialization)
@@ -169,6 +193,8 @@ public:
 
     // MAIN PROCESS FUNCTION: EXACT CONTINUOUS MATH, ZERO RUNTIME ATAN2
     void process_frame(const float* ranges_16) {
+        auto t_start = std::chrono::high_resolution_clock::now();
+
         // Step 1: Flat buffer reset (< 1 microsecond)
         std::fill(log_odds.begin(), log_odds.end(), 0.0f);
 
@@ -186,6 +212,7 @@ public:
                 }
             }
         }
+        auto t_step1 = std::chrono::high_resolution_clock::now();
 
         // Step 2: Exact Continuous Float Evaluation via Precomputed Cone Cells
         // Pass 2A: Accumulate Obstacle Hit Evidence for active returns
@@ -211,6 +238,7 @@ public:
                 }
             }
         }
+        auto t_step2a = std::chrono::high_resolution_clock::now();
 
         // Pass 2B: Strict Free-Space & Negative Cone Space-Carving
         // Any beam that is negative (or travels through open air before a hit further along)
@@ -258,11 +286,15 @@ public:
                 }
             }
         }
+        auto t_step2b = std::chrono::high_resolution_clock::now();
 
-        // Step 3: Sigmoid Probability Map, Confirmed Obstacle Threshold & Unknown Space
+        // Step 3: Fast Sigmoid Probability Map, Confirmed Obstacle Threshold & Unknown Space
+        constexpr float LUT_SCALE = 2047.0f / 20.0f;
         for (int i = 0; i < total_cells; ++i) {
             float lo = std::max(-10.0f, std::min(10.0f, log_odds[i]));
-            float p = 1.0f / (1.0f + std::exp(-lo));
+            int lut_idx = static_cast<int>((lo + 10.0f) * LUT_SCALE);
+            lut_idx = std::max(0, std::min(2047, lut_idx));
+            float p = sigmoid_lut[lut_idx];
             prob_map[i] = p;
 
             // Confirmed obstacle hits only (prob >= 0.65, log_odds >= 0.62)
@@ -282,6 +314,7 @@ public:
             // Unobserved space: untouched / uncertain cells (std::abs(lo) < 0.5f, prob ~ 0.50)
             unknown_mask[i] = (std::abs(lo) < 0.5f && raw == 0) ? 1 : 0;
         }
+        auto t_step3 = std::chrono::high_resolution_clock::now();
 
         // Step 4: Clean Circular C-Space Morphological Dilation on Confirmed Obstacle Boundaries
         std::fill(hazard_mask.begin(), hazard_mask.end(), 0);
@@ -290,11 +323,26 @@ public:
                 int row_off = r * width;
                 for (int c = 0; c < width; ++c) {
                     if (raw_hazard[row_off + c] == 1) {
-                        for (size_t k = 0; k < kernel_dx.size(); ++k) {
-                            int nr = r + kernel_dy[k];
-                            int nc = c + kernel_dx[k];
-                            if (nr >= 0 && nr < height && nc >= 0 && nc < width) {
-                                hazard_mask[nr * width + nc] = 1;
+                        // Skip dilation for interior obstacle cells (already surrounded on 4 sides)
+                        if (r > 0 && r < height - 1 && c > 0 && c < width - 1 &&
+                            raw_hazard[(r - 1) * width + c] == 1 &&
+                            raw_hazard[(r + 1) * width + c] == 1 &&
+                            raw_hazard[row_off + (c - 1)] == 1 &&
+                            raw_hazard[row_off + (c + 1)] == 1) {
+                            hazard_mask[row_off + c] = 1;
+                            continue; // Interior obstacle: perimeter cells dilate outward past this cell
+                        }
+
+                        // Boundary obstacle: Dilate using fast contiguous horizontal spans
+                        for (int dy = -inflation_cells; dy <= inflation_cells; ++dy) {
+                            int nr = r + dy;
+                            if (nr < 0 || nr >= height) continue;
+                            int dx = span_dx_max[dy + inflation_cells];
+                            int nc_start = std::max(0, c - dx);
+                            int nc_end = std::min(width - 1, c + dx);
+                            int span_len = nc_end - nc_start + 1;
+                            if (span_len > 0) {
+                                std::memset(&hazard_mask[nr * width + nc_start], 1, span_len);
                             }
                         }
                     }
@@ -310,6 +358,14 @@ public:
                 unknown_mask[i] = 0;
             }
         }
+        auto t_end = std::chrono::high_resolution_clock::now();
+
+        t_step1_ms = std::chrono::duration<float, std::milli>(t_step1 - t_start).count();
+        t_step2a_ms = std::chrono::duration<float, std::milli>(t_step2a - t_step1).count();
+        t_step2b_ms = std::chrono::duration<float, std::milli>(t_step2b - t_step2a).count();
+        t_step3_ms = std::chrono::duration<float, std::milli>(t_step3 - t_step2b).count();
+        t_step4_ms = std::chrono::duration<float, std::milli>(t_end - t_step3).count();
+        t_total_ms = std::chrono::duration<float, std::milli>(t_end - t_start).count();
     }
 
     // Step 6: O(1) Instant Trajectory Probe (Zero Allocation)
@@ -752,6 +808,17 @@ COSTMAP_API void costmap_get_unknown_mask(void* handle, uint8_t* out_unknown_mas
     if (!handle || !out_unknown_mask) return;
     auto* cm = static_cast<SmartHybridCostmapFront*>(handle);
     std::memcpy(out_unknown_mask, cm->unknown_mask.data(), cm->total_cells * sizeof(uint8_t));
+}
+
+COSTMAP_API void costmap_get_perf(void* handle, float* out_timers_6) {
+    if (!handle || !out_timers_6) return;
+    auto* cm = static_cast<SmartHybridCostmapFront*>(handle);
+    out_timers_6[0] = cm->t_step1_ms;
+    out_timers_6[1] = cm->t_step2a_ms;
+    out_timers_6[2] = cm->t_step2b_ms;
+    out_timers_6[3] = cm->t_step3_ms;
+    out_timers_6[4] = cm->t_step4_ms;
+    out_timers_6[5] = cm->t_total_ms;
 }
 
 COSTMAP_API int costmap_scout_gaps(

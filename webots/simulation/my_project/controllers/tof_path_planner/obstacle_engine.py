@@ -83,16 +83,24 @@ class MovingObstacleManager:
         engine: ReverseObstacleEngine,
         obstacle_names: Optional[List[str]] = None,
         elevation_z: float = 0.075,
-        speed_mps: float = 0.50,
+        speed_mps: float = 1.00,
+        direction: int = 1,
     ):
         self.robot = robot
         self.engine = engine
         self.elevation_z = elevation_z
-        self.speed_mps = speed_mps
+        self._speed_mps = abs(float(speed_mps))
+        if speed_mps < 0:
+            self.direction = -1
+        else:
+            self.direction = -1 if direction < 0 else 1
+
         if obstacle_names is None:
             obstacle_names = ["MOVING_OBSTACLE", "MOVING_OBSTACLE_2", "MOVING_OBSTACLE_3"]
         self.obstacle_names = obstacle_names
         self.obs_nodes = []
+        self.current_s: List[float] = []
+        self.last_sim_time_s = 0.0
 
         if hasattr(robot, "getFromDef"):
             for name in self.obstacle_names:
@@ -102,16 +110,71 @@ class MovingObstacleManager:
                     if field:
                         self.obs_nodes.append(field)
 
+        self._init_positions()
+
+    @property
+    def speed_mps(self) -> float:
+        return self._speed_mps
+
+    @speed_mps.setter
+    def speed_mps(self, val: float):
+        v = float(val)
+        if v < 0:
+            self.direction = -1
+            self._speed_mps = abs(v)
+        else:
+            self._speed_mps = v
+
+    def _init_positions(self) -> None:
+        n_obs = len(self.obs_nodes)
+        if n_obs > 0 and self.engine.total_length > 0:
+            self.current_s = [
+                (float(k + 1) * (self.engine.total_length / float(n_obs + 1))) % self.engine.total_length
+                for k in range(n_obs)
+            ]
+        else:
+            self.current_s = []
+        self.last_sim_time_s = 0.0
+
+    def set_speed(self, speed: float) -> None:
+        self.speed_mps = float(speed)
+
+    def set_direction(self, direction: int) -> None:
+        self.direction = -1 if int(direction) < 0 else 1
+
+    def toggle_direction(self) -> int:
+        self.direction = -self.direction
+        return self.direction
+
+    def reset(self) -> None:
+        self._init_positions()
+        if len(self.obs_nodes) > 0 and self.engine.total_length > 0:
+            for k, field in enumerate(self.obs_nodes):
+                ox, oy = self.engine.get_position_at_s(self.current_s[k])
+                field.setSFVec3f([float(ox), float(oy), self.elevation_z])
+
     def update(self, sim_time_s: float) -> List[Tuple[float, float]]:
         positions = []
         n_obs = len(self.obs_nodes)
         if n_obs > 0 and self.engine.total_length > 0:
+            if not self.current_s or len(self.current_s) != n_obs:
+                self._init_positions()
+
+            # Handle reset / rewind
+            if sim_time_s < self.last_sim_time_s or (sim_time_s == 0.0 and self.last_sim_time_s > 0.0):
+                self._init_positions()
+                dt = 0.0
+            else:
+                dt = max(0.0, sim_time_s - self.last_sim_time_s)
+                if dt > 2.0:
+                    dt = 0.0
+
+            self.last_sim_time_s = sim_time_s
+            step_ds = self.direction * self._speed_mps * dt
+
             for k, field in enumerate(self.obs_nodes):
-                obs_s = (float(k + 1) * (self.engine.total_length / float(n_obs + 1)) + self.speed_mps * sim_time_s) % self.engine.total_length
-                ox, oy = self.engine.get_position_at_s(obs_s)
+                self.current_s[k] = (self.current_s[k] + step_ds) % self.engine.total_length
+                ox, oy = self.engine.get_position_at_s(self.current_s[k])
                 field.setSFVec3f([float(ox), float(oy), self.elevation_z])
                 positions.append((float(ox), float(oy)))
         return positions
-
-    def reset(self) -> None:
-        self.update(0.0)

@@ -137,7 +137,8 @@ ENCODER_NAMES: Dict[str, str] = {
 
 # 3.4 Dynamic Moving Obstacles (On Racing Line)
 MOVING_OBSTACLE_NAMES: List[str] = ["MOVING_OBSTACLE", "MOVING_OBSTACLE_2", "MOVING_OBSTACLE_3"]
-MOVING_OBSTACLE_SPEED_MPS: float = 1.00     # m/s backwards pace along racing line (Track 1 = 1.00 m/s, Track 2 = 0.50 m/s)
+MOVING_OBSTACLE_SPEED_MPS: float = 1.00     # m/s pace along racing line (default: 1.00 m/s)
+MOVING_OBSTACLE_DIRECTION: int = 1          # Direction along trajectory: +1 (Forward) or -1 (Reverse)
 MOVING_OBSTACLE_Z_ELEVATION: float = 0.075  # meters elevation above track ground
 
 

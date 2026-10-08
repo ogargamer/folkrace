@@ -50,6 +50,7 @@ from planner_config import (
     TOF_MAX_RANGE_M,
     MOVING_OBSTACLE_NAMES,
     MOVING_OBSTACLE_SPEED_MPS,
+    MOVING_OBSTACLE_DIRECTION,
     MOVING_OBSTACLE_Z_ELEVATION,
     V_MIN_CRUISE,
     V_MAX_CRUISE,
@@ -99,6 +100,7 @@ def run_racing_studio(robot: any, vehicle: FolkraceVehicle) -> None:
         obstacle_names=MOVING_OBSTACLE_NAMES,
         elevation_z=MOVING_OBSTACLE_Z_ELEVATION,
         speed_mps=MOVING_OBSTACLE_SPEED_MPS,
+        direction=MOVING_OBSTACLE_DIRECTION,
     )
 
     # UDP Telemetry Broadcaster (Port 9876) & Command Receiver (Port 9877)
@@ -241,6 +243,21 @@ def run_racing_studio(robot: any, vehicle: FolkraceVehicle) -> None:
                     vehicle.reset(start_pos=[0.0, 0.0, 0.04])
                     track_tracker.reset([0.0, 0.0])
                     print("[Racing Studio] Robot reset requested by GUI", flush=True)
+                elif c == "set_obstacle_speed":
+                    spd = float(cmd_pkt.get("val", 1.0))
+                    obs_manager.speed_mps = spd
+                    obs_engine.speed_mps = spd
+                    print(f"[Racing Studio] Moving obstacle speed set to: {obs_manager.speed_mps:.2f} m/s", flush=True)
+                elif c == "set_obstacle_direction":
+                    d = int(cmd_pkt.get("val", 1))
+                    obs_manager.set_direction(d)
+                    print(f"[Racing Studio] Moving obstacle direction set to: {'Forward (+)' if obs_manager.direction > 0 else 'Reverse (-)'}", flush=True)
+                elif c == "toggle_obstacle_direction":
+                    obs_manager.toggle_direction()
+                    print(f"[Racing Studio] Moving obstacle direction toggled to: {'Forward (+)' if obs_manager.direction > 0 else 'Reverse (-)'}", flush=True)
+                elif c == "reset_obstacles":
+                    obs_manager.reset()
+                    print("[Racing Studio] Moving obstacles reset to initial spacing", flush=True)
                 elif c == "set_param":
                     p_name = cmd_pkt.get("name", "")
                     p_val = cmd_pkt.get("val", None)
@@ -248,6 +265,15 @@ def run_racing_studio(robot: any, vehicle: FolkraceVehicle) -> None:
                         if p_name == "telemetry_hz":
                             telemetry_hz = max(1, min(60, int(p_val)))
                             print(f"[Racing Studio] Telemetry streaming rate set to: {telemetry_hz} Hz", flush=True)
+                        elif p_name in ("obstacle_speed", "obstacle_speed_mps"):
+                            spd = float(p_val)
+                            obs_manager.speed_mps = spd
+                            obs_engine.speed_mps = spd
+                            print(f"[Racing Studio] Moving obstacle speed set to: {obs_manager.speed_mps:.2f} m/s", flush=True)
+                        elif p_name in ("obstacle_direction", "obs_direction"):
+                            d = int(p_val)
+                            obs_manager.set_direction(d)
+                            print(f"[Racing Studio] Moving obstacle direction set to: {'Forward (+)' if obs_manager.direction > 0 else 'Reverse (-)'}", flush=True)
                         elif p_name == "r_inflation_m":
                             vehicle.costmap.r_inflation_m = float(p_val)
                             vehicle.costmap._handle = vehicle.costmap._lib.costmap_create(
@@ -303,6 +329,8 @@ def run_racing_studio(robot: any, vehicle: FolkraceVehicle) -> None:
                 last_telemetry_time = sim_time
 
                 telemetry["obstacles"] = [[round(ox, 3), round(oy, 3)] for (ox, oy) in obs_positions]
+                telemetry["obstacle_speed"] = round(float(obs_manager.speed_mps), 2)
+                telemetry["obstacle_direction"] = int(obs_manager.direction)
                 telemetry["active_planner"] = "SL_MPC"
                 telemetry["sim_time"] = round(sim_time, 2)
                 telemetry["telemetry_hz"] = telemetry_hz
@@ -325,13 +353,22 @@ def run_racing_studio(robot: any, vehicle: FolkraceVehicle) -> None:
                     steer_act = telemetry.get("steer_actual_deg", steer_cmd)
                     mode_str = telemetry.get("mode", "DRIVE")
                     plan_ms = telemetry.get("plan_ms", 0.0)
+                    map_ms = telemetry.get("map_ms", 0.0)
+                    scout_ms = telemetry.get("scout_ms", 0.0)
+                    opt_prim_ms = telemetry.get("opt_prim_ms", 0.0)
+                    opt_alt_ms = telemetry.get("opt_alt_ms", 0.0)
+                    opt_shield_ms = telemetry.get("opt_shield_ms", 0.0)
+                    iters_prim = telemetry.get("iters_prim", telemetry.get("osqp_iters", 0))
+                    iters_alt = telemetry.get("iters_alt", telemetry.get("osqp_iters_alt", 0))
+                    step_ms = telemetry.get("step_ms", 0.0)
+                    step_cpu_ms = telemetry.get("step_cpu_ms", 0.0)
                     lap_num = getattr(track_tracker, "current_lap", 0)
 
                     color_mode = 0x00FF88 if not any(x in mode_str for x in ("PIVOT", "DECEL", "SPIN")) else 0xFF3333
                     f_tof_val = telemetry.get("f_tof", 0.0)
-                    robot.setLabel(0, f"SL-MPC {telemetry_hz}Hz | Mode: {mode_str:20s} | t: {sim_time:5.1f}", 0.01, 0.01, 0.06, 0x00E5FF, 0.0, "Arial")
+                    robot.setLabel(0, f"SL-MPC {telemetry_hz}Hz | Mode: {mode_str:16s} | t: {sim_time:5.1f} | Plan: {plan_ms:4.1f}ms", 0.01, 0.01, 0.06, 0x00E5FF, 0.0, "Arial")
                     robot.setLabel(1, f"v: {v_real:+4.2f} (cmd: {v_cmd:+4.2f}, plan: {v_plan:+4.2f}) | Steer: {steer_act:+5.1f} (cmd: {steer_cmd:+5.1f}, plan: {steer_plan:+5.1f})", 0.01, 0.04, 0.06, color_mode, 0.0, "Arial")
-                    robot.setLabel(2, f"Track Progress: {track_dist:6.1f} | f_tof: {f_tof_val:4.2f}", 0.01, 0.07, 0.05, 0xFFFFFF, 0.0, "Arial")
+                    robot.setLabel(2, f"Track: {track_dist:5.1f}m | f_tof: {f_tof_val:4.2f} | map:{map_ms:.1f} p:{opt_prim_ms:.1f}({iters_prim}) a:{opt_alt_ms:.1f}({iters_alt}) step:{step_ms:.1f}ms cpu:{step_cpu_ms:.1f}ms", 0.01, 0.07, 0.05, 0xFFFFFF, 0.0, "Arial")
 
                 # Terminal Telemetry Output (throttled to telemetry_hz)
                 v_real_val = telemetry.get("v_real", 0.0)
@@ -341,10 +378,35 @@ def run_racing_studio(robot: any, vehicle: FolkraceVehicle) -> None:
                 steer_plan_val = telemetry.get("steer_plan_deg", steer_cmd_val)
                 steer_act_val = telemetry.get("steer_actual_deg", steer_cmd_val)
                 f_tof_val = telemetry.get("f_tof", 0.0)
+                plan_ms = telemetry.get("plan_ms", 0.0)
+                map_ms = telemetry.get("map_ms", 0.0)
+                scout_ms = telemetry.get("scout_ms", 0.0)
+                opt_prim_ms = telemetry.get("opt_prim_ms", 0.0)
+                opt_alt_ms = telemetry.get("opt_alt_ms", 0.0)
+                opt_shield_ms = telemetry.get("opt_shield_ms", 0.0)
+                iters_prim = telemetry.get("iters_prim", telemetry.get("osqp_iters", 0))
+                iters_alt = telemetry.get("iters_alt", telemetry.get("osqp_iters_alt", 0))
+                obs_ms = telemetry.get("obs_ms", 0.0)
+                telem_ms = telemetry.get("telem_ms", 0.0)
+                step_ms = telemetry.get("step_ms", 0.0)
+                step_cpu_ms = telemetry.get("step_cpu_ms", 0.0)
+                gc_ms = telemetry.get("gc_ms", 0.0)
+                gc_str = f" gc:{gc_ms:3.1f}ms" if gc_ms > 0.0 else ""
+                mp = telemetry.get("map_perf", ())
+                map_detail = f"[{mp[3]:.1f}/{mp[4]:.1f}]" if (len(mp) >= 5 and map_ms > 4.0) else ""
+                alt_str = f" alt:{opt_alt_ms:3.1f} it:{iters_prim}/{iters_alt}" if opt_alt_ms > 0.0 else f" it:{iters_prim}"
+                obs_str = f" obs:{obs_ms:3.1f}" if obs_ms > 0.0 else ""
+                perf_breakdown = (
+                    f"Plan: {plan_ms:4.1f}ms (map:{map_ms:3.1f}{map_detail} sc:{scout_ms:3.1f} "
+                    f"prim:{opt_prim_ms:3.1f}{alt_str} "
+                    f"sh:{opt_shield_ms:3.1f}{obs_str} tlm:{telem_ms:3.1f} "
+                    f"step:{step_ms:4.1f}ms cpu:{step_cpu_ms:4.1f}ms{gc_str})"
+                )
                 print(
                     f"Mode: {telemetry['mode']:20s} | t: {sim_time:5.2f} | f_tof: {f_tof_val:4.2f} | "
                     f"v: {v_real_val:+5.2f} (cmd: {v_cmd_val:+5.2f}, plan: {v_plan_val:+5.2f}) | "
-                    f"Steer: {steer_act_val:+5.1f} (cmd: {steer_cmd_val:+5.1f}, plan: {steer_plan_val:+5.1f})",
+                    f"Steer: {steer_act_val:+5.1f} (cmd: {steer_cmd_val:+5.1f}, plan: {steer_plan_val:+5.1f}) | "
+                    f"{perf_breakdown}",
                     flush=True,
                 )
 
@@ -392,6 +454,7 @@ def run_champion_preview(robot: any, vehicle: FolkraceVehicle) -> None:
         obstacle_names=MOVING_OBSTACLE_NAMES,
         elevation_z=MOVING_OBSTACLE_Z_ELEVATION,
         speed_mps=MOVING_OBSTACLE_SPEED_MPS,
+        direction=MOVING_OBSTACLE_DIRECTION,
     )
 
     track_tracker = WebotsTrackProgressTracker(traj_csv)
@@ -511,6 +574,21 @@ def run_champion_preview(robot: any, vehicle: FolkraceVehicle) -> None:
                 elif c == "set_telemetry_hz":
                     telemetry_hz = max(1, min(60, int(cmd_pkt.get("val", 60))))
                     print(f"[Champion Preview] Telemetry streaming rate set to: {telemetry_hz} Hz", flush=True)
+                elif c == "set_obstacle_speed":
+                    spd = float(cmd_pkt.get("val", 1.0))
+                    obs_manager.speed_mps = spd
+                    obs_engine.speed_mps = spd
+                    print(f"[Champion Preview] Moving obstacle speed set to: {obs_manager.speed_mps:.2f} m/s", flush=True)
+                elif c == "set_obstacle_direction":
+                    d = int(cmd_pkt.get("val", 1))
+                    obs_manager.set_direction(d)
+                    print(f"[Champion Preview] Moving obstacle direction set to: {'Forward (+)' if obs_manager.direction > 0 else 'Reverse (-)'}", flush=True)
+                elif c == "toggle_obstacle_direction":
+                    obs_manager.toggle_direction()
+                    print(f"[Champion Preview] Moving obstacle direction toggled to: {'Forward (+)' if obs_manager.direction > 0 else 'Reverse (-)'}", flush=True)
+                elif c == "reset_obstacles":
+                    obs_manager.reset()
+                    print("[Champion Preview] Moving obstacles reset to initial spacing", flush=True)
                 elif c == "set_param":
                     p_name = cmd_pkt.get("name", "")
                     p_val = cmd_pkt.get("val", None)
@@ -518,6 +596,15 @@ def run_champion_preview(robot: any, vehicle: FolkraceVehicle) -> None:
                         if p_name == "telemetry_hz":
                             telemetry_hz = max(1, min(60, int(p_val)))
                             print(f"[Champion Preview] Telemetry streaming rate set to: {telemetry_hz} Hz", flush=True)
+                        elif p_name in ("obstacle_speed", "obstacle_speed_mps"):
+                            spd = float(p_val)
+                            obs_manager.speed_mps = spd
+                            obs_engine.speed_mps = spd
+                            print(f"[Champion Preview] Moving obstacle speed set to: {obs_manager.speed_mps:.2f} m/s", flush=True)
+                        elif p_name in ("obstacle_direction", "obs_direction"):
+                            d = int(p_val)
+                            obs_manager.set_direction(d)
+                            print(f"[Champion Preview] Moving obstacle direction set to: {'Forward (+)' if obs_manager.direction > 0 else 'Reverse (-)'}", flush=True)
                         elif p_name == "r_inflation_m":
                             vehicle.costmap.r_inflation_m = float(p_val)
                             vehicle.costmap._handle = vehicle.costmap._lib.costmap_create(
@@ -569,6 +656,8 @@ def run_champion_preview(robot: any, vehicle: FolkraceVehicle) -> None:
                 last_telemetry_time = sim_time
 
                 telemetry["obstacles"] = [[round(ox, 3), round(oy, 3)] for (ox, oy) in obs_positions]
+                telemetry["obstacle_speed"] = round(float(obs_manager.speed_mps), 2)
+                telemetry["obstacle_direction"] = int(obs_manager.direction)
                 telemetry["active_planner"] = "SL_MPC"
                 telemetry["sim_time"] = round(sim_time, 2)
                 telemetry["telemetry_hz"] = telemetry_hz
@@ -595,13 +684,22 @@ def run_champion_preview(robot: any, vehicle: FolkraceVehicle) -> None:
                     steer_act = telemetry.get("steer_actual_deg", steer_cmd)
                     mode_str = telemetry.get("mode", "DRIVE")
                     plan_ms = telemetry.get("plan_ms", 0.0)
+                    map_ms = telemetry.get("map_ms", 0.0)
+                    scout_ms = telemetry.get("scout_ms", 0.0)
+                    opt_prim_ms = telemetry.get("opt_prim_ms", 0.0)
+                    opt_alt_ms = telemetry.get("opt_alt_ms", 0.0)
+                    opt_shield_ms = telemetry.get("opt_shield_ms", 0.0)
+                    iters_prim = telemetry.get("iters_prim", telemetry.get("osqp_iters", 0))
+                    iters_alt = telemetry.get("iters_alt", telemetry.get("osqp_iters_alt", 0))
+                    step_ms = telemetry.get("step_ms", 0.0)
+                    step_cpu_ms = telemetry.get("step_cpu_ms", 0.0)
                     lap_num = getattr(track_tracker, "current_lap", 0)
 
                     color_mode = 0x00FF88 if not any(x in mode_str for x in ("PIVOT", "DECEL", "SPIN")) else 0xFF3333
                     f_tof_val = telemetry.get("f_tof", 0.0)
-                    robot.setLabel(0, f"CHAMPION PREVIEW {telemetry_hz}Hz | Mode: {mode_str:20s} | t: {sim_time:5.1f}", 0.01, 0.01, 0.06, 0x00E5FF, 0.0, "Arial")
+                    robot.setLabel(0, f"CHAMPION PREVIEW {telemetry_hz}Hz | Mode: {mode_str:16s} | t: {sim_time:5.1f} | Plan: {plan_ms:4.1f}ms", 0.01, 0.01, 0.06, 0x00E5FF, 0.0, "Arial")
                     robot.setLabel(1, f"v: {v_real:+4.2f} (cmd: {v_cmd:+4.2f}, plan: {v_plan:+4.2f}) | Steer: {steer_act:+5.1f} (cmd: {steer_cmd:+5.1f}, plan: {steer_plan:+5.1f})", 0.01, 0.04, 0.06, color_mode, 0.0, "Arial")
-                    robot.setLabel(2, f"Track Progress: {track_dist:6.1f} | f_tof: {f_tof_val:4.2f} | {title[:40]}", 0.01, 0.07, 0.05, 0xFFFFFF, 0.0, "Arial")
+                    robot.setLabel(2, f"Track: {track_dist:5.1f}m | map:{map_ms:.1f} p:{opt_prim_ms:.1f}({iters_prim}) a:{opt_alt_ms:.1f}({iters_alt}) step:{step_ms:.1f}ms cpu:{step_cpu_ms:.1f}ms | {title[:25]}", 0.01, 0.07, 0.05, 0xFFFFFF, 0.0, "Arial")
 
                 # Terminal Telemetry Output (throttled to telemetry_hz)
                 v_real_val = telemetry.get("v_real", 0.0)
@@ -611,10 +709,35 @@ def run_champion_preview(robot: any, vehicle: FolkraceVehicle) -> None:
                 steer_plan_val = telemetry.get("steer_plan_deg", steer_cmd_val)
                 steer_act_val = telemetry.get("steer_actual_deg", steer_cmd_val)
                 f_tof_val = telemetry.get("f_tof", 0.0)
+                plan_ms = telemetry.get("plan_ms", 0.0)
+                map_ms = telemetry.get("map_ms", 0.0)
+                scout_ms = telemetry.get("scout_ms", 0.0)
+                opt_prim_ms = telemetry.get("opt_prim_ms", 0.0)
+                opt_alt_ms = telemetry.get("opt_alt_ms", 0.0)
+                opt_shield_ms = telemetry.get("opt_shield_ms", 0.0)
+                iters_prim = telemetry.get("iters_prim", telemetry.get("osqp_iters", 0))
+                iters_alt = telemetry.get("iters_alt", telemetry.get("osqp_iters_alt", 0))
+                obs_ms = telemetry.get("obs_ms", 0.0)
+                telem_ms = telemetry.get("telem_ms", 0.0)
+                step_ms = telemetry.get("step_ms", 0.0)
+                step_cpu_ms = telemetry.get("step_cpu_ms", 0.0)
+                gc_ms = telemetry.get("gc_ms", 0.0)
+                gc_str = f" gc:{gc_ms:3.1f}ms" if gc_ms > 0.0 else ""
+                mp = telemetry.get("map_perf", ())
+                map_detail = f"[{mp[3]:.1f}/{mp[4]:.1f}]" if (len(mp) >= 5 and map_ms > 4.0) else ""
+                alt_str = f" alt:{opt_alt_ms:3.1f} it:{iters_prim}/{iters_alt}" if opt_alt_ms > 0.0 else f" it:{iters_prim}"
+                obs_str = f" obs:{obs_ms:3.1f}" if obs_ms > 0.0 else ""
+                perf_breakdown = (
+                    f"Plan: {plan_ms:4.1f}ms (map:{map_ms:3.1f}{map_detail} sc:{scout_ms:3.1f} "
+                    f"prim:{opt_prim_ms:3.1f}{alt_str} "
+                    f"sh:{opt_shield_ms:3.1f}{obs_str} tlm:{telem_ms:3.1f} "
+                    f"step:{step_ms:4.1f}ms cpu:{step_cpu_ms:4.1f}ms{gc_str})"
+                )
                 print(
                     f"Mode: {telemetry['mode']:20s} | t: {sim_time:5.2f} | f_tof: {f_tof_val:4.2f} | "
                     f"v: {v_real_val:+5.2f} (cmd: {v_cmd_val:+5.2f}, plan: {v_plan_val:+5.2f}) | "
-                    f"Steer: {steer_act_val:+5.1f} (cmd: {steer_cmd_val:+5.1f}, plan: {steer_plan_val:+5.1f})",
+                    f"Steer: {steer_act_val:+5.1f} (cmd: {steer_cmd_val:+5.1f}, plan: {steer_plan_val:+5.1f}) | "
+                    f"{perf_breakdown}",
                     flush=True,
                 )
 
@@ -698,10 +821,35 @@ def run_fast_champion_drive(robot: any, vehicle: FolkraceVehicle) -> None:
             steer_cmd_val = telemetry.get("steer_cmd_deg", telemetry.get("steer_deg", 0.0))
             steer_plan_val = telemetry.get("steer_plan_deg", steer_cmd_val)
             steer_act_val = telemetry.get("steer_actual_deg", steer_cmd_val)
+            plan_ms = telemetry.get("plan_ms", 0.0)
+            map_ms = telemetry.get("map_ms", 0.0)
+            scout_ms = telemetry.get("scout_ms", 0.0)
+            opt_prim_ms = telemetry.get("opt_prim_ms", 0.0)
+            opt_alt_ms = telemetry.get("opt_alt_ms", 0.0)
+            opt_shield_ms = telemetry.get("opt_shield_ms", 0.0)
+            iters_prim = telemetry.get("iters_prim", telemetry.get("osqp_iters", 0))
+            iters_alt = telemetry.get("iters_alt", telemetry.get("osqp_iters_alt", 0))
+            obs_ms = telemetry.get("obs_ms", 0.0)
+            telem_ms = telemetry.get("telem_ms", 0.0)
+            step_ms = telemetry.get("step_ms", 0.0)
+            step_cpu_ms = telemetry.get("step_cpu_ms", 0.0)
+            gc_ms = telemetry.get("gc_ms", 0.0)
+            gc_str = f" gc:{gc_ms:3.1f}ms" if gc_ms > 0.0 else ""
+            mp = telemetry.get("map_perf", ())
+            map_detail = f"[{mp[3]:.1f}/{mp[4]:.1f}]" if (len(mp) >= 5 and map_ms > 4.0) else ""
+            alt_str = f" alt:{opt_alt_ms:3.1f} it:{iters_prim}/{iters_alt}" if opt_alt_ms > 0.0 else f" it:{iters_prim}"
+            obs_str = f" obs:{obs_ms:3.1f}" if obs_ms > 0.0 else ""
+            perf_breakdown = (
+                f"Plan: {plan_ms:4.1f}ms (map:{map_ms:3.1f}{map_detail} sc:{scout_ms:3.1f} "
+                f"prim:{opt_prim_ms:3.1f}{alt_str} "
+                f"sh:{opt_shield_ms:3.1f}{obs_str} tlm:{telem_ms:3.1f} "
+                f"step:{step_ms:4.1f}ms cpu:{step_cpu_ms:4.1f}ms{gc_str})"
+            )
             print(
                 f"Mode: {telemetry['mode']:20s} | t: {sim_time:5.2f} | f_tof: {f_tof_val:4.2f} | "
                 f"v: {v_real_val:+5.2f} (cmd: {v_cmd_val:+5.2f}, plan: {v_plan_val:+5.2f}) | "
-                f"Steer: {steer_act_val:+5.1f} (cmd: {steer_cmd_val:+5.1f}, plan: {steer_plan_val:+5.1f})",
+                f"Steer: {steer_act_val:+5.1f} (cmd: {steer_cmd_val:+5.1f}, plan: {steer_plan_val:+5.1f}) | "
+                f"{perf_breakdown}",
                 flush=True,
             )
 
@@ -873,7 +1021,7 @@ def run_ga_worker(robot: any, vehicle: FolkraceVehicle) -> None:
             m1_out["track2_metrics"] = None
             return m1_out
 
-        # Track 2: Secondary track with moving obstacles at 0.50 m/s
+        # Track 2: Secondary track with moving obstacles the other way at 1.00 m/s (reverse)
         m2 = _run_single_trial(gene_dict, duration_s, obstacle_speed_mps=TRACK2_MOVING_OBSTACLE_SPEED_MPS)
         fit2 = float(m2.get("fitness", -5000.0))
 

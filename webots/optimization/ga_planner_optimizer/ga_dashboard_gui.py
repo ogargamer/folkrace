@@ -526,10 +526,10 @@ class GADashboardGUI(QMainWindow):
         self.chk_preview.setToolTip("Runs 1 rendered 20-second trial in Webots GUI per planner before parallel headless GA.")
         header_layout.addWidget(self.chk_preview)
 
-        # 2nd Track (0.5 m/s Obstacles) Checkbox
-        self.chk_track2 = QCheckBox("2nd Track (0.5 m/s)")
+        # 2nd Track (Opposite 1.0 m/s Obstacles) Checkbox
+        self.chk_track2 = QCheckBox("2nd Track (Opposite 1.0 m/s)")
         self.chk_track2.setStyleSheet("color: #F59E0B; font-weight: bold;")
-        self.chk_track2.setToolTip("When checked, evaluates candidates on Track 1 (1.0 m/s) AND Track 2 (0.5 m/s) moving obstacles. When unchecked, evaluates Track 1 only.")
+        self.chk_track2.setToolTip("When checked, evaluates candidates on Track 1 (1.0 m/s Forward) AND Track 2 (1.0 m/s Reverse / Opposite) moving obstacles. When unchecked, evaluates Track 1 only.")
         self.chk_track2.setChecked(USE_TRACK2)
         header_layout.addWidget(self.chk_track2)
 

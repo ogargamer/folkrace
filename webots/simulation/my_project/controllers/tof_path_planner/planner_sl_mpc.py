@@ -11,6 +11,7 @@ import ctypes
 import math
 import os
 import sys
+import time
 from typing import Dict, List, Optional, Tuple, Union
 import numpy as np
 
@@ -447,9 +448,13 @@ class CppCurvilinearSLMPC:
         is_clear_prim = bool(prim_target[3]) if len(prim_target) >= 4 else (math.hypot(tx_prim, ty_prim) >= 1.60)
         theta_prim = math.atan2(tx_prim - x0, max(0.20, ty_prim - y0))
 
+        t_opt_0 = time.perf_counter()
+        t_opt_cpu_0 = time.process_time()
+
         # ----------------------------------------------------------------------
         # 1. SOLVE INCUMBENT (PRIMARY) RACING LINE
         # ----------------------------------------------------------------------
+        t_prim_0 = time.perf_counter()
         if hasattr(_lib, "sl_mpc_plan_projected"):
             success_prim = _lib.sl_mpc_plan_projected(
                 self._handle,
@@ -489,6 +494,7 @@ class CppCurvilinearSLMPC:
         n_corr = _lib.sl_mpc_get_corridor(self._handle, self._buf_xs1, self._buf_ys1, self._buf_xs2, self._buf_ys2, self._max_pts)
         corridor_left = [[float(self._buf_xs1[i]), float(self._buf_ys1[i])] for i in range(n_corr)]
         corridor_right = [[float(self._buf_xs2[i]), float(self._buf_ys2[i])] for i in range(n_corr)]
+        t_prim_ms = (time.perf_counter() - t_prim_0) * 1000.0
 
         # ----------------------------------------------------------------------
         # 2. SOLVE SMART CHALLENGER ALTERNATIVE LINE (if available)
@@ -499,14 +505,19 @@ class CppCurvilinearSLMPC:
         cmd_speed_alt = self.v_cruise_min
         cost_alt = 1e9
         best_line_alt = []
+        t_alt_ms = 0.0
+        iters_alt = 0
 
         is_clear_alt = False
-        if alt_target is not None and hasattr(self, "_handle_alt") and self._handle_alt:
+        # Discard challenger alternative solve if primary solve took >= 10.0ms or hit max iterations (35)
+        alt_allowed = (t_prim_ms < 10.0 and iters_prim < 35)
+        if alt_allowed and alt_target is not None and hasattr(self, "_handle_alt") and self._handle_alt:
             tx_alt, ty_alt, ap_alt = alt_target[:3]
             is_clear_alt = bool(alt_target[3]) if len(alt_target) >= 4 else (math.hypot(tx_alt, ty_alt) >= 1.60)
             min_sep = getattr(self, "alt_min_separation_m", 0.06)
             if math.hypot(tx_alt - tx_prim, ty_alt - ty_prim) >= min_sep or abs(tx_alt - tx_prim) >= (min_sep * 0.7):
                 has_challenger = True
+                t_alt_0 = time.perf_counter()
                 theta_alt = math.atan2(tx_alt - x0, max(0.20, ty_alt - y0))
                 if hasattr(_lib, "sl_mpc_plan_projected"):
                     _lib.sl_mpc_plan_projected(
@@ -532,11 +543,13 @@ class CppCurvilinearSLMPC:
                         ctypes.byref(self._out_status_code),
                     )
                 status_alt = self._out_status_code.value
+                iters_alt = int(self._out_osqp_iters.value)
                 cmd_steer_alt = float(self._out_steer.value)
                 cmd_speed_alt = float(self._out_speed.value)
                 cost_alt = float(self._out_best_cost.value)
                 n_best_alt = _lib.sl_mpc_get_best_line(self._handle_alt, self._buf_xs1, self._buf_ys1, self._max_pts)
                 best_line_alt = [[float(self._buf_xs1[i]), float(self._buf_ys1[i])] for i in range(n_best_alt)]
+                t_alt_ms = (time.perf_counter() - t_alt_0) * 1000.0
 
         # ----------------------------------------------------------------------
         # 3. ARBITRATION BETWEEN INCUMBENT AND CHALLENGER
@@ -598,6 +611,7 @@ class CppCurvilinearSLMPC:
         corridor_right = [[float(self._buf_xs2[i]), float(self._buf_ys2[i])] for i in range(n_corr)]
 
         # Extract Emergency Shield evasion branches (Step 0 Left/Right, Step 2 Left/Right, MPC Straight, Zero-Steer Straight)
+        t_shield_0 = time.perf_counter()
         _lib.sl_mpc_get_shield_branches(
             win_handle,
             self._buf_xs1, self._buf_ys1, ctypes.byref(self._shield_k1_l_cnt), ctypes.byref(self._shield_k1_l_safe),
@@ -656,6 +670,7 @@ class CppCurvilinearSLMPC:
             "straight_zero": straight_zero_branch,
             "straight_zero_safe": bool(self._shield_straight_zero_safe.value),
         }
+        t_shield_ms = (time.perf_counter() - t_shield_0) * 1000.0
 
         # ----------------------------------------------------------------------
         # 4. PACKAGE ACTIVE CONTROL COMMANDS
@@ -691,11 +706,17 @@ class CppCurvilinearSLMPC:
             status_desc = "FALLBACK_SL_MPC"
             active_cost = cost_prim
 
+        t_opt_total_ms = (time.perf_counter() - t_opt_0) * 1000.0
+        t_opt_cpu_ms = (time.process_time() - t_opt_cpu_0) * 1000.0
+
         return {
             "cmd_steer_rad": cmd_steer,
             "cmd_speed_mps": cmd_speed,
             "osqp_status": "solved" if (status_prim == 0 or status_alt == 0) else "fallback",
             "osqp_iters": iters_prim,
+            "osqp_iters_alt": iters_alt,
+            "status_prim": status_prim,
+            "status_alt": status_alt if has_challenger else None,
             "best_cost": active_cost,
             "cost_primary": cost_prim,
             "cost_alt": cost_alt if has_challenger else None,
@@ -708,6 +729,11 @@ class CppCurvilinearSLMPC:
             "corridor_left": corridor_left,
             "corridor_right": corridor_right,
             "shield": shield_info,
+            "opt_ms": round(t_opt_total_ms, 2),
+            "opt_cpu_ms": round(t_opt_cpu_ms, 2),
+            "opt_prim_ms": round(t_prim_ms, 2),
+            "opt_alt_ms": round(t_alt_ms, 2),
+            "opt_shield_ms": round(t_shield_ms, 2),
         }
 
     def __del__(self):

@@ -65,6 +65,10 @@ if hasattr(_lib, "costmap_get_unknown_mask"):
     _lib.costmap_get_unknown_mask.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint8)]
     _lib.costmap_get_unknown_mask.restype = None
 
+if hasattr(_lib, "costmap_get_perf"):
+    _lib.costmap_get_perf.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_float)]
+    _lib.costmap_get_perf.restype = None
+
 if hasattr(_lib, "costmap_scout_gaps"):
     _lib.costmap_scout_gaps.argtypes = [
         ctypes.c_void_p,
@@ -191,6 +195,8 @@ class CppSmartHybridCostmap:
         self._out_targets_y = (ctypes.c_float * 4)()
         self._out_targets_ap = (ctypes.c_float * 4)()
         self._out_targets_clear = (ctypes.c_float * 4)()
+        self._perf_buf = (ctypes.c_float * 6)()
+        self.last_perf = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
 
     def __del__(self):
         if hasattr(self, "_handle") and self._handle:
@@ -266,6 +272,17 @@ class CppSmartHybridCostmap:
             )
         else:
             self.unknown_mask = ((self.prob_map >= 0.38) & (self.prob_map <= 0.65) & (self.hazard_mask == 0)).astype(np.uint8)
+
+        if hasattr(_lib, "costmap_get_perf"):
+            _lib.costmap_get_perf(self._handle, self._perf_buf)
+            self.last_perf = (
+                float(self._perf_buf[0]),
+                float(self._perf_buf[1]),
+                float(self._perf_buf[2]),
+                float(self._perf_buf[3]),
+                float(self._perf_buf[4]),
+                float(self._perf_buf[5]),
+            )
 
         exec_ms = (time.perf_counter() - t0) * 1000.0
         return self.prob_map, self.hazard_mask, exec_ms

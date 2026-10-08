@@ -1,6 +1,6 @@
 {
   "planner": "OPTION_2_SL_MPC",
-  "fitness": 18139.71,
+  "fitness": 8139.71,
   "metrics": {
     "distance_m": 113.4,
     "mean_speed_mps": 2.657,
@@ -11,7 +11,7 @@
     "stalled": false,
     "obstacle_speed_mps": 1.0,
     "compute_multiplier": 1.0,
-    "fitness": 18139.71,
+    "fitness": 8139.71,
     "track1_metrics": {
       "distance_m": 113.4,
       "mean_speed_mps": 2.657,
@@ -22,7 +22,7 @@
       "stalled": false,
       "obstacle_speed_mps": 1.0,
       "compute_multiplier": 1.0,
-      "fitness": 18139.71
+      "fitness": 8139.71
     },
     "track2_metrics": null
   },

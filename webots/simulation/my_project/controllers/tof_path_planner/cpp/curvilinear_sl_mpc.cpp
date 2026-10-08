@@ -185,10 +185,10 @@ public:
     // Balanced high-precision tolerances: matched to actuator resolution
     // (polishing strictly disabled per user request)
     if (solver.settings) {
-      solver.settings->eps_abs = 0.0015;
-      solver.settings->eps_rel = 0.0015;
-      solver.settings->max_iter = 60;
-      solver.settings->check_termination = 10;
+      solver.settings->eps_abs = 0.003;
+      solver.settings->eps_rel = 0.003;
+      solver.settings->max_iter = 35;
+      solver.settings->check_termination = 5;
       solver.settings->polishing = 0;
     }
   }

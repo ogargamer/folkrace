@@ -65,12 +65,12 @@ WEBOTS_BINARY: str = r"C:\Program Files\Webots\msys64\mingw64\bin\webots.exe"
 BASE_WORKER_PORT: int = 10200
 TIMEOUT_PER_TRIAL_WALL_S: float = 200.0
 
-# Moving Obstacle Parameters (Track 1 = 1.00 m/s, Track 2 = 0.50 m/s)
+# Moving Obstacle Parameters (Track 1 = 1.00 m/s forward, Track 2 = 1.00 m/s reverse/opposite)
 ENABLE_MOVING_OBSTACLES: bool = True
-USE_TRACK2: bool = True  # Whether to evaluate candidate on 2nd track (0.50 m/s obstacles) alongside Track 1 (1.00 m/s)
+USE_TRACK2: bool = True  # Whether to evaluate candidate on 2nd track (-1.00 m/s opposite direction) alongside Track 1 (1.00 m/s)
 MOVING_OBSTACLE_SPEED_MPS: float = 1.00
 TRACK1_MOVING_OBSTACLE_SPEED_MPS: float = 1.00
-TRACK2_MOVING_OBSTACLE_SPEED_MPS: float = 0.50
+TRACK2_MOVING_OBSTACLE_SPEED_MPS: float = -1.00
 MOVING_OBSTACLE_NAMES: List[str] = [
     "MOVING_OBSTACLE",
     "MOVING_OBSTACLE_2",

@@ -16,8 +16,24 @@ import zlib
 import base64
 import copy
 import collections
+import gc
 from typing import Dict, List, Optional, Tuple, Any
 import numpy as np
+
+_gc_stats = {"step_gc_ms": 0.0, "last_gen": -1}
+_gc_t0 = 0.0
+
+def _folkrace_gc_cb(phase, info):
+    global _gc_t0
+    if phase == "start":
+        _gc_t0 = time.perf_counter()
+    elif phase == "stop":
+        dt_ms = (time.perf_counter() - _gc_t0) * 1000.0
+        _gc_stats["step_gc_ms"] += dt_ms
+        _gc_stats["last_gen"] = info.get("generation", -1)
+
+if not any(getattr(cb, "__name__", "") == "_folkrace_gc_cb" for cb in gc.callbacks):
+    gc.callbacks.append(_folkrace_gc_cb)
 
 CURR_DIR = os.path.dirname(os.path.abspath(__file__))
 CONTROLLERS_DIR = os.path.dirname(CURR_DIR)
@@ -331,7 +347,20 @@ class FolkraceVehicle:
         self.was_recovering = False
         self.mode_desc = "SL_MPC"
         self.cached_plan_ms = 0.0
+        self.cached_plan_cpu_ms = 0.0
         self.cached_map_ms = 0.0
+        self.cached_scout_ms = 0.0
+        self.cached_obs_ms = 0.0
+        self.cached_opt_ms = 0.0
+        self.cached_opt_prim_ms = 0.0
+        self.cached_opt_alt_ms = 0.0
+        self.cached_opt_shield_ms = 0.0
+        self.cached_osqp_iters = 0
+        self.cached_osqp_iters_alt = 0
+        self.cached_telem_ms = 0.0
+        self.cached_step_ms = 0.0
+        self.cached_step_cpu_ms = 0.0
+        self.cached_gc_ms = 0.0
         self.v_est = 0.0
         self.cached_yaw_rate = 0.0
         self.x_est = 0.0
@@ -655,6 +684,9 @@ class FolkraceVehicle:
         Executes one 120 Hz dynamics step with 60 Hz planner decimation.
         Returns: (telemetry_dict, planner_executed_boolean)
         """
+        t_step_start = time.perf_counter()
+        t_step_cpu_start = time.process_time()
+        _gc_stats["step_gc_ms"] = 0.0
         self.step_counter += 1
         sim_time = self.step_counter * dt
 
@@ -699,6 +731,14 @@ class FolkraceVehicle:
                 "targets": [],
                 "plan_ms": 0.0,
                 "map_ms": 0.0,
+                "scout_ms": 0.0,
+                "obs_ms": 0.0,
+                "opt_ms": 0.0,
+                "opt_prim_ms": 0.0,
+                "opt_alt_ms": 0.0,
+                "opt_shield_ms": 0.0,
+                "telem_ms": 0.0,
+                "step_ms": 0.0,
                 "surviving": 0,
                 "candidates": 0,
                 "tof": {k: round(float(v), 3) for k, v in tof_readings.items()},
@@ -755,6 +795,7 @@ class FolkraceVehicle:
 
             # Dynamic Moving Obstacle Detection, Tracking & Vector Enlargement
             # NOTE: Disabled because it is not working properly, WIP.
+            t_obs_0 = time.perf_counter()
             enlarged_hazard_mask, dyn_tracks, obs_telem = self.obstacle_tracker.process_frame(
                 prob_map=prob_map,
                 robot_pose=(self.x_est, self.y_est, self.yaw_est),
@@ -765,6 +806,7 @@ class FolkraceVehicle:
                 yaw_rate=self.cached_yaw_rate,
                 tof_readings=tof_readings,
             )
+            self.cached_obs_ms = (time.perf_counter() - t_obs_0) * 1000.0
             self.last_dynamic_tracks = dyn_tracks
             self.last_confirmed_tracks = getattr(self.obstacle_tracker, "last_confirmed_tracks", dyn_tracks)
             self.last_obs_telem = obs_telem
@@ -814,6 +856,7 @@ class FolkraceVehicle:
             self.proj_steer = steer_3
 
             # Scout Forward Gaps using projected anchor pose in F_sens
+            t_scout_0 = time.perf_counter()
             xg, yg, width, theta_g = self.gap_scout.scout_gap(
                 tof_readings=tof_readings,
                 hazard_mask=enlarged_hazard_mask,
@@ -825,6 +868,7 @@ class FolkraceVehicle:
                 anchor_y=dy_3,
                 anchor_yaw=delta_yaw_3,
             )
+            self.cached_scout_ms = (time.perf_counter() - t_scout_0) * 1000.0
             self.last_gap_info = (xg, yg, width, theta_g)
 
             # Curvilinear SL-MPC Trajectory Optimization anchored at projected state
@@ -843,6 +887,13 @@ class FolkraceVehicle:
                 psi0=delta_yaw_3,
             )
             self.cached_plan_ms = (time.perf_counter() - t_plan_0) * 1000.0
+            self.cached_plan_cpu_ms = plan_res.get("opt_cpu_ms", 0.0)
+            self.cached_opt_ms = plan_res.get("opt_ms", self.cached_plan_ms)
+            self.cached_opt_prim_ms = plan_res.get("opt_prim_ms", 0.0)
+            self.cached_opt_alt_ms = plan_res.get("opt_alt_ms", 0.0)
+            self.cached_opt_shield_ms = plan_res.get("opt_shield_ms", 0.0)
+            self.cached_osqp_iters = plan_res.get("osqp_iters", 0)
+            self.cached_osqp_iters_alt = plan_res.get("osqp_iters_alt", 0)
             self.last_plan_res = plan_res
 
             raw_target_steer = float(plan_res.get("cmd_steer_rad", 0.0))
@@ -1204,7 +1255,21 @@ class FolkraceVehicle:
                 "proj_v": round(float(self.proj_v), 3),
                 "proj_steer_deg": round(math.degrees(float(self.proj_steer)), 2),
                 "plan_ms": round(float(self.cached_plan_ms), 2),
+                "plan_cpu_ms": round(float(self.cached_plan_cpu_ms), 2),
                 "map_ms": round(float(self.cached_map_ms), 2),
+                "map_perf": getattr(self.costmap, "last_perf", (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)),
+                "scout_ms": round(float(self.cached_scout_ms), 2),
+                "obs_ms": round(float(self.cached_obs_ms), 2),
+                "opt_ms": round(float(self.cached_opt_ms), 2),
+                "opt_prim_ms": round(float(self.cached_opt_prim_ms), 2),
+                "opt_alt_ms": round(float(self.cached_opt_alt_ms), 2),
+                "opt_shield_ms": round(float(self.cached_opt_shield_ms), 2),
+                "iters_prim": int(self.cached_osqp_iters),
+                "iters_alt": int(self.cached_osqp_iters_alt),
+                "telem_ms": 0.0,
+                "step_ms": round((time.perf_counter() - t_step_start) * 1000.0, 2),
+                "step_cpu_ms": round((time.process_time() - t_step_cpu_start) * 1000.0, 2),
+                "gc_ms": round(float(_gc_stats["step_gc_ms"]), 2),
                 "escape_state": str(getattr(self.recovery_manager.state, "name", self.recovery_manager.state)),
                 "watchdog_mode": str(getattr(self.watchdog.mode, "name", self.watchdog.mode)),
                 "f_tof": round(float(self.cached_f_tof), 2),
@@ -1214,6 +1279,8 @@ class FolkraceVehicle:
                 "effective_mu": drift_res["effective_mu"],
             }
             return telemetry, planner_ran
+
+        t_telem_0 = time.perf_counter()
 
         # 2x2 Max Pooling for Costmap Telemetry:
         # Prevents small 1-2 cell obstacle hits from being skipped/aliased during decimation,
@@ -1240,8 +1307,8 @@ class FolkraceVehicle:
         ])
         hazard_down = (haz_max > 0).astype(np.uint8)
 
-        grid_compressed = base64.b64encode(zlib.compress(prob_down.tobytes())).decode("ascii")
-        hazard_compressed = base64.b64encode(zlib.compress(hazard_down.tobytes())).decode("ascii")
+        grid_compressed = base64.b64encode(zlib.compress(prob_down.tobytes(), 1)).decode("ascii")
+        hazard_compressed = base64.b64encode(zlib.compress(hazard_down.tobytes(), 1)).decode("ascii")
 
         b_line = to_py(self.last_plan_res.get("best_line", []))
         c_lines = to_py(self.last_plan_res.get("candidate_lines", []))[:20]
@@ -1252,6 +1319,15 @@ class FolkraceVehicle:
             for tgt in (getattr(self.gap_scout, "last_targets", []) or [])
             if isinstance(tgt, (list, tuple)) and len(tgt) >= 3
         ]
+
+        telem_ms = (time.perf_counter() - t_telem_0) * 1000.0
+        self.cached_telem_ms = telem_ms
+        step_ms = (time.perf_counter() - t_step_start) * 1000.0
+        step_cpu_ms = (time.process_time() - t_step_cpu_start) * 1000.0
+        gc_ms = _gc_stats["step_gc_ms"]
+        self.cached_step_ms = step_ms
+        self.cached_step_cpu_ms = step_cpu_ms
+        self.cached_gc_ms = gc_ms
 
         telemetry = {
             "time_step": self.step_counter,
@@ -1283,7 +1359,21 @@ class FolkraceVehicle:
             "gap": g_gap,
             "targets": g_targets,
             "plan_ms": round(float(self.cached_plan_ms), 2),
+            "plan_cpu_ms": round(float(self.cached_plan_cpu_ms), 2),
             "map_ms": round(float(self.cached_map_ms), 2),
+            "map_perf": getattr(self.costmap, "last_perf", (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)),
+            "scout_ms": round(float(self.cached_scout_ms), 2),
+            "obs_ms": round(float(self.cached_obs_ms), 2),
+            "opt_ms": round(float(self.cached_opt_ms), 2),
+            "opt_prim_ms": round(float(self.cached_opt_prim_ms), 2),
+            "opt_alt_ms": round(float(self.cached_opt_alt_ms), 2),
+            "opt_shield_ms": round(float(self.cached_opt_shield_ms), 2),
+            "iters_prim": int(self.cached_osqp_iters),
+            "iters_alt": int(self.cached_osqp_iters_alt),
+            "telem_ms": round(float(telem_ms), 2),
+            "step_ms": round(float(step_ms), 2),
+            "step_cpu_ms": round(float(step_cpu_ms), 2),
+            "gc_ms": round(float(gc_ms), 2),
             "surviving": int(self.last_plan_res.get("surviving_count", 0)),
             "candidates": int(self.last_plan_res.get("candidate_count", len(c_lines))),
             "tof": {k: round(float(v), 3) for k, v in tof_readings.items()},
