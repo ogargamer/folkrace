@@ -242,6 +242,7 @@ AWW_HISTORY_WINDOW_S: float = AWW_BREADCRUMB_MAX_TIMEOUT_S  # Backward-compatibl
 AWW_EARLY_EXIT_MIN_GAP_M: float = 1.4          # meters minimum scouted gap distance to qualify as long-path early exit
 AWW_EARLY_EXIT_CONE_DEG: float = 30.0          # degrees total narrow cone width (±15 deg) oriented along candidate gap vector
 AWW_EARLY_EXIT_OPPOSING_DEG: float = 110.0     # degrees heading divergence threshold for opposing breadcrumbs in gap corridor
+AWW_EARLY_EXIT_MIN_BC_DIST_M: float = 0.15     # meters minimum distance from robot to evaluate opposing breadcrumbs in gap corridor (starts 15cm out)
 
 
 # ==============================================================================

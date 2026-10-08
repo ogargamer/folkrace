@@ -505,6 +505,48 @@ def test_early_gap_exit_sentry():
     assert is_rec_rev is True, "Robot must continue reversing when in PIVOT_REVERSE"
     assert v_cmd_rev < 0.0, "Expected negative velocity command during reverse"
 
+    # Test 1H: Close-range breadcrumbs starting from 15cm out (e.g. at 20cm) block early exit
+    bc_dog_close = BreadcrumbWatchdog()
+    bc_dog_close.cumulative_dist_m = 2.0
+    # Breadcrumb at y = +0.20m in front of vehicle (xv=0.0, yv=0.20m), opposing heading
+    bc_dog_close.breadcrumbs.append(Breadcrumb(x=0.0, y=0.20, yaw=math.pi, v=1.5, timestamp=1.0, s_dist=1.5))
+    for k in range(5):
+        bc_dog_close.breadcrumbs.append(Breadcrumb(x=20.0 + k, y=20.0, yaw=0.0, v=1.5, timestamp=1.0, s_dist=0.1))
+
+    # Candidate gap at (0.0, 1.5m). With min_bc_dist=0.15m:
+    # 20cm breadcrumb (0.15m <= d=0.20m < 0.30m) MUST be detected and block early exit!
+    has_opp_close, cnt_close, _ = bc_dog_close.check_gap_channel(0.0, 0.0, 0.0, gap_xg=0.0, gap_yg=1.5)
+    is_exit_close, exit_info_close = bc_dog_close.is_gap_early_exit(0.0, 0.0, 0.0, gap_xg=0.0, gap_yg=1.5)
+    print(f"  [Test 1H - Close Breadcrumb @ 20cm] Opposing: {has_opp_close} (count={cnt_close}), Early Exit: {is_exit_close}")
+    assert has_opp_close is True, "Breadcrumb at 20cm must be detected by early exit sentry starting from 15cm out"
+    assert is_exit_close is False, "Early exit must be BLOCKED when opposing breadcrumb exists 20cm out"
+    assert exit_info_close["reason"] == "OPPOSING_BREADCRUMBS_IN_CHANNEL"
+
+    # Breadcrumb inside < 15cm (e.g. 10cm under chassis center) is excluded
+    bc_dog_too_close = BreadcrumbWatchdog()
+    bc_dog_too_close.cumulative_dist_m = 2.0
+    bc_dog_too_close.breadcrumbs.append(Breadcrumb(x=0.0, y=0.10, yaw=math.pi, v=1.5, timestamp=1.0, s_dist=1.5))
+    for k in range(5):
+        bc_dog_too_close.breadcrumbs.append(Breadcrumb(x=20.0 + k, y=20.0, yaw=0.0, v=1.5, timestamp=1.0, s_dist=0.1))
+    has_opp_sub15, _, _ = bc_dog_too_close.check_gap_channel(0.0, 0.0, 0.0, gap_xg=0.0, gap_yg=1.5)
+    assert has_opp_sub15 is False, "Breadcrumb at 10cm (< 15cm) must be excluded"
+
+    # Test 1I: Early exit must NOT suppress wrong-way when forward Line-of-Sight sees opposing breadcrumbs
+    watchdog_ww = AntiWrongWayWatchdog(mode=WrongWayOptionMode.OPTION_1_BREADCRUMB)
+    for i in range(120):
+        watchdog_ww.update(0.0, i * 0.05, 0.0, v_est=2.0, yaw_rate=0.0, now_s=i * 0.05)
+    # Vehicle is at (0.0, 6.0) facing wrong way (yaw = pi), seeing opposing trail along +Y
+    # Provide candidate gap at an angle (e.g. +30 deg: gx=0.6, gy=1.2)
+    st = None
+    for k in range(watchdog_ww.CONFIRM_STEPS_THRESHOLD + 2):
+        st = watchdog_ww.update(
+            0.0, 6.0, math.pi, v_est=1.5, yaw_rate=0.0, now_s=10.0 + k * 0.01,
+            candidate_gaps=[(0.6, 1.2)], state="NORMAL_DRIVE"
+        )
+    print(f"  [Test 1I - No Early Exit Suppression While Facing Breadcrumbs] Wrong Way: {st.is_wrong_way}, Early Exit: {st.early_exit_found}")
+    assert st.is_wrong_way is True, "Confirmed opposing LOS breadcrumbs must trigger wrong way and NOT be suppressed by angled candidate gap"
+    assert st.early_exit_found is False, "Early exit must NOT trigger when forward LOS sees opposing breadcrumbs"
+
     print("  -> Narrow-Cone Early Gap Exit Sentry: PASSED (100% verified)")
 
 
