@@ -136,7 +136,7 @@ public:
 
         span_dx_max.resize(2 * inflation_cells + 1, 0);
         for (int dy = -inflation_cells; dy <= inflation_cells; ++dy) {
-            int max_dx = static_cast<int>(std::round(std::sqrt(std::max(0, inflation_cells * inflation_cells - dy * dy))));
+            int max_dx = static_cast<int>(std::floor(std::sqrt(std::max(0, inflation_cells * inflation_cells - dy * dy))));
             span_dx_max[dy + inflation_cells] = max_dx;
         }
 
@@ -200,14 +200,14 @@ public:
 
         constexpr float L_FREE = -2.5f;
 
-        // Origin Launch Clearance: Robot chassis footprint is safe
+        // Origin Launch Clearance: Robot chassis footprint behind sensors is safe
         for (int r = 0; r < height; ++r) {
             float cell_y = y_min + r * res + res * 0.5f;
-            if (cell_y > 0.18f) break;
+            if (cell_y > 0.095f) break;
             int row_off = r * width;
             for (int c = 0; c < width; ++c) {
                 float cell_x = x_min + c * res + res * 0.5f;
-                if (std::abs(cell_x) <= (0.10f + r_inflation_m) && cell_y >= 0.0f) {
+                if (std::abs(cell_x) <= 0.080f && cell_y >= 0.0f) {
                     log_odds[row_off + c] = std::min(log_odds[row_off + c], L_FREE);
                 }
             }
@@ -244,6 +244,7 @@ public:
         // Any beam that is negative (or travels through open air before a hit further along)
         // physically guarantees NO obstacle exists inside that free-flight cone.
         // It decisively carves away phantom arcs, lateral bloat, and front overextensions.
+        // Hits confirmed by active returns are protected and never overwritten by open-air rays.
         for (int s_idx = 0; s_idx < 16; ++s_idx) {
             float raw_z = ranges_16[s_idx];
             float z = std::min(SENSOR_RIG[s_idx].max_range, std::max(SENSOR_RIG[s_idx].min_range, raw_z));
@@ -274,14 +275,14 @@ public:
             }
         }
 
-        // Origin Launch Clearance: Robot chassis footprint is safe
+        // Origin Launch Clearance: Robot chassis footprint behind sensors is safe
         for (int r = 0; r < height; ++r) {
             float cell_y = y_min + r * res + res * 0.5f;
-            if (cell_y > 0.18f) break;
+            if (cell_y > 0.095f) break;
             int row_off = r * width;
             for (int c = 0; c < width; ++c) {
                 float cell_x = x_min + c * res + res * 0.5f;
-                if (std::abs(cell_x) <= (0.10f + r_inflation_m) && cell_y >= 0.0f) {
+                if (std::abs(cell_x) <= 0.080f && cell_y >= 0.0f) {
                     log_odds[row_off + c] = std::min(log_odds[row_off + c], L_FREE);
                 }
             }
