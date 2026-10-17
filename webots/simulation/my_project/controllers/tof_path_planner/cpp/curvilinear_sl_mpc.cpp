@@ -81,6 +81,7 @@ public:
 
   int nx;
   int nu;
+  int max_iterations;
 
   // Preallocated buffers for OSQP data update
   double q_vec[MPC_N_VARS];
@@ -164,14 +165,14 @@ public:
         mu_friction(mu), v_corner_factor(v_corner),
         v_cruise_max(v_max), v_cruise_min(v_min),
         straight_lock_dist_m(lock_dist), straight_lock_speed_mps(lock_spd),
-        dt_actuator(DT_PLANNER_CONST), nx(7), nu(2), best_line_count(0),
-        guide_line_count(0), corridor_count(0), shield_active(false),
-        shield_chosen_id(-1), shield_k1_l_cnt(0), shield_k1_l_safe(false),
-        shield_k1_r_cnt(0), shield_k1_r_safe(false), shield_k2_l_cnt(0),
-        shield_k2_l_safe(false), shield_k2_r_cnt(0), shield_k2_r_safe(false),
-        shield_straight_cnt(0), shield_straight_safe(false),
-        shield_straight_zero_cnt(0), shield_straight_zero_safe(false),
-        has_solution(false) {
+        dt_actuator(DT_PLANNER_CONST), nx(7), nu(2), max_iterations(35),
+        best_line_count(0), guide_line_count(0), corridor_count(0),
+        shield_active(false), shield_chosen_id(-1), shield_k1_l_cnt(0),
+        shield_k1_l_safe(false), shield_k1_r_cnt(0), shield_k1_r_safe(false),
+        shield_k2_l_cnt(0), shield_k2_l_safe(false), shield_k2_r_cnt(0),
+        shield_k2_r_safe(false), shield_straight_cnt(0),
+        shield_straight_safe(false), shield_straight_zero_cnt(0),
+        shield_straight_zero_safe(false), has_solution(false) {
     // Copy constant structure of A_data
     std::memset(A_data, 0, sizeof(A_data));
     for (int k = 0; k < NUM_CONST_ENTRIES; ++k) {
@@ -1129,6 +1130,10 @@ public:
       osqp_cold_start(&solver);
     }
 
+    if (solver.settings) {
+      solver.settings->max_iter = max_iterations;
+    }
+
     osqp_solve(&solver);
 
     int status_val = solver.info->status_val;
@@ -1287,6 +1292,13 @@ SL_MPC_API void sl_mpc_reset(void *handle) {
   if (handle) {
     auto *planner = static_cast<CurvilinearSLMPCNative *>(handle);
     planner->has_solution = false;
+  }
+}
+
+SL_MPC_API void sl_mpc_set_max_iter(void *handle, int max_iter) {
+  if (handle) {
+    auto *planner = static_cast<CurvilinearSLMPCNative *>(handle);
+    planner->max_iterations = max_iter;
   }
 }
 

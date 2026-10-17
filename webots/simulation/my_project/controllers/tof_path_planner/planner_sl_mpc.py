@@ -110,6 +110,10 @@ if CPP_AVAILABLE and _lib is not None:
         _lib.sl_mpc_reset.argtypes = [ctypes.c_void_p]
         _lib.sl_mpc_reset.restype = None
 
+    if hasattr(_lib, "sl_mpc_set_max_iter"):
+        _lib.sl_mpc_set_max_iter.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        _lib.sl_mpc_set_max_iter.restype = None
+
     _lib.sl_mpc_plan.argtypes = [
         ctypes.c_void_p,
         ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_double,
@@ -509,14 +513,17 @@ class CppCurvilinearSLMPC:
         t_alt_ms = 0.0
         iters_alt = 0
 
-        # Discard challenger alternative solve if primary solve took >= 5.0ms or exceeded 35 iterations
-        alt_allowed = (t_prim_ms < 5.0 and iters_prim <= 35)
-        if alt_allowed and alt_target is not None and hasattr(self, "_handle_alt") and self._handle_alt:
+        # Fallback to single iteration for challenger solve if primary solve was slow (>= 5.0ms or > 35 iters)
+        alt_allowed_full = (t_prim_ms < 5.0 and iters_prim <= 35)
+        if alt_target is not None and hasattr(self, "_handle_alt") and self._handle_alt:
             tx_alt, ty_alt, ap_alt = alt_target[:3]
             is_clear_alt = bool(alt_target[3]) if len(alt_target) >= 4 else (math.hypot(tx_alt, ty_alt) >= 1.60)
             min_sep = getattr(self, "alt_min_separation_m", 0.06)
             if math.hypot(tx_alt - tx_prim, ty_alt - ty_prim) >= min_sep or abs(tx_alt - tx_prim) >= (min_sep * 0.7):
                 has_challenger = True
+                max_iter_alt = 35 if alt_allowed_full else 1
+                if hasattr(_lib, "sl_mpc_set_max_iter"):
+                    _lib.sl_mpc_set_max_iter(self._handle_alt, max_iter_alt)
                 t_alt_0 = time.perf_counter()
                 theta_alt = math.atan2(tx_alt - x0, max(0.20, ty_alt - y0))
                 if hasattr(_lib, "sl_mpc_plan_projected"):
