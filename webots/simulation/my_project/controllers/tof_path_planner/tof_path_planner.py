@@ -69,6 +69,21 @@ def find_trajectory_csv() -> str:
     return ""
 
 
+def _json_default(obj):
+    """Fast JSON fallback serializer for NumPy scalar/array types without recursive cloning."""
+    if isinstance(obj, (np.floating, float)):
+        return float(obj)
+    elif isinstance(obj, (np.integer, int)):
+        return int(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, bytes):
+        return obj.decode("ascii", errors="replace")
+    elif hasattr(obj, "tolist"):
+        return obj.tolist()
+    raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
+
+
 def to_py(obj):
     if isinstance(obj, (np.floating, float)):
         return float(obj)
@@ -126,19 +141,6 @@ def run_racing_studio(robot: any, vehicle: FolkraceVehicle) -> None:
     sim_time = 0.0
     telemetry_hz = max(1, min(60, int(os.environ.get("WEBOTS_TELEMETRY_HZ", 60))))
     last_telemetry_time = -1.0
-
-    def to_py(obj):
-        if isinstance(obj, (np.floating, float)):
-            return float(obj)
-        elif isinstance(obj, (np.integer, int)):
-            return int(obj)
-        elif isinstance(obj, np.ndarray):
-            return obj.tolist()
-        elif isinstance(obj, dict):
-            return {k: to_py(v) for k, v in obj.items()}
-        elif isinstance(obj, (list, tuple)):
-            return [to_py(v) for v in obj]
-        return obj
 
     # Discover Front and Back Pillars if present in the world (e.g. test_wrong_way.wbt)
     front_pillar_node = robot.getFromDef("FRONT_PILLAR") if (vehicle.is_supervisor and hasattr(robot, "getFromDef")) else None
@@ -338,7 +340,7 @@ def run_racing_studio(robot: any, vehicle: FolkraceVehicle) -> None:
                 telemetry["back_pillar"] = bool(back_pillar_active)
                 telemetry["sim_speed"] = round(float(sim_speed_mult), 2)
                 try:
-                    pkt_bytes = json.dumps(to_py(telemetry)).encode("utf-8")
+                    pkt_bytes = json.dumps(telemetry, default=_json_default).encode("utf-8")
                     gui_sock.sendto(pkt_bytes, ("127.0.0.1", 9876))
                 except Exception:
                     pass
@@ -491,19 +493,6 @@ def run_champion_preview(robot: any, vehicle: FolkraceVehicle) -> None:
     sim_time = 0.0
     telemetry_hz = max(1, min(60, int(os.environ.get("WEBOTS_TELEMETRY_HZ", 60))))
     last_telemetry_time = -1.0
-
-    def to_py(obj):
-        if isinstance(obj, (np.floating, float)):
-            return float(obj)
-        elif isinstance(obj, (np.integer, int)):
-            return int(obj)
-        elif isinstance(obj, np.ndarray):
-            return obj.tolist()
-        elif isinstance(obj, dict):
-            return {k: to_py(v) for k, v in obj.items()}
-        elif isinstance(obj, (list, tuple)):
-            return [to_py(v) for v in obj]
-        return obj
 
     while robot.step(TIME_STEP_MS) != -1:
         wall_start_t = time.perf_counter()
@@ -669,7 +658,7 @@ def run_champion_preview(robot: any, vehicle: FolkraceVehicle) -> None:
                     "title": title,
                 }
                 try:
-                    pkt_bytes = json.dumps(to_py(telemetry)).encode("utf-8")
+                    pkt_bytes = json.dumps(telemetry, default=_json_default).encode("utf-8")
                     gui_sock.sendto(pkt_bytes, ("127.0.0.1", 9876))
                 except Exception:
                     pass
@@ -1224,7 +1213,7 @@ def run_stationary_obstacle_test(robot: any, vehicle: FolkraceVehicle) -> None:
                 telemetry["obstacles"] = [[round(X_obs, 3), round(Y_obs, 3)]]
                 telemetry["test_stage"] = st_name
                 try:
-                    pkt_bytes = json.dumps(to_py(telemetry)).encode("utf-8")
+                    pkt_bytes = json.dumps(telemetry, default=_json_default).encode("utf-8")
                     gui_sock.sendto(pkt_bytes, ("127.0.0.1", 9876))
                 except Exception:
                     pass
@@ -1315,19 +1304,6 @@ def run_moving_obstacle_test(robot: any, vehicle: FolkraceVehicle) -> None:
     results_summary = []
     dt_step = TIME_STEP_MS / 1000.0
 
-    def to_py(obj):
-        if isinstance(obj, (np.floating, float)):
-            return float(obj)
-        elif isinstance(obj, (np.integer, int)):
-            return int(obj)
-        elif isinstance(obj, np.ndarray):
-            return obj.tolist()
-        elif isinstance(obj, dict):
-            return {k: to_py(v) for k, v in obj.items()}
-        elif isinstance(obj, (list, tuple)):
-            return [to_py(v) for v in obj]
-        return obj
-
     for stage_idx, (st_name, ego_v, ego_steer, target_obs_v, duration_s, x0_rel, y0_rel, vx_obs_w, vy_obs_w) in enumerate(test_stages):
         print(f"\n---> Starting {st_name} ...", flush=True)
         vehicle.reset(start_pos=start_pos, start_rot=start_rot)
@@ -1380,7 +1356,7 @@ def run_moving_obstacle_test(robot: any, vehicle: FolkraceVehicle) -> None:
 
             if telem:
                 try:
-                    payload = json.dumps(to_py(telem)).encode("utf-8")
+                    payload = json.dumps(telem, default=_json_default).encode("utf-8")
                     gui_sock.sendto(payload, ("127.0.0.1", 9876))
                 except Exception:
                     pass
@@ -1524,19 +1500,6 @@ def run_phase3_live_test(robot: any, vehicle: FolkraceVehicle) -> None:
 
     # Tracking metrics per mode for automated summary
     stage_metrics = {m: {"speeds": [], "dynamics": [], "leads": []} for m in range(1, 7)}
-
-    def to_py(obj):
-        if isinstance(obj, (np.floating, float)):
-            return float(obj)
-        elif isinstance(obj, (np.integer, int)):
-            return int(obj)
-        elif isinstance(obj, np.ndarray):
-            return obj.tolist()
-        elif isinstance(obj, dict):
-            return {k: to_py(v) for k, v in obj.items()}
-        elif isinstance(obj, (list, tuple)):
-            return [to_py(v) for v in obj]
-        return obj
 
     def print_summary_table():
         log_line("\n" + "=" * 92)
@@ -1745,7 +1708,7 @@ def run_phase3_live_test(robot: any, vehicle: FolkraceVehicle) -> None:
             telem["auto_sweep"] = auto_sweep
             telem["phase3_mode"] = obs_mode
             try:
-                payload = json.dumps(to_py(telem)).encode("utf-8")
+                payload = json.dumps(telem, default=_json_default).encode("utf-8")
                 gui_sock.sendto(payload, ("127.0.0.1", 9876))
             except Exception:
                 pass

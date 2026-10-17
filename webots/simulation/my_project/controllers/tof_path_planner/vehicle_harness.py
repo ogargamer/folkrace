@@ -34,6 +34,7 @@ def _folkrace_gc_cb(phase, info):
 
 if not any(getattr(cb, "__name__", "") == "_folkrace_gc_cb" for cb in gc.callbacks):
     gc.callbacks.append(_folkrace_gc_cb)
+gc.set_threshold(50000, 20, 20)
 
 CURR_DIR = os.path.dirname(os.path.abspath(__file__))
 CONTROLLERS_DIR = os.path.dirname(CURR_DIR)
@@ -182,6 +183,11 @@ class FolkraceVehicle:
         self.robot = robot
         self.is_supervisor = is_supervisor
         self.robot_node = robot.getSelf() if (is_supervisor and hasattr(robot, "getSelf")) else None
+        self._trans_field = self.robot_node.getField("translation") if (self.is_supervisor and self.robot_node) else None
+        self._rot_field = self.robot_node.getField("rotation") if (self.is_supervisor and self.robot_node) else None
+        self._step_gt_pose = None
+        self._step_gt_vel = None
+        self._step_rear_flow = None
 
         # 1. Discover Actuators
         self.motors = {
@@ -501,9 +507,12 @@ class FolkraceVehicle:
 
     def reset(self, start_pos: Optional[List[float]] = None, start_rot: Optional[List[float]] = None) -> None:
         """Resets vehicle physics state, odometry, costmap, and controller memories."""
+        self._step_gt_pose = None
+        self._step_gt_vel = None
+        self._step_rear_flow = None
         if self.is_supervisor and self.robot_node:
-            trans_field = self.robot_node.getField("translation")
-            rot_field = self.robot_node.getField("rotation")
+            trans_field = self._trans_field if self._trans_field is not None else self.robot_node.getField("translation")
+            rot_field = self._rot_field if self._rot_field is not None else self.robot_node.getField("rotation")
             if start_pos and trans_field:
                 trans_field.setSFVec3f([float(start_pos[0]), float(start_pos[1]), float(start_pos[2])])
             if start_rot and rot_field:
@@ -588,35 +597,46 @@ class FolkraceVehicle:
 
     def get_ground_truth_pose(self) -> Tuple[float, float, float]:
         """Returns (x, y, yaw_rad) ground-truth if supervisor available, else odometry."""
+        if self._step_gt_pose is not None:
+            return self._step_gt_pose
         if self.is_supervisor and self.robot_node:
             try:
-                trans = self.robot_node.getField("translation")
-                rot = self.robot_node.getField("rotation")
+                trans = self._trans_field if self._trans_field is not None else self.robot_node.getField("translation")
+                rot = self._rot_field if self._rot_field is not None else self.robot_node.getField("rotation")
                 if trans and rot:
                     pos = trans.getSFVec3f()
                     r = rot.getSFRotation()
                     yaw = float(r[3]) * (1.0 if r[2] >= 0.0 else -1.0)
-                    return float(pos[0]), float(pos[1]), yaw
+                    res = (float(pos[0]), float(pos[1]), yaw)
+                    self._step_gt_pose = res
+                    return res
             except Exception:
                 pass
-        return float(self.x_est), float(self.y_est), float(self.yaw_est)
+        res = (float(self.x_est), float(self.y_est), float(self.yaw_est))
+        self._step_gt_pose = res
+        return res
 
     def get_ground_truth_velocity(self) -> float:
         """Returns real signed longitudinal velocity from supervisor if available, else fused estimate."""
+        if self._step_gt_vel is not None:
+            return self._step_gt_vel
         if self.is_supervisor and self.robot_node:
             try:
                 vel = self.robot_node.getVelocity()
-                rot = self.robot_node.getField("rotation")
+                rot = self._rot_field if self._rot_field is not None else self.robot_node.getField("rotation")
                 if rot:
                     r = rot.getSFRotation()
                     yaw = float(r[3]) * (1.0 if r[2] >= 0.0 else -1.0)
                     # Vehicle forward unit vector in Webots world frame: (-sin(yaw), cos(yaw))
                     v_long = vel[0] * (-math.sin(yaw)) + vel[1] * math.cos(yaw)
-                    return float(v_long)
-                return float(math.hypot(vel[0], vel[1]))
+                    self._step_gt_vel = float(v_long)
+                    return self._step_gt_vel
+                self._step_gt_vel = float(math.hypot(vel[0], vel[1]))
+                return self._step_gt_vel
             except Exception:
                 pass
-        return float(self.v_est)
+        self._step_gt_vel = float(self.v_est)
+        return self._step_gt_vel
 
     def get_ground_truth_rear_axle_flow(self) -> Dict[str, float]:
         """
@@ -632,10 +652,12 @@ class FolkraceVehicle:
                 - 'slip_angle_rad': tire slip angle beta = atan2(v_lateral, v_forward) in radians
                 - 'yaw_rate_rad_s': angular rate around Z axis in rad/s
         """
+        if self._step_rear_flow is not None:
+            return self._step_rear_flow
         if self.is_supervisor and self.robot_node:
             try:
                 vel = self.robot_node.getVelocity()  # [vx, vy, vz, wx, wy, wz]
-                rot = self.robot_node.getField("rotation")
+                rot = self._rot_field if self._rot_field is not None else self.robot_node.getField("rotation")
                 if rot and vel:
                     r = rot.getSFRotation()
                     yaw = float(r[3]) * (1.0 if r[2] >= 0.0 else -1.0)
@@ -653,25 +675,29 @@ class FolkraceVehicle:
                     v_mag = float(math.hypot(v_fwd_rear, v_lat_rear))
                     slip_angle = float(math.atan2(v_lat_rear, v_fwd_rear)) if abs(v_fwd_rear) > 1e-4 else 0.0
 
-                    return {
+                    res = {
                         "v_forward": round(v_fwd_rear, 4),
                         "v_lateral": round(v_lat_rear, 4),
                         "v_mag": round(v_mag, 4),
                         "slip_angle_rad": round(slip_angle, 4),
                         "yaw_rate_rad_s": round(wz, 4),
                     }
+                    self._step_rear_flow = res
+                    return res
             except Exception:
                 pass
 
         v_fwd = float(self.v_est)
         wz = float(self.cached_yaw_rate)
-        return {
+        res = {
             "v_forward": round(v_fwd, 4),
             "v_lateral": 0.0,
             "v_mag": round(abs(v_fwd), 4),
             "slip_angle_rad": 0.0,
             "yaw_rate_rad_s": round(wz, 4),
         }
+        self._step_rear_flow = res
+        return res
 
     def step(
         self,
@@ -688,6 +714,9 @@ class FolkraceVehicle:
         t_step_cpu_start = time.process_time()
         _gc_stats["step_gc_ms"] = 0.0
         self.step_counter += 1
+        self._step_gt_pose = None
+        self._step_gt_vel = None
+        self._step_rear_flow = None
         sim_time = self.step_counter * dt
 
         # Initial physics warmup pause (0.50 s)
@@ -1310,8 +1339,8 @@ class FolkraceVehicle:
         grid_compressed = base64.b64encode(zlib.compress(prob_down.tobytes(), 1)).decode("ascii")
         hazard_compressed = base64.b64encode(zlib.compress(hazard_down.tobytes(), 1)).decode("ascii")
 
-        b_line = to_py(self.last_plan_res.get("best_line", []))
-        c_lines = to_py(self.last_plan_res.get("candidate_lines", []))[:20]
+        b_line = self.last_plan_res.get("best_line", [])
+        c_lines = self.last_plan_res.get("candidate_lines", [])[:20]
         xg, yg, width, theta_g = self.last_gap_info
         g_gap = [round(float(xg), 3), round(float(yg), 3), round(float(width), 3)]
         g_targets = [
@@ -1380,10 +1409,10 @@ class FolkraceVehicle:
             "tof_ranges": [round(float(tof_readings.get(k, TOF_MAX_RANGE_M)), 3) for k in TOF_SENSOR_NAMES],
             "best_line": b_line,
             "candidate_lines": c_lines,
-            "guide_line": to_py(self.last_plan_res.get("guide_line", [])),
-            "corridor_left": to_py(self.last_plan_res.get("corridor_left", [])),
-            "corridor_right": to_py(self.last_plan_res.get("corridor_right", [])),
-            "shield": to_py(self.last_plan_res.get("shield", {})),
+            "guide_line": self.last_plan_res.get("guide_line", []),
+            "corridor_left": self.last_plan_res.get("corridor_left", []),
+            "corridor_right": self.last_plan_res.get("corridor_right", []),
+            "shield": self.last_plan_res.get("shield", {}),
             "f_tof": round(float(self.cached_f_tof), 2),
             "grid_shape": [int(s) for s in prob_down.shape],
             "grid_bounds": [float(GRID_X_MIN), float(GRID_X_MAX), float(GRID_Y_MIN), float(GRID_Y_MAX)],
