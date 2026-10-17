@@ -509,9 +509,8 @@ class CppCurvilinearSLMPC:
         t_alt_ms = 0.0
         iters_alt = 0
 
-        # Discard challenger alternative solve if primary solve took >= 2.5ms or took > 20 iterations
-        # (prevents doubling compute budget into a 5-6ms latency spike when conditions are complex)
-        alt_allowed = (t_prim_ms < 2.5 and iters_prim <= 20)
+        # Discard challenger alternative solve if primary solve took >= 5.0ms or exceeded 35 iterations
+        alt_allowed = (t_prim_ms < 5.0 and iters_prim <= 35)
         if alt_allowed and alt_target is not None and hasattr(self, "_handle_alt") and self._handle_alt:
             tx_alt, ty_alt, ap_alt = alt_target[:3]
             is_clear_alt = bool(alt_target[3]) if len(alt_target) >= 4 else (math.hypot(tx_alt, ty_alt) >= 1.60)
