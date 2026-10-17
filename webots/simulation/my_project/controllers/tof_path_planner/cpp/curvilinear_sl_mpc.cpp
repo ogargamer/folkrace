@@ -182,6 +182,30 @@ public:
       P_data[k] = P_base_data[k];
     }
 
+    // P is diagonal. Layout (N = 30): per stage k = 0..N the state weights
+    // [d, e_psi, vx, delta] at 4k..4k+3 (vx is overwritten every plan()),
+    // then per stage k = 0..N-1 the input weights [Fx, v_delta] at
+    // 4(N+1) + 2k..2k+1, then slacks. P_base_data was baked for the reference
+    // weights below, so scale relative to them: reference weights reproduce
+    // the original behaviour exactly.
+    static_assert(MPC_NNZ_P >= 4 * 31 + 2 * 30, "unexpected P layout");
+    constexpr double REF_Q_CTE = 18.0;
+    constexpr double REF_Q_HEADING = 8.0;
+    constexpr double REF_R_STEER = 5.0;
+    constexpr double REF_R_STEER_RATE = 10.0;
+    const double s_cte = std::max(q_cte, 0.0) / REF_Q_CTE;
+    const double s_head = std::max(q_heading, 0.0) / REF_Q_HEADING;
+    const double s_steer = std::max(r_steer, 0.0) / REF_R_STEER;
+    const double s_rate = std::max(r_steer_rate, 0.0) / REF_R_STEER_RATE;
+    for (int k = 0; k <= 30; ++k) {
+      P_data[4 * k + 0] *= s_cte;
+      P_data[4 * k + 1] *= s_head;
+      P_data[4 * k + 3] *= s_steer;
+    }
+    for (int k = 0; k < 30; ++k) {
+      P_data[4 * 31 + 2 * k + 1] *= s_rate;
+    }
+
     // Balanced high-precision tolerances: matched to actuator resolution
     // (polishing strictly disabled per user request)
     if (solver.settings) {
@@ -548,7 +572,7 @@ public:
       float py = static_cast<float>(y);
       float px_f = static_cast<float>(x - 0.06 * std::sin(psi));
       float py_f = static_cast<float>(y + 0.06 * std::cos(psi));
-      if (costmap_probe_func && costmap_handle) {
+      if (is_safe && costmap_probe_func && costmap_handle) {
         if (costmap_probe_func(costmap_handle, &px, &py, 1) == 0 ||
             costmap_probe_func(costmap_handle, &px_f, &py_f, 1) == 0) {
           is_safe = false; // Collision
@@ -581,87 +605,67 @@ public:
     double act_v = std::max(0.0, v_bar);
     double act_delta = delta_0;
 
-    // Advance to Step 1 (t = 1 * dt)
-    double d_delta_0 =
-        std::max(-max_delta_rate_step,
-                 std::min(max_delta_rate_step, cmd_steer - act_delta));
-    double act_delta_1 = act_delta + d_delta_0;
-    double delta_mid_0 = act_delta + 0.5 * d_delta_0;
+    // State at Step 2 (t = 2 * dt). On a successful MPC solve it comes straight
+    // from the solution; otherwise propagate two steps of kinematics below.
+    double act_x_2 = mpc_x_2;
+    double act_y_2 = mpc_y_2;
+    double act_psi_2 = mpc_psi_2;
+    double act_v_2 = mpc_v_2;
+    double act_delta_2 = mpc_delta_2;
 
-    double act_v_1 = act_v;
-    if (cmd_speed < act_v)
-      act_v_1 = std::max(cmd_speed, act_v - max_a_dec * dt_sim_step);
-    else
-      act_v_1 = std::min(cmd_speed, act_v + max_a_acc * dt_sim_step);
-    double v_mid_0 = 0.5 * (act_v + act_v_1);
+    if (!use_mpc_step2) {
+      // Advance to Step 1 (t = 1 * dt)
+      double d_delta_0 =
+          std::max(-max_delta_rate_step,
+                   std::min(max_delta_rate_step, cmd_steer - act_delta));
+      double act_delta_1 = act_delta + d_delta_0;
+      double delta_mid_0 = act_delta + 0.5 * d_delta_0;
 
-    double max_yaw_rate_0 = (mu_friction * GRAVITY_G_CONST) / std::max(0.35, v_mid_0);
-    double d_psi_0 =
-        (v_mid_0 / WHEELBASE_CONST) * std::tan(delta_mid_0) * dt_sim_step;
-    d_psi_0 = std::max(-max_yaw_rate_0 * dt_sim_step,
-                       std::min(max_yaw_rate_0 * dt_sim_step, d_psi_0));
-    double psi_mid_0 = act_psi + 0.5 * d_psi_0;
-    double act_psi_1 = act_psi + d_psi_0;
+      double act_v_1 = act_v;
+      if (cmd_speed < act_v)
+        act_v_1 = std::max(cmd_speed, act_v - max_a_dec * dt_sim_step);
+      else
+        act_v_1 = std::min(cmd_speed, act_v + max_a_acc * dt_sim_step);
+      double v_mid_0 = 0.5 * (act_v + act_v_1);
 
-    // In vehicle local frame: +Y is forward, +X is right, delta > 0 turns left
-    // (towards -X)
-    double act_x_1 = act_x - v_mid_0 * std::sin(psi_mid_0) * dt_sim_step;
-    double act_y_1 = act_y + v_mid_0 * std::cos(psi_mid_0) * dt_sim_step;
+      double max_yaw_rate_0 = (mu_friction * GRAVITY_G_CONST) / std::max(0.35, v_mid_0);
+      double d_psi_0 =
+          (v_mid_0 / WHEELBASE_CONST) * std::tan(delta_mid_0) * dt_sim_step;
+      d_psi_0 = std::max(-max_yaw_rate_0 * dt_sim_step,
+                         std::min(max_yaw_rate_0 * dt_sim_step, d_psi_0));
+      double psi_mid_0 = act_psi + 0.5 * d_psi_0;
+      double act_psi_1 = act_psi + d_psi_0;
 
-    // Advance to Step 2 (t = 2 * dt)
-    double d_delta_1 =
-        std::max(-max_delta_rate_step,
-                 std::min(max_delta_rate_step, cmd_steer - act_delta_1));
-    double act_delta_2 = act_delta_1 + d_delta_1;
-    double delta_mid_1 = act_delta_1 + 0.5 * d_delta_1;
+      // In vehicle local frame: +Y is forward, +X is right, delta > 0 turns left
+      // (towards -X)
+      double act_x_1 = act_x - v_mid_0 * std::sin(psi_mid_0) * dt_sim_step;
+      double act_y_1 = act_y + v_mid_0 * std::cos(psi_mid_0) * dt_sim_step;
 
-    double act_v_2 = act_v_1;
-    if (cmd_speed < act_v_1)
-      act_v_2 = std::max(cmd_speed, act_v_1 - max_a_dec * dt_sim_step);
-    else
-      act_v_2 = std::min(cmd_speed, act_v_1 + max_a_acc * dt_sim_step);
-    double v_mid_1 = 0.5 * (act_v_1 + act_v_2);
+      // Advance to Step 2 (t = 2 * dt)
+      double d_delta_1 =
+          std::max(-max_delta_rate_step,
+                   std::min(max_delta_rate_step, cmd_steer - act_delta_1));
+      act_delta_2 = act_delta_1 + d_delta_1;
+      double delta_mid_1 = act_delta_1 + 0.5 * d_delta_1;
 
-    double max_yaw_rate_1 = (mu_friction * GRAVITY_G_CONST) / std::max(0.35, v_mid_1);
-    double d_psi_1 =
-        (v_mid_1 / WHEELBASE_CONST) * std::tan(delta_mid_1) * dt_sim_step;
-    d_psi_1 = std::max(-max_yaw_rate_1 * dt_sim_step,
-                       std::min(max_yaw_rate_1 * dt_sim_step, d_psi_1));
-    double psi_mid_1 = act_psi_1 + 0.5 * d_psi_1;
-    double act_psi_2 = act_psi_1 + d_psi_1;
+      act_v_2 = act_v_1;
+      if (cmd_speed < act_v_1)
+        act_v_2 = std::max(cmd_speed, act_v_1 - max_a_dec * dt_sim_step);
+      else
+        act_v_2 = std::min(cmd_speed, act_v_1 + max_a_acc * dt_sim_step);
+      double v_mid_1 = 0.5 * (act_v_1 + act_v_2);
 
-    double act_x_2 = act_x_1 - v_mid_1 * std::sin(psi_mid_1) * dt_sim_step;
-    double act_y_2 = act_y_1 + v_mid_1 * std::cos(psi_mid_1) * dt_sim_step;
+      double max_yaw_rate_1 = (mu_friction * GRAVITY_G_CONST) / std::max(0.35, v_mid_1);
+      double d_psi_1 =
+          (v_mid_1 / WHEELBASE_CONST) * std::tan(delta_mid_1) * dt_sim_step;
+      d_psi_1 = std::max(-max_yaw_rate_1 * dt_sim_step,
+                         std::min(max_yaw_rate_1 * dt_sim_step, d_psi_1));
+      double psi_mid_1 = act_psi_1 + 0.5 * d_psi_1;
+      act_psi_2 = act_psi_1 + d_psi_1;
 
-    if (use_mpc_step2) {
-      act_x_2 = mpc_x_2;
-      act_y_2 = mpc_y_2;
-      act_psi_2 = mpc_psi_2;
-      act_v_2 = mpc_v_2;
-      act_delta_2 = mpc_delta_2;
+      act_x_2 = act_x_1 - v_mid_1 * std::sin(psi_mid_1) * dt_sim_step;
+      act_y_2 = act_y_1 + v_mid_1 * std::cos(psi_mid_1) * dt_sim_step;
     }
-
-    // Advance to Step 3 (t = 3 * dt)
-    double d_delta_2 =
-        std::max(-max_delta_rate_step,
-                 std::min(max_delta_rate_step, cmd_steer - act_delta_2));
-    double act_delta_3 = act_delta_2 + d_delta_2;
-    double delta_mid_2 = act_delta_2 + 0.5 * d_delta_2;
-
-    double act_v_3 = act_v_2;
-    if (cmd_speed < act_v_2)
-      act_v_3 = std::max(cmd_speed, act_v_2 - max_a_dec * dt_sim_step);
-    else
-      act_v_3 = std::min(cmd_speed, act_v_2 + max_a_acc * dt_sim_step);
-    double v_mid_2 = 0.5 * (act_v_2 + act_v_3);
-
-    double d_psi_2 =
-        (v_mid_2 / WHEELBASE_CONST) * std::tan(delta_mid_2) * dt_sim_step;
-    double psi_mid_2 = act_psi_2 + 0.5 * d_psi_2;
-    double act_psi_3 = act_psi_2 + d_psi_2;
-
-    double act_x_3 = act_x_2 - v_mid_2 * std::sin(psi_mid_2) * dt_sim_step;
-    double act_y_3 = act_y_2 + v_mid_2 * std::cos(psi_mid_2) * dt_sim_step;
 
     shield_active = false;
     shield_chosen_id = -1;
@@ -923,7 +927,7 @@ public:
       double uk = sk / std::max(L_guide, 0.01);
 
       // Probe whether step dot k is inside obstacle / C-space
-      if (costmap_probe_func && costmap_handle) {
+      if (!blocked_ahead && costmap_probe_func && costmap_handle) {
         float px = static_cast<float>(step_states[k].gx);
         float py = static_cast<float>(step_states[k].gy);
         if (costmap_probe_func(costmap_handle, &px, &py, 1) == 0) {

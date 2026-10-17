@@ -23,7 +23,7 @@ import numpy as np
 NUM_CPU_CORES: int = 14
 
 # Population size per generation (168 candidates: 12 full 14-core worker batches)
-POPULATION_SIZE: int = 168
+POPULATION_SIZE: int = 42
 
 # Maximum number of generations to run
 NUM_GENERATIONS: int = 9999
@@ -37,7 +37,7 @@ EVAL_DURATION_HOURLY_GROWTH_S: float = 2.50  # Linear seconds added per wall-clo
 EVAL_DURATION_MAX_S: float = 60.0            # Maximum simulation duration ceiling
 
 # Number of evaluation runs per candidate to average (1 for deterministic, >1 if noisy)
-RUNS_PER_EVALUATION: int = 2
+RUNS_PER_EVALUATION: int = 1
 
 # Optimization Algorithm: 'CMA_ES' (Covariance Matrix Adaptation), 'GA' (Genetic Algorithm)
 ALGORITHM: str = "CMA_ES"
@@ -47,7 +47,7 @@ SEED_FROM_BEST_GENOME_DEFAULT: bool = True
 BEST_GENOME_PATH: str = os.path.join(os.path.dirname(os.path.abspath(__file__)), "best_planner_genome.json")
 
 # CMA-ES Hyperparameters (Wide exploration sigma = 0.30 across normalized [0, 1] parameter space)
-CMA_SIGMA0: float = 0.30             # Initial search step size in normalized [0, 1] parameter space
+CMA_SIGMA0: float = 0.25             # Initial search step size in normalized [0, 1] parameter space
 CMA_RESTART_ON_CONVERGENCE: bool = True  # Automatically re-seed if search distribution collapses
 
 # Genetic Operator Rates (Used when ALGORITHM == 'GA')
@@ -360,7 +360,7 @@ def compute_efficiency_multiplier(gene_dict: Optional[Dict[str, Any]]) -> float:
     return 1.0
 
 
-SPEED_PHYSICAL_MAX_MPS: float = 5.50
+SPEED_PHYSICAL_MAX_MPS: float = 5.00
 DISTANCE_VALID_MIN_M: float = 0.10
 
 

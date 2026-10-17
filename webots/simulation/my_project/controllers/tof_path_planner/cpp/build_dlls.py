@@ -120,6 +120,7 @@ def compile_sl_mpc(compiler: str, env: dict, cpp_dir: str, output_dir: str) -> b
         "-shared",
         "-fPIC",
         "-mavx2",
+        "-fno-math-errno",
         "-std=c++17",
         "-Wall",
         "-Wextra",

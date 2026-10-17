@@ -369,8 +369,9 @@ class CppCurvilinearSLMPC:
                 lib_cm = cpp_smart_hybrid_costmap._lib
                 probe_addr = ctypes.cast(lib_cm.costmap_probe_path, ctypes.c_void_p).value
                 return ctypes.c_void_p(self._costmap._handle), ctypes.c_void_p(probe_addr)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[Warning] SL-MPC native costmap probe unavailable ({e}); "
+                      f"falling back to SLOW Python probe callback", flush=True)
 
         if hasattr(self._costmap, "probe_path"):
             def _py_probe_cb(h, xs_ptr, ys_ptr, count):
