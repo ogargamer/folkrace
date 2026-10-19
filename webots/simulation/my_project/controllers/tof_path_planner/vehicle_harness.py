@@ -72,7 +72,6 @@ from planner_config import (
     V_MIN_CRUISE,
     V_MAX_CRUISE,
     MAX_SERVO_RAD,
-    MAX_ACKERMANN_RAD,
     MAX_STEERING_RAD,
     ACKERMANN_PERCENT,
     WHEELBASE,
@@ -90,7 +89,6 @@ from planner_config import (
     R_INFLATION_M,
     RECOVERY_REVERSE_SPEED_MPS,
     RECOVERY_STEER_ANGLE_RAD,
-    RECOVERY_FRONT_BLOCKED_M,
     RECOVERY_CLEARANCE_EXIT_M,
     RECOVERY_ANY_TOF_EXIT_M,
     RECOVERY_ARC_LOOKAHEAD_M,
@@ -101,7 +99,15 @@ from planner_config import (
     STRAIGHT_LOCK_SPEED_MPS,
     FRONT_LATERAL_RESERVE_MIN,
     ENABLE_TRACTION_DRIFT_CONTROL,
+    ENABLE_ANTI_ROLLOVER,
+    ENABLE_TILT_SPEED_SCALING,
+    TILT_SLOWDOWN_START_DEG,
+    TILT_SLOWDOWN_END_DEG,
+    TILT_MAX_SPEED_CAP,
+    TILT_MIN_SPEED_CAP,
+    TILT_EXP_FACTOR,
 )
+from anti_rollover_controller import AntiRolloverController
 
 
 def to_py(obj: Any) -> Any:
@@ -329,6 +335,16 @@ class FolkraceVehicle:
             max_steer=MAX_STEERING_RAD,
             enabled=ENABLE_TRACTION_DRIFT_CONTROL,
         )
+        self.anti_rollover = AntiRolloverController(
+            max_steer=MAX_STEERING_RAD,
+            tilt_slowdown_start_deg=TILT_SLOWDOWN_START_DEG,
+            tilt_slowdown_end_deg=TILT_SLOWDOWN_END_DEG,
+            tilt_max_speed_cap=TILT_MAX_SPEED_CAP,
+            tilt_min_speed_cap=TILT_MIN_SPEED_CAP,
+            tilt_exp_factor=TILT_EXP_FACTOR,
+            enable_tilt_speed_scaling=ENABLE_TILT_SPEED_SCALING,
+            enabled=ENABLE_ANTI_ROLLOVER,
+        )
 
         # Default Tuning Parameters
         self.base_mu = 0.817
@@ -543,6 +559,7 @@ class FolkraceVehicle:
         self.costmap.clear()
         self.watchdog.reset()
         self.drift_controller.reset()
+        self.anti_rollover.reset()
         self.last_aww_status = None
         if hasattr(self, "planner") and hasattr(self.planner, "reset_active_target"):
             self.planner.reset_active_target()
@@ -1165,14 +1182,53 @@ class FolkraceVehicle:
         if hasattr(self.planner, "set_dynamic_mu"):
             self.planner.set_dynamic_mu(self.mu_val)
 
-        # 5. Friction Rate Limiter Aware of Fused Speed with Front Lateral Grip Reservation
+        # 4b. Active Anti-Rollover Mitigation Evaluation (15° to 22° smoothstep, mu scaling, FOC clamp)
+        arm_res = self.anti_rollover.update(
+            roll_rad=self.fusion.roll,
+            roll_rate=self.fusion.roll_rate,
+            target_steer_rad=drift_res["steer_cmd"],
+            v_forward=float(rear_flow["v_forward"]),
+            mu=self.mu_val,
+            dt=dt,
+            pitch_rad=self.fusion.pitch,
+        )
+
+        # Combined Steering Command (Planner + Drift Countersteer + Anti-Rollover Countersteer)
+        effective_steer_cmd = max(
+            -MAX_STEERING_RAD,
+            min(MAX_STEERING_RAD, drift_res["steer_cmd"] + arm_res["delta_counter"]),
+        )
+
+        # Combined Rear Drive Alpha (Drift Traction Alpha & Rollover Power Attenuation)
+        combined_alpha = min(drift_res["rear_alpha"], arm_res["alpha_rollover"])
+
+        # 5. Dynamic Friction Rate Limiter with Instant Crash Resynchronization
         if override_speed is not None:
             self.rate_limited_speed = float(override_speed)
         else:
-            # Synchronize rate limiter with actual fused speed (self.v_est) to prevent
-            # driving forward into obstacles or dragging brakes after dynamic speed loss
             target_v = self.cached_target_speed
             v_curr = self.v_est
+
+            # Dynamic Pre-Emptive Tilt Speed Scaling (4° to 15° ARM threshold):
+            # When tilting over 4° is detected, dynamically scale down max speed limit
+            # from 2.0 m/s down slightly exponentially as tilt increases up to 15°.
+            # Happens before acceleration and deceleration ramp calculations.
+            if arm_res.get("tilt_detected", False) and arm_res.get("v_tilt_limit") is not None:
+                v_tilt_cap = arm_res["v_tilt_limit"]
+                if target_v > 0.0:
+                    target_v = min(target_v, v_tilt_cap)
+                elif target_v < 0.0:
+                    target_v = max(target_v, -v_tilt_cap)
+
+            # Anti-Rollover Speed Attenuation: cap target speed when vehicle is tilted (>= 15°)
+            if arm_res["is_active"] and arm_res["v_arm_target"] is not None:
+                target_v = min(target_v, arm_res["v_arm_target"])
+
+            # Instant Wall Hit / Collision Resync:
+            # If actual ground speed suddenly drops (e.g. wall crash or abrupt halt),
+            # snap rate limiter immediately to v_curr so the vehicle never pushes an arbitrary curve into obstacles
+            if v_curr < self.rate_limited_speed - 0.15:
+                self.rate_limited_speed = v_curr
 
             # When requesting deceleration or reverse, command must not stay higher than actual speed
             if target_v <= v_curr:
@@ -1185,41 +1241,61 @@ class FolkraceVehicle:
 
             speed_err = target_v - self.rate_limited_speed
             is_accel = (self.rate_limited_speed >= 0.0 and speed_err > 0.0) or (self.rate_limited_speed <= 0.0 and speed_err < 0.0)
+
+            # Lateral reserve on front steering axle:
+            steer_mag = abs(float(effective_steer_cmd))
+            lateral_fraction = min(0.80, abs(math.sin(steer_mag)))
+            max_longitudinal_fraction = math.sqrt(max(FRONT_LATERAL_RESERVE_MIN ** 2, 1.0 - lateral_fraction ** 2))
+
+            # Dynamic acceleration and braking limits referencing mu and planner config limits
+            dt_lag = TOTAL_LATENCY_STEPS * dt
+            a_limit = min(ACCEL_FWD_MAX, 0.85 * self.mu_val * 9.81)
+            d_limit = min(BRAKE_DECEL_MAX, 1.00 * self.mu_val * 9.81 * max_longitudinal_fraction)
+
             if is_accel:
-                max_dv = (0.85 * self.mu_val * 9.81) * dt
+                max_dv = a_limit * dt
             else:
-                # Friction circle reserve on front steering axle:
-                # Caps forward braking decel during high steering angles to prevent front tire wash-out
-                steer_mag = abs(float(drift_res["steer_cmd"]))
-                lateral_fraction = min(0.80, abs(math.sin(steer_mag)))
-                max_longitudinal_fraction = math.sqrt(max(FRONT_LATERAL_RESERVE_MIN ** 2, 1.0 - lateral_fraction ** 2))
-                max_dv = (1.00 * self.mu_val * 9.81 * max_longitudinal_fraction) * dt
+                max_dv = d_limit * dt
 
             if abs(speed_err) <= max_dv:
                 self.rate_limited_speed = target_v
             else:
                 self.rate_limited_speed += math.copysign(max_dv, speed_err)
 
-            # Traction slip envelope: Cap commanded wheel velocity relative to fused ground speed
-            # to strictly prevent runaway wheelspin if tires break traction or car is pinned against obstacle.
-            max_slip_lead = max(0.40, 0.20 * abs(v_curr))
+            # Dynamic Traction Slip Envelope referencing physical latency & peak tire slip (10%)
+            max_slip_lead = (a_limit * dt_lag) + (0.10 * abs(v_curr))
+            max_slip_lag = (d_limit * dt_lag) + (0.10 * abs(v_curr))
+
             if self.rate_limited_speed > 0.0:
                 self.rate_limited_speed = min(self.rate_limited_speed, max(0.0, v_curr) + max_slip_lead)
             elif self.rate_limited_speed < 0.0:
                 self.rate_limited_speed = max(self.rate_limited_speed, min(0.0, v_curr) - max_slip_lead)
 
         # 6. Electronic Differential & Ground-Roll Clamped Actuation
-        is_drift_active = (drift_res.get("mode", "GRIP") != "GRIP") or bool(drift_res.get("is_stabilizing", False))
+        is_drift_active = (drift_res.get("mode", "GRIP") != "GRIP") or bool(drift_res.get("is_stabilizing", False)) or arm_res["is_active"]
         diff_res = self.ediff.update(
             target_v=self.rate_limited_speed,
-            target_steer_rad=drift_res["steer_cmd"],
+            target_steer_rad=effective_steer_cmd,
             gyro_z_rad_s=live_gyro_z,
             dt=dt,
-            rear_alpha=drift_res["rear_alpha"],
+            rear_alpha=combined_alpha,
             v_ground_RL=drift_res["v_ground_RL"],
             v_ground_RR=drift_res["v_ground_RR"],
             is_drifting=is_drift_active,
         )
+
+        # 6b. Individual Closed-Loop FOC Airborne Wheel Ground-Roll Clamping
+        # Clamps motor speed on lifted wheels to match true vehicle ground speed,
+        # strictly preventing runaway free-spinning and landing spin-out shock
+        if arm_res["is_active"] and arm_res["lifted_side"] != "NONE":
+            w_clamp = arm_res["w_tilt"]
+            omega_ground_sync = (v_curr / WHEEL_RADIUS) * MOTOR_DIR
+            if arm_res["lifted_side"] == "LEFT":
+                diff_res["omega_FL"] = (1.0 - w_clamp) * diff_res["omega_FL"] + w_clamp * omega_ground_sync
+                diff_res["omega_RL"] = (1.0 - w_clamp) * diff_res["omega_RL"] + w_clamp * omega_ground_sync
+            elif arm_res["lifted_side"] == "RIGHT":
+                diff_res["omega_FR"] = (1.0 - w_clamp) * diff_res["omega_FR"] + w_clamp * omega_ground_sync
+                diff_res["omega_RR"] = (1.0 - w_clamp) * diff_res["omega_RR"] + w_clamp * omega_ground_sync
 
         # 7. Apply Actuator Commands
         if self.servos.get("left"):
@@ -1236,6 +1312,7 @@ class FolkraceVehicle:
         if self.motors.get("RR"):
             self.motors["RR"].setVelocity(diff_res["omega_RR"])
 
+
         # 8. Assemble Telemetry Payload (Full for GUI / Lean for headless GA)
         gx, gy, gyaw = self.get_ground_truth_pose()
         v_real = self.get_ground_truth_velocity()
@@ -1250,14 +1327,19 @@ class FolkraceVehicle:
             hazard_mask=self.last_enlarged_hazard,
         )
         aww_detailed["corrective_substate"] = getattr(self.recovery_manager, "corrective_substate", "FORWARD")
-        # Compose combined operational mode string (e.g. "SL_MPC", "SL_MPC_DRIFT")
+        # Compose combined operational mode string (e.g. "SL_MPC", "SL_MPC_ARM", "SL_MPC_DRIFT")
         drift_mode = drift_res.get("mode", "GRIP")
-        active_mode = f"{self.mode_desc}_{drift_mode}" if drift_mode not in ("GRIP", "DISABLED") else self.mode_desc
+        if arm_res["is_active"]:
+            active_mode = f"{self.mode_desc}_ARM"
+        elif drift_mode not in ("GRIP", "DISABLED"):
+            active_mode = f"{self.mode_desc}_{drift_mode}"
+        else:
+            active_mode = self.mode_desc
 
         v_plan = round(float(self.cached_target_speed), 3)
         v_cmd_act = round(float(self.rate_limited_speed), 3)
         steer_plan = round(math.degrees(float(self.cached_target_steer)), 2)
-        steer_cmd_act = round(math.degrees(float(drift_res["steer_cmd"])), 2)
+        steer_cmd_act = round(math.degrees(float(effective_steer_cmd)), 2)
 
         if not full_telemetry:
             telemetry = {
@@ -1271,13 +1353,16 @@ class FolkraceVehicle:
                 "v_real": round(float(v_real), 3),
                 "flow_rear_axle": rear_flow,
                 "yaw_fused": round(float(self.yaw_est), 4),
+                "roll_deg": round(float(self.fusion.roll_deg), 2),
+                "pitch_deg": round(float(self.fusion.pitch_deg), 2),
+                "roll_rate": round(float(self.fusion.roll_rate), 3),
                 "v_plan": v_plan,
                 "v_tgt": v_plan,
                 "v_cmd": v_cmd_act,
                 "steer_plan_deg": steer_plan,
                 "steer_cmd_deg": steer_cmd_act,
                 "steer_deg": steer_cmd_act,
-                "steer_rad": round(float(drift_res["steer_cmd"]), 4),
+                "steer_rad": round(float(effective_steer_cmd), 4),
                 "steer_actual_deg": round(math.degrees(float(getattr(self.ediff, "current_steer_rad", self.active_steer))), 2),
                 "pose": [float(gx), float(gy), float(gyaw)],
                 "proj_anchor": [round(float(self.proj_anchor[0]), 4), round(float(self.proj_anchor[1]), 4), round(float(self.proj_anchor[2]), 4)],
@@ -1304,7 +1389,14 @@ class FolkraceVehicle:
                 "f_tof": round(float(self.cached_f_tof), 2),
                 "aww": aww_detailed,
                 "drift": drift_res,
-                "rear_alpha": drift_res["rear_alpha"],
+                "arm": arm_res,
+                "arm_active": bool(arm_res["is_active"]),
+                "arm_w_tilt": arm_res["w_tilt"],
+                "arm_counter_deg": arm_res["delta_counter_deg"],
+                "tilt_detected": bool(arm_res.get("tilt_detected", False)),
+                "v_tilt_limit": arm_res.get("v_tilt_limit"),
+                "tilt_scale": arm_res.get("tilt_scale_factor", 1.0),
+                "rear_alpha": combined_alpha,
                 "effective_mu": drift_res["effective_mu"],
             }
             return telemetry, planner_ran
@@ -1369,16 +1461,26 @@ class FolkraceVehicle:
             "v_real": round(float(v_real), 3),
             "flow_rear_axle": rear_flow,
             "drift": drift_res,
-            "rear_alpha": drift_res["rear_alpha"],
+            "arm": arm_res,
+            "arm_active": bool(arm_res["is_active"]),
+            "arm_w_tilt": arm_res["w_tilt"],
+            "arm_counter_deg": arm_res["delta_counter_deg"],
+            "tilt_detected": bool(arm_res.get("tilt_detected", False)),
+            "v_tilt_limit": arm_res.get("v_tilt_limit"),
+            "tilt_scale": arm_res.get("tilt_scale_factor", 1.0),
+            "rear_alpha": combined_alpha,
             "effective_mu": drift_res["effective_mu"],
             "yaw_fused": round(float(self.yaw_est), 4),
+            "roll_deg": round(float(self.fusion.roll_deg), 2),
+            "pitch_deg": round(float(self.fusion.pitch_deg), 2),
+            "roll_rate": round(float(self.fusion.roll_rate), 3),
             "v_plan": v_plan,
             "v_tgt": v_plan,
             "v_cmd": v_cmd_act,
             "steer_plan_deg": steer_plan,
             "steer_cmd_deg": steer_cmd_act,
             "steer_deg": steer_cmd_act,
-            "steer_rad": round(float(drift_res["steer_cmd"]), 4),
+            "steer_rad": round(float(effective_steer_cmd), 4),
             "steer_actual_deg": round(math.degrees(float(getattr(self.ediff, "current_steer_rad", self.active_steer))), 2),
             "pose": [float(gx), float(gy), float(gyaw)],
             "proj_anchor": [round(float(self.proj_anchor[0]), 4), round(float(self.proj_anchor[1]), 4), round(float(self.proj_anchor[2]), 4)],

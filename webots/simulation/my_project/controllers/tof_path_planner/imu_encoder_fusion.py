@@ -51,6 +51,11 @@ class IMUEncoderFusion:
         self.slip_ratio: float = 0.0
         self.yaw: float = 0.0
         self.yaw_rate: float = 0.0
+        self.roll: float = 0.0
+        self.pitch: float = 0.0
+        self.roll_rate: float = 0.0
+        self.pitch_rate: float = 0.0
+        self.tilt_mag: float = 0.0
         self.a_forward: float = 0.0
         self.a_lateral: float = 0.0
         self.total_distance_m: float = 0.0
@@ -76,6 +81,11 @@ class IMUEncoderFusion:
         self.slip_ratio = 0.0
         self.yaw = 0.0
         self.yaw_rate = 0.0
+        self.roll = 0.0
+        self.pitch = 0.0
+        self.roll_rate = 0.0
+        self.pitch_rate = 0.0
+        self.tilt_mag = 0.0
         self.a_forward = 0.0
         self.a_lateral = 0.0
         self.total_distance_m = 0.0
@@ -92,6 +102,18 @@ class IMUEncoderFusion:
         self.imu_dev = imu_dev
         self.gyro_dev = gyro_dev
         self.accel_dev = accel_dev
+
+    @property
+    def roll_deg(self) -> float:
+        return math.degrees(self.roll)
+
+    @property
+    def pitch_deg(self) -> float:
+        return math.degrees(self.pitch)
+
+    @property
+    def tilt_mag_deg(self) -> float:
+        return math.degrees(self.tilt_mag)
 
     def update(
         self,
@@ -136,19 +158,32 @@ class IMUEncoderFusion:
         v_fl = -wheel_omegas["FL"] * self.wheel_radius
         v_fr = -wheel_omegas["FR"] * self.wheel_radius
 
-        # 3. Read IMU Gyroscope (body Z-axis yaw rate)
+        # 3. Read IMU Gyroscope (body frame: +X Pitch, +Y Roll, +Z Yaw)
         gyro_z = 0.0
+        gyro_roll = 0.0
+        gyro_pitch = 0.0
         if self.gyro_dev is not None:
             raw_gyro = self.gyro_dev.getValues()
             if raw_gyro and len(raw_gyro) >= 3:
+                gyro_pitch = float(raw_gyro[0])
+                gyro_roll = float(raw_gyro[1])
                 gyro_z = float(raw_gyro[2])
         self.yaw_rate = gyro_z
+        self.roll_rate = gyro_roll
+        self.pitch_rate = gyro_pitch
 
-        # 4. Read Inertial Unit (Yaw heading)
+        # 4. Read Inertial Unit (Euler angles: +X pitch, +Y roll, +Z yaw in ENU vehicle frame)
         if self.imu_dev is not None:
             rpy = self.imu_dev.getRollPitchYaw()
             if rpy and len(rpy) >= 3:
+                # In robot body (+Y Forward, +X Right, +Z Up):
+                # rpy[1] is rotation around Y (longitudinal roll / bank)
+                # rpy[0] is rotation around X (transverse pitch)
+                # rpy[2] is rotation around Z (heading yaw)
+                self.pitch = float(rpy[0])
+                self.roll = float(rpy[1])
                 self.yaw = float(rpy[2])
+                self.tilt_mag = float(math.hypot(self.roll, self.pitch))
 
         # 5. Read IMU Accelerometer (local robot body: +Y is Forward, +X is Right)
         a_fwd = 0.0

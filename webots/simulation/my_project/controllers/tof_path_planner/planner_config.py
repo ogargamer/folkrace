@@ -27,12 +27,12 @@ PLANNER_TYPE: str = "SL_MPC"
 # ==============================================================================
 
 # 1.1 Chassis Dimensions & Mass Properties
-WHEELBASE: float = 0.1325              # meters (L: distance between front and rear axles)
+REAR_AXLE_OFFSET_M: float = -0.0700     # meters (offset along body Y-axis from chassis origin to rear axle center)
+FRONT_AXLE_OFFSET_M: float = 0.0625    # meters (offset along body Y-axis from chassis origin to front axle center)
+WHEELBASE: float = FRONT_AXLE_OFFSET_M - REAR_AXLE_OFFSET_M  # 0.1325 meters (distance between front and rear axles)
 TRACK_REAR: float = 0.1000             # meters (lateral distance between rear wheel contact centers)
 TRACK_FRONT: float = 0.0822            # meters (lateral distance between front wheel contact centers)
 TRACK_KINGPIN: float = 0.0620          # meters (distance between front steering kingpin pivots)
-REAR_AXLE_OFFSET_M: float = -0.0700     # meters (offset along body Y-axis from chassis origin to rear axle center)
-FRONT_AXLE_OFFSET_M: float = 0.0625    # meters (offset along body Y-axis from chassis origin to front axle center)
 WHEEL_RADIUS: float = 0.0275           # meters (27.5 mm rolling radius)
 VEHICLE_MASS: float = 1.000            # kg total vehicle mass
 
@@ -40,7 +40,6 @@ VEHICLE_MASS: float = 1.000            # kg total vehicle mass
 ACKERMANN_PERCENT: float = 0.40        # 40% Ackermann steering geometry (0.0 = parallel, 1.0 = true Ackermann)
 MAX_SERVO_RAD: float = 0.696386        # radians (+- 39.9 deg servo limit, 0.1 deg inside Webots 40.0 deg physical hard stops)
 MAX_STEERING_RAD: float = 0.657137     # radians (+- 37.65 deg virtual center angle producing 39.9 deg at inside servo)
-MAX_ACKERMANN_RAD: float = MAX_STEERING_RAD  # Backward-compatible alias
 
 # 1.3 Powertrain & Velocity Ceilings
 MOTOR_DIR: float = -1.0                # Webots rotational sign (-1.0 applies forward thrust)
@@ -92,11 +91,11 @@ PLANNER_HZ: float = 1000.0 / TOF_TIME_STEP_MS              # ToF scan processing
 # 3.2 Realistic Hardware Latency & Lookahead Compensation
 TOF_LATENCY_STEPS: int = 2              # 2 simulation steps = 16 ms ToF integration & transport delay
 ACTUATOR_LATENCY_STEPS: int = 1         # 1 simulation step = 8 ms intrinsic Webots ODE physics integration delay
-TOTAL_LATENCY_STEPS: int = 3            # 3 simulation steps = 24 ms total latency compensated by SE(2) lookahead projection
+TOTAL_LATENCY_STEPS: int = TOF_LATENCY_STEPS + ACTUATOR_LATENCY_STEPS  # 3 simulation steps = 24 ms total latency compensated by SE(2) lookahead projection
 
 # 3.2 C++ Smart Hybrid Costmap Bounds (Local Vehicle Coordinates, +Y Forward, +X Right)
-GRID_X_MIN: float = -1.25              # meters (lateral left boundary)
 GRID_X_MAX: float = 1.25               # meters (lateral right boundary)
+GRID_X_MIN: float = -GRID_X_MAX        # meters (lateral left boundary, symmetrical)
 GRID_Y_MIN: float = 0.00               # meters (starting from robot center)
 GRID_Y_MAX: float = 1.90               # meters (forward preview range up to 1.9m)
 GRID_RES: float = 0.010                # meters (10 mm grid resolution)
@@ -123,7 +122,6 @@ TOF_SENSOR_NAMES: List[str] = [
     "tof_front_right_71.6deg",
     "tof_front_right_82.9deg",
 ]
-FRONT_TOF_SENSOR_NAMES: List[str] = TOF_SENSOR_NAMES  # Backward-compatible alias
 TOF_MAX_RANGE_M: float = 1.80          # meters maximum valid ToF range
 TOF_MIN_RANGE_M: float = 0.001         # meters minimum valid ToF range
 
@@ -166,7 +164,7 @@ GAP_DIST_THRESH_M: float = 0.95        # meters threshold distance to engage exp
 GAP_DIST_EXP_K: float = 0.717          # Exponential growth scaling factor for distance beyond threshold
 
 # 4.4 Fast Straight-Line Lock
-STRAIGHT_LOCK_DIST_M: float = 1.70     # meters forward clearance on both 4.1 deg ToFs to lock full speed straight
+STRAIGHT_LOCK_DIST_M: float = 1.80     # meters forward clearance on both 4.1 deg ToFs to lock full speed straight (aligned with TOF_MAX_RANGE_M)
 STRAIGHT_LOCK_SPEED_MPS: float = V_MAX_CRUISE  # m/s top cruising speed when straight-line locked (5.0 m/s)
 
 # 4.5 Dual-Path Candidate Selection & Smart Challenger Arbitration
@@ -197,13 +195,12 @@ MPC_V_CRUISE_MAX: float = V_MAX_CRUISE # m/s top cruising speed ceiling (5.0 m/s
 MPC_V_CRUISE_MIN: float = V_MIN_CRUISE # m/s cornering / crawl speed floor (~1.20 m/s)
 
 # 5.4 Straight-Line Lock & Challenger Aliases
-MPC_STRAIGHT_LOCK_DIST_M: float = 1.80                        # Forward clearance to lock straight (1.80 m)
-MPC_STRAIGHT_LOCK_SPEED_MPS: float = STRAIGHT_LOCK_SPEED_MPS  # Top speed when straight locked (5.0 m/s)
+MPC_STRAIGHT_LOCK_DIST_M: float = STRAIGHT_LOCK_DIST_M        # Forward clearance to lock straight (unified with STRAIGHT_LOCK_DIST_M: 1.80 m)
+MPC_STRAIGHT_LOCK_SPEED_MPS: float = STRAIGHT_LOCK_SPEED_MPS  # Top speed when straight locked (unified with STRAIGHT_LOCK_SPEED_MPS: 5.0 m/s)
 MPC_ALT_SWITCH_HYSTERESIS: float = 24.484                     # Cost reduction needed for challenger overthrow
 MPC_ALT_MIN_SEPARATION_M: float = ALT_MIN_SEPARATION_M        # Minimum lateral separation between paths (m)
 MPC_ALT_APERTURE_BIAS: float = ALT_APERTURE_BIAS              # Challenger aperture width bias multiplier
 MPC_W_GAP_CLEAR: float = 10.0                                 # Lookahead depth credit & clear horizon weight (m)
-MPC_ALT_LOOKAHEAD_DEPTH_WEIGHT: float = MPC_W_GAP_CLEAR      # Backward-compatible alias
 
 
 # ==============================================================================
@@ -217,13 +214,12 @@ RECOVERY_SERVO_SLEW_RAD_S: float = SERVO_MAX_SPEED_RAD_S  # rad/s centering slew
 RECOVERY_ARC_LOOKAHEAD_M: float = 0.146                # meters length of kinematic escape arcs projected on costmap
 
 # 6.2 Stall Detection Triggers & Failsafe Timeouts
-RECOVERY_FRONT_BLOCKED_M: float = 0.25       # meters front clearance threshold to detect forward stall
+RECOVERY_CLEARANCE_EXIT_M: float = 0.25      # meters (25 cm) minimum forward clearance to conclude reverse
 RECOVERY_REVERSE_STROKE_MAX_S: float = 1.0  # seconds maximum reverse stroke failsafe
 RECOVERY_TOTAL_TIMEOUT_S: float = 1.2       # seconds maximum total recovery duration before forced exit
 RECOVERY_EXIT_MIN_TIME_S: float = 0.0        # seconds minimum recovery stroke time before clearance check
 
 # 6.3 Multi-Criteria Exit Conditions
-RECOVERY_CLEARANCE_EXIT_M: float = 0.25      # meters (25 cm) minimum forward clearance to conclude reverse
 RECOVERY_ANY_TOF_EXIT_M: float = 0.60        # meters (60 cm) minimum clearance on at least one ToF to conclude reverse
 
 
@@ -237,7 +233,6 @@ AWW_BREADCRUMB_LOOKBACK_M: float = 8.0         # meters baseline historical path
 AWW_BREADCRUMB_DURATION_SCALE: float = 0.6     # scale factor for breadcrumb fade (0.6x = disappears 1.67x faster / 60% retention)
 AWW_BREADCRUMB_SPACING_M: float = 0.05         # meters minimum spatial spacing between breadcrumb nodes
 AWW_BREADCRUMB_MAX_TIMEOUT_S: float = 6.0      # seconds maximum timeout before breadcrumb history expires
-AWW_HISTORY_WINDOW_S: float = AWW_BREADCRUMB_MAX_TIMEOUT_S  # Backward-compatible alias (6.0 s)
 
 # 7.2 Narrow-Cone Early Gap Exit Sentry
 AWW_EARLY_EXIT_MIN_GAP_M: float = 1.4          # meters minimum scouted gap distance to qualify as long-path early exit
@@ -257,7 +252,6 @@ ENABLE_TRACTION_DRIFT_CONTROL: bool = True
 V_ARM_DRIFT_MPS: float = V_MIN_CRUISE          # ~1.204 m/s entry threshold
 V_DISARM_CRAWL_MPS: float = 0.60               # Disarm only if speed drops below this AND tires have gripped
 V_CRAWL_FLOOR_MPS: float = 0.40                # Floor of the linear fade ramp (zero countersteer at or below)
-V_MIN_DRIFT_MPS: float = V_DISARM_CRAWL_MPS    # Backward-compatible alias
 
 # 8.2 Slip Angle Thresholds (Radians)
 BETA_SCRUB_RAD: float = math.radians(3.5)      # ~0.061 rad (linear tire limit)
@@ -285,3 +279,32 @@ ALPHA_SLEW_DROP_RATE: float = 4.0              # Max alpha decay rate (units/s) 
 ALPHA_SLEW_RISE_RATE: float = 2.5              # Max alpha recovery rate (units/s) to prevent breaking traction again
 
 
+# ==============================================================================
+# 9. ACTIVE ANTI-ROLLOVER MITIGATION (ARM)
+# ==============================================================================
+
+ENABLE_ANTI_ROLLOVER: bool = True
+
+# 9.1 Tilt Thresholds (Degrees & Radians)
+ARM_TILT_WARN_DEG: float = 15.0                # Advisory ramp start threshold (deg): rejects small ramps/curbs
+ARM_TILT_CRIT_DEG: float = 22.0                # Critical full-intervention threshold (deg): imminent tipping point
+ARM_TILT_WARN_RAD: float = math.radians(ARM_TILT_WARN_DEG)
+ARM_TILT_CRIT_RAD: float = math.radians(ARM_TILT_CRIT_DEG)
+
+# 9.2 Active Countersteering & Roll-Rate Damping
+ARM_K_P_ROLL: float = 1.25                     # Proportional countersteer gain (rad steer per rad roll excess)
+ARM_K_D_ROLL: float = 0.08                     # Derivative damping against roll rate to prevent landing snap (rad / (rad/s))
+ARM_SETTLE_TIME_S: float = 0.080               # 80 ms touchdown latch hold time for smooth suspension settling
+
+# 9.3 Dynamic Mu-Aware Deceleration & Drive Attenuation
+ARM_DECEL_FRACTION: float = 0.85               # Fraction of available mu*g utilized for tilt deceleration
+ARM_MIN_MU_RATIO: float = 0.20                 # Minimum friction ratio floor to prevent mathematical singularity
+ARM_NOMINAL_MU: float = TIRE_MU                # Reference tire friction coefficient (unified with canonical TIRE_MU: 0.86)
+
+# 9.4 Dynamic Pre-Emptive Tilt Speed Governor (4° to 15° ARM threshold)
+ENABLE_TILT_SPEED_SCALING: bool = True          # Enable dynamic pre-emptive tilt speed scaling
+TILT_SLOWDOWN_START_DEG: float = 4.0           # Detect tilt over 4 deg and begin scaling down max speed (editable parameter)
+TILT_SLOWDOWN_END_DEG: float = ARM_TILT_WARN_DEG # Scale down max speed up to ARM threshold (15 deg, unified with ARM_TILT_WARN_DEG)
+TILT_MAX_SPEED_CAP: float = V_MAX_CRUISE       # Maximum speed limit (m/s) unified with vehicle cruising ceiling (5.0 m/s)
+TILT_MIN_SPEED_CAP: float = 2.0                # Minimum speed floor (m/s) at maximum tilt (15 deg)
+TILT_EXP_FACTOR: float = 1.3                   # Slight exponential curvature factor for dynamic scaling (k in exp(-k * u))

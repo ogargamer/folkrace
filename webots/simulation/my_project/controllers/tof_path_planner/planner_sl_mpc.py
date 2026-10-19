@@ -35,7 +35,6 @@ try:
         MPC_ALT_MIN_SEPARATION_M,
         MPC_ALT_APERTURE_BIAS,
         MPC_W_GAP_CLEAR,
-        MPC_ALT_LOOKAHEAD_DEPTH_WEIGHT,
         DT_PLANNER,
     )
 except ImportError:
@@ -58,7 +57,6 @@ except ImportError:
         MPC_ALT_MIN_SEPARATION_M,
         MPC_ALT_APERTURE_BIAS,
         MPC_W_GAP_CLEAR,
-        MPC_ALT_LOOKAHEAD_DEPTH_WEIGHT,
         DT_PLANNER,
     )
 

@@ -70,10 +70,6 @@ class ReverseObstacleEngine:
         return float(x), float(y)
 
 
-# Backward compatibility alias
-MovingObstacleTrajectory = ReverseObstacleEngine
-
-
 class MovingObstacleManager:
     """Manages Webots solid nodes representing dynamic moving obstacles."""
 

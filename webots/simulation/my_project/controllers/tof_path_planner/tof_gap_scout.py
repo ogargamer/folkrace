@@ -90,26 +90,6 @@ FRONT_TOF_SENSOR_RIG = [
     ("tof_front_right_82.9deg",  0.070, 0.095, 3.0172, 1.80),
 ]
 
-LEGACY_TOF_SENSOR_RIG = [
-    ("tof_fl_0", -0.070,  0.095, 0.9097, 1.80),
-    ("tof_fl_1", -0.070,  0.095, 1.1060, 1.80),
-    ("tof_fl_2", -0.070,  0.095, 1.3024, 1.80),
-    ("tof_fl_3", -0.070,  0.095, 1.4987, 1.80),
-    ("tof_fr_0",  0.070,  0.095, 2.2318, 1.80),
-    ("tof_fr_1",  0.070,  0.095, 2.0356, 1.80),
-    ("tof_fr_2",  0.070,  0.095, 1.8391, 1.80),
-    ("tof_fr_3",  0.070,  0.095, 1.6428, 1.80),
-    ("tof_bl_0", -0.070, -0.095, 1.6957, 1.80),
-    ("tof_bl_1", -0.070, -0.095, 1.8920, 1.80),
-    ("tof_bl_2", -0.070, -0.095, 2.0883, 1.80),
-    ("tof_bl_3", -0.070, -0.095, 2.2847, 1.80),
-    ("tof_br_0",  0.070, -0.095, 1.4462, 1.80),
-    ("tof_br_1",  0.070, -0.095, 1.2499, 1.80),
-    ("tof_br_2",  0.070, -0.095, 1.0536, 1.80),
-    ("tof_br_3",  0.070, -0.095, 0.8573, 1.80),
-]
-
-TOF_SENSOR_RIG = FRONT_TOF_SENSOR_RIG
 
 # 16-Channel ToF Pod Geometry:
 # 8 zones per corner, each zone has 11.25 deg FOV (8 * 11.25 deg = 90.0 deg total FOV per pod).
@@ -285,7 +265,7 @@ class ToFGapScout:
         # 1. EVALUATE 16 PHYSICAL TOF BEAM SIGHTLINES (LUT + MEASURED RANGES)
         # ----------------------------------------------------------------------
         if tof_readings:
-            active_rig = FRONT_TOF_SENSOR_RIG if any("front" in k for k in tof_readings) else LEGACY_TOF_SENSOR_RIG
+            active_rig = FRONT_TOF_SENSOR_RIG
             for s_name, sx, sy, heading, max_range in active_rig:
                 raw_z = tof_readings.get(s_name, max_range)
                 z = min(max_range, max(0.10, raw_z))
@@ -473,7 +453,7 @@ class ToFGapScout:
             if tof_readings:
                 # Find matching physical zone index for candidate angle
                 rel_deg = math.degrees(c["rel_angle"])
-                active_rig = FRONT_TOF_SENSOR_RIG if any("front" in k for k in tof_readings) else LEGACY_TOF_SENSOR_RIG
+                active_rig = FRONT_TOF_SENSOR_RIG
                 if rel_deg >= 0.0:
                     z_idx = min(7, max(0, int(round((rel_deg - 4.1) / 11.25))))
                 else:
