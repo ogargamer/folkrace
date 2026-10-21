@@ -337,10 +337,22 @@ void loop() {
             for (int r = 0; r < 4; r++) {
                 Serial.print("  |");
                 for (int c = 0; c < 4; c++) {
-                    int idx = r * 4 + c;
+                    int zone = r * 4 + c;
+                    int idx = zone * VL53L8CX_NB_TARGET_PER_ZONE; // Primary target (Target 0)
                     int16_t dist = Results2.distance_mm[idx];
                     uint8_t st = Results2.target_status[idx];
-                    Serial.printf(" %4dmm(s%1u) |", dist, st);
+                    uint8_t ntar = Results2.nb_target_detected[zone];
+
+                    if (st == 5) {
+                        Serial.printf(" %4dmm(OK) |", dist);
+                    } else if (st == 6 || st == 9) {
+                        Serial.printf(" %4dmm(50) |", dist);
+                    } else if (st == 255 || ntar == 0) {
+                        Serial.print("  ---mm(--) |");
+                    } else {
+                        // Error/unreliable reading (s4=consistency/near-field fail, s2=phase fail, etc.)
+                        Serial.printf(" %4dmm(s%1u) |", dist, st);
+                    }
                 }
                 Serial.println();
             }
