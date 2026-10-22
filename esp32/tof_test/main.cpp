@@ -333,7 +333,23 @@ void loop() {
         last_print_time = millis();
 
         if (tof2_active && frame_count > 0) {
-            Serial.printf("[ToF 2 - HSPI] Frame #%lu (Stream #%3u):\n", frame_count, Dev2.streamcount);
+            int16_t min_dist = 9999;
+            int min_zone = -1;
+
+            // Find closest valid obstacle
+            for (int z = 0; z < 16; z++) {
+                int idx = z * VL53L8CX_NB_TARGET_PER_ZONE;
+                uint8_t st = Results2.target_status[idx];
+                int16_t d = Results2.distance_mm[idx];
+                if ((st == 5 || st == 6 || st == 9) && d > 20 && d < min_dist) {
+                    min_dist = d;
+                    min_zone = z;
+                }
+            }
+
+            Serial.printf("[ToF 2 - HSPI] Frame #%lu (Stream #%3u) | Temp: %d C | Closest: %d mm (Zone %d)\n", 
+                          frame_count, Dev2.streamcount, Results2.silicon_temp_degc, 
+                          (min_zone >= 0 ? min_dist : -1), min_zone);
             for (int r = 0; r < 4; r++) {
                 Serial.print("  |");
                 for (int c = 0; c < 4; c++) {
@@ -350,8 +366,8 @@ void loop() {
                     } else if (st == 255 || ntar == 0) {
                         Serial.print("  ---mm(--) |");
                     } else {
-                        // Error/unreliable reading (s4=consistency/near-field fail, s2=phase fail, etc.)
-                        Serial.printf(" %4dmm(s%1u) |", dist, st);
+                        // Diagnostic status: s4=near-field/consistency, s12=low signal, s14=high noise
+                        Serial.printf(" %4dmm(s%02u)|", dist, st);
                     }
                 }
                 Serial.println();
