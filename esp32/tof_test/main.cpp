@@ -20,10 +20,10 @@
 #define TOF2_INT_PIN    38
 #define TOF2_LPN_PIN    47
 
-// Ultra-stable SPI clock frequencies
-#define SPI_INIT_SPEED_HZ   1000000 // 1 MHz for clean, rock-solid firmware burst
-#define SPI_RANGING_SPEED_HZ 3000000 // 3 MHz for live stream
-#define CHUNK_SIZE          512
+// ST-certified ultra-stable SPI clock frequency (2.0 MHz matching STSW-IMG042 Linux driver)
+#define SPI_INIT_SPEED_HZ   2000000
+#define SPI_RANGING_SPEED_HZ 2000000
+#define CHUNK_SIZE          1024
 
 // =========================================================================
 // HARDWARE DRIVER STRUCTURES & CONTEXT
@@ -78,7 +78,7 @@ uint8_t VL53L8CX_WrByte(VL53L8CX_Platform *p_platform, uint16_t RegisterAddress,
     ctx->spi->transferBytes(buf, NULL, 3);
     delayMicroseconds(1);
     digitalWrite(ctx->cs_pin, HIGH);
-    delayMicroseconds(1);
+    delayMicroseconds(2);
     ctx->spi->endTransaction();
     return 0;
 }
@@ -100,7 +100,7 @@ uint8_t VL53L8CX_WrMulti(VL53L8CX_Platform *p_platform, uint16_t RegisterAddress
         ctx->spi->transferBytes(tx_chunk_buffer, NULL, chunk + 2);
         delayMicroseconds(2);
         digitalWrite(ctx->cs_pin, HIGH);
-        delayMicroseconds(5);
+        delayMicroseconds(3);
         ctx->spi->endTransaction();
 
         pos += chunk;
@@ -121,34 +121,28 @@ uint8_t VL53L8CX_RdByte(VL53L8CX_Platform *p_platform, uint16_t RegisterAddress,
     ctx->spi->transferBytes(NULL, p_value, 1);
     delayMicroseconds(1);
     digitalWrite(ctx->cs_pin, HIGH);
-    delayMicroseconds(1);
+    delayMicroseconds(2);
     ctx->spi->endTransaction();
     return 0;
 }
 
+// Critical fix: Multi-byte reads (such as ranging results) must be read in a single
+// unbroken SPI transaction with CS held low throughout, matching ST official driver.
 uint8_t VL53L8CX_RdMulti(VL53L8CX_Platform *p_platform, uint16_t RegisterAddress, uint8_t *p_values, uint32_t size) {
     ToF_Device_Context *ctx = (ToF_Device_Context *)p_platform->handle;
-    uint32_t pos = 0;
-    while (pos < size) {
-        uint32_t chunk = (size - pos > CHUNK_SIZE) ? CHUNK_SIZE : (size - pos);
-        uint16_t r = RegisterAddress + pos;
+    uint8_t addr_buf[2];
+    addr_buf[0] = (uint8_t)(((RegisterAddress & ~0x8000) >> 8) & 0xFF);
+    addr_buf[1] = (uint8_t)(RegisterAddress & 0xFF);
 
-        uint8_t addr_buf[2];
-        addr_buf[0] = (uint8_t)(((r & ~0x8000) >> 8) & 0xFF);
-        addr_buf[1] = (uint8_t)(r & 0xFF);
-
-        ctx->spi->beginTransaction(SPISettings(ctx->speed_hz, MSBFIRST, SPI_MODE3));
-        digitalWrite(ctx->cs_pin, LOW);
-        delayMicroseconds(1);
-        ctx->spi->transferBytes(addr_buf, NULL, 2);
-        ctx->spi->transferBytes(NULL, &p_values[pos], chunk);
-        delayMicroseconds(1);
-        digitalWrite(ctx->cs_pin, HIGH);
-        delayMicroseconds(1);
-        ctx->spi->endTransaction();
-
-        pos += chunk;
-    }
+    ctx->spi->beginTransaction(SPISettings(ctx->speed_hz, MSBFIRST, SPI_MODE3));
+    digitalWrite(ctx->cs_pin, LOW);
+    delayMicroseconds(2);
+    ctx->spi->transferBytes(addr_buf, NULL, 2);
+    ctx->spi->transferBytes(NULL, p_values, size);
+    delayMicroseconds(2);
+    digitalWrite(ctx->cs_pin, HIGH);
+    delayMicroseconds(3);
+    ctx->spi->endTransaction();
     return 0;
 }
 
@@ -187,26 +181,23 @@ bool initialize_tof_sensor(VL53L8CX_Configuration *p_dev, ToF_Device_Context *ct
     uint8_t status = 0;
     bool found_alive = false;
 
-    for (int attempt = 1; attempt <= 5; attempt++) {
-        Serial.printf("[%s] Attempt %d: Power cycling via LPn (GPIO %d)...\n", ctx->name, attempt, ctx->lpn_pin);
+    for (int attempt = 1; attempt <= 3; attempt++) {
         digitalWrite(ctx->lpn_pin, LOW);
-        delay(150);
+        delay(15);
         digitalWrite(ctx->lpn_pin, HIGH);
-        delay(250);
+        delay(30);
 
         VL53L8CX_WrByte(&(p_dev->platform), 0x7fff, 0x00);
         VL53L8CX_RdByte(&(p_dev->platform), 0, &dev_id);
         VL53L8CX_RdByte(&(p_dev->platform), 1, &rev_id);
-        Serial.printf("[%s] Raw SPI Read: Reg 0x00=0x%02X, Reg 0x01=0x%02X (Expected: 0xF0, 0x0C)\n", ctx->name, dev_id, rev_id);
 
         status = vl53l8cx_is_alive(p_dev, &isAlive);
-        Serial.printf("[%s] vl53l8cx_is_alive: status = %u, isAlive = %u\n", ctx->name, status, isAlive);
 
         if (isAlive && dev_id == 0xF0 && rev_id == 0x0C) {
             found_alive = true;
             break;
         }
-        delay(100);
+        delay(20);
     }
 
     if (!found_alive) {
@@ -380,6 +371,13 @@ void send_json_telemetry() {
     Serial.println(F("]}"));
 }
 
+bool fast_soft_recover_sensor(VL53L8CX_Configuration *p_dev) {
+    vl53l8cx_stop_ranging(p_dev);
+    delayMicroseconds(500);
+    uint8_t st = vl53l8cx_start_ranging(p_dev);
+    return (st == 0);
+}
+
 void handle_serial_commands() {
     while (Serial.available()) {
         String cmd = Serial.readStringUntil('\n');
@@ -390,7 +388,11 @@ void handle_serial_commands() {
             Serial.println(F("{\"type\":\"CONFIG\",\"res\":16,\"freq\":15,\"integ\":5,\"order\":1,\"sharp\":1,\"mode\":1,\"power\":1,\"margin\":50}"));
         } else if (cmd == "RESET") {
             Serial.println(F("{\"type\":\"ACK\",\"status\":\"OK\",\"cmd\":\"RESET\"}"));
-            tof2_active = initialize_tof_sensor(&Dev2, &ctx_tof2);
+            if (!fast_soft_recover_sensor(&Dev2)) {
+                tof2_active = initialize_tof_sensor(&Dev2, &ctx_tof2);
+            } else {
+                tof2_active = true;
+            }
         } else if (cmd.startsWith("SET_CONFIG")) {
             Serial.println(F("{\"type\":\"ACK\",\"status\":\"OK\",\"cmd\":\"SET_CONFIG\"}"));
         } else if (cmd.startsWith("CALIBRATE_XTALK")) {
@@ -400,7 +402,9 @@ void handle_serial_commands() {
 }
 
 unsigned long frame_count = 0;
-unsigned long last_print_time = 0;
+unsigned long last_frame_time_ms = 0;
+unsigned long last_soft_attempt_ms = 0;
+uint8_t stall_count = 0;
 
 void loop() {
     handle_serial_commands();
@@ -411,7 +415,31 @@ void loop() {
         if (st == 0 && isReady) {
             if (vl53l8cx_get_ranging_data(&Dev2, &Results2) == 0) {
                 frame_count++;
+                last_frame_time_ms = millis();
+                stall_count = 0;
                 send_json_telemetry();
+            }
+        }
+    }
+
+    // Two-Tier Automatic Watchdog Recovery
+    // At 15 Hz ranging, frames arrive every ~66 ms
+    unsigned long now = millis();
+    if (tof2_active && (now - last_frame_time_ms > 160)) {
+        stall_count++;
+        if (stall_count <= 2 && (now - last_soft_attempt_ms > 120)) {
+            // Tier 1: Instant Soft Recovery (<20ms, skips 0-1 frames)
+            last_soft_attempt_ms = now;
+            if (fast_soft_recover_sensor(&Dev2)) {
+                last_frame_time_ms = millis();
+            }
+        } else if (now - last_frame_time_ms > 600) {
+            // Tier 2: Fast Hardware LPn Re-init (~250ms)
+            last_soft_attempt_ms = now;
+            tof2_active = initialize_tof_sensor(&Dev2, &ctx_tof2);
+            if (tof2_active) {
+                last_frame_time_ms = millis();
+                stall_count = 0;
             }
         }
     }
