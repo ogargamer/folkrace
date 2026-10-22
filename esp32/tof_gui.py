@@ -4,18 +4,15 @@
 DA WINNA — VL53L8CX MULTIZONE TIME-OF-FLIGHT CONTROL & TELEMETRY SUITE
 ===============================================================================
 Features:
-  - Full Multi-Target Detection & Analysis (up to 4 targets per zone)
-  - Target Reflectance Estimation (%) Heatmaps, Histograms & Oscilloscope
+  - Smart Fallback Multi-Target Detection (Target #1 with Target #2 Fallback)
   - Optical Signal Rate (kcps/SPAD), Range Sigma Noise (mm), Ambient Light & SPAD Counts
   - ST Table 4 Target Status Interpretation & Confidence Filtering (100% vs 50% vs Errors)
-  - Continuous High-Speed Ranging Mode (up to 60 Hz 4x4, 15 Hz 8x8)
+  - Continuous High-Speed 60 Hz 4x4 Ranging with Optimal 15 ms Integration Time Budget
   - Closest vs Strongest Target Order Selection
   - Veiling Glare Sharpener Tuning (0-99%, ST Rev 12 Default = 1%)
   - Crosstalk (Xtalk) Calibration Suite & Xtalk Margin Configuration
-  - Interactive 2D Depth / Reflectance / Multi-Metric Matrix Heatmap
-  - 3D Elevation Depth Point Cloud & Surface Mesh Visualizer
-  - Multi-Target Range Distribution Radar / Depth Slice Visualizer
-  - Dual-Trace Historical Oscilloscope (Distance & Reflectance Strip-Charts)
+  - High-Visibility 2D Depth & Confidence Matrix Heatmap (Expanded Full-Width)
+  - Historical Depth Telemetry Oscilloscope (Real-time Envelope & Selected Zone Trace)
   - Silicon Temperature (°C) Telemetry Monitoring
 """
 
@@ -37,17 +34,11 @@ from PyQt5.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView, QScrollArea
 )
 
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QThread, QObject
-from PyQt5.QtGui import QColor, QFont, QPainter, QBrush, QPen, QLinearGradient, QPixmap
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QThread, QObject, QPointF
+from PyQt5.QtGui import QColor, QFont, QPainter, QBrush, QPen, QLinearGradient, QPixmap, QPolygonF
 
 if hasattr(Qt, 'HighDpiScaleFactorRoundingPolicy'):
     QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
-
-import matplotlib
-matplotlib.use('Qt5Agg')
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
-from matplotlib.figure import Figure
-from mpl_toolkits.mplot3d import Axes3D
 
 
 # =============================================================================
@@ -81,18 +72,95 @@ def get_status_info(st):
 # =============================================================================
 
 class SerialEngine(QThread):
-    data_received = pyqtSignal(dict)
+    """
+    Producer thread. Telemetry frames are NOT emitted as Qt signals (that floods the
+    GUI event queue when rendering is slower than the sensor). Instead the newest
+    frame is stored in a locked slot; the GUI pulls it with take_latest() on its own
+    timer (latest-frame-wins). Sequence numbers are tracked here so loss is measured
+    on every received packet, not only on the rendered ones.
+    """
     config_received = pyqtSignal(dict)
     ack_received = pyqtSignal(dict)
     connection_changed = pyqtSignal(bool, str)
     raw_log = pyqtSignal(str)
 
-    def __init__(self, port="COM5", baud=921600):
+    RX_BUFFER_BYTES = 1 << 20
+
+    def __init__(self, port="COM7", baud=921600):
         super().__init__()
         self.port = port
         self.baud = baud
         self.ser = None
         self._running = False
+
+        self._lock = threading.Lock()
+        self._latest = None
+        self.reset_stats()
+
+    def reset_stats(self):
+        with self._lock:
+            self.rx_packets = 0
+            self.lost_packets = 0
+            self.parse_errors = 0
+            self.last_seq = None
+            self.last_rx_time = 0.0
+            self.max_gap_s = 0.0
+            self.rx_high_water = 0
+            self._latest = None
+            self.current_dt_ms = 0.0
+            self.peak_dt_ms = 0.0
+            self.spike_count = 0
+            self.recent_dts = []
+
+    def take_latest(self):
+        """Return the newest unconsumed telemetry packet (or None) and clear the slot."""
+        with self._lock:
+            pkt = self._latest
+            self._latest = None
+        return pkt
+
+    def get_stats(self):
+        with self._lock:
+            mean_dt = float(np.mean(self.recent_dts)) if self.recent_dts else 0.0
+            jitter = float(np.std(self.recent_dts)) if len(self.recent_dts) > 1 else 0.0
+            return {
+                "rx": self.rx_packets,
+                "lost": self.lost_packets,
+                "bad": self.parse_errors,
+                "last_rx": self.last_rx_time,
+                "max_gap": self.max_gap_s,
+                "hw": self.rx_high_water,
+                "dt_ms": self.current_dt_ms,
+                "mean_dt": mean_dt,
+                "jitter": jitter,
+                "peak_dt": self.peak_dt_ms,
+                "spikes": self.spike_count,
+            }
+
+    def _store_frame(self, packet):
+        now = time.perf_counter()
+        seq = packet.get("seq")
+        with self._lock:
+            if self.last_rx_time:
+                dt_ms = (now - self.last_rx_time) * 1000.0
+                self.current_dt_ms = dt_ms
+                if dt_ms > self.peak_dt_ms:
+                    self.peak_dt_ms = dt_ms
+                if dt_ms > 50.0:
+                    self.spike_count += 1
+                self.recent_dts.append(dt_ms)
+                if len(self.recent_dts) > 60:
+                    self.recent_dts.pop(0)
+                self.max_gap_s = max(self.max_gap_s, now - self.last_rx_time)
+            self.last_rx_time = now
+            self.rx_packets += 1
+            if isinstance(seq, int):
+                if self.last_seq is not None:
+                    gap = seq - self.last_seq
+                    if 1 < gap < 1000000:
+                        self.lost_packets += gap - 1
+                self.last_seq = seq
+            self._latest = packet
 
     def set_connection_params(self, port, baud):
         self.port = port
@@ -107,6 +175,11 @@ class SerialEngine(QThread):
             self.ser.dtr = False
             self.ser.rts = False
             self.ser.open()
+            try:
+                self.ser.set_buffer_size(rx_size=self.RX_BUFFER_BYTES, tx_size=1 << 16)
+            except Exception:
+                pass
+            self.reset_stats()
             self._running = True
             self.connection_changed.emit(True, f"Connected to {self.port} @ {self.baud}")
             self.send_command("GET_CONFIG")
@@ -118,11 +191,16 @@ class SerialEngine(QThread):
         buffer = ""
         while self._running:
             try:
-                if self.ser and self.ser.is_open and self.ser.in_waiting:
-                    raw = self.ser.read(self.ser.in_waiting).decode('utf-8', errors='replace')
+                waiting = self.ser.in_waiting if (self.ser and self.ser.is_open) else 0
+                if waiting:
+                    if waiting > self.rx_high_water:
+                        self.rx_high_water = waiting
+                    raw = self.ser.read(waiting).decode('utf-8', errors='replace')
                     buffer += raw
                     if len(buffer) > 32768:
                         buffer = buffer[-4096:]
+                        if "\n" in buffer:
+                            _, buffer = buffer.split("\n", 1)
                     while "\n" in buffer:
                         line, buffer = buffer.split("\n", 1)
                         line = line.strip()
@@ -134,7 +212,7 @@ class SerialEngine(QThread):
                                 packet = json.loads(line)
                                 ptype = packet.get("type", packet.get("t", ""))
                                 if ptype == "D":
-                                    self.data_received.emit(packet)
+                                    self._store_frame(packet)
                                 elif ptype == "CONFIG":
                                     self.config_received.emit(packet)
                                     try: self.raw_log.emit(line)
@@ -148,7 +226,8 @@ class SerialEngine(QThread):
                                     try: self.raw_log.emit(line)
                                     except RuntimeError: break
                             except Exception:
-                                pass
+                                with self._lock:
+                                    self.parse_errors += 1
                         else:
                             try: self.raw_log.emit(line)
                             except RuntimeError: break
@@ -197,14 +276,6 @@ def turbo_colormap(val):
     b = int(255 * max(0.0, min(1.0, 0.1067 + x * (12.583 - x * (60.118 - x * (109.07 - x * (88.5 - x * 26.85)))))))
     return QColor(r, g, b)
 
-def viridis_colormap(val):
-    """Normalized [0.0, 1.0] -> RGB QColor (0%=Deep Purple, 50%=Teal, 100%=Bright Yellow)"""
-    x = max(0.0, min(1.0, val))
-    r = int(255 * max(0.0, min(1.0, 0.267 + x * (0.0048 + x * (2.28 - x * (2.11))))))
-    g = int(255 * max(0.0, min(1.0, 0.004 + x * (1.42 + x * (0.83 - x * (1.38))))))
-    b = int(255 * max(0.0, min(1.0, 0.329 + x * (1.36 - x * (2.41 + x * (0.88))))))
-    return QColor(r, g, b)
-
 def amber_colormap(val):
     """Normalized [0.0, 1.0] -> Amber/Gold intensity for Signal & SPADs"""
     x = max(0.0, min(1.0, val))
@@ -213,33 +284,9 @@ def amber_colormap(val):
     b = int(min(255, 40 + x * 50))
     return QColor(r, g, b)
 
-def reflectance_badge_colors(refl):
-    """
-    Returns (bg_color, text_color, border_color) for the reflectivity sub-tile badge.
-    Color coding:
-      - 70-100%: Bright Gold / Radiant Amber (High reflectivity, e.g. white wall, reflector)
-      - 40-69%: Vibrant Emerald / Teal (Medium-high, e.g. light painted surface)
-      - 15-39%: Rich Indigo / Blue (Medium-low, e.g. wood, gray object)
-      - 1-14%: Deep Slate / Plum (Low reflectivity, e.g. black foam, tire)
-      - 0% / Invalid: Dark Charcoal
-    """
-    if refl <= 0:
-        return QColor(24, 30, 44, 220), QColor(148, 163, 184), QColor(45, 55, 75)
-    elif refl >= 70:
-        norm = min(1.0, (refl - 70) / 30.0)
-        return QColor(int(217 + norm * 38), int(145 + norm * 60), 10, 235), QColor(15, 23, 42), QColor(254, 240, 138)
-    elif refl >= 40:
-        norm = min(1.0, (refl - 40) / 30.0)
-        return QColor(int(5 + norm * 15), int(130 + norm * 50), int(100 + norm * 30), 235), QColor(255, 255, 255), QColor(167, 243, 208)
-    elif refl >= 15:
-        norm = min(1.0, (refl - 15) / 25.0)
-        return QColor(int(45 + norm * 30), int(75 + norm * 45), int(180 + norm * 45), 235), QColor(255, 255, 255), QColor(191, 219, 254)
-    else:
-        return QColor(40, 52, 70, 230), QColor(226, 232, 240), QColor(100, 116, 139)
-
 
 # =============================================================================
-# 2D MATRIX MULTI-METRIC HEATMAP WIDGET
+# 2D MATRIX MULTI-METRIC HEATMAP WIDGET (TARGET 1 & TARGET 2 SMART FALLBACK)
 # =============================================================================
 
 class MatrixHeatmapWidget(QFrame):
@@ -253,27 +300,25 @@ class MatrixHeatmapWidget(QFrame):
 
         self.resolution = 16
         self.grid_dim = 4
-        self.nb_targets = 4
+        self.nb_targets = 2  # Only Target 1 and Target 2
 
-        # Multi-target data matrices (zones, 4)
-        self.distances = np.zeros((16, 4), dtype=int)
-        self.reflectances = np.zeros((16, 4), dtype=int)
-        self.statuses = np.zeros((16, 4), dtype=int)
-        self.sigmas = np.zeros((16, 4), dtype=int)
-        self.signals = np.zeros((16, 4), dtype=int)
+        # Multi-target data matrices (zones, 2)
+        self.distances = np.zeros((16, 2), dtype=int)
+        self.statuses = np.zeros((16, 2), dtype=int)
+        self.sigmas = np.zeros((16, 2), dtype=int)
+        self.signals = np.zeros((16, 2), dtype=int)
         self.target_counts = np.zeros(16, dtype=int)
         self.ambient = np.zeros(16, dtype=int)
         self.spads = np.zeros(16, dtype=int)
 
         self.selected_zone = 0
-        self.target_layer = 0   # 0=Target 1 (Primary), 1=Target 2, 2=Target 3, 3=Target 4, -1=Composite
-        self.active_metric = "dist"  # "dist", "refl", "sig", "sigm", "amb", "spad", "ntar", "st"
+        self.target_layer = 100  # Default to 100 = Smart Fallback (Target 1 -> Target 2)
+        self.active_metric = "dist"  # "dist", "sig", "sigm", "amb", "spad", "ntar", "st"
         
         # Pickiness & Quality Filters
         self.status_filter = "valid_5_6_9"  # "valid_5", "valid_5_6_9", "valid_extended", "all"
         self.max_sigma_filter = 0    # 0 = disabled, or 1..30 mm (max noise tolerance)
         self.min_signal_filter = 0   # 0 = disabled, or 1..100 kcps (min signal rate threshold)
-        self.min_refl_filter = 0     # 0 = disabled, or 1..30 % (min reflectance gate)
         self.min_dist_gate = 20      # mm
         self.max_dist_gate = 4000    # mm
 
@@ -285,7 +330,7 @@ class MatrixHeatmapWidget(QFrame):
         self.flip_v = False
         self.rotation = 0
 
-    def is_valid_reading(self, dist, st, sig=None, sigm=None, refl=None):
+    def is_valid_reading(self, dist, st, sig=None, sigm=None):
         if dist <= 0:
             return False
         
@@ -309,35 +354,31 @@ class MatrixHeatmapWidget(QFrame):
         if self.min_signal_filter > 0 and sig is not None and sig < self.min_signal_filter:
             return False
             
-        # 5. Minimum Reflectance Gate (rejection of ghost reflections)
-        if self.min_refl_filter > 0 and refl is not None and refl < self.min_refl_filter:
-            return False
-            
         return True
 
-    def update_telemetry(self, res, nt, ntar, dists, refls, stats, sigs, sigms, ambs, spads_list):
+    def update_telemetry(self, res, nt, ntar, dists, stats, sigs, sigms, ambs, spads_list):
         self.resolution = res
         self.grid_dim = 8 if res == 64 else 4
-        self.nb_targets = nt if nt > 0 else 4
-
+        raw_nt = nt if nt > 0 else 4
         n_zones = res
-        tot_elems = n_zones * self.nb_targets
+        tot_elems = n_zones * raw_nt
 
-        # Reshape into (n_zones, nb_targets)
+        # Reshape incoming raw data to (n_zones, raw_nt) and slice only Target 1 & Target 2
         d_arr = np.array(dists[:tot_elems], dtype=int) if len(dists) >= tot_elems else np.zeros(tot_elems, dtype=int)
-        self.distances = d_arr.reshape((n_zones, self.nb_targets))
-
-        r_arr = np.array(refls[:tot_elems], dtype=int) if len(refls) >= tot_elems else np.zeros(tot_elems, dtype=int)
-        self.reflectances = r_arr.reshape((n_zones, self.nb_targets))
+        d_mat = d_arr.reshape((n_zones, raw_nt))
+        self.distances = d_mat[:, :2]
 
         s_arr = np.array(stats[:tot_elems], dtype=int) if len(stats) >= tot_elems else np.zeros(tot_elems, dtype=int)
-        self.statuses = s_arr.reshape((n_zones, self.nb_targets))
+        s_mat = s_arr.reshape((n_zones, raw_nt))
+        self.statuses = s_mat[:, :2]
 
         sig_arr = np.array(sigs[:tot_elems], dtype=int) if len(sigs) >= tot_elems else np.zeros(tot_elems, dtype=int)
-        self.signals = sig_arr.reshape((n_zones, self.nb_targets))
+        sig_mat = sig_arr.reshape((n_zones, raw_nt))
+        self.signals = sig_mat[:, :2]
 
         sigm_arr = np.array(sigms[:tot_elems], dtype=int) if len(sigms) >= tot_elems else np.zeros(tot_elems, dtype=int)
-        self.sigmas = sigm_arr.reshape((n_zones, self.nb_targets))
+        sigm_mat = sigm_arr.reshape((n_zones, raw_nt))
+        self.sigmas = sigm_mat[:, :2]
 
         self.target_counts = np.array(ntar[:n_zones], dtype=int) if len(ntar) >= n_zones else np.zeros(n_zones, dtype=int)
         self.ambient = np.array(ambs[:n_zones], dtype=int) if len(ambs) >= n_zones else np.zeros(n_zones, dtype=int)
@@ -356,12 +397,11 @@ class MatrixHeatmapWidget(QFrame):
                 {
                     "idx": t,
                     "dist": int(self.distances[z_idx, t]),
-                    "refl": int(self.reflectances[z_idx, t]),
                     "stat": int(self.statuses[z_idx, t]),
                     "sig": int(self.signals[z_idx, t]),
                     "sigm": int(self.sigmas[z_idx, t]),
                 }
-                for t in range(self.nb_targets)
+                for t in range(min(2, self.distances.shape[1]))
             ]
         }
 
@@ -399,81 +439,61 @@ class MatrixHeatmapWidget(QFrame):
 
     def get_effective_layer_data(self):
         """
-        Returns (dists, refls, stats, sigs, sigms, tgt_indices) for current target_layer.
+        Returns (dists, stats, sigs, sigms, tgt_indices) for current target_layer.
         If target_layer == 100 ('Smart Fallback'):
             For each zone, uses Target #1 if valid; otherwise automatically falls back
-            to the next valid secondary/tertiary target (Target #2, #3, #4).
+            to Target #2 if Target #2 is valid.
         """
         n_zones = self.resolution
         if self.target_layer == 100:
             dists = np.zeros(n_zones, dtype=int)
-            refls = np.zeros(n_zones, dtype=int)
             stats = np.zeros(n_zones, dtype=int)
             sigs = np.zeros(n_zones, dtype=int)
             sigms = np.zeros(n_zones, dtype=int)
             tgt_indices = np.zeros(n_zones, dtype=int)
 
             for z in range(n_zones):
-                # 1. Test Primary Target (index 0)
+                # 1. Test Primary Target (Target #1, index 0)
                 d0 = self.distances[z, 0] if len(self.distances) > z else 0
                 st0 = self.statuses[z, 0] if len(self.statuses) > z else 0
-                r0 = self.reflectances[z, 0] if len(self.reflectances) > z else 0
                 sig0 = self.signals[z, 0] if len(self.signals) > z else 0
                 sigm0 = self.sigmas[z, 0] if len(self.sigmas) > z else 0
 
-                if self.is_valid_reading(d0, st0, sig=sig0, sigm=sigm0, refl=r0):
+                if self.is_valid_reading(d0, st0, sig=sig0, sigm=sigm0):
                     dists[z] = d0
-                    refls[z] = r0
                     stats[z] = st0
                     sigs[z] = sig0
                     sigms[z] = sigm0
                     tgt_indices[z] = 0
                 else:
-                    # 2. Primary has no reading or is filtered; search secondary targets (1, 2, 3)
-                    found_fallback = False
-                    for t in range(1, self.nb_targets):
-                        dt = self.distances[z, t] if len(self.distances) > z else 0
-                        stt = self.statuses[z, t] if len(self.statuses) > z else 0
-                        rt = self.reflectances[z, t] if len(self.reflectances) > z else 0
-                        sigt = self.signals[z, t] if len(self.signals) > z else 0
-                        sigmt = self.sigmas[z, t] if len(self.sigmas) > z else 0
+                    # 2. Primary has no reading or is filtered; search secondary target (Target #2, index 1)
+                    d1 = self.distances[z, 1] if (len(self.distances) > z and self.distances.shape[1] > 1) else 0
+                    st1 = self.statuses[z, 1] if (len(self.statuses) > z and self.statuses.shape[1] > 1) else 0
+                    sig1 = self.signals[z, 1] if (len(self.signals) > z and self.signals.shape[1] > 1) else 0
+                    sigm1 = self.sigmas[z, 1] if (len(self.sigmas) > z and self.sigmas.shape[1] > 1) else 0
 
-                        if self.is_valid_reading(dt, stt, sig=sigt, sigm=sigmt, refl=rt) or (dt > 0 and stt in (5, 6, 9, 10, 13)):
-                            dists[z] = dt
-                            refls[z] = rt
-                            stats[z] = stt
-                            sigs[z] = sigt
-                            sigms[z] = sigmt
-                            tgt_indices[z] = t
-                            found_fallback = True
-                            break
-
-                    if not found_fallback:
+                    if self.is_valid_reading(d1, st1, sig=sig1, sigm=sigm1) or (d1 > 0 and st1 in (5, 6, 9, 10, 13)):
+                        dists[z] = d1
+                        stats[z] = st1
+                        sigs[z] = sig1
+                        sigms[z] = sigm1
+                        tgt_indices[z] = 1
+                    else:
                         dists[z] = d0
-                        refls[z] = r0
                         stats[z] = st0
                         sigs[z] = sig0
                         sigms[z] = sigm0
                         tgt_indices[z] = 0
-            return dists, refls, stats, sigs, sigms, tgt_indices
+
+            return dists, stats, sigs, sigms, tgt_indices
         else:
-            t_idx = 0 if self.target_layer < 0 else min(self.nb_targets - 1, self.target_layer)
+            t_idx = 0 if self.target_layer <= 0 else min(1, self.target_layer)
             dists = self.distances[:, t_idx] if len(self.distances) else np.zeros(n_zones, dtype=int)
-            refls = self.reflectances[:, t_idx] if len(self.reflectances) else np.zeros(n_zones, dtype=int)
             stats = self.statuses[:, t_idx] if len(self.statuses) else np.zeros(n_zones, dtype=int)
             sigs = self.signals[:, t_idx] if len(self.signals) else np.zeros(n_zones, dtype=int)
             sigms = self.sigmas[:, t_idx] if len(self.sigmas) else np.zeros(n_zones, dtype=int)
             tgt_indices = np.full(n_zones, t_idx, dtype=int)
-            return dists, refls, stats, sigs, sigms, tgt_indices
-
-    def is_valid_status(self, st):
-        if self.status_filter == "all":
-            return True
-        if self.status_filter == "valid_5":
-            return st == 5
-        if self.status_filter == "valid_5_6_9":
-            return st in (5, 6, 9)
-        return True
+            return dists, stats, sigs, sigms, tgt_indices
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -485,11 +505,9 @@ class MatrixHeatmapWidget(QFrame):
         cell_h = h / self.grid_dim
 
         zones_grid = self.get_transformed_grid(np.arange(self.resolution))
-
-        dists_layer, refls_layer, stats_layer, sigs_layer, sigms_layer, tgt_idx_layer = self.get_effective_layer_data()
+        dists_layer, stats_layer, sigs_layer, sigms_layer, tgt_idx_layer = self.get_effective_layer_data()
 
         grid_d = self.get_transformed_grid(dists_layer)
-        grid_r = self.get_transformed_grid(refls_layer)
         grid_st = self.get_transformed_grid(stats_layer)
         grid_sig = self.get_transformed_grid(sigs_layer)
         grid_sigm = self.get_transformed_grid(sigms_layer)
@@ -504,29 +522,25 @@ class MatrixHeatmapWidget(QFrame):
                 y = r * cell_h
 
                 dist = int(grid_d[r, c])
-                refl = int(grid_r[r, c])
                 st = int(grid_st[r, c])
                 sig = int(grid_sig[r, c])
                 sigm = int(grid_sigm[r, c])
                 tgt_idx = int(grid_tgt_idx[r, c])
-                nt = int(grid_nt[r, c])
+                nt = min(2, int(grid_nt[r, c]))
                 amb = int(grid_amb[r, c])
                 spad = int(grid_spad[r, c])
                 z_idx = int(zones_grid[r, c])
 
-                valid = self.is_valid_reading(dist, st, sig=sig, sigm=sigm, refl=refl)
-                is_fallback = (self.target_layer == 100 and tgt_idx > 0 and valid)
+                valid = self.is_valid_reading(dist, st, sig=sig, sigm=sigm)
+                is_fallback = (self.target_layer == 100 and tgt_idx == 1 and valid)
 
                 # Determine Tile Background Color based on Active Metric
-                if not valid and self.active_metric in ("dist", "refl", "sig", "sigm"):
+                if not valid and self.active_metric in ("dist", "sig", "sigm"):
                     cell_color = QColor(20, 24, 35)
                 else:
                     if self.active_metric == "dist":
                         norm = (dist - self.min_dist_range) / max(1.0, (self.max_dist_range - self.min_dist_range))
                         cell_color = turbo_colormap(1.0 - norm)
-                    elif self.active_metric == "refl":
-                        norm = min(1.0, max(0.0, refl / 100.0))
-                        cell_color = viridis_colormap(norm)
                     elif self.active_metric == "sig":
                         norm = min(1.0, max(0.0, sig / 500.0))
                         cell_color = amber_colormap(norm)
@@ -540,8 +554,8 @@ class MatrixHeatmapWidget(QFrame):
                         norm = min(1.0, max(0.0, spad / 250.0))
                         cell_color = amber_colormap(norm)
                     elif self.active_metric == "ntar":
-                        norm = min(1.0, max(0.0, nt / 4.0))
-                        cell_color = viridis_colormap(norm)
+                        norm = min(1.0, max(0.0, nt / 2.0))
+                        cell_color = turbo_colormap(norm)
                     elif self.active_metric == "st":
                         _, col_hex, _ = get_status_info(st)
                         cell_color = QColor(col_hex)
@@ -553,16 +567,14 @@ class MatrixHeatmapWidget(QFrame):
                 if z_idx == self.selected_zone:
                     painter.setPen(QPen(QColor("#00E5FF"), 2.5))
                 elif is_fallback:
-                    painter.setPen(QPen(QColor("#38BDF8"), 1.8, Qt.DashLine))
+                    painter.setPen(QPen(QColor("#38BDF8"), 2.0, Qt.DashLine))
                 else:
                     painter.setPen(QPen(QColor("#141824"), 1))
-                painter.drawRoundedRect(int(x + 2), int(y + 2), int(cell_w - 4), int(cell_h - 4), 4, 4)
+                painter.drawRoundedRect(int(x + 2), int(y + 2), int(cell_w - 4), int(cell_h - 4), 6, 6)
 
-                # --- Line 1: Primary Distance / Metric Value (Large Bold) ---
+                # --- Line 1: Primary Value (Large Bold) ---
                 if self.active_metric == "dist":
                     txt_line1 = f"{dist} mm" if (valid and self.grid_dim == 4) else (f"{dist}" if valid else "---")
-                elif self.active_metric == "refl":
-                    txt_line1 = f"{refl}%" if valid else "---"
                 elif self.active_metric == "sig":
                     txt_line1 = f"{sig} kcps" if self.grid_dim == 4 else f"{sig}k"
                 elif self.active_metric == "sigm":
@@ -578,61 +590,51 @@ class MatrixHeatmapWidget(QFrame):
                 else:
                     txt_line1 = f"{dist} mm" if valid else "---"
 
-                max_txt_w = cell_w - 8
-                target_pt1 = 15.5 if self.grid_dim == 4 else 9.5
-                while target_pt1 > 6:
-                    test_font = QFont("Segoe UI", int(target_pt1), QFont.Bold)
-                    metrics = painter.fontMetrics()
-                    if metrics.horizontalAdvance(txt_line1) <= max_txt_w:
-                        break
-                    target_pt1 -= 0.5
-
-                painter.setFont(QFont("Segoe UI", max(5, int(target_pt1)), QFont.Bold))
-                # Slight text shadow for readability against bright turbo background
-                painter.setPen(QColor(0, 0, 0, 180))
-                painter.drawText(int(x + 1), int(y + cell_h * 0.05 + 1), int(cell_w), int(cell_h * 0.35), Qt.AlignCenter, txt_line1)
+                target_pt1 = 15.0 if self.grid_dim == 4 else 8.5
+                if len(txt_line1) > 6:
+                    target_pt1 = 12.0 if self.grid_dim == 4 else 7.0
+                painter.setFont(QFont("Segoe UI", int(target_pt1), QFont.Bold))
+                # Slight shadow
+                painter.setPen(QColor(0, 0, 0, 200))
+                painter.drawText(int(x + 1), int(y + cell_h * 0.08 + 1), int(cell_w), int(cell_h * 0.38), Qt.AlignCenter, txt_line1)
                 painter.setPen(QColor(255, 255, 255))
-                painter.drawText(int(x), int(y + cell_h * 0.05), int(cell_w), int(cell_h * 0.35), Qt.AlignCenter, txt_line1)
+                painter.drawText(int(x), int(y + cell_h * 0.08), int(cell_w), int(cell_h * 0.38), Qt.AlignCenter, txt_line1)
 
-                # --- Line 2: Inner Sub-Tile (Color-Coded Reflectivity / Metric Badge) ---
-                refl_bg, refl_fg, refl_border = reflectance_badge_colors(refl if valid else 0)
-                if is_fallback:
-                    refl_border = QColor("#38BDF8")
-
-                sub_w = int(cell_w * 0.82 if self.grid_dim == 4 else cell_w * 0.88)
-                sub_h = int(cell_h * 0.28 if self.grid_dim == 4 else cell_h * 0.27)
+                # --- Line 2: Secondary Info / Smart Fallback Sub-Badge ---
+                sub_w = int(cell_w * 0.84 if self.grid_dim == 4 else cell_w * 0.88)
+                sub_h = int(cell_h * 0.24 if self.grid_dim == 4 else cell_h * 0.24)
                 sub_x = int(x + (cell_w - sub_w) / 2)
-                sub_y = int(y + cell_h * 0.41 if self.grid_dim == 4 else y + cell_h * 0.39)
+                sub_y = int(y + cell_h * 0.44 if self.grid_dim == 4 else y + cell_h * 0.42)
                 sub_r = 4 if self.grid_dim == 4 else 3
 
-                painter.setBrush(QBrush(refl_bg))
-                painter.setPen(QPen(refl_border, 1.5 if is_fallback else 1))
+                if is_fallback:
+                    badge_bg = QColor(14, 116, 144, 230)
+                    badge_fg = QColor("#E0F2FE")
+                    badge_border = QColor("#38BDF8")
+                    txt_sub = "🥈 T2 Fallback" if self.grid_dim == 4 else "T2 FB"
+                elif valid:
+                    badge_bg = QColor(18, 24, 38, 210)
+                    badge_fg = QColor("#CBD5E1")
+                    badge_border = QColor(35, 45, 65)
+                    txt_sub = f"Sig: {sig}k | ±{sigm}mm" if self.grid_dim == 4 else f"{sig}k"
+                else:
+                    badge_bg = QColor(25, 28, 38, 180)
+                    badge_fg = QColor("#94A3B8")
+                    badge_border = QColor(40, 48, 65)
+                    txt_sub = "No Target" if self.grid_dim == 4 else "---"
+
+                painter.setBrush(QBrush(badge_bg))
+                painter.setPen(QPen(badge_border, 1.2))
                 painter.drawRoundedRect(sub_x, sub_y, sub_w, sub_h, sub_r, sub_r)
 
-                if is_fallback:
-                    txt_sub = f"🥈 {refl}% (T{tgt_idx+1} Fallback)" if (valid and self.grid_dim == 4) else f"{refl}% T{tgt_idx+1}"
-                elif self.active_metric == "dist":
-                    txt_sub = f"🔆 {refl}% Refl" if (valid and self.grid_dim == 4) else (f"{refl}%" if valid else "-- %")
-                elif self.active_metric == "refl":
-                    txt_sub = f"{dist} mm" if (valid and self.grid_dim == 4) else (f"{dist}" if valid else "---")
-                else:
-                    txt_sub = f"{refl}% Refl" if self.grid_dim == 4 else f"{refl}%"
-
-                target_pt2 = 10.5 if self.grid_dim == 4 else 7.5
-                while target_pt2 > 5:
-                    test_font = QFont("Segoe UI", int(target_pt2), QFont.Bold)
-                    metrics = painter.fontMetrics()
-                    if metrics.horizontalAdvance(txt_sub) <= sub_w - 4:
-                        break
-                    target_pt2 -= 0.5
-
+                target_pt2 = 9.5 if self.grid_dim == 4 else 7.0
                 painter.setFont(QFont("Segoe UI", max(4, int(target_pt2)), QFont.Bold))
-                painter.setPen(refl_fg)
+                painter.setPen(badge_fg)
                 painter.drawText(sub_x, sub_y, sub_w, sub_h, Qt.AlignCenter, txt_sub)
 
-                # --- Line 3: Bottom Pill Badge (Zone ID + Status + Multi-Target Dots) ---
+                # --- Line 3: Bottom Pill Badge (Zone ID + Status) ---
                 pill_w = int(cell_w * 0.80 if self.grid_dim == 4 else cell_w * 0.88)
-                pill_h = int(cell_h * 0.22 if self.grid_dim == 4 else cell_h * 0.24)
+                pill_h = int(cell_h * 0.20 if self.grid_dim == 4 else cell_h * 0.22)
                 pill_x = int(x + (cell_w - pill_w) / 2)
                 pill_y = int(y + cell_h * 0.72 if self.grid_dim == 4 else y + cell_h * 0.69)
                 pill_r = 3 if self.grid_dim == 4 else 2
@@ -642,205 +644,31 @@ class MatrixHeatmapWidget(QFrame):
                 painter.drawRoundedRect(pill_x, pill_y, pill_w, pill_h, pill_r, pill_r)
 
                 status_desc, st_hex, _ = get_status_info(st)
-                tgt_dots = "•" * min(4, nt) if nt > 0 else ""
+                tgt_dot = " • T2" if is_fallback else (" • T1" if valid else "")
 
-                if is_fallback:
-                    if self.grid_dim == 4:
-                        sub_txt = f"Z{z_idx} • s{st} [T{tgt_idx+1} FB] {tgt_dots}"
-                        pill_pt = 7.8
-                    else:
-                        sub_txt = f"Z{z_idx} T{tgt_idx+1} s{st}"
-                        pill_pt = 6.0
+                if self.grid_dim == 4:
+                    sub_txt = f"Z{z_idx} • s{st}{tgt_dot}"
+                    pill_pt = 8.5
                 else:
-                    if self.grid_dim == 4:
-                        sub_txt = f"Z{z_idx} • s{st} {tgt_dots}"
-                        pill_pt = 8.5
-                    else:
-                        sub_txt = f"Z{z_idx} s{st}"
-                        pill_pt = 6.5
+                    sub_txt = f"Z{z_idx} s{st}"
+                    pill_pt = 6.5
 
                 painter.setFont(QFont("Segoe UI", max(4, int(pill_pt)), QFont.Bold))
                 painter.setPen(QColor(st_hex))
                 painter.drawText(pill_x, pill_y, pill_w, pill_h, Qt.AlignCenter, sub_txt)
 
 
-
-
-
 # =============================================================================
-# 3D DEPTH & REFLECTANCE SURFACE / POINT CLOUD VISUALIZER
-# =============================================================================
-
-class Depth3DVisualizer(QWidget):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.figure = Figure(facecolor="#10141e", edgecolor='none')
-        self.canvas = FigureCanvas(self.figure)
-        self.ax = self.figure.add_subplot(111, projection='3d')
-        self.ax.set_facecolor("#10141e")
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(self.canvas)
-        self._style_3d_axes()
-        self.last_draw_time = 0
-
-    def _style_3d_axes(self):
-        self.ax.xaxis.pane.fill = False
-        self.ax.yaxis.pane.fill = False
-        self.ax.zaxis.pane.fill = False
-        self.ax.xaxis.pane.set_edgecolor("#232a3d")
-        self.ax.yaxis.pane.set_edgecolor("#232a3d")
-        self.ax.zaxis.pane.set_edgecolor("#232a3d")
-        self.ax.tick_params(colors='#8fa0be', labelsize=8)
-        self.ax.set_xlabel('X (Zone)', color='#8fa0be', fontsize=8.5)
-        self.ax.set_ylabel('Y (Zone)', color='#8fa0be', fontsize=8.5)
-        self.ax.set_zlabel('Depth (mm)', color='#00E5FF', fontsize=8.5)
-
-    def update_3d_view(self, res, dists_layer, refls_layer, flip_h=False, flip_v=False, rotation=0, metric="dist"):
-        now = time.perf_counter()
-        if now - self.last_draw_time < 0.04:  # Max 25 FPS
-            return
-        self.last_draw_time = now
-
-        dim = 8 if res == 64 else 4
-        if len(dists_layer) < dim * dim:
-            return
-
-        grid_d = np.array(dists_layer[:dim*dim]).reshape((dim, dim))
-        grid_r = np.array(refls_layer[:dim*dim]).reshape((dim, dim)) if len(refls_layer) >= dim*dim else np.zeros((dim, dim))
-
-        if flip_h:
-            grid_d = np.fliplr(grid_d)
-            grid_r = np.fliplr(grid_r)
-        if flip_v:
-            grid_d = np.flipud(grid_d)
-            grid_r = np.flipud(grid_r)
-        if rotation == 90:
-            grid_d = np.rot90(grid_d, -1)
-            grid_r = np.rot90(grid_r, -1)
-        elif rotation == 180:
-            grid_d = np.rot90(grid_d, 2)
-            grid_r = np.rot90(grid_r, 2)
-        elif rotation == 270:
-            grid_d = np.rot90(grid_d, 1)
-            grid_r = np.rot90(grid_r, 1)
-
-        grid_d_clamped = np.where(grid_d <= 0, 3000, grid_d)
-
-        x = np.arange(dim)
-        y = np.arange(dim)
-        X, Y = np.meshgrid(x, y)
-
-        elev = self.ax.elev
-        azim = self.ax.azim
-
-        self.ax.clear()
-        self.ax.set_facecolor("#10141e")
-        self._style_3d_axes()
-
-        cmap = 'viridis' if metric == "refl" else 'turbo_r'
-        color_grid = grid_r if metric == "refl" else grid_d_clamped
-
-        self.ax.plot_surface(X, Y, grid_d_clamped, cmap=cmap, edgecolor='#232a3d', linewidth=0.5, alpha=0.88)
-        self.ax.scatter(X, Y, grid_d_clamped, color='#00E5FF', s=25)
-
-        self.ax.set_zlim(0, 3000)
-        self.ax.view_init(elev=elev, azim=azim)
-        self.figure.tight_layout()
-        self.canvas.draw_idle()
-
-
-# =============================================================================
-# MULTI-TARGET RANGE DISTRIBUTION RADAR / DEPTH SLICES
-# =============================================================================
-
-class MultiTargetRadarWidget(QWidget):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.figure = Figure(facecolor="#10141e", edgecolor='none')
-        self.canvas = FigureCanvas(self.figure)
-        self.ax = self.figure.add_subplot(111)
-        self.ax.set_facecolor("#151a27")
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-
-        self._style_chart()
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(self.canvas)
-        self.last_draw_time = 0
-
-    def _style_chart(self):
-        self.ax.spines['bottom'].set_color('#232a3d')
-        self.ax.spines['top'].set_color('#232a3d')
-        self.ax.spines['right'].set_color('#232a3d')
-        self.ax.spines['left'].set_color('#232a3d')
-        self.ax.tick_params(colors='#8fa0be', labelsize=8)
-        self.ax.grid(True, linestyle='--', alpha=0.3, color='#28324a')
-        self.ax.set_ylabel('Distance (mm)', color='#00E5FF', fontsize=8.5)
-        self.ax.set_xlabel('Zone Index #', color='#8fa0be', fontsize=8.5)
-        self.ax.set_ylim(0, 3500)
-
-    def update_targets(self, res, distances_2d, refl_2d, stats_2d, signals_2d=None, sigmas_2d=None, is_valid_func=None):
-        now = time.perf_counter()
-        if now - self.last_draw_time < 0.05:  # Max 20 FPS
-            return
-        self.last_draw_time = now
-
-        self.ax.clear()
-        self.ax.set_facecolor("#151a27")
-        self._style_chart()
-
-        colors = ['#00E5FF', '#FFB300', '#EC407A', '#00E676']
-        labels = ['Target 1 (Primary)', 'Target 2', 'Target 3', 'Target 4']
-
-        n_zones = min(res, len(distances_2d))
-        self.ax.set_xlim(-0.5, n_zones - 0.5)
-
-        for t in range(min(4, distances_2d.shape[1])):
-            zone_indices = []
-            dists = []
-            sizes = []
-            for z in range(n_zones):
-                d = distances_2d[z, t]
-                st = stats_2d[z, t] if stats_2d.shape[1] > t else 0
-                r = refl_2d[z, t] if refl_2d.shape[1] > t else 0
-                sig = signals_2d[z, t] if (signals_2d is not None and signals_2d.shape[1] > t) else None
-                sigm = sigmas_2d[z, t] if (sigmas_2d is not None and sigmas_2d.shape[1] > t) else None
-
-                valid = is_valid_func(d, st, sig=sig, sigm=sigm, refl=r) if is_valid_func else (d > 0 and st in (5, 6, 9))
-                if valid:
-                    zone_indices.append(z)
-                    dists.append(d)
-                    sizes.append(max(18, min(160, r * 1.6)))
-
-            if zone_indices:
-                self.ax.scatter(zone_indices, dists, color=colors[t], s=sizes, alpha=0.85, label=labels[t], edgecolors='white', linewidth=0.5)
-
-        self.ax.legend(loc='upper right', facecolor='#10141e', edgecolor='#232a3d', fontsize=8, labelcolor='#ffffff')
-        self.figure.tight_layout()
-        self.canvas.draw_idle()
-
-
-
-# =============================================================================
-# DUAL-TRACE TELEMETRY OSCILLOSCOPE (DEPTH + REFLECTANCE)
+# HISTORICAL DISTANCE TELEMETRY OSCILLOSCOPE (DEPTH STRIP-CHART)
 # =============================================================================
 
 class TelemetryStripChart(QWidget):
+    """Native QPainter oscilloscope (min/max envelope, mean and selected-zone traces)."""
+
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.figure = Figure(facecolor="#10141e", edgecolor='none')
-        self.canvas = FigureCanvas(self.figure)
-        
-        # Dual subplots: Top = Distance (mm), Bottom = Reflectance (%)
-        self.ax_dist = self.figure.add_subplot(211)
-        self.ax_dist.set_facecolor("#151a27")
-        self.ax_refl = self.figure.add_subplot(212, sharex=self.ax_dist)
-        self.ax_refl.set_facecolor("#151a27")
-        
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.setMinimumHeight(160)
 
         self.max_history = 120
         self.hist_min_d = []
@@ -848,62 +676,22 @@ class TelemetryStripChart(QWidget):
         self.hist_max_d = []
         self.hist_sel_d = []
 
-        self.hist_mean_r = []
-        self.hist_sel_r = []
-
         self.last_selected_idx = 0
-        self.last_draw_time = 0
 
-        self._style_charts()
-        self.line_mean_d, = self.ax_dist.plot([], [], color='#00E5FF', label='Mean Depth', linewidth=1.8)
-        self.line_sel_d, = self.ax_dist.plot([], [], color='#00E676', label='Selected Zone', linewidth=1.4, linestyle='--')
-        self.poly_fill_d = None
-        self.ax_dist.legend(loc='upper right', facecolor='#10141e', edgecolor='#232a3d', fontsize=7.5, labelcolor='#ffffff')
-
-        self.line_mean_r, = self.ax_refl.plot([], [], color='#FFB300', label='Mean Reflectance', linewidth=1.6)
-        self.line_sel_r, = self.ax_refl.plot([], [], color='#FF4081', label='Selected Zone Refl', linewidth=1.2, linestyle=':')
-        self.ax_refl.legend(loc='upper right', facecolor='#10141e', edgecolor='#232a3d', fontsize=7.5, labelcolor='#ffffff')
-
-        self.figure.tight_layout()
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(self.canvas)
-
-    def _style_charts(self):
-        for ax, ylabel in [(self.ax_dist, 'Depth (mm)'), (self.ax_refl, 'Reflectance (%)')]:
-            ax.spines['bottom'].set_color('#232a3d')
-            ax.spines['top'].set_color('#232a3d')
-            ax.spines['right'].set_color('#232a3d')
-            ax.spines['left'].set_color('#232a3d')
-            ax.tick_params(colors='#8fa0be', labelsize=8)
-            ax.grid(True, linestyle='--', alpha=0.25, color='#28324a')
-            ax.set_ylabel(ylabel, color='#8fa0be', fontsize=8)
-        self.ax_refl.set_xlabel('Frames', color='#8fa0be', fontsize=8)
-        self.ax_dist.set_ylim(0, 3000)
-        self.ax_refl.set_ylim(0, 100)
-
-    def add_telemetry_point(self, dists_t0, refls_t0, selected_idx):
-        valid_d = [d for d in dists_t0 if d > 0]
+    def add_telemetry_point(self, dists_layer, selected_idx):
+        valid_d = [d for d in dists_layer if d > 0]
         if not valid_d:
             return
 
         min_d = min(valid_d)
         mean_d = float(np.mean(valid_d))
         max_d = max(valid_d)
-        sel_d = dists_t0[selected_idx] if selected_idx < len(dists_t0) and dists_t0[selected_idx] > 0 else mean_d
-
-        valid_r = [refls_t0[i] for i in range(len(dists_t0)) if dists_t0[i] > 0 and i < len(refls_t0)]
-        mean_r = float(np.mean(valid_r)) if valid_r else 0.0
-        sel_r = refls_t0[selected_idx] if selected_idx < len(refls_t0) else mean_r
+        sel_d = dists_layer[selected_idx] if selected_idx < len(dists_layer) and dists_layer[selected_idx] > 0 else mean_d
 
         self.hist_min_d.append(min_d)
         self.hist_mean_d.append(mean_d)
         self.hist_max_d.append(max_d)
         self.hist_sel_d.append(sel_d)
-
-        self.hist_mean_r.append(mean_r)
-        self.hist_sel_r.append(sel_r)
         self.last_selected_idx = selected_idx
 
         if len(self.hist_mean_d) > self.max_history:
@@ -911,36 +699,82 @@ class TelemetryStripChart(QWidget):
             self.hist_mean_d.pop(0)
             self.hist_max_d.pop(0)
             self.hist_sel_d.pop(0)
-            self.hist_mean_r.pop(0)
-            self.hist_sel_r.pop(0)
 
     def redraw_chart(self):
-        now = time.perf_counter()
-        if now - self.last_draw_time < 0.05:  # Max 20 FPS
-            return
-        self.last_draw_time = now
+        self.update()
 
-        if not self.hist_mean_d:
-            return
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        w, h = self.width(), self.height()
+        p.fillRect(0, 0, w, h, QColor("#10141e"))
 
-        x = np.arange(len(self.hist_mean_d))
-        self.line_mean_d.set_data(x, self.hist_mean_d)
-        self.line_sel_d.set_data(x, self.hist_sel_d)
-        self.line_sel_d.set_label(f'Zone {self.last_selected_idx} Depth')
+        ml, mr, mt, mb = 52, 12, 12, 24
+        pw, ph = max(1, w - ml - mr), max(1, h - mt - mb)
+        p.fillRect(ml, mt, pw, ph, QColor("#151a27"))
 
-        self.line_mean_r.set_data(x, self.hist_mean_r)
-        self.line_sel_r.set_data(x, self.hist_sel_r)
-        self.line_sel_r.set_label(f'Zone {self.last_selected_idx} Refl')
+        n = len(self.hist_mean_d)
+        max_y = max(2500, max(self.hist_max_d) + 200) if n else 2500
+        x_span = max(self.max_history, n)
 
-        if self.poly_fill_d:
-            try: self.poly_fill_d.remove()
-            except Exception: pass
-        self.poly_fill_d = self.ax_dist.fill_between(x, self.hist_min_d, self.hist_max_d, color='#00E5FF', alpha=0.15)
+        def px(i):
+            return ml + pw * i / max(1, x_span - 1)
 
-        max_y = max(2500, max(self.hist_max_d) + 200)
-        self.ax_dist.set_ylim(0, max_y)
-        self.ax_dist.set_xlim(0, max(self.max_history, len(x)))
-        self.canvas.draw_idle()
+        def py(v):
+            return mt + ph * (1.0 - min(max(v, 0.0), max_y) / max_y)
+
+        # Grid + Y labels
+        p.setFont(QFont("Segoe UI", 8))
+        grid_pen = QPen(QColor(40, 50, 74, 110), 1, Qt.DashLine)
+        step = 500 if max_y <= 4000 else 1000
+        v = 0
+        while v <= max_y:
+            y = py(v)
+            p.setPen(grid_pen)
+            p.drawLine(int(ml), int(y), int(ml + pw), int(y))
+            p.setPen(QColor("#8fa0be"))
+            p.drawText(0, int(y) - 8, ml - 6, 16, Qt.AlignRight | Qt.AlignVCenter, str(v))
+            v += step
+        p.setPen(QColor("#00E5FF"))
+        p.drawText(ml + 4, 0, 160, mt + 12, Qt.AlignLeft | Qt.AlignVCenter, "Depth (mm)")
+        p.setPen(QColor("#8fa0be"))
+        p.drawText(ml, h - mb + 4, pw, mb - 4, Qt.AlignCenter, "Frames")
+
+        if n >= 2:
+            # Min/max envelope
+            poly = QPolygonF()
+            for i in range(n):
+                poly.append(QPointF(px(i), py(self.hist_max_d[i])))
+            for i in range(n - 1, -1, -1):
+                poly.append(QPointF(px(i), py(self.hist_min_d[i])))
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(0, 229, 255, 40))
+            p.drawPolygon(poly)
+            p.setBrush(Qt.NoBrush)
+
+            sel_poly = QPolygonF([QPointF(px(i), py(self.hist_sel_d[i])) for i in range(n)])
+            p.setPen(QPen(QColor("#00E676"), 1.4, Qt.DashLine))
+            p.drawPolyline(sel_poly)
+
+            mean_poly = QPolygonF([QPointF(px(i), py(self.hist_mean_d[i])) for i in range(n)])
+            p.setPen(QPen(QColor("#00E5FF"), 1.8))
+            p.drawPolyline(mean_poly)
+
+        # Legend
+        lx = ml + pw - 150
+        p.setPen(QPen(QColor("#232a3d"), 1))
+        p.setBrush(QColor(16, 20, 30, 220))
+        p.drawRect(lx, mt + 4, 144, 38)
+        p.setPen(QPen(QColor("#00E5FF"), 1.8))
+        p.drawLine(lx + 6, mt + 14, lx + 26, mt + 14)
+        p.setPen(QPen(QColor("#00E676"), 1.4, Qt.DashLine))
+        p.drawLine(lx + 6, mt + 30, lx + 26, mt + 30)
+        p.setPen(QColor("#ffffff"))
+        p.drawText(lx + 32, mt + 6, 110, 16, Qt.AlignLeft | Qt.AlignVCenter, "Mean Depth")
+        p.drawText(lx + 32, mt + 22, 110, 16, Qt.AlignLeft | Qt.AlignVCenter, f"Zone {self.last_selected_idx} Depth")
+        p.setPen(QPen(QColor("#232a3d"), 1))
+        p.setBrush(Qt.NoBrush)
+        p.drawRect(ml, mt, pw, ph)
 
 
 # =============================================================================
@@ -962,7 +796,7 @@ class VL53L8CXDashboard(QMainWindow):
                 int(avail.height() * 0.86)
             )
         else:
-            self.resize(1360, 840)
+            self.resize(1280, 800)
 
         self.setStyleSheet("""
             QMainWindow { background-color: #0b0d14; }
@@ -1049,11 +883,24 @@ class VL53L8CXDashboard(QMainWindow):
         """)
 
         self.serial_engine = SerialEngine()
-        self.serial_engine.data_received.connect(self.on_data_received)
         self.serial_engine.config_received.connect(self.on_config_received)
         self.serial_engine.ack_received.connect(self.on_ack_received)
         self.serial_engine.connection_changed.connect(self.on_connection_changed)
         self.serial_engine.raw_log.connect(self.on_raw_log)
+
+        # Pull-based rendering: the UI consumes only the newest frame at a fixed rate.
+        self.ui_timer = QTimer(self)
+        self.ui_timer.timeout.connect(self.ui_tick)
+        self.ui_timer.start(16)
+
+        # Command ACK watchdog so Apply/Reset never leaves the UI locked on a lost ACK.
+        self.ack_timer = QTimer(self)
+        self.ack_timer.setSingleShot(True)
+        self.ack_timer.timeout.connect(self.on_ack_timeout)
+
+        self.last_frame_wall = 0.0
+        self.diag_prev_rx = 0
+        self.diag_prev_time = time.perf_counter()
 
         self.fps_timer = QTimer(self)
         self.fps_timer.timeout.connect(self.update_fps_calc)
@@ -1104,6 +951,19 @@ class VL53L8CXDashboard(QMainWindow):
         self.fps_badge.setStyleSheet("background-color: #0f1422; color: #00E676; font-weight: bold; padding: 2px 8px; border-radius: 4px; border: 1px solid #1c2233; font-size: 8pt;")
         nav_layout.addWidget(self.fps_badge)
 
+        self.latency_badge = QLabel("⏱️ -- ms")
+        self.latency_badge.setFixedHeight(24)
+        self.latency_badge.setToolTip("Inter-frame arrival time ± jitter. Peak latency and lag spikes (>50ms) counter.")
+        self.latency_badge.setStyleSheet("background-color: #0f1422; color: #00E5FF; font-weight: bold; padding: 2px 8px; border-radius: 4px; border: 1px solid #1c2233; font-size: 8pt;")
+        nav_layout.addWidget(self.latency_badge)
+
+        self.diag_badge = QLabel("RX -- Hz | loss -- | age -- ms")
+        self.diag_badge.setFixedHeight(24)
+        self.diag_badge.setToolTip("RX = frames/s received over serial, loss = missing sequence numbers, "
+                                   "age = time since last frame, buf = peak OS RX buffer usage")
+        self.diag_badge.setStyleSheet("background-color: #0f1422; color: #94a3b8; font-weight: bold; padding: 2px 8px; border-radius: 4px; border: 1px solid #1c2233; font-size: 8pt;")
+        nav_layout.addWidget(self.diag_badge)
+
         nav_layout.addWidget(QLabel("Port:"))
         self.port_combo = QComboBox()
         self.port_combo.setMinimumWidth(75)
@@ -1141,17 +1001,11 @@ class VL53L8CXDashboard(QMainWindow):
 
         self.vis_tabs = QTabWidget()
 
-        # Tab 1: 2D Matrix Multi-Metric Heatmap & Multi-Target Zone Inspector
+        # Tab 1: 2D Matrix Heatmap (Expanded Full-Width)
         tab_2d = QWidget()
-        tab_2d_layout = QHBoxLayout(tab_2d)
+        tab_2d_layout = QVBoxLayout(tab_2d)
         tab_2d_layout.setContentsMargins(4, 4, 4, 4)
-        tab_2d_layout.setSpacing(6)
-
-        # Left Column: Toolbar + Heatmap
-        hm_col = QWidget()
-        hm_col_layout = QVBoxLayout(hm_col)
-        hm_col_layout.setContentsMargins(0, 0, 0, 0)
-        hm_col_layout.setSpacing(4)
+        tab_2d_layout.setSpacing(4)
 
         # Heatmap Filter & Layer Toolbar
         toolbar = QHBoxLayout()
@@ -1160,27 +1014,22 @@ class VL53L8CXDashboard(QMainWindow):
         toolbar.addWidget(QLabel("📊 Metric:"))
         self.metric_combo = QComboBox()
         self.metric_combo.addItem("📏 Distance (mm)", "dist")
-        self.metric_combo.addItem("🔆 Reflectance (%)", "refl")
         self.metric_combo.addItem("📶 Signal Rate (kcps/SPAD)", "sig")
         self.metric_combo.addItem("〰️ Range Noise (±mm)", "sigm")
         self.metric_combo.addItem("💡 Ambient Noise (kcps)", "amb")
         self.metric_combo.addItem("⚡ Active SPADs Count", "spad")
-        self.metric_combo.addItem("🎯 Target Count (0-4)", "ntar")
+        self.metric_combo.addItem("🎯 Target Count (1-2)", "ntar")
         self.metric_combo.addItem("🏷️ Target Status & Validity", "st")
         self.metric_combo.currentIndexChanged.connect(self.on_metric_changed)
         toolbar.addWidget(self.metric_combo)
 
         toolbar.addWidget(QLabel("🎯 Target Layer:"))
         self.layer_combo = QComboBox()
+        self.layer_combo.addItem("🔄 Smart Fallback (T1 → T2)", 100)
         self.layer_combo.addItem("🥇 Target #1 (Primary)", 0)
-        self.layer_combo.addItem("🔄 Smart Fallback (T1 → Secondary)", 100)
-        self.layer_combo.addItem("🥈 Target #2 (Secondary Only)", 1)
-        self.layer_combo.addItem("🥉 Target #3 (Tertiary Only)", 2)
-        self.layer_combo.addItem("4️⃣ Target #4 (Quaternary Only)", 3)
-        self.layer_combo.addItem("👥 Multi-Target Composite", -1)
+        self.layer_combo.addItem("🥈 Target #2 (Secondary)", 1)
         self.layer_combo.currentIndexChanged.connect(self.on_layer_changed)
         toolbar.addWidget(self.layer_combo)
-
 
         toolbar.addWidget(QLabel("🛡️ Filter:"))
         self.filter_combo = QComboBox()
@@ -1213,118 +1062,38 @@ class VL53L8CXDashboard(QMainWindow):
         self.btn_rotate.clicked.connect(self.on_rotate_clicked)
         toolbar.addWidget(self.btn_rotate)
 
-        hm_col_layout.addLayout(toolbar)
+        tab_2d_layout.addLayout(toolbar)
+
+        # Quick Live Frame KPI Banner
+        kpi_bar = QHBoxLayout()
+        kpi_bar.setSpacing(14)
+        
+        self.kpi_mean_lbl = QLabel("Mean Depth: --- mm")
+        self.kpi_mean_lbl.setStyleSheet("font-weight: bold; color: #00E5FF; font-size: 8.5pt;")
+        kpi_bar.addWidget(self.kpi_mean_lbl)
+
+        self.kpi_valid_lbl = QLabel("Valid Targets: ---")
+        self.kpi_valid_lbl.setStyleSheet("font-weight: bold; color: #00E676; font-size: 8.5pt;")
+        kpi_bar.addWidget(self.kpi_valid_lbl)
+
+        self.kpi_sel_lbl = QLabel("Selected: Zone #0")
+        self.kpi_sel_lbl.setStyleSheet("color: #94A3B8; font-size: 8.5pt;")
+        kpi_bar.addWidget(self.kpi_sel_lbl)
+
+        kpi_bar.addStretch()
+        tab_2d_layout.addLayout(kpi_bar)
 
         self.heatmap = MatrixHeatmapWidget()
         self.heatmap.cell_selected.connect(self.on_cell_selected)
-        hm_col_layout.addWidget(self.heatmap, 1)
+        tab_2d_layout.addWidget(self.heatmap, 1)
 
-        tab_2d_layout.addWidget(hm_col, 3)
+        self.vis_tabs.addTab(tab_2d, "🗺️ 2D Matrix Heatmap")
 
-        # Right Column: Per-Zone Multi-Target Inspector Sidebar
-        inspector_frame = QFrame()
-        inspector_frame.setStyleSheet("background-color: #12151f; border-radius: 6px; border: 1px solid #232a3d;")
-        ins_layout = QVBoxLayout(inspector_frame)
-        ins_layout.setContentsMargins(8, 8, 8, 8)
-        ins_layout.setSpacing(6)
-
-        ins_title = QLabel("🔍 ZONE MULTI-TARGET INSPECTOR")
-        ins_title.setStyleSheet("font-weight: bold; color: #00E5FF; font-size: 8.5pt;")
-        ins_layout.addWidget(ins_title)
-
-        self.ins_zone_lbl = QLabel("Zone #0 (Row 0, Col 0)")
-        self.ins_zone_lbl.setStyleSheet("font-size: 9.5pt; font-weight: bold; color: #ffffff;")
-        ins_layout.addWidget(self.ins_zone_lbl)
-
-        self.ins_ntar_lbl = QLabel("🎯 Targets Detected: 0 / 4")
-        self.ins_ntar_lbl.setStyleSheet("color: #38bdf8; font-weight: bold;")
-        ins_layout.addWidget(self.ins_ntar_lbl)
-
-        # Target breakdown cards (4 targets)
-        self.target_cards = []
-        for t in range(4):
-            card = QFrame()
-            card.setStyleSheet("background-color: #181d2b; border: 1px solid #232a3d; border-radius: 4px; padding: 4px;")
-            card_layout = QVBoxLayout(card)
-            card_layout.setContentsMargins(4, 4, 4, 4)
-            card_layout.setSpacing(2)
-
-            t_title = QLabel(f"Target #{t+1} {'(Primary)' if t==0 else ''}")
-            t_title.setStyleSheet(f"font-weight: bold; color: {['#00E5FF', '#FFB300', '#EC407A', '#00E676'][t]}; font-size: 8pt;")
-            card_layout.addWidget(t_title)
-
-            t_val_row = QHBoxLayout()
-            d_lbl = QLabel("--- mm")
-            d_lbl.setStyleSheet("font-size: 10.5pt; font-weight: bold; color: #ffffff;")
-            t_val_row.addWidget(d_lbl)
-
-            r_lbl = QLabel("--- %")
-            r_lbl.setStyleSheet("font-size: 9pt; font-weight: bold; color: #FFB300;")
-            t_val_row.addWidget(r_lbl)
-            card_layout.addLayout(t_val_row)
-
-            meta_lbl = QLabel("Sig: --- kcps | Noise: ±-- mm")
-            meta_lbl.setStyleSheet("font-size: 7.5pt; color: #8fa0be;")
-            card_layout.addWidget(meta_lbl)
-
-            st_lbl = QLabel("Status: ---")
-            st_lbl.setStyleSheet("font-size: 7.5pt; color: #cbd5e1;")
-            card_layout.addWidget(st_lbl)
-
-            ins_layout.addWidget(card)
-            self.target_cards.append({
-                "frame": card,
-                "d_lbl": d_lbl,
-                "r_lbl": r_lbl,
-                "meta_lbl": meta_lbl,
-                "st_lbl": st_lbl
-            })
-
-        ins_layout.addStretch()
-
-        # Zone Environment & SPADs
-        env_box = QFrame()
-        env_box.setStyleSheet("background-color: #161b28; border-radius: 4px; padding: 4px;")
-        env_layout = QVBoxLayout(env_box)
-        env_layout.setContentsMargins(4, 4, 4, 4)
-        env_layout.setSpacing(2)
-        
-        self.ins_amb_lbl = QLabel("💡 Ambient Noise: --- kcps/SPAD")
-        env_layout.addWidget(self.ins_amb_lbl)
-        self.ins_spad_lbl = QLabel("⚡ SPADs Enabled: ---")
-        env_layout.addWidget(self.ins_spad_lbl)
-        ins_layout.addWidget(env_box)
-
-        # Global Frame Summary
-        kpi_title = QLabel("📊 FRAME SUMMARY")
-        kpi_title.setStyleSheet("font-weight: bold; color: #00E5FF; font-size: 8pt; margin-top: 4px;")
-        ins_layout.addWidget(kpi_title)
-
-        self.kpi_mean_lbl = QLabel("Mean Depth: --- mm")
-        ins_layout.addWidget(self.kpi_mean_lbl)
-
-        self.kpi_refl_lbl = QLabel("Mean Refl: --- %")
-        ins_layout.addWidget(self.kpi_refl_lbl)
-
-        self.kpi_valid_lbl = QLabel("Valid Targets: 0 / 16 (0%)")
-        ins_layout.addWidget(self.kpi_valid_lbl)
-
-        tab_2d_layout.addWidget(inspector_frame, 1)
-        self.vis_tabs.addTab(tab_2d, "🗺️ 2D Multi-Target Heatmap")
-
-        # Tab 2: 3D Point Cloud / Surface
-        self.visualizer_3d = Depth3DVisualizer()
-        self.vis_tabs.addTab(self.visualizer_3d, "🌐 3D Point Cloud & Surface")
-
-        # Tab 3: Multi-Target Range Distribution Radar
-        self.target_radar = MultiTargetRadarWidget()
-        self.vis_tabs.addTab(self.target_radar, "🎯 Multi-Target Range Slices")
-
-        # Tab 4: Dual-Trace Historical Strip Chart
+        # Tab 2: Historical Distance Oscilloscope
         self.strip_chart = TelemetryStripChart()
-        self.vis_tabs.addTab(self.strip_chart, "📈 Depth & Reflectance Oscilloscope")
+        self.vis_tabs.addTab(self.strip_chart, "📈 Distance Oscilloscope")
 
-        # Tab 5: Raw Serial Logs
+        # Tab 3: Raw Serial Logs
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
         self.log_text.setStyleSheet("background-color: #0c0f17; color: #8b949e; font-family: 'Consolas', monospace; font-size: 8pt;")
@@ -1345,7 +1114,7 @@ class VL53L8CXDashboard(QMainWindow):
         param_layout.setContentsMargins(6, 6, 6, 6)
         param_layout.setSpacing(4)
 
-        # Resolution & Target Order
+        # Resolution & Target Order (Default: 4x4, Closest)
         row1 = QHBoxLayout()
         row1.addWidget(QLabel("Resolution:"))
         self.res_combo = QComboBox()
@@ -1361,7 +1130,7 @@ class VL53L8CXDashboard(QMainWindow):
         row1.addWidget(self.order_combo)
         param_layout.addLayout(row1)
 
-        # Ranging Frequency Slider
+        # Ranging Frequency Slider (Default: 60 Hz)
         freq_layout = QHBoxLayout()
         self.freq_lbl = QLabel("Rate: 60 Hz")
         self.freq_lbl.setMinimumWidth(75)
@@ -1380,18 +1149,18 @@ class VL53L8CXDashboard(QMainWindow):
         self.freq_spin.valueChanged.connect(self.on_freq_changed)
         param_layout.addLayout(freq_layout)
 
-        # Integration Time Slider & Live SpinBox
+        # Integration Time Slider & Live SpinBox (Default: Optimal 15 ms for 60 Hz)
         integ_layout = QHBoxLayout()
-        self.integ_lbl = QLabel("Integ Time: 5 ms")
+        self.integ_lbl = QLabel("Integ Time: 15 ms")
         self.integ_lbl.setMinimumWidth(85)
         integ_layout.addWidget(self.integ_lbl)
         self.integ_slider = QSlider(Qt.Horizontal)
         self.integ_slider.setRange(2, 200)
-        self.integ_slider.setValue(5)
+        self.integ_slider.setValue(15)
         integ_layout.addWidget(self.integ_slider)
         self.integ_spin = QSpinBox()
         self.integ_spin.setRange(2, 1000)
-        self.integ_spin.setValue(5)
+        self.integ_spin.setValue(15)
         self.integ_spin.setSuffix(" ms")
         self.integ_spin.setFixedWidth(52)
         integ_layout.addWidget(self.integ_spin)
@@ -1404,8 +1173,8 @@ class VL53L8CXDashboard(QMainWindow):
         integ_btn_row = QHBoxLayout()
         integ_btn_row.setSpacing(3)
 
-        btn_integ_auto = QPushButton("⚡ Auto / Max")
-        btn_integ_auto.setToolTip("Set integration time to maximum possible for current frequency budget")
+        btn_integ_auto = QPushButton("⚡ Auto / Max (15ms)")
+        btn_integ_auto.setToolTip("Set integration time to maximum possible for current frequency budget (15 ms @ 60 Hz)")
         btn_integ_auto.clicked.connect(lambda: self.set_smart_integration("auto"))
         integ_btn_row.addWidget(btn_integ_auto)
 
@@ -1414,13 +1183,13 @@ class VL53L8CXDashboard(QMainWindow):
         btn_integ_fast.clicked.connect(lambda: self.set_smart_integration("fast"))
         integ_btn_row.addWidget(btn_integ_fast)
 
-        btn_integ_bal = QPushButton("⚖️ Bal (15ms)")
-        btn_integ_bal.setToolTip("Balanced integration time (15 ms) for high signal-to-noise ratio")
+        btn_integ_bal = QPushButton("⚖️ Optimal Bal (15ms)")
+        btn_integ_bal.setToolTip("Optimal balanced integration time (15 ms) for 60 Hz maximum SNR")
         btn_integ_bal.clicked.connect(lambda: self.set_smart_integration("balanced"))
         integ_btn_row.addWidget(btn_integ_bal)
 
         btn_integ_deep = QPushButton("🔭 Deep (50ms)")
-        btn_integ_deep.setToolTip("Deep photon accumulation (50 ms) for dark or low-reflectance surfaces")
+        btn_integ_deep.setToolTip("Deep photon accumulation (50 ms) for lower frequency ranging")
         btn_integ_deep.clicked.connect(lambda: self.set_smart_integration("deep"))
         integ_btn_row.addWidget(btn_integ_deep)
 
@@ -1444,22 +1213,6 @@ class VL53L8CXDashboard(QMainWindow):
         self.sharp_spin.valueChanged.connect(self.sharp_slider.setValue)
         self.sharp_spin.valueChanged.connect(lambda val: self.sharp_lbl.setText(f"Sharpener: {val}%"))
         param_layout.addLayout(sharp_layout)
-
-
-        # Mode & Power
-        row2 = QHBoxLayout()
-        row2.addWidget(QLabel("Mode:"))
-        self.mode_combo = QComboBox()
-        self.mode_combo.addItem("Continuous (High Perf)", 1)
-        self.mode_combo.addItem("Autonomous (Low Power)", 3)
-        row2.addWidget(self.mode_combo)
-
-        row2.addWidget(QLabel("Power:"))
-        self.pwr_combo = QComboBox()
-        self.pwr_combo.addItem("Active Wakeup", 1)
-        self.pwr_combo.addItem("Low Power Sleep", 0)
-        row2.addWidget(self.pwr_combo)
-        param_layout.addLayout(row2)
 
         ctrl_layout.addWidget(param_group)
 
@@ -1488,7 +1241,7 @@ class VL53L8CXDashboard(QMainWindow):
         self.conf_desc_lbl.setWordWrap(True)
         picky_layout.addWidget(self.conf_desc_lbl)
 
-        # Toggleable ST Table 4 Status Glossary Drawer (Full 15 Status Codes)
+        # Toggleable ST Table 4 Status Glossary Drawer
         glossary_toggle_row = QHBoxLayout()
         self.btn_toggle_glossary = QPushButton("📋 ST Table 4 Status Code Glossary (All 15) ▾")
         self.btn_toggle_glossary.setCheckable(True)
@@ -1564,8 +1317,6 @@ class VL53L8CXDashboard(QMainWindow):
         self.btn_toggle_glossary.toggled.connect(lambda checked: self.btn_toggle_glossary.setText("📋 ST Table 4 Status Code Glossary (All 15) ▴" if checked else "📋 ST Table 4 Status Code Glossary (All 15) ▾"))
         picky_layout.addWidget(self.glossary_scroll)
 
-
-
         # 2. Max Noise Sigma Limit Slider
         sigma_row = QHBoxLayout()
         self.sigma_lbl = QLabel("Max Noise: Off")
@@ -1606,27 +1357,7 @@ class VL53L8CXDashboard(QMainWindow):
         self.min_sig_spin.valueChanged.connect(self.on_min_sig_changed)
         picky_layout.addLayout(sig_row)
 
-        # 4. Min Reflectance Gate Slider
-        refl_row = QHBoxLayout()
-        self.min_refl_lbl = QLabel("Min Refl: Off")
-        self.min_refl_lbl.setMinimumWidth(85)
-        refl_row.addWidget(self.min_refl_lbl)
-        self.min_refl_slider = QSlider(Qt.Horizontal)
-        self.min_refl_slider.setRange(0, 30)
-        self.min_refl_slider.setValue(0)
-        refl_row.addWidget(self.min_refl_slider)
-        self.min_refl_spin = QSpinBox()
-        self.min_refl_spin.setRange(0, 30)
-        self.min_refl_spin.setValue(0)
-        self.min_refl_spin.setSuffix(" %")
-        self.min_refl_spin.setFixedWidth(52)
-        refl_row.addWidget(self.min_refl_spin)
-        self.min_refl_slider.valueChanged.connect(self.min_refl_spin.setValue)
-        self.min_refl_spin.valueChanged.connect(self.min_refl_slider.setValue)
-        self.min_refl_spin.valueChanged.connect(self.on_min_refl_changed)
-        picky_layout.addLayout(refl_row)
-
-        # 5. Distance Range Gating
+        # 4. Distance Range Gating
         dist_row = QHBoxLayout()
         dist_row.addWidget(QLabel("Range Gate:"))
         self.gate_min_spin = QSpinBox()
@@ -1666,13 +1397,6 @@ class VL53L8CXDashboard(QMainWindow):
         self.cal_samples_spin.setRange(1, 16)
         self.cal_samples_spin.setValue(4)
         cal_row1.addWidget(self.cal_samples_spin)
-
-        cal_row1.addWidget(QLabel("Refl:"))
-        self.cal_refl_spin = QSpinBox()
-        self.cal_refl_spin.setRange(1, 99)
-        self.cal_refl_spin.setValue(3)
-        self.cal_refl_spin.setSuffix(" %")
-        cal_row1.addWidget(self.cal_refl_spin)
         xtalk_layout.addLayout(cal_row1)
 
         margin_row = QHBoxLayout()
@@ -1685,39 +1409,38 @@ class VL53L8CXDashboard(QMainWindow):
 
         self.cal_btn = QPushButton("🎯 Calibrate Xtalk")
         self.cal_btn.setObjectName("calBtn")
-        self.cal_btn.setToolTip("Run ST crosstalk calibration with target at specified distance & reflectance")
+        self.cal_btn.setToolTip("Run ST crosstalk calibration with target at specified distance")
         self.cal_btn.clicked.connect(self.calibrate_xtalk)
         margin_row.addWidget(self.cal_btn)
         xtalk_layout.addLayout(margin_row)
 
         ctrl_layout.addWidget(xtalk_group)
 
-        # --- Card 4: Quick Performance & Pickiness Presets ---
+        # --- Card 4: Quick Performance Presets ---
         preset_group = QGroupBox("⚡ RACING & DETECTION PRESETS")
         preset_layout = QGridLayout(preset_group)
         preset_layout.setContentsMargins(6, 6, 6, 6)
         preset_layout.setSpacing(4)
 
-        btn_preset_speed = QPushButton("🚀 4x4 @ 60 Hz (Max Speed)")
-        btn_preset_speed.clicked.connect(lambda: self.load_preset(16, 60, 1, 1, 1, 50, "valid_5_6_9", 0, 0, 0))
+        btn_preset_speed = QPushButton("🚀 4x4 @ 60 Hz (Optimal 15ms)")
+        btn_preset_speed.clicked.connect(lambda: self.load_preset(16, 60, 1, 1, 50, "valid_5_6_9", 0, 0, integ=15))
         preset_layout.addWidget(btn_preset_speed, 0, 0)
 
         btn_preset_prec = QPushButton("🎯 8x8 @ 15 Hz (Max Res)")
-        btn_preset_prec.clicked.connect(lambda: self.load_preset(64, 15, 1, 1, 1, 50, "valid_5_6_9", 0, 0, 0))
+        btn_preset_prec.clicked.connect(lambda: self.load_preset(64, 15, 1, 1, 50, "valid_5_6_9", 0, 0, integ=50))
         preset_layout.addWidget(btn_preset_prec, 0, 1)
 
         btn_preset_picky = QPushButton("🛡️ Ultra Picky (High Confidence)")
-        btn_preset_picky.clicked.connect(lambda: self.load_preset(16, 60, 1, 5, 1, 100, "valid_5", 5, 10, 3))
+        btn_preset_picky.clicked.connect(lambda: self.load_preset(16, 60, 1, 5, 100, "valid_5", 5, 10, integ=15))
         preset_layout.addWidget(btn_preset_picky, 1, 0)
 
         btn_preset_sens = QPushButton("👁️ Ultra Sensitive (Faint Targets)")
-        btn_preset_sens.clicked.connect(lambda: self.load_preset(16, 30, 2, 0, 1, 0, "valid_extended", 0, 0, 0))
+        btn_preset_sens.clicked.connect(lambda: self.load_preset(16, 30, 2, 0, 0, "valid_extended", 0, 0, integ=30))
         preset_layout.addWidget(btn_preset_sens, 1, 1)
 
         ctrl_layout.addWidget(preset_group)
 
-
-        # --- Card 4: Action Panel ---
+        # --- Card 5: Action Panel ---
         action_box = QFrame()
         action_box.setStyleSheet("background-color: #12151f; border-radius: 6px; border: 1px solid #232a3d; padding: 4px;")
         act_layout = QVBoxLayout(action_box)
@@ -1729,7 +1452,7 @@ class VL53L8CXDashboard(QMainWindow):
         self.apply_btn.clicked.connect(self.apply_changes)
         act_layout.addWidget(self.apply_btn)
 
-        self.apply_status_lbl = QLabel("Ready • Continuous Mode Active")
+        self.apply_status_lbl = QLabel("Ready • Continuous 60 Hz Mode Active")
         self.apply_status_lbl.setAlignment(Qt.AlignCenter)
         self.apply_status_lbl.setStyleSheet("color: #8fa0be; font-size: 8pt; font-style: italic;")
         act_layout.addWidget(self.apply_status_lbl)
@@ -1809,7 +1532,6 @@ class VL53L8CXDashboard(QMainWindow):
     def on_layer_changed(self, index):
         self.heatmap.target_layer = self.layer_combo.currentData()
         self.heatmap.update()
-        self.update_active_3d_view()
 
     def on_filter_changed(self, index):
         val = self.filter_combo.currentData()
@@ -1843,7 +1565,6 @@ class VL53L8CXDashboard(QMainWindow):
             self.conf_desc_lbl.setText("🔬 Accepting ALL status codes (s0 to s255, including errors & noise)")
             self.conf_desc_lbl.setStyleSheet("color: #f87171; font-size: 7.5pt; font-style: italic; padding: 2px 4px; background: #161c2b; border-radius: 3px;")
 
-
     def on_sigma_limit_changed(self, val):
         self.heatmap.max_sigma_filter = val
         self.sigma_lbl.setText(f"Max Noise: {val} mm" if val > 0 else "Max Noise: Off")
@@ -1852,11 +1573,6 @@ class VL53L8CXDashboard(QMainWindow):
     def on_min_sig_changed(self, val):
         self.heatmap.min_signal_filter = val
         self.min_sig_lbl.setText(f"Min Signal: {val} k" if val > 0 else "Min Signal: Off")
-        self.heatmap.update()
-
-    def on_min_refl_changed(self, val):
-        self.heatmap.min_refl_filter = val
-        self.min_refl_lbl.setText(f"Min Refl: {val} %" if val > 0 else "Min Refl: Off")
         self.heatmap.update()
 
     def on_dist_gate_changed(self):
@@ -1885,7 +1601,7 @@ class VL53L8CXDashboard(QMainWindow):
         elif preset_type == "deep":
             val = min(50, max_budget)
         else:
-            val = 5
+            val = 15
         self.integ_spin.setValue(max(2, val))
 
     def on_toggle_flip_h(self):
@@ -1904,9 +1620,8 @@ class VL53L8CXDashboard(QMainWindow):
         rot = self.heatmap.rotation
         self.btn_rotate.setText(f"🔄 {rot}°")
         self.heatmap.update()
-        self.update_active_3d_view()
 
-    def load_preset(self, res, freq, order, sharp, mode, margin, conf="valid_5_6_9", sigma=0, min_sig=0, min_refl=0, integ=5):
+    def load_preset(self, res, freq, order, sharp, margin, conf="valid_5_6_9", sigma=0, min_sig=0, integ=15):
         idx = self.res_combo.findData(res)
         if idx >= 0: self.res_combo.setCurrentIndex(idx)
         self.freq_spin.setValue(freq)
@@ -1914,15 +1629,12 @@ class VL53L8CXDashboard(QMainWindow):
         idx = self.order_combo.findData(order)
         if idx >= 0: self.order_combo.setCurrentIndex(idx)
         self.sharp_spin.setValue(sharp)
-        idx = self.mode_combo.findData(mode)
-        if idx >= 0: self.mode_combo.setCurrentIndex(idx)
         self.margin_spin.setValue(margin)
         
         idx_conf = self.conf_combo.findData(conf)
         if idx_conf >= 0: self.conf_combo.setCurrentIndex(idx_conf)
         self.sigma_spin.setValue(sigma)
         self.min_sig_spin.setValue(min_sig)
-        self.min_refl_spin.setValue(min_refl)
         
         self.apply_changes()
 
@@ -1932,28 +1644,34 @@ class VL53L8CXDashboard(QMainWindow):
         integ = self.integ_spin.value()
         order = self.order_combo.currentData()
         sharp = self.sharp_spin.value()
-        mode = self.mode_combo.currentData()
-        pwr = self.pwr_combo.currentData()
         margin = self.margin_spin.value()
 
-        cmd = f"SET_CONFIG:res={res},freq={freq},integ={integ},order={order},sharp={sharp},mode={mode},pwr={pwr},margin={margin}"
+        # Always Continuous High-Performance Ranging Mode (mode=1) & Active Wakeup (pwr=1)
+        cmd = f"SET_CONFIG:res={res},freq={freq},integ={integ},order={order},sharp={sharp},mode=1,pwr=1,margin={margin}"
         self.apply_btn.setEnabled(False)
         self.apply_status_lbl.setText("⏳ Applying sensor changes...")
         self.apply_status_lbl.setStyleSheet("color: #00E5FF; font-weight: bold;")
         self.serial_engine.send_command(cmd)
+        self.ack_timer.start(3000)
 
     def reset_sensor(self):
         self.apply_status_lbl.setText("🔄 Hardware resetting...")
         self.serial_engine.send_command("RESET")
+        self.ack_timer.start(3000)
 
     def calibrate_xtalk(self):
         dist = self.cal_dist_spin.value()
         samples = self.cal_samples_spin.value()
-        refl = self.cal_refl_spin.value()
-        self.apply_status_lbl.setText(f"📐 Calibrating crosstalk @ {dist}mm, {refl}% refl...")
-        self.serial_engine.send_command(f"CALIBRATE_XTALK:dist={dist},samples={samples},refl={refl}")
+        self.apply_status_lbl.setText(f"📐 Calibrating crosstalk @ {dist}mm...")
+        self.serial_engine.send_command(f"CALIBRATE_XTALK:dist={dist},samples={samples},refl=3")
+
+    def on_ack_timeout(self):
+        self.apply_btn.setEnabled(True)
+        self.apply_status_lbl.setText("⚠️ No ACK from sensor (command may be lost) - try again")
+        self.apply_status_lbl.setStyleSheet("color: #FFB300; font-weight: bold;")
 
     def on_ack_received(self, data):
+        self.ack_timer.stop()
         self.apply_btn.setEnabled(True)
         status = data.get("status", "")
         cmd = data.get("cmd", "")
@@ -1970,11 +1688,9 @@ class VL53L8CXDashboard(QMainWindow):
     def on_config_received(self, data):
         res = data.get("res", 16)
         freq = data.get("freq", 60)
-        integ = data.get("integ", 5)
+        integ = data.get("integ", 15)
         order = data.get("order", 1)
         sharp = data.get("sharp", 1)
-        mode = data.get("mode", 1)
-        pwr = data.get("power", 1)
         margin = data.get("margin", 50)
 
         idx = self.res_combo.findData(res)
@@ -1984,19 +1700,21 @@ class VL53L8CXDashboard(QMainWindow):
         idx = self.order_combo.findData(order)
         if idx >= 0: self.order_combo.setCurrentIndex(idx)
         self.sharp_spin.setValue(sharp)
-        idx = self.mode_combo.findData(mode)
-        if idx >= 0: self.mode_combo.setCurrentIndex(idx)
-        if idx >= 0: self.pwr_combo.setCurrentIndex(idx)
         self.margin_spin.setValue(margin)
 
-    def on_data_received(self, data):
+    def ui_tick(self):
+        data = self.serial_engine.take_latest()
+        if data is None:
+            return
+        self.last_frame_wall = time.perf_counter()
+        self.render_frame(data)
 
+    def render_frame(self, data):
         self.frame_counter += 1
         res = data.get("r", 16)
         nt = data.get("nt", 4)
         ntar = data.get("ntar", [])
         dists = data.get("d", [])
-        refls = data.get("refl", [])
         statuses = data.get("st", [])
         signals = data.get("sig", [])
         sigmas = data.get("sigm", [])
@@ -2007,116 +1725,43 @@ class VL53L8CXDashboard(QMainWindow):
         if temp_c is not None:
             self.temp_badge.setText(f"🌡️ {temp_c} °C")
 
-        # Update Heatmap data model
-        self.heatmap.update_telemetry(res, nt, ntar, dists, refls, statuses, signals, sigmas, ambs, spads)
+        # Update Heatmap data model (retaining Target 1 & Target 2)
+        self.heatmap.update_telemetry(res, nt, ntar, dists, statuses, signals, sigmas, ambs, spads)
 
         # Route updates to active tab
         tab_idx = self.vis_tabs.currentIndex()
-        if tab_idx == 1:
-            self.update_active_3d_view()
-        elif tab_idx == 2:
-            self.target_radar.update_targets(
-                res,
-                self.heatmap.distances,
-                self.heatmap.reflectances,
-                self.heatmap.statuses,
-                signals_2d=self.heatmap.signals,
-                sigmas_2d=self.heatmap.sigmas,
-                is_valid_func=self.heatmap.is_valid_reading
-            )
+        dists_layer, _, _, _, _ = self.heatmap.get_effective_layer_data()
 
-        elif tab_idx == 3:
-            d_t0 = self.heatmap.distances[:, 0] if len(self.heatmap.distances) else []
-            r_t0 = self.heatmap.reflectances[:, 0] if len(self.heatmap.reflectances) else []
-            self.strip_chart.add_telemetry_point(d_t0, r_t0, self.heatmap.selected_zone)
+        if tab_idx == 1:
+            self.strip_chart.add_telemetry_point(dists_layer, self.heatmap.selected_zone)
             self.strip_chart.redraw_chart()
 
-        # Update Zone Inspector Sidebar
-        self.update_zone_inspector(self.heatmap.selected_zone)
-
-        # Update Global KPIs using active pickiness & quality gating
+        # Update Live KPIs
         valid_indices = [
             z for z in range(res)
             if self.heatmap.is_valid_reading(
-                self.heatmap.distances[z, 0],
+                dists_layer[z],
                 self.heatmap.statuses[z, 0],
                 sig=self.heatmap.signals[z, 0],
-                sigm=self.heatmap.sigmas[z, 0],
-                refl=self.heatmap.reflectances[z, 0]
+                sigm=self.heatmap.sigmas[z, 0]
             )
         ]
         if valid_indices:
-            valid_d = [self.heatmap.distances[z, 0] for z in valid_indices]
-            valid_r = [self.heatmap.reflectances[z, 0] for z in valid_indices]
+            valid_d = [dists_layer[z] for z in valid_indices]
             self.kpi_mean_lbl.setText(f"Mean Depth: {np.mean(valid_d):.1f} mm")
-            self.kpi_refl_lbl.setText(f"Mean Refl: {np.mean(valid_r):.1f} %")
         else:
             self.kpi_mean_lbl.setText("Mean Depth: --- mm")
-            self.kpi_refl_lbl.setText("Mean Refl: --- %")
 
         valid_count = len(valid_indices)
         self.kpi_valid_lbl.setText(f"Valid Targets: {valid_count} / {res} ({int(100*valid_count/res)}%)")
-
-
-    def update_zone_inspector(self, z_idx):
-        zdata = self.heatmap.get_zone_data(z_idx)
-        if not zdata:
-            return
-
-        dim = self.heatmap.grid_dim
-        self.ins_zone_lbl.setText(f"Zone #{z_idx} (Row {z_idx//dim}, Col {z_idx%dim})")
-        self.ins_ntar_lbl.setText(f"🎯 Targets Detected: {zdata['ntar']} / {self.heatmap.nb_targets}")
-
-        self.ins_amb_lbl.setText(f"💡 Ambient Noise: {zdata['amb']} kcps/SPAD")
-        self.ins_spad_lbl.setText(f"⚡ SPADs Enabled: {zdata['spad']}")
-
-        for t in range(4):
-            card = self.target_cards[t]
-            if t < len(zdata['targets']):
-                tgt = zdata['targets'][t]
-                dist = tgt['dist']
-                refl = tgt['refl']
-                st = tgt['stat']
-                sig = tgt['sig']
-                sigm = tgt['sigm']
-
-                st_desc, st_hex, conf = get_status_info(st)
-
-                if dist > 0 and st in (5, 6, 9, 10, 13):
-                    card['d_lbl'].setText(f"{dist} mm")
-                    card['r_lbl'].setText(f"{refl}% refl")
-                    card['meta_lbl'].setText(f"Sig: {sig} kcps | Noise: ±{sigm} mm")
-                    card['st_lbl'].setText(f"s{st}: {st_desc}")
-                    card['st_lbl'].setStyleSheet(f"font-size: 7.5pt; font-weight: bold; color: {st_hex};")
-                else:
-                    card['d_lbl'].setText("---")
-                    card['r_lbl'].setText("-- %")
-                    card['meta_lbl'].setText("Sig: -- kcps | Noise: ±-- mm")
-                    card['st_lbl'].setText(f"s{st}: {st_desc}" if st != 0 else "No Target Detected")
-                    card['st_lbl'].setStyleSheet("font-size: 7.5pt; color: #64748b;")
-            else:
-                card['d_lbl'].setText("---")
-                card['r_lbl'].setText("-- %")
-                card['meta_lbl'].setText("---")
-                card['st_lbl'].setText("Inactive")
-
-    def update_active_3d_view(self):
-        dists, refls, stats, sigs, sigms, tgt_indices = self.heatmap.get_effective_layer_data()
-        self.visualizer_3d.update_3d_view(
-            self.heatmap.resolution,
-            dists, refls,
-            flip_h=self.heatmap.flip_h,
-            flip_v=self.heatmap.flip_v,
-            rotation=self.heatmap.rotation,
-            metric="refl" if self.heatmap.active_metric == "refl" else "dist"
-        )
-
+        self.kpi_sel_lbl.setText(f"Selected: Zone #{self.heatmap.selected_zone}")
 
     def on_cell_selected(self, idx):
-        self.update_zone_inspector(idx)
+        self.kpi_sel_lbl.setText(f"Selected: Zone #{idx}")
+        self.strip_chart.last_selected_idx = idx
 
     def on_raw_log(self, text):
-        if self.vis_tabs.currentIndex() == 4:
+        if self.vis_tabs.currentIndex() == 2:
             self.log_text.append(text)
             if self.log_text.document().blockCount() > 300:
                 cursor = self.log_text.textCursor()
@@ -2133,6 +1778,58 @@ class VL53L8CXDashboard(QMainWindow):
             self.fps_badge.setText(f"{self.current_fps:.1f} FPS")
             self.frame_counter = 0
             self.last_fps_time = now
+        self.update_diagnostics(now)
+
+    def update_diagnostics(self, now):
+        st = self.serial_engine.get_stats()
+        ddt = now - self.diag_prev_time
+        if ddt <= 0:
+            return
+        rx_hz = (st["rx"] - self.diag_prev_rx) / ddt
+        self.diag_prev_rx = st["rx"]
+        self.diag_prev_time = now
+
+        total = st["rx"] + st["lost"]
+        loss_pct = (100.0 * st["lost"] / total) if total else 0.0
+        age_ms = (now - st["last_rx"]) * 1000.0 if st["last_rx"] else -1
+        connected = self.serial_engine.isRunning() and st["last_rx"] > 0
+
+        if not connected:
+            self.diag_badge.setText("RX -- Hz | no data")
+            self.latency_badge.setText("⏱️ -- ms")
+            color = "#94a3b8"
+            lat_color = "#94a3b8"
+        else:
+            mean_dt = st.get("mean_dt", 0.0)
+            jitter = st.get("jitter", 0.0)
+            peak_dt = st.get("peak_dt", 0.0)
+            spikes = st.get("spikes", 0)
+
+            self.latency_badge.setText(f"⏱️ {mean_dt:.1f}±{jitter:.1f}ms (peak: {peak_dt:.0f}ms)")
+            if peak_dt > 200 or spikes > 5:
+                lat_color = "#EF4444"
+            elif peak_dt > 50 or spikes > 0:
+                lat_color = "#FFB300"
+            else:
+                lat_color = "#00E676"
+
+            self.diag_badge.setText(
+                f"RX {rx_hz:.0f} Hz | loss {loss_pct:.1f}% ({st['lost']}) | spikes {spikes} | "
+                f"age {age_ms:.0f} ms | buf {st['hw']}B"
+            )
+            if age_ms > 1000:
+                color = "#EF4444"
+            elif age_ms > 250 or loss_pct > 5:
+                color = "#FFB300"
+            else:
+                color = "#00E676"
+
+        self.latency_badge.setStyleSheet(
+            f"background-color: #0f1422; color: {lat_color}; font-weight: bold; padding: 2px 8px; "
+            "border-radius: 4px; border: 1px solid #1c2233; font-size: 8pt;")
+        self.diag_badge.setStyleSheet(
+            f"background-color: #0f1422; color: {color}; font-weight: bold; padding: 2px 8px; "
+            "border-radius: 4px; border: 1px solid #1c2233; font-size: 8pt;")
 
 
 # =============================================================================
