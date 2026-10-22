@@ -81,12 +81,12 @@ bool tof1_active = false;
 bool tof2_active = false;
 
 // =========================================================================
-// RUNTIME SENSOR CONFIGURATION STATE (Default: 4x4 @ 30 Hz)
+// RUNTIME SENSOR CONFIGURATION STATE (Default: 4x4 @ 60 Hz)
 // =========================================================================
 
 uint8_t current_resolution = VL53L8CX_RESOLUTION_4X4;
-uint8_t current_frequency_hz = 30;
-uint32_t current_integration_ms = 10;
+uint8_t current_frequency_hz = 60;
+uint32_t current_integration_ms = 8;
 uint8_t current_target_order = VL53L8CX_TARGET_ORDER_CLOSEST;
 uint8_t current_sharpener = 1;
 
@@ -686,5 +686,5 @@ void loop() {
         }
     }
 
-    delay(2);
+    delayMicroseconds(200);
 }
