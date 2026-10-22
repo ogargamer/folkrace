@@ -59,6 +59,21 @@ VL53L8CX_Configuration Dev2;
 VL53L8CX_ResultsData Results2;
 bool tof2_active = false;
 
+// =========================================================================
+// RUNTIME SENSOR CONFIGURATION STATE (Default: 4x4 @ 60 Hz)
+// =========================================================================
+
+uint8_t current_resolution = VL53L8CX_RESOLUTION_4X4;
+uint8_t current_frequency_hz = 60;
+uint32_t current_integration_ms = 5;
+uint8_t current_target_order = VL53L8CX_TARGET_ORDER_CLOSEST;
+uint8_t current_sharpener = 1;
+unsigned long watchdog_timeout_ms = 100;
+unsigned long frame_count = 0;
+unsigned long last_frame_time_ms = 0;
+unsigned long last_soft_attempt_ms = 0;
+uint8_t stall_count = 0;
+
 static uint8_t tx_chunk_buffer[CHUNK_SIZE + 4];
 
 // =========================================================================
@@ -239,11 +254,17 @@ bool initialize_tof_sensor(VL53L8CX_Configuration *p_dev, ToF_Device_Context *ct
     // Switch to Ranging Speed (3 MHz)
     ctx->speed_hz = SPI_RANGING_SPEED_HZ;
 
-    // 4. Configure Resolution & Frequency (4x4 matrix @ 15 Hz)
-    Serial.printf("[%s] Configuring 4x4 matrix resolution @ 15 Hz...\n", ctx->name);
-    vl53l8cx_set_resolution(p_dev, VL53L8CX_RESOLUTION_4X4);
-    vl53l8cx_set_ranging_frequency_hz(p_dev, 15);
-    vl53l8cx_set_target_order(p_dev, VL53L8CX_TARGET_ORDER_CLOSEST);
+    // 4. Configure Resolution & Frequency (4x4 matrix @ 60 Hz by default)
+    Serial.printf("[%s] Configuring resolution (%s) @ %u Hz...\n", 
+                  ctx->name, 
+                  (current_resolution == VL53L8CX_RESOLUTION_8X8) ? "8x8" : "4x4", 
+                  current_frequency_hz);
+    vl53l8cx_set_resolution(p_dev, current_resolution);
+    vl53l8cx_set_ranging_frequency_hz(p_dev, current_frequency_hz);
+    vl53l8cx_set_integration_time_ms(p_dev, current_integration_ms);
+    vl53l8cx_set_target_order(p_dev, current_target_order);
+    vl53l8cx_set_sharpener_percent(p_dev, current_sharpener);
+    watchdog_timeout_ms = max(100UL, (1000UL / current_frequency_hz) * 3UL);
 
     // 5. Start Continuous Ranging
     Serial.printf("[%s] Starting continuous ranging session...\n", ctx->name);
@@ -304,21 +325,6 @@ void setup() {
 // =========================================================================
 // MAIN LOOP: STREAM LIVE 4X4 DISTANCE MATRICES
 // =========================================================================
-
-// =========================================================================
-// RUNTIME SENSOR CONFIGURATION STATE
-// =========================================================================
-
-uint8_t current_resolution = VL53L8CX_RESOLUTION_4X4;
-uint8_t current_frequency_hz = 15;
-uint32_t current_integration_ms = 5;
-uint8_t current_target_order = VL53L8CX_TARGET_ORDER_CLOSEST;
-uint8_t current_sharpener = 1;
-unsigned long watchdog_timeout_ms = 200;
-unsigned long frame_count = 0;
-unsigned long last_frame_time_ms = 0;
-unsigned long last_soft_attempt_ms = 0;
-uint8_t stall_count = 0;
 
 // =========================================================================
 // JSON TELEMETRY STREAMER & COMMAND DISPATCHER FOR GUI
@@ -447,8 +453,11 @@ void apply_sensor_configuration(String params) {
     // 4. Integration Time (ms)
     if (integ >= 2 && integ <= 1000) {
         current_integration_ms = integ;
-        vl53l8cx_set_integration_time_ms(&Dev2, current_integration_ms);
     }
+    if (current_integration_ms * current_frequency_hz > 950) {
+        current_integration_ms = max(2UL, 950UL / current_frequency_hz);
+    }
+    vl53l8cx_set_integration_time_ms(&Dev2, current_integration_ms);
     
     // 5. Target Order (1=Closest, 2=Strongest)
     if (order == 1 || order == 2) {
@@ -485,13 +494,20 @@ void handle_serial_commands() {
                           current_frequency_hz, current_integration_ms, current_target_order, current_sharpener);
         } else if (cmd == "RESET") {
             Serial.println(F("{\"type\":\"ACK\",\"status\":\"OK\",\"cmd\":\"RESET\"}"));
-            if (!fast_soft_recover_sensor(&Dev2)) {
-                tof2_active = initialize_tof_sensor(&Dev2, &ctx_tof2);
-            } else {
-                tof2_active = true;
+            tof2_active = initialize_tof_sensor(&Dev2, &ctx_tof2);
+            if (tof2_active) {
+                last_frame_time_ms = millis();
+                stall_count = 0;
             }
-        } else if (cmd.startsWith("SET_CONFIG:")) {
-            apply_sensor_configuration(cmd.substring(11));
+        } else if (cmd.startsWith("SET_CONFIG:") || cmd.startsWith("SET_CONFIG ")) {
+            int colon = cmd.indexOf(':');
+            if (colon == -1) colon = cmd.indexOf(' ');
+            apply_sensor_configuration(cmd.substring(colon + 1));
+        } else if (cmd.startsWith("SET_HZ:") || cmd.startsWith("SET_FREQ:")) {
+            int colon = cmd.indexOf(':');
+            apply_sensor_configuration("freq=" + cmd.substring(colon + 1));
+        } else if (cmd.startsWith("FREQ:")) {
+            apply_sensor_configuration("freq=" + cmd.substring(5));
         } else if (cmd.startsWith("CALIBRATE_XTALK")) {
             Serial.println(F("{\"type\":\"ACK\",\"status\":\"OK\",\"cmd\":\"CALIBRATE_XTALK\"}"));
         }
