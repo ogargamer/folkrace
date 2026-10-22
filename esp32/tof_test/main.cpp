@@ -68,11 +68,11 @@ uint8_t current_frequency_hz = 60;
 uint32_t current_integration_ms = 5;
 uint8_t current_target_order = VL53L8CX_TARGET_ORDER_CLOSEST;
 uint8_t current_sharpener = 1;
-unsigned long watchdog_timeout_ms = 100;
 unsigned long frame_count = 0;
 unsigned long last_frame_time_ms = 0;
-unsigned long last_soft_attempt_ms = 0;
-uint8_t stall_count = 0;
+unsigned long last_recovery_attempt_ms = 0;
+uint8_t recovery_tier = 0;
+uint8_t consecutive_spi_errors = 0;
 
 static uint8_t tx_chunk_buffer[CHUNK_SIZE + 4];
 
@@ -264,7 +264,6 @@ bool initialize_tof_sensor(VL53L8CX_Configuration *p_dev, ToF_Device_Context *ct
     vl53l8cx_set_integration_time_ms(p_dev, current_integration_ms);
     vl53l8cx_set_target_order(p_dev, current_target_order);
     vl53l8cx_set_sharpener_percent(p_dev, current_sharpener);
-    watchdog_timeout_ms = max(100UL, (1000UL / current_frequency_hz) * 3UL);
 
     // 5. Start Continuous Ranging
     Serial.printf("[%s] Starting continuous ranging session...\n", ctx->name);
@@ -306,6 +305,7 @@ void setup() {
     pinMode(TOF2_LPN_PIN, OUTPUT);
     digitalWrite(TOF2_LPN_PIN, HIGH);
     pinMode(TOF2_INT_PIN, INPUT_PULLUP);
+    pinMode(TOF2_MISO_PIN, INPUT_PULLUP);
 
     // 2. Initialize HSPI on verified pins: SCK=39, MISO=41, MOSI=40, SS=-1 (manual CS)
     HardwareSPI.begin(TOF2_SCK_PIN, TOF2_MISO_PIN, TOF2_MOSI_PIN, -1);
@@ -400,8 +400,10 @@ void send_json_telemetry() {
 }
 
 bool fast_soft_recover_sensor(VL53L8CX_Configuration *p_dev) {
+    digitalWrite(ctx_tof2.cs_pin, HIGH);
+    delay(2);
     vl53l8cx_stop_ranging(p_dev);
-    delayMicroseconds(500);
+    delay(5);
     uint8_t st = vl53l8cx_start_ranging(p_dev);
     return (st == 0);
 }
@@ -447,7 +449,6 @@ void apply_sensor_configuration(String params) {
         }
         current_frequency_hz = freq;
         vl53l8cx_set_ranging_frequency_hz(&Dev2, current_frequency_hz);
-        watchdog_timeout_ms = max(100UL, (1000UL / current_frequency_hz) * 3UL);
     }
     
     // 4. Integration Time (ms)
@@ -476,6 +477,8 @@ void apply_sensor_configuration(String params) {
     if (st == 0) {
         tof2_active = true;
         last_frame_time_ms = millis();
+        consecutive_spi_errors = 0;
+        recovery_tier = 0;
         Serial.println(F("{\"type\":\"ACK\",\"status\":\"OK\",\"cmd\":\"SET_CONFIG\"}"));
     } else {
         Serial.printf("{\"type\":\"ACK\",\"status\":\"ERROR\",\"code\":%u,\"cmd\":\"SET_CONFIG\"}\n", st);
@@ -497,7 +500,8 @@ void handle_serial_commands() {
             tof2_active = initialize_tof_sensor(&Dev2, &ctx_tof2);
             if (tof2_active) {
                 last_frame_time_ms = millis();
-                stall_count = 0;
+                consecutive_spi_errors = 0;
+                recovery_tier = 0;
             }
         } else if (cmd.startsWith("SET_CONFIG:") || cmd.startsWith("SET_CONFIG ")) {
             int colon = cmd.indexOf(':');
@@ -514,42 +518,83 @@ void handle_serial_commands() {
     }
 }
 
-void loop() {
-    handle_serial_commands();
-
-    uint8_t isReady = 0;
-    if (tof2_active) {
-        uint8_t st = vl53l8cx_check_data_ready(&Dev2, &isReady);
-        if (st == 0 && isReady) {
-            if (vl53l8cx_get_ranging_data(&Dev2, &Results2) == 0) {
-                frame_count++;
-                last_frame_time_ms = millis();
-                stall_count = 0;
-                send_json_telemetry();
-            }
-        }
-    }
-
-    // Adaptive Automatic Watchdog Recovery
+void check_and_recover_sensor() {
     unsigned long now = millis();
-    if (tof2_active && (now - last_frame_time_ms > watchdog_timeout_ms)) {
-        stall_count++;
-        if (stall_count <= 2 && (now - last_soft_attempt_ms > (watchdog_timeout_ms / 2))) {
-            // Tier 1: Instant Soft Recovery (<20ms, skips 0-1 frames)
-            last_soft_attempt_ms = now;
-            if (fast_soft_recover_sensor(&Dev2)) {
-                last_frame_time_ms = millis();
+
+    if (tof2_active) {
+        unsigned long elapsed = now - last_frame_time_ms;
+        // Generous stall threshold: at 60 Hz, allow at least 350 ms for ST internal VCSEL calibrations
+        unsigned long stall_threshold = max(350UL, (1000UL / current_frequency_hz) * 4UL);
+
+        bool is_stalled = (elapsed > stall_threshold);
+        bool has_spi_fault = (consecutive_spi_errors >= 6);
+
+        if (is_stalled || has_spi_fault) {
+            // Rate limit recovery attempts: at least 200 ms between attempts
+            if (now - last_recovery_attempt_ms >= 200) {
+                last_recovery_attempt_ms = now;
+
+                if (recovery_tier == 0 && !has_spi_fault) {
+                    // Tier 1: Fast soft recovery (<5 ms, preserves 84KB firmware & parameters)
+                    recovery_tier = 1;
+                    if (fast_soft_recover_sensor(&Dev2)) {
+                        last_frame_time_ms = millis();
+                        consecutive_spi_errors = 0;
+                        recovery_tier = 0;
+                        return;
+                    }
+                }
+
+                // Tier 2: Full Hardware LPn Reset & Re-init
+                recovery_tier = 2;
+                tof2_active = initialize_tof_sensor(&Dev2, &ctx_tof2);
+                if (tof2_active) {
+                    last_frame_time_ms = millis();
+                    consecutive_spi_errors = 0;
+                    recovery_tier = 0;
+                }
             }
-        } else if (now - last_frame_time_ms > (watchdog_timeout_ms * 4)) {
-            // Tier 2: Fast Hardware LPn Re-init (~250ms)
-            last_soft_attempt_ms = now;
+        } else {
+            recovery_tier = 0;
+        }
+    } else {
+        // Tier 3: Continuous Auto-Reconnect (Sensor offline, cable disconnected or loose)
+        // Keep retrying hardware initialization every 1000 ms indefinitely!
+        if (now - last_recovery_attempt_ms >= 1000) {
+            last_recovery_attempt_ms = now;
             tof2_active = initialize_tof_sensor(&Dev2, &ctx_tof2);
             if (tof2_active) {
                 last_frame_time_ms = millis();
-                stall_count = 0;
+                consecutive_spi_errors = 0;
+                recovery_tier = 0;
+                Serial.println(F("{\"type\":\"SYSTEM_BOOT\"}"));
             }
         }
     }
+}
 
-    delay(2);
+void loop() {
+    handle_serial_commands();
+
+    if (tof2_active) {
+        uint8_t isReady = 0;
+        uint8_t st = vl53l8cx_check_data_ready(&Dev2, &isReady);
+        if (st == 0) {
+            consecutive_spi_errors = 0;
+            if (isReady) {
+                if (vl53l8cx_get_ranging_data(&Dev2, &Results2) == 0) {
+                    frame_count++;
+                    last_frame_time_ms = millis();
+                    recovery_tier = 0;
+                    send_json_telemetry();
+                }
+            }
+        } else {
+            consecutive_spi_errors++;
+        }
+    }
+
+    check_and_recover_sensor();
+
+    delay(1);
 }

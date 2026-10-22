@@ -121,6 +121,8 @@ class SerialEngine(QThread):
                 if self.ser and self.ser.is_open and self.ser.in_waiting:
                     raw = self.ser.read(self.ser.in_waiting).decode('utf-8', errors='replace')
                     buffer += raw
+                    if len(buffer) > 32768:
+                        buffer = buffer[-4096:]
                     while "\n" in buffer:
                         line, buffer = buffer.split("\n", 1)
                         line = line.strip()
