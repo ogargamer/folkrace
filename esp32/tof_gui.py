@@ -100,7 +100,13 @@ class SerialEngine(QThread):
 
     def run(self):
         try:
-            self.ser = serial.Serial(self.port, self.baud, timeout=0.1)
+            self.ser = serial.Serial()
+            self.ser.port = self.port
+            self.ser.baudrate = self.baud
+            self.ser.timeout = 0.1
+            self.ser.dtr = False
+            self.ser.rts = False
+            self.ser.open()
             self._running = True
             self.connection_changed.emit(True, f"Connected to {self.port} @ {self.baud}")
             self.send_command("GET_CONFIG")
@@ -1057,12 +1063,9 @@ class VL53L8CXDashboard(QMainWindow):
         self.init_ui()
         self.refresh_com_ports()
 
-        # Auto-connect if COM7, COM5, or another active serial port is available
-        available_ports = [p.device for p in serial.tools.list_ports.comports()]
-        target_port = "COM7" if "COM7" in available_ports else ("COM5" if "COM5" in available_ports else (available_ports[0] if available_ports else None))
-        if target_port:
-            self.port_combo.setCurrentText(target_port)
-            self.toggle_connection()
+        # Auto-connect to COM7
+        self.port_combo.setCurrentText("COM7")
+        self.toggle_connection()
 
     def init_ui(self):
         main_widget = QWidget()
@@ -1757,8 +1760,11 @@ class VL53L8CXDashboard(QMainWindow):
     def refresh_com_ports(self):
         self.port_combo.clear()
         ports = [p.device for p in serial.tools.list_ports.comports()]
-        if not ports:
-            ports = ["COM5"]
+        if "COM7" not in ports:
+            ports.insert(0, "COM7")
+        else:
+            ports.remove("COM7")
+            ports.insert(0, "COM7")
         self.port_combo.addItems(ports)
 
     def toggle_connection(self):
