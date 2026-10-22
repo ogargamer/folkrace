@@ -73,6 +73,7 @@ unsigned long last_frame_time_ms = 0;
 unsigned long last_recovery_attempt_ms = 0;
 uint8_t recovery_tier = 0;
 uint8_t consecutive_spi_errors = 0;
+bool calibrated_at_44c = false;
 
 static uint8_t tx_chunk_buffer[CHUNK_SIZE + 4];
 
@@ -264,6 +265,8 @@ bool initialize_tof_sensor(VL53L8CX_Configuration *p_dev, ToF_Device_Context *ct
     vl53l8cx_set_integration_time_ms(p_dev, current_integration_ms);
     vl53l8cx_set_target_order(p_dev, current_target_order);
     vl53l8cx_set_sharpener_percent(p_dev, current_sharpener);
+    vl53l8cx_set_VHV_repeat_count(p_dev, 14400); // 4 min interval @ 60 Hz
+    calibrated_at_44c = false;
 
     // 5. Start Continuous Ranging
     Serial.printf("[%s] Starting continuous ranging session...\n", ctx->name);
@@ -472,6 +475,8 @@ void apply_sensor_configuration(String params) {
         vl53l8cx_set_sharpener_percent(&Dev2, current_sharpener);
     }
     
+    vl53l8cx_set_VHV_repeat_count(&Dev2, 14400); // 4 min interval @ 60 Hz
+    
     // 7. Restart continuous ranging with updated parameters
     uint8_t st = vl53l8cx_start_ranging(&Dev2);
     if (st == 0) {
@@ -586,6 +591,15 @@ void loop() {
                     frame_count++;
                     last_frame_time_ms = millis();
                     recovery_tier = 0;
+
+                    // One-time warmup calibration: when reaching >= 44°C for the first time,
+                    // perform a single fast re-sync (<15 ms) to lock in the 44°C equilibrium calibration
+                    if (!calibrated_at_44c && Results2.silicon_temp_degc >= 44) {
+                        calibrated_at_44c = true;
+                        fast_soft_recover_sensor(&Dev2);
+                        last_frame_time_ms = millis();
+                    }
+
                     send_json_telemetry();
                 }
             }
