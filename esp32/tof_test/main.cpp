@@ -306,65 +306,87 @@ void setup() {
 // =========================================================================
 
 // =========================================================================
+// RUNTIME SENSOR CONFIGURATION STATE
+// =========================================================================
+
+uint8_t current_resolution = VL53L8CX_RESOLUTION_4X4;
+uint8_t current_frequency_hz = 15;
+uint32_t current_integration_ms = 5;
+uint8_t current_target_order = VL53L8CX_TARGET_ORDER_CLOSEST;
+uint8_t current_sharpener = 1;
+unsigned long watchdog_timeout_ms = 200;
+unsigned long frame_count = 0;
+unsigned long last_frame_time_ms = 0;
+unsigned long last_soft_attempt_ms = 0;
+uint8_t stall_count = 0;
+
+// =========================================================================
 // JSON TELEMETRY STREAMER & COMMAND DISPATCHER FOR GUI
 // =========================================================================
 
 void send_json_telemetry() {
-    Serial.print(F("{\"t\":\"D\",\"r\":16,\"nt\":4,\"temp\":"));
+    int n_zones = (current_resolution == VL53L8CX_RESOLUTION_8X8) ? 64 : 16;
+    int n_targets = n_zones * VL53L8CX_NB_TARGET_PER_ZONE;
+
+    Serial.print(F("{\"t\":\"D\",\"r\":"));
+    Serial.print(n_zones);
+    Serial.print(F(",\"nt\":"));
+    Serial.print(VL53L8CX_NB_TARGET_PER_ZONE);
+    Serial.print(F(",\"temp\":"));
     Serial.print(Results2.silicon_temp_degc);
     
-    // ntar (16 zones)
+    // ntar (n_zones)
     Serial.print(F(",\"ntar\":["));
-    for (int z = 0; z < 16; z++) {
+    for (int z = 0; z < n_zones; z++) {
         if (z > 0) Serial.print(',');
         Serial.print(Results2.nb_target_detected[z]);
     }
     
-    // d (64 targets)
+    // d (n_targets)
     Serial.print(F("],\"d\":["));
-    for (int i = 0; i < 64; i++) {
+    for (int i = 0; i < n_targets; i++) {
         if (i > 0) Serial.print(',');
         Serial.print(Results2.distance_mm[i]);
     }
     
-    // refl (64 targets)
+    // refl (n_targets)
     Serial.print(F("],\"refl\":["));
-    for (int i = 0; i < 64; i++) {
+    for (int i = 0; i < n_targets; i++) {
         if (i > 0) Serial.print(',');
         Serial.print(Results2.reflectance[i]);
     }
 
-    // st (64 targets)
+    // st (n_targets)
     Serial.print(F("],\"st\":["));
-    for (int i = 0; i < 64; i++) {
+    for (int i = 0; i < n_targets; i++) {
         if (i > 0) Serial.print(',');
         Serial.print(Results2.target_status[i]);
     }
 
-    // sig (64 targets)
+    // sig (n_targets)
     Serial.print(F("],\"sig\":["));
-    for (int i = 0; i < 64; i++) {
+    for (int i = 0; i < n_targets; i++) {
         if (i > 0) Serial.print(',');
         Serial.print(Results2.signal_per_spad[i]);
     }
 
-    // sigm (64 targets)
+    // sigm (n_targets)
     Serial.print(F("],\"sigm\":["));
-    for (int i = 0; i < 64; i++) {
+    for (int i = 0; i < n_targets; i++) {
         if (i > 0) Serial.print(',');
         Serial.print(Results2.range_sigma_mm[i]);
     }
 
-    // amb (16 zones)
+    // amb (n_zones)
     Serial.print(F("],\"amb\":["));
-    for (int z = 0; z < 16; z++) {
+    for (int z = 0; z < n_zones; z++) {
         if (z > 0) Serial.print(',');
         Serial.print(Results2.ambient_per_spad[z]);
     }
 
-    // spad (16 zones)
+    // spad (n_zones)
     Serial.print(F("],\"spad\":["));
-    for (int z = 0; z < 16; z++) {
+    for (int z = 0; z < n_zones; z++) {
         if (z > 0) Serial.print(',');
         Serial.print(Results2.nb_spads_enabled[z]);
     }
@@ -378,6 +400,79 @@ bool fast_soft_recover_sensor(VL53L8CX_Configuration *p_dev) {
     return (st == 0);
 }
 
+void apply_sensor_configuration(String params) {
+    int res = -1, freq = -1, integ = -1, order = -1, sharp = -1;
+    
+    // Parse key=value tokens
+    int start = 0;
+    while (start < params.length()) {
+        int eq = params.indexOf('=', start);
+        if (eq == -1) break;
+        int comma = params.indexOf(',', eq);
+        if (comma == -1) comma = params.length();
+        
+        String key = params.substring(start, eq);
+        String val = params.substring(eq + 1, comma);
+        key.trim(); val.trim();
+        
+        if (key == "res") res = val.toInt();
+        else if (key == "freq") freq = val.toInt();
+        else if (key == "integ") integ = val.toInt();
+        else if (key == "order") order = val.toInt();
+        else if (key == "sharp") sharp = val.toInt();
+        
+        start = comma + 1;
+    }
+    
+    // 1. Must stop ranging session before altering DCI parameters
+    vl53l8cx_stop_ranging(&Dev2);
+    delay(5);
+    
+    // 2. Resolution (16=4x4, 64=8x8)
+    if (res == 16 || res == 64) {
+        current_resolution = (res == 64) ? VL53L8CX_RESOLUTION_8X8 : VL53L8CX_RESOLUTION_4X4;
+        vl53l8cx_set_resolution(&Dev2, current_resolution);
+    }
+    
+    // 3. Frequency (Hz)
+    if (freq >= 1 && freq <= 60) {
+        if (current_resolution == VL53L8CX_RESOLUTION_8X8 && freq > 15) {
+            freq = 15; // ST hardware limit: 8x8 is max 15 Hz
+        }
+        current_frequency_hz = freq;
+        vl53l8cx_set_ranging_frequency_hz(&Dev2, current_frequency_hz);
+        watchdog_timeout_ms = max(100UL, (1000UL / current_frequency_hz) * 3UL);
+    }
+    
+    // 4. Integration Time (ms)
+    if (integ >= 2 && integ <= 1000) {
+        current_integration_ms = integ;
+        vl53l8cx_set_integration_time_ms(&Dev2, current_integration_ms);
+    }
+    
+    // 5. Target Order (1=Closest, 2=Strongest)
+    if (order == 1 || order == 2) {
+        current_target_order = order;
+        vl53l8cx_set_target_order(&Dev2, current_target_order);
+    }
+    
+    // 6. Veiling Glare Sharpener (0-99%)
+    if (sharp >= 0 && sharp <= 99) {
+        current_sharpener = sharp;
+        vl53l8cx_set_sharpener_percent(&Dev2, current_sharpener);
+    }
+    
+    // 7. Restart continuous ranging with updated parameters
+    uint8_t st = vl53l8cx_start_ranging(&Dev2);
+    if (st == 0) {
+        tof2_active = true;
+        last_frame_time_ms = millis();
+        Serial.println(F("{\"type\":\"ACK\",\"status\":\"OK\",\"cmd\":\"SET_CONFIG\"}"));
+    } else {
+        Serial.printf("{\"type\":\"ACK\",\"status\":\"ERROR\",\"code\":%u,\"cmd\":\"SET_CONFIG\"}\n", st);
+    }
+}
+
 void handle_serial_commands() {
     while (Serial.available()) {
         String cmd = Serial.readStringUntil('\n');
@@ -385,7 +480,9 @@ void handle_serial_commands() {
         if (cmd.length() == 0) continue;
 
         if (cmd == "GET_CONFIG") {
-            Serial.println(F("{\"type\":\"CONFIG\",\"res\":16,\"freq\":15,\"integ\":5,\"order\":1,\"sharp\":1,\"mode\":1,\"power\":1,\"margin\":50}"));
+            Serial.printf("{\"type\":\"CONFIG\",\"res\":%u,\"freq\":%u,\"integ\":%lu,\"order\":%u,\"sharp\":%u,\"mode\":1,\"power\":1,\"margin\":50}\n",
+                          (current_resolution == VL53L8CX_RESOLUTION_8X8 ? 64 : 16),
+                          current_frequency_hz, current_integration_ms, current_target_order, current_sharpener);
         } else if (cmd == "RESET") {
             Serial.println(F("{\"type\":\"ACK\",\"status\":\"OK\",\"cmd\":\"RESET\"}"));
             if (!fast_soft_recover_sensor(&Dev2)) {
@@ -393,18 +490,13 @@ void handle_serial_commands() {
             } else {
                 tof2_active = true;
             }
-        } else if (cmd.startsWith("SET_CONFIG")) {
-            Serial.println(F("{\"type\":\"ACK\",\"status\":\"OK\",\"cmd\":\"SET_CONFIG\"}"));
+        } else if (cmd.startsWith("SET_CONFIG:")) {
+            apply_sensor_configuration(cmd.substring(11));
         } else if (cmd.startsWith("CALIBRATE_XTALK")) {
             Serial.println(F("{\"type\":\"ACK\",\"status\":\"OK\",\"cmd\":\"CALIBRATE_XTALK\"}"));
         }
     }
 }
-
-unsigned long frame_count = 0;
-unsigned long last_frame_time_ms = 0;
-unsigned long last_soft_attempt_ms = 0;
-uint8_t stall_count = 0;
 
 void loop() {
     handle_serial_commands();
@@ -422,18 +514,17 @@ void loop() {
         }
     }
 
-    // Two-Tier Automatic Watchdog Recovery
-    // At 15 Hz ranging, frames arrive every ~66 ms
+    // Adaptive Automatic Watchdog Recovery
     unsigned long now = millis();
-    if (tof2_active && (now - last_frame_time_ms > 160)) {
+    if (tof2_active && (now - last_frame_time_ms > watchdog_timeout_ms)) {
         stall_count++;
-        if (stall_count <= 2 && (now - last_soft_attempt_ms > 120)) {
+        if (stall_count <= 2 && (now - last_soft_attempt_ms > (watchdog_timeout_ms / 2))) {
             // Tier 1: Instant Soft Recovery (<20ms, skips 0-1 frames)
             last_soft_attempt_ms = now;
             if (fast_soft_recover_sensor(&Dev2)) {
                 last_frame_time_ms = millis();
             }
-        } else if (now - last_frame_time_ms > 600) {
+        } else if (now - last_frame_time_ms > (watchdog_timeout_ms * 4)) {
             // Tier 2: Fast Hardware LPn Re-init (~250ms)
             last_soft_attempt_ms = now;
             tof2_active = initialize_tof_sensor(&Dev2, &ctx_tof2);
