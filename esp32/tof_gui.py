@@ -94,73 +94,98 @@ class SerialEngine(QThread):
         self._running = False
 
         self._lock = threading.Lock()
-        self._latest = None
         self.reset_stats()
 
     def reset_stats(self):
         with self._lock:
-            self.rx_packets = 0
-            self.lost_packets = 0
-            self.parse_errors = 0
-            self.last_seq = None
-            self.last_rx_time = 0.0
-            self.max_gap_s = 0.0
             self.rx_high_water = 0
-            self._latest = None
-            self.current_dt_ms = 0.0
-            self.peak_dt_ms = 0.0
-            self.spike_count = 0
-            self.recent_dts = []
+            self.parse_errors = 0
+            self._latest_by_sensor = {1: None, 2: None}
+            self.sensor_stats = {
+                1: {
+                    "rx_packets": 0, "lost_packets": 0, "last_seq": None,
+                    "last_rx_time": 0.0, "max_gap_s": 0.0, "current_dt_ms": 0.0,
+                    "peak_dt_ms": 0.0, "spike_count": 0, "recent_dts": []
+                },
+                2: {
+                    "rx_packets": 0, "lost_packets": 0, "last_seq": None,
+                    "last_rx_time": 0.0, "max_gap_s": 0.0, "current_dt_ms": 0.0,
+                    "peak_dt_ms": 0.0, "spike_count": 0, "recent_dts": []
+                }
+            }
 
-    def take_latest(self):
-        """Return the newest unconsumed telemetry packet (or None) and clear the slot."""
+    def take_latest(self, sensor_id=1):
+        """Return the newest unconsumed telemetry packet for the specified sensor_id (or None)."""
         with self._lock:
-            pkt = self._latest
-            self._latest = None
+            pkt = self._latest_by_sensor.get(sensor_id)
+            self._latest_by_sensor[sensor_id] = None
         return pkt
 
-    def get_stats(self):
+    def is_sensor_active(self, sensor_id, timeout_s=2.0):
         with self._lock:
-            mean_dt = float(np.mean(self.recent_dts)) if self.recent_dts else 0.0
-            jitter = float(np.std(self.recent_dts)) if len(self.recent_dts) > 1 else 0.0
+            st = self.sensor_stats.get(sensor_id)
+            if not st or not st["last_rx_time"]:
+                return False
+            return (time.perf_counter() - st["last_rx_time"]) < timeout_s
+
+    def get_stats(self, sensor_id=1):
+        with self._lock:
+            st = self.sensor_stats.get(sensor_id)
+            if not st:
+                return {
+                    "rx": 0, "lost": 0, "bad": self.parse_errors,
+                    "last_rx": 0.0, "max_gap": 0.0, "hw": self.rx_high_water,
+                    "dt_ms": 0.0, "mean_dt": 0.0, "jitter": 0.0,
+                    "peak_dt": 0.0, "spikes": 0,
+                }
+            mean_dt = float(np.mean(st["recent_dts"])) if st["recent_dts"] else 0.0
+            jitter = float(np.std(st["recent_dts"])) if len(st["recent_dts"]) > 1 else 0.0
             return {
-                "rx": self.rx_packets,
-                "lost": self.lost_packets,
+                "rx": st["rx_packets"],
+                "lost": st["lost_packets"],
                 "bad": self.parse_errors,
-                "last_rx": self.last_rx_time,
-                "max_gap": self.max_gap_s,
+                "last_rx": st["last_rx_time"],
+                "max_gap": st["max_gap_s"],
                 "hw": self.rx_high_water,
-                "dt_ms": self.current_dt_ms,
+                "dt_ms": st["current_dt_ms"],
                 "mean_dt": mean_dt,
                 "jitter": jitter,
-                "peak_dt": self.peak_dt_ms,
-                "spikes": self.spike_count,
+                "peak_dt": st["peak_dt_ms"],
+                "spikes": st["spike_count"],
             }
 
     def _store_frame(self, packet):
         now = time.perf_counter()
+        sensor_id = packet.get("id", 1)
         seq = packet.get("seq")
         with self._lock:
-            if self.last_rx_time:
-                dt_ms = (now - self.last_rx_time) * 1000.0
-                self.current_dt_ms = dt_ms
-                if dt_ms > self.peak_dt_ms:
-                    self.peak_dt_ms = dt_ms
+            if sensor_id not in self.sensor_stats:
+                self.sensor_stats[sensor_id] = {
+                    "rx_packets": 0, "lost_packets": 0, "last_seq": None,
+                    "last_rx_time": 0.0, "max_gap_s": 0.0, "current_dt_ms": 0.0,
+                    "peak_dt_ms": 0.0, "spike_count": 0, "recent_dts": []
+                }
+            st = self.sensor_stats[sensor_id]
+            if st["last_rx_time"]:
+                dt_ms = (now - st["last_rx_time"]) * 1000.0
+                st["current_dt_ms"] = dt_ms
+                if dt_ms > st["peak_dt_ms"]:
+                    st["peak_dt_ms"] = dt_ms
                 if dt_ms > 50.0:
-                    self.spike_count += 1
-                self.recent_dts.append(dt_ms)
-                if len(self.recent_dts) > 60:
-                    self.recent_dts.pop(0)
-                self.max_gap_s = max(self.max_gap_s, now - self.last_rx_time)
-            self.last_rx_time = now
-            self.rx_packets += 1
+                    st["spike_count"] += 1
+                st["recent_dts"].append(dt_ms)
+                if len(st["recent_dts"]) > 60:
+                    st["recent_dts"].pop(0)
+                st["max_gap_s"] = max(st["max_gap_s"], now - st["last_rx_time"])
+            st["last_rx_time"] = now
+            st["rx_packets"] += 1
             if isinstance(seq, int):
-                if self.last_seq is not None:
-                    gap = seq - self.last_seq
+                if st["last_seq"] is not None:
+                    gap = seq - st["last_seq"]
                     if 1 < gap < 1000000:
-                        self.lost_packets += gap - 1
-                self.last_seq = seq
-            self._latest = packet
+                        st["lost_packets"] += gap - 1
+                st["last_seq"] = seq
+            self._latest_by_sensor[sensor_id] = packet
 
     def set_connection_params(self, port, baud):
         self.port = port
@@ -899,8 +924,15 @@ class VL53L8CXDashboard(QMainWindow):
         self.ack_timer.timeout.connect(self.on_ack_timeout)
 
         self.last_frame_wall = 0.0
-        self.diag_prev_rx = 0
+        self.diag_prev_rx = {}
         self.diag_prev_time = time.perf_counter()
+
+        self.active_sensor_id = 1
+        self.sensor_orientations = {
+            1: {"rotation": 0, "flip_h": False, "flip_v": False},
+            2: {"rotation": 0, "flip_h": False, "flip_v": False},
+        }
+        self.load_saved_orientations()
 
         self.fps_timer = QTimer(self)
         self.fps_timer.timeout.connect(self.update_fps_calc)
@@ -935,9 +967,26 @@ class VL53L8CXDashboard(QMainWindow):
         nav_layout.setSpacing(8)
         nav_layout.setAlignment(Qt.AlignVCenter)
 
-        title_lbl = QLabel("🎯 VL53L8CX CONTINUOUS TIME-OF-FLIGHT ENGINE")
+        title_lbl = QLabel("🎯 VL53L8CX DUAL TOF ENGINE")
         title_lbl.setStyleSheet("font-size: 9.5pt; font-weight: bold; color: #00E5FF; letter-spacing: 0.5px;")
         nav_layout.addWidget(title_lbl)
+
+        # Slim Sensor Toggle Buttons (ToF 1 vs ToF 2)
+        self.nav_btn_tof1 = QPushButton("🟢 ToF 1 (CS 10)")
+        self.nav_btn_tof1.setCheckable(True)
+        self.nav_btn_tof1.setChecked(True)
+        self.nav_btn_tof1.setFixedHeight(24)
+        self.nav_btn_tof1.setToolTip("Switch live view to ToF 1 (CS:10, INT:5, LPN:6, MISO:41)")
+        self.nav_btn_tof1.clicked.connect(lambda: self.switch_active_sensor(1))
+        nav_layout.addWidget(self.nav_btn_tof1)
+
+        self.nav_btn_tof2 = QPushButton("⚪ ToF 2 (CS 9)")
+        self.nav_btn_tof2.setCheckable(True)
+        self.nav_btn_tof2.setChecked(False)
+        self.nav_btn_tof2.setFixedHeight(24)
+        self.nav_btn_tof2.setToolTip("Switch live view to ToF 2 (CS:9, INT:4, LPN:8, MISO:13)")
+        self.nav_btn_tof2.clicked.connect(lambda: self.switch_active_sensor(2))
+        nav_layout.addWidget(self.nav_btn_tof2)
 
         nav_layout.addStretch()
 
@@ -1041,26 +1090,61 @@ class VL53L8CXDashboard(QMainWindow):
 
         toolbar.addStretch()
 
-        # Orientation buttons
+        # Quick Sensor Switch in Toolbar
+        toolbar.addWidget(QLabel("📡 Sensor:"))
+        self.tb_btn_tof1 = QPushButton("ToF 1")
+        self.tb_btn_tof1.setCheckable(True)
+        self.tb_btn_tof1.setChecked(True)
+        self.tb_btn_tof1.setFixedHeight(22)
+        self.tb_btn_tof1.setToolTip("Switch active view to ToF 1 (CS 10)")
+        self.tb_btn_tof1.clicked.connect(lambda: self.switch_active_sensor(1))
+        toolbar.addWidget(self.tb_btn_tof1)
+
+        self.tb_btn_tof2 = QPushButton("ToF 2")
+        self.tb_btn_tof2.setCheckable(True)
+        self.tb_btn_tof2.setChecked(False)
+        self.tb_btn_tof2.setFixedHeight(22)
+        self.tb_btn_tof2.setToolTip("Switch active view to ToF 2 (CS 9)")
+        self.tb_btn_tof2.clicked.connect(lambda: self.switch_active_sensor(2))
+        toolbar.addWidget(self.tb_btn_tof2)
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.VLine)
+        sep.setStyleSheet("color: #232a3d;")
+        toolbar.addWidget(sep)
+
+        # Orientation buttons (Independent per sensor)
         self.btn_flip_h = QPushButton("🪞 H")
         self.btn_flip_h.setCheckable(True)
         self.btn_flip_h.setFixedHeight(22)
-        self.btn_flip_h.setToolTip("Mirror matrix horizontally")
+        self.btn_flip_h.setToolTip("Mirror matrix horizontally for active sensor")
         self.btn_flip_h.clicked.connect(self.on_toggle_flip_h)
         toolbar.addWidget(self.btn_flip_h)
 
         self.btn_flip_v = QPushButton("↕️ V")
         self.btn_flip_v.setCheckable(True)
         self.btn_flip_v.setFixedHeight(22)
-        self.btn_flip_v.setToolTip("Flip matrix vertically")
+        self.btn_flip_v.setToolTip("Flip matrix vertically for active sensor")
         self.btn_flip_v.clicked.connect(self.on_toggle_flip_v)
         toolbar.addWidget(self.btn_flip_v)
 
         self.btn_rotate = QPushButton("🔄 0°")
         self.btn_rotate.setFixedHeight(22)
-        self.btn_rotate.setToolTip("Rotate matrix 90° CW")
+        self.btn_rotate.setToolTip("Rotate matrix 90° CW for active sensor")
         self.btn_rotate.clicked.connect(self.on_rotate_clicked)
         toolbar.addWidget(self.btn_rotate)
+
+        self.orientation_summary_lbl = QLabel("🎯 ToF 1: 0° (Normal)")
+        self.orientation_summary_lbl.setFixedHeight(22)
+        self.orientation_summary_lbl.setStyleSheet("background-color: #181d2b; color: #38bdf8; font-weight: bold; padding: 2px 8px; border-radius: 4px; border: 1px solid #232a3d; font-size: 8pt;")
+        toolbar.addWidget(self.orientation_summary_lbl)
+
+        self.btn_save_orientation = QPushButton("💾 Save / Copy")
+        self.btn_save_orientation.setFixedHeight(22)
+        self.btn_save_orientation.setToolTip("Save both ToF orientations to tof_orientation.json and copy configuration to clipboard")
+        self.btn_save_orientation.setStyleSheet("background-color: #0284c7; color: white; font-weight: bold; border-radius: 4px; padding: 2px 8px; font-size: 8pt;")
+        self.btn_save_orientation.clicked.connect(self.on_save_copy_orientation)
+        toolbar.addWidget(self.btn_save_orientation)
 
         tab_2d_layout.addLayout(toolbar)
 
@@ -1472,6 +1556,7 @@ class VL53L8CXDashboard(QMainWindow):
         body_splitter.setStretchFactor(1, 2)
 
         main_layout.addWidget(body_splitter, 1)
+        self.switch_active_sensor(1)
 
     # -------------------------------------------------------------------------
     # LIFECYCLE & EVENT HANDLERS
@@ -1606,20 +1691,147 @@ class VL53L8CXDashboard(QMainWindow):
 
     def on_toggle_flip_h(self):
         self.heatmap.flip_h = self.btn_flip_h.isChecked()
+        self.sensor_orientations[self.active_sensor_id]["flip_h"] = self.heatmap.flip_h
+        self.save_orientations_to_disk()
         self.update_orientation_state()
 
     def on_toggle_flip_v(self):
         self.heatmap.flip_v = self.btn_flip_v.isChecked()
+        self.sensor_orientations[self.active_sensor_id]["flip_v"] = self.heatmap.flip_v
+        self.save_orientations_to_disk()
         self.update_orientation_state()
 
     def on_rotate_clicked(self):
         self.heatmap.rotation = (self.heatmap.rotation + 90) % 360
+        self.sensor_orientations[self.active_sensor_id]["rotation"] = self.heatmap.rotation
+        self.save_orientations_to_disk()
         self.update_orientation_state()
 
     def update_orientation_state(self):
         rot = self.heatmap.rotation
+        fh = self.heatmap.flip_h
+        fv = self.heatmap.flip_v
         self.btn_rotate.setText(f"🔄 {rot}°")
+        self.btn_flip_h.setChecked(fh)
+        self.btn_flip_v.setChecked(fv)
+
+        flags = []
+        if fh: flags.append("H-Flip")
+        if fv: flags.append("V-Flip")
+        flag_str = f" ({', '.join(flags)})" if flags else " (Normal)"
+        self.orientation_summary_lbl.setText(f"🎯 ToF {self.active_sensor_id}: {rot}°{flag_str}")
+        self.orientation_summary_lbl.setStyleSheet("background-color: #181d2b; color: #38bdf8; font-weight: bold; padding: 2px 8px; border-radius: 4px; border: 1px solid #232a3d; font-size: 8pt;")
         self.heatmap.update()
+
+    def get_orientation_file_path(self):
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), "tof_orientation.json")
+
+    def load_saved_orientations(self):
+        path = self.get_orientation_file_path()
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                for sid in (1, 2):
+                    key = f"tof{sid}"
+                    if key in data:
+                        self.sensor_orientations[sid]["rotation"] = int(data[key].get("rotation", 0))
+                        self.sensor_orientations[sid]["flip_h"] = bool(data[key].get("flip_h", False))
+                        self.sensor_orientations[sid]["flip_v"] = bool(data[key].get("flip_v", False))
+            except Exception as e:
+                print(f"[Warning] Failed to load {path}: {e}")
+
+    def save_orientations_to_disk(self):
+        path = self.get_orientation_file_path()
+        try:
+            payload = {
+                "tof1": {
+                    "sensor_id": 1,
+                    "name": "ToF 1 (CS:10, INT:5, LPN:6, MISO:41)",
+                    "rotation": self.sensor_orientations[1]["rotation"],
+                    "flip_h": self.sensor_orientations[1]["flip_h"],
+                    "flip_v": self.sensor_orientations[1]["flip_v"],
+                },
+                "tof2": {
+                    "sensor_id": 2,
+                    "name": "ToF 2 (CS:9, INT:4, LPN:8, MISO:13)",
+                    "rotation": self.sensor_orientations[2]["rotation"],
+                    "flip_h": self.sensor_orientations[2]["flip_h"],
+                    "flip_v": self.sensor_orientations[2]["flip_v"],
+                }
+            }
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2)
+        except Exception as e:
+            print(f"[Warning] Failed to save {path}: {e}")
+
+    def on_save_copy_orientation(self):
+        self.save_orientations_to_disk()
+        path = self.get_orientation_file_path()
+        payload = {
+            "tof1": {
+                "rotation": self.sensor_orientations[1]["rotation"],
+                "flip_h": self.sensor_orientations[1]["flip_h"],
+                "flip_v": self.sensor_orientations[1]["flip_v"],
+            },
+            "tof2": {
+                "rotation": self.sensor_orientations[2]["rotation"],
+                "flip_h": self.sensor_orientations[2]["flip_h"],
+                "flip_v": self.sensor_orientations[2]["flip_v"],
+            }
+        }
+        json_str = json.dumps(payload, indent=2)
+        clipboard = QApplication.clipboard()
+        if clipboard:
+            clipboard.setText(json_str)
+        self.log_text.append(f"\n[ORIENTATION CAPTURED & SAVED to {os.path.basename(path)}]\n{json_str}\n")
+        
+        self.orientation_summary_lbl.setText("✅ Saved & Copied to Clipboard!")
+        self.orientation_summary_lbl.setStyleSheet("background-color: #064e3b; color: #34d399; font-weight: bold; padding: 2px 8px; border-radius: 4px; border: 1px solid #059669; font-size: 8pt;")
+        QTimer.singleShot(2200, self.update_orientation_state)
+
+    def switch_active_sensor(self, sensor_id):
+        if sensor_id not in (1, 2):
+            return
+        self.active_sensor_id = sensor_id
+
+        # Update button checked states
+        is_tof1 = (sensor_id == 1)
+        self.nav_btn_tof1.setChecked(is_tof1)
+        self.nav_btn_tof2.setChecked(not is_tof1)
+        self.tb_btn_tof1.setChecked(is_tof1)
+        self.tb_btn_tof2.setChecked(not is_tof1)
+
+        self.update_sensor_button_styles()
+
+        # Load orientation for the selected sensor into the heatmap
+        ori = self.sensor_orientations[sensor_id]
+        self.heatmap.flip_h = ori["flip_h"]
+        self.heatmap.flip_v = ori["flip_v"]
+        self.heatmap.rotation = ori["rotation"]
+
+        self.update_orientation_state()
+        self.frame_counter = 0
+        self.last_fps_time = time.perf_counter()
+
+    def update_sensor_button_styles(self):
+        active_tof1 = (self.active_sensor_id == 1)
+        
+        style_tof1_on = "background-color: #00E5FF; color: #0b0d14; font-weight: bold; border-radius: 4px; padding: 2px 10px; border: 1px solid #00B4D8; font-size: 8pt;"
+        style_tof1_off = "background-color: #181d2b; color: #94a3b8; font-weight: bold; border-radius: 4px; padding: 2px 10px; border: 1px solid #232a3d; font-size: 8pt;"
+        
+        style_tof2_on = "background-color: #00E676; color: #0b0d14; font-weight: bold; border-radius: 4px; padding: 2px 10px; border: 1px solid #00C853; font-size: 8pt;"
+        style_tof2_off = "background-color: #181d2b; color: #94a3b8; font-weight: bold; border-radius: 4px; padding: 2px 10px; border: 1px solid #232a3d; font-size: 8pt;"
+
+        self.nav_btn_tof1.setStyleSheet(style_tof1_on if active_tof1 else style_tof1_off)
+        self.nav_btn_tof2.setStyleSheet(style_tof2_off if active_tof1 else style_tof2_on)
+
+        tb_style_on = "background-color: #00E5FF; color: #0b0d14; font-weight: bold; border-radius: 4px; padding: 2px 8px; border: 1px solid #00B4D8; font-size: 8pt;"
+        tb_style_off = "background-color: #181d2b; color: #cbd5e1; font-weight: bold; border-radius: 4px; padding: 2px 8px; border: 1px solid #232a3d; font-size: 8pt;"
+        tb2_style_on = "background-color: #00E676; color: #0b0d14; font-weight: bold; border-radius: 4px; padding: 2px 8px; border: 1px solid #00C853; font-size: 8pt;"
+
+        self.tb_btn_tof1.setStyleSheet(tb_style_on if active_tof1 else tb_style_off)
+        self.tb_btn_tof2.setStyleSheet(tb_style_off if active_tof1 else tb2_style_on)
 
     def load_preset(self, res, freq, order, sharp, margin, conf="valid_5_6_9", sigma=0, min_sig=0, integ=15):
         idx = self.res_combo.findData(res)
@@ -1703,7 +1915,7 @@ class VL53L8CXDashboard(QMainWindow):
         self.margin_spin.setValue(margin)
 
     def ui_tick(self):
-        data = self.serial_engine.take_latest()
+        data = self.serial_engine.take_latest(self.active_sensor_id)
         if data is None:
             return
         self.last_frame_wall = time.perf_counter()
@@ -1723,7 +1935,7 @@ class VL53L8CXDashboard(QMainWindow):
         temp_c = data.get("temp", None)
 
         if temp_c is not None:
-            self.temp_badge.setText(f"🌡️ {temp_c} °C")
+            self.temp_badge.setText(f"🌡️ ToF {self.active_sensor_id}: {temp_c} °C")
 
         # Update Heatmap data model (retaining Target 1 & Target 2)
         self.heatmap.update_telemetry(res, nt, ntar, dists, statuses, signals, sigmas, ambs, spads)
@@ -1754,10 +1966,10 @@ class VL53L8CXDashboard(QMainWindow):
 
         valid_count = len(valid_indices)
         self.kpi_valid_lbl.setText(f"Valid Targets: {valid_count} / {res} ({int(100*valid_count/res)}%)")
-        self.kpi_sel_lbl.setText(f"Selected: Zone #{self.heatmap.selected_zone}")
+        self.kpi_sel_lbl.setText(f"ToF #{self.active_sensor_id} | Zone #{self.heatmap.selected_zone}")
 
     def on_cell_selected(self, idx):
-        self.kpi_sel_lbl.setText(f"Selected: Zone #{idx}")
+        self.kpi_sel_lbl.setText(f"ToF #{self.active_sensor_id} | Zone #{idx}")
         self.strip_chart.last_selected_idx = idx
 
     def on_raw_log(self, text):
@@ -1775,18 +1987,29 @@ class VL53L8CXDashboard(QMainWindow):
         dt = now - self.last_fps_time
         if dt >= 0.2:
             self.current_fps = self.frame_counter / dt
-            self.fps_badge.setText(f"{self.current_fps:.1f} FPS")
+            self.fps_badge.setText(f"{self.current_fps:.1f} FPS (ToF {self.active_sensor_id})")
             self.frame_counter = 0
             self.last_fps_time = now
         self.update_diagnostics(now)
 
     def update_diagnostics(self, now):
-        st = self.serial_engine.get_stats()
+        # Update live indicator status dots on toggle buttons
+        tof1_live = self.serial_engine.is_sensor_active(1)
+        tof2_live = self.serial_engine.is_sensor_active(2)
+        dot1 = "🟢" if tof1_live else "⚪"
+        dot2 = "🟢" if tof2_live else "⚪"
+        self.nav_btn_tof1.setText(f"{dot1} ToF 1 (CS 10)")
+        self.nav_btn_tof2.setText(f"{dot2} ToF 2 (CS 9)")
+        self.tb_btn_tof1.setText(f"{dot1} ToF 1")
+        self.tb_btn_tof2.setText(f"{dot2} ToF 2")
+
+        st = self.serial_engine.get_stats(self.active_sensor_id)
         ddt = now - self.diag_prev_time
         if ddt <= 0:
             return
-        rx_hz = (st["rx"] - self.diag_prev_rx) / ddt
-        self.diag_prev_rx = st["rx"]
+        prev_rx = self.diag_prev_rx.get(self.active_sensor_id, st["rx"])
+        rx_hz = (st["rx"] - prev_rx) / ddt
+        self.diag_prev_rx[self.active_sensor_id] = st["rx"]
         self.diag_prev_time = now
 
         total = st["rx"] + st["lost"]
@@ -1795,7 +2018,7 @@ class VL53L8CXDashboard(QMainWindow):
         connected = self.serial_engine.isRunning() and st["last_rx"] > 0
 
         if not connected:
-            self.diag_badge.setText("RX -- Hz | no data")
+            self.diag_badge.setText(f"ToF {self.active_sensor_id}: RX -- Hz | no data")
             self.latency_badge.setText("⏱️ -- ms")
             color = "#94a3b8"
             lat_color = "#94a3b8"
@@ -1814,7 +2037,7 @@ class VL53L8CXDashboard(QMainWindow):
                 lat_color = "#00E676"
 
             self.diag_badge.setText(
-                f"RX {rx_hz:.0f} Hz | loss {loss_pct:.1f}% ({st['lost']}) | spikes {spikes} | "
+                f"ToF {self.active_sensor_id}: RX {rx_hz:.0f} Hz | loss {loss_pct:.1f}% ({st['lost']}) | spikes {spikes} | "
                 f"age {age_ms:.0f} ms | buf {st['hw']}B"
             )
             if age_ms > 1000:

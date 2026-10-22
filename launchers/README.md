@@ -27,3 +27,5 @@ All hardware-dependent launchers explicitly identify their target platform in th
 | **11** | Simulation | [`11_moving_robot_obstacle_test.py`](./11_moving_robot_obstacle_test.py) | Phase 2 Moving Robot Test Bench: Ego-motion compensated dynamic obstacle detection & vector enlargement at race speeds. |
 | **12** | Simulation | [`12_phase3_live_webots.py`](./12_phase3_live_webots.py) | Phase 3 Live Webots Rendered Test: Fully rendered 3D simulation with moving robot, interactive dynamic obstacle modes, and live 2D radar GUI. |
 | **13** | Simulation | [`13_fast_champion_drive.py`](./13_fast_champion_drive.py) | Ultra-lean champion 3D drive launcher for maximum real-time rendering & physics performance (zero GUI, zero UDP/HUD overhead). |
+| **14** | **ESP32** | [`14_esp32_tof_arc_gui.py`](./14_esp32_tof_arc_gui.py) | Physical ESP32 dual VL53L8CX 8-zone 90° top-down 2D radar visualizer with proximity blind-spot / open-space fallback. |
+
