@@ -141,6 +141,9 @@ class SerialEngine(QThread):
                                     except RuntimeError: break
                             except Exception:
                                 pass
+                        else:
+                            try: self.raw_log.emit(line)
+                            except RuntimeError: break
                 else:
                     time.sleep(0.002)
             except Exception as e:
@@ -1054,12 +1057,12 @@ class VL53L8CXDashboard(QMainWindow):
         self.init_ui()
         self.refresh_com_ports()
 
-        # Auto-connect if COM5 is available
-        for p in serial.tools.list_ports.comports():
-            if p.device == "COM5":
-                self.port_combo.setCurrentText("COM5")
-                self.toggle_connection()
-                break
+        # Auto-connect if COM7, COM5, or another active serial port is available
+        available_ports = [p.device for p in serial.tools.list_ports.comports()]
+        target_port = "COM7" if "COM7" in available_ports else ("COM5" if "COM5" in available_ports else (available_ports[0] if available_ports else None))
+        if target_port:
+            self.port_combo.setCurrentText(target_port)
+            self.toggle_connection()
 
     def init_ui(self):
         main_widget = QWidget()

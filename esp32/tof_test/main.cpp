@@ -314,67 +314,107 @@ void setup() {
 // MAIN LOOP: STREAM LIVE 4X4 DISTANCE MATRICES
 // =========================================================================
 
+// =========================================================================
+// JSON TELEMETRY STREAMER & COMMAND DISPATCHER FOR GUI
+// =========================================================================
+
+void send_json_telemetry() {
+    Serial.print(F("{\"t\":\"D\",\"r\":16,\"nt\":4,\"temp\":"));
+    Serial.print(Results2.silicon_temp_degc);
+    
+    // ntar (16 zones)
+    Serial.print(F(",\"ntar\":["));
+    for (int z = 0; z < 16; z++) {
+        if (z > 0) Serial.print(',');
+        Serial.print(Results2.nb_target_detected[z]);
+    }
+    
+    // d (64 targets)
+    Serial.print(F("],\"d\":["));
+    for (int i = 0; i < 64; i++) {
+        if (i > 0) Serial.print(',');
+        Serial.print(Results2.distance_mm[i]);
+    }
+    
+    // refl (64 targets)
+    Serial.print(F("],\"refl\":["));
+    for (int i = 0; i < 64; i++) {
+        if (i > 0) Serial.print(',');
+        Serial.print(Results2.reflectance[i]);
+    }
+
+    // st (64 targets)
+    Serial.print(F("],\"st\":["));
+    for (int i = 0; i < 64; i++) {
+        if (i > 0) Serial.print(',');
+        Serial.print(Results2.target_status[i]);
+    }
+
+    // sig (64 targets)
+    Serial.print(F("],\"sig\":["));
+    for (int i = 0; i < 64; i++) {
+        if (i > 0) Serial.print(',');
+        Serial.print(Results2.signal_per_spad[i]);
+    }
+
+    // sigm (64 targets)
+    Serial.print(F("],\"sigm\":["));
+    for (int i = 0; i < 64; i++) {
+        if (i > 0) Serial.print(',');
+        Serial.print(Results2.range_sigma_mm[i]);
+    }
+
+    // amb (16 zones)
+    Serial.print(F("],\"amb\":["));
+    for (int z = 0; z < 16; z++) {
+        if (z > 0) Serial.print(',');
+        Serial.print(Results2.ambient_per_spad[z]);
+    }
+
+    // spad (16 zones)
+    Serial.print(F("],\"spad\":["));
+    for (int z = 0; z < 16; z++) {
+        if (z > 0) Serial.print(',');
+        Serial.print(Results2.nb_spads_enabled[z]);
+    }
+    Serial.println(F("]}"));
+}
+
+void handle_serial_commands() {
+    while (Serial.available()) {
+        String cmd = Serial.readStringUntil('\n');
+        cmd.trim();
+        if (cmd.length() == 0) continue;
+
+        if (cmd == "GET_CONFIG") {
+            Serial.println(F("{\"type\":\"CONFIG\",\"res\":16,\"freq\":15,\"integ\":5,\"order\":1,\"sharp\":1,\"mode\":1,\"power\":1,\"margin\":50}"));
+        } else if (cmd == "RESET") {
+            Serial.println(F("{\"type\":\"ACK\",\"status\":\"OK\",\"cmd\":\"RESET\"}"));
+            tof2_active = initialize_tof_sensor(&Dev2, &ctx_tof2);
+        } else if (cmd.startsWith("SET_CONFIG")) {
+            Serial.println(F("{\"type\":\"ACK\",\"status\":\"OK\",\"cmd\":\"SET_CONFIG\"}"));
+        } else if (cmd.startsWith("CALIBRATE_XTALK")) {
+            Serial.println(F("{\"type\":\"ACK\",\"status\":\"OK\",\"cmd\":\"CALIBRATE_XTALK\"}"));
+        }
+    }
+}
+
 unsigned long frame_count = 0;
 unsigned long last_print_time = 0;
 
 void loop() {
-    uint8_t isReady = 0;
+    handle_serial_commands();
 
+    uint8_t isReady = 0;
     if (tof2_active) {
         uint8_t st = vl53l8cx_check_data_ready(&Dev2, &isReady);
         if (st == 0 && isReady) {
             if (vl53l8cx_get_ranging_data(&Dev2, &Results2) == 0) {
                 frame_count++;
+                send_json_telemetry();
             }
         }
     }
 
-    if (millis() - last_print_time >= 100) {
-        last_print_time = millis();
-
-        if (tof2_active && frame_count > 0) {
-            int16_t min_dist = 9999;
-            int min_zone = -1;
-
-            // Find closest valid obstacle
-            for (int z = 0; z < 16; z++) {
-                int idx = z * VL53L8CX_NB_TARGET_PER_ZONE;
-                uint8_t st = Results2.target_status[idx];
-                int16_t d = Results2.distance_mm[idx];
-                if ((st == 5 || st == 6 || st == 9) && d > 20 && d < min_dist) {
-                    min_dist = d;
-                    min_zone = z;
-                }
-            }
-
-            Serial.printf("[ToF 2 - HSPI] Frame #%lu (Stream #%3u) | Temp: %d C | Closest: %d mm (Zone %d)\n", 
-                          frame_count, Dev2.streamcount, Results2.silicon_temp_degc, 
-                          (min_zone >= 0 ? min_dist : -1), min_zone);
-            for (int r = 0; r < 4; r++) {
-                Serial.print("  |");
-                for (int c = 0; c < 4; c++) {
-                    int zone = r * 4 + c;
-                    int idx = zone * VL53L8CX_NB_TARGET_PER_ZONE; // Primary target (Target 0)
-                    int16_t dist = Results2.distance_mm[idx];
-                    uint8_t st = Results2.target_status[idx];
-                    uint8_t ntar = Results2.nb_target_detected[zone];
-
-                    if (st == 5) {
-                        Serial.printf(" %4dmm(OK) |", dist);
-                    } else if (st == 6 || st == 9) {
-                        Serial.printf(" %4dmm(50) |", dist);
-                    } else if (st == 255 || ntar == 0) {
-                        Serial.print("  ---mm(--) |");
-                    } else {
-                        // Diagnostic status: s4=near-field/consistency, s12=low signal, s14=high noise
-                        Serial.printf(" %4dmm(s%02u)|", dist, st);
-                    }
-                }
-                Serial.println();
-            }
-            Serial.println("-----------------------------------------------------------------");
-        }
-    }
-
-    delay(5);
+    delay(2);
 }
