@@ -94,6 +94,9 @@ from planner_config import (
     RECOVERY_ARC_LOOKAHEAD_M,
     ACCEL_FWD_MAX,
     BRAKE_DECEL_MAX,
+    ACCEL_FWD_RATIO,
+    BRAKE_DECEL_RATIO,
+    GRAVITY_G,
     SERVO_MAX_SPEED_RAD_S,
     STRAIGHT_LOCK_DIST_M,
     STRAIGHT_LOCK_SPEED_MPS,
@@ -350,12 +353,12 @@ class FolkraceVehicle:
         self.base_mu = 0.817
         self.mu_val = self.base_mu
         self.r_infl = R_INFLATION_M
-        self.target_lookahead_m = 1.35
-        self.aggr_dist_far = 1.70
+        self.target_lookahead_m = 2.40
+        self.aggr_dist_far = 2.40
         self.aggr_dist_close = 1.00
         self.aggr_min_scale = 0.30
         self.steer_deadband = 0.002
-        self.straight_lock_dist = 1.80
+        self.straight_lock_dist = STRAIGHT_LOCK_DIST_M
         self.straight_lock_speed = 5.00
         self.v_cruise_min = V_MIN_CRUISE
         self.v_cruise_max = V_MAX_CRUISE
@@ -424,12 +427,12 @@ class FolkraceVehicle:
         self.base_mu = float(genes.get("mu_friction", 0.817))
         self.mu_val = self.base_mu
         self.r_infl = float(genes.get("r_inflation_m", R_INFLATION_M))
-        self.target_lookahead_m = float(genes.get("target_lookahead_m", 1.35))
-        self.aggr_dist_far = float(genes.get("aggr_dist_far_m", 1.70))
+        self.target_lookahead_m = float(genes.get("target_lookahead_m", 2.40))
+        self.aggr_dist_far = float(genes.get("aggr_dist_far_m", 2.40))
         self.aggr_dist_close = float(genes.get("aggr_dist_close_m", 1.00))
         self.aggr_min_scale = float(genes.get("aggr_min_scale", 0.30))
         self.steer_deadband = float(genes.get("steer_deadband_rad", 0.002))
-        self.straight_lock_dist = float(genes.get("straight_lock_dist", 1.80))
+        self.straight_lock_dist = float(genes.get("straight_lock_dist", STRAIGHT_LOCK_DIST_M))
         self.straight_lock_speed = float(genes.get("straight_lock_speed", 5.00))
         self.v_cruise_min = float(genes.get("v_cruise_min", V_MIN_CRUISE))
         self.v_cruise_max = float(genes.get("v_cruise_max", V_MAX_CRUISE))
@@ -452,7 +455,7 @@ class FolkraceVehicle:
             alt_min_separation_m=float(genes.get("alt_min_separation_m", 0.25)),
             alt_aperture_bias=float(genes.get("alt_aperture_bias", 1.80)),
             scout_obs_width_m=float(genes.get("scout_obs_width_m", 0.22)),
-            scout_block_dist_m=float(genes.get("scout_block_dist_m", genes.get("target_lookahead_m", 1.72))),
+            scout_block_dist_m=float(genes.get("scout_block_dist_m", genes.get("target_lookahead_m", 2.40))),
             scout_straight_pen_k=float(genes.get("scout_straight_pen_k", 2.50)),
             scout_straight_exp_k=float(genes.get("scout_straight_exp_k", 1.50)),
             ray_origin_offset_m=float(genes.get("ray_origin_offset_m", 0.070)),
@@ -1224,11 +1227,30 @@ class FolkraceVehicle:
             if arm_res["is_active"] and arm_res["v_arm_target"] is not None:
                 target_v = min(target_v, arm_res["v_arm_target"])
 
-            # Instant Wall Hit / Collision Resync:
-            # If actual ground speed suddenly drops (e.g. wall crash or abrupt halt),
-            # snap rate limiter immediately to v_curr so the vehicle never pushes an arbitrary curve into obstacles
-            if v_curr < self.rate_limited_speed - 0.15:
-                self.rate_limited_speed = v_curr
+            # Lateral reserve on front steering axle:
+            steer_mag = abs(float(effective_steer_cmd))
+            lateral_fraction = min(0.80, abs(math.sin(steer_mag)))
+            max_longitudinal_fraction = math.sqrt(max(FRONT_LATERAL_RESERVE_MIN ** 2, 1.0 - lateral_fraction ** 2))
+
+            # Dynamic Acceleration Limits based on mu and front axle lateral reserve
+            dt_lag = TOTAL_LATENCY_STEPS * dt
+            a_limit = min(ACCEL_FWD_MAX, ACCEL_FWD_RATIO * self.mu_val * GRAVITY_G)
+            d_limit = min(BRAKE_DECEL_MAX, BRAKE_DECEL_RATIO * self.mu_val * GRAVITY_G * max_longitudinal_fraction)
+
+            # Dynamic Slip Envelope referencing physical latency & peak tire slip
+            slip_ratio_accel = min(0.30, max(0.08, 0.10 * (a_limit / GRAVITY_G)))
+            max_slip_lead = (a_limit * dt_lag) + (slip_ratio_accel * abs(v_curr))
+
+            # Harmonized Instant Wall Hit / Collision Resync:
+            # Preserves motor acceleration lead within tractive slip envelope, snapping immediately to v_curr
+            # only if vehicle collides and decelerates abruptly below its dynamic slip envelope.
+            collision_threshold = max_slip_lead + 0.15
+            if self.rate_limited_speed >= 0.0:
+                if v_curr < self.rate_limited_speed - collision_threshold:
+                    self.rate_limited_speed = v_curr
+            else:
+                if v_curr > self.rate_limited_speed + collision_threshold:
+                    self.rate_limited_speed = v_curr
 
             # When requesting deceleration or reverse, command must not stay higher than actual speed
             if target_v <= v_curr:
@@ -1242,16 +1264,6 @@ class FolkraceVehicle:
             speed_err = target_v - self.rate_limited_speed
             is_accel = (self.rate_limited_speed >= 0.0 and speed_err > 0.0) or (self.rate_limited_speed <= 0.0 and speed_err < 0.0)
 
-            # Lateral reserve on front steering axle:
-            steer_mag = abs(float(effective_steer_cmd))
-            lateral_fraction = min(0.80, abs(math.sin(steer_mag)))
-            max_longitudinal_fraction = math.sqrt(max(FRONT_LATERAL_RESERVE_MIN ** 2, 1.0 - lateral_fraction ** 2))
-
-            # Dynamic acceleration and braking limits referencing mu and planner config limits
-            dt_lag = TOTAL_LATENCY_STEPS * dt
-            a_limit = min(ACCEL_FWD_MAX, 0.85 * self.mu_val * 9.81)
-            d_limit = min(BRAKE_DECEL_MAX, 1.00 * self.mu_val * 9.81 * max_longitudinal_fraction)
-
             if is_accel:
                 max_dv = a_limit * dt
             else:
@@ -1262,10 +1274,7 @@ class FolkraceVehicle:
             else:
                 self.rate_limited_speed += math.copysign(max_dv, speed_err)
 
-            # Dynamic Traction Slip Envelope referencing physical latency & peak tire slip (10%)
-            max_slip_lead = (a_limit * dt_lag) + (0.10 * abs(v_curr))
-            max_slip_lag = (d_limit * dt_lag) + (0.10 * abs(v_curr))
-
+            # Dynamic Traction Slip Envelope Clamping
             if self.rate_limited_speed > 0.0:
                 self.rate_limited_speed = min(self.rate_limited_speed, max(0.0, v_curr) + max_slip_lead)
             elif self.rate_limited_speed < 0.0:
