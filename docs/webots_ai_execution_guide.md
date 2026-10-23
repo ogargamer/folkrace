@@ -102,40 +102,21 @@ if now >= target_duration_seconds:
 
 ---
 
-## 6. Dynamic Obstacle Avoidance & Ego-Compensation Test Suite
+## 6. Autonomous Track Racing Simulation Launchers
 
-### Summary of Testing Phases:
-
-| Phase | Script | Execution Type | Target / Objective |
+| Mode | Script | Execution Type | Target / Objective |
 |---|---|---|---|
-| **Phase 1** | `launchers/10_stationary_obstacle_test.py` | Analytical / 3D Webots | Stationary robot baseline; tests 5 oncoming/lateral obstacle speeds with zero false alarms. |
-| **Phase 2** | `launchers/11_moving_robot_obstacle_test.py` | Analytical / 3D Webots | Ego-robot cruising (up to 2.5 m/s) and turning (yaw rate 1.5 rad/s) past stationary walls and oncoming/lateral obstacles. |
-| **Phase 3** | `launchers/12_phase3_live_webots.py` | Analytical / 3D Webots + GUI | Robot oscillating continuously with live interactive mode switching across 6 dynamic scenarios. |
-| **Track Race** | `launchers/1_champion_preview.py` | Real-time 3D Webots + GUI | High-speed multi-car race on `track_racing.wbt` with 3 dynamic opponents. |
+| **Champion Preview** | `launchers/1_champion_preview.py` | Real-time 3D Webots + GUI | High-speed multi-car race on `track_racing.wbt` with live 2D telemetry GUI. |
+| **Fast Champion Drive** | `launchers/13_fast_champion_drive.py` | Real-time 3D Webots (Headless GUI) | Ultra-lean champion 3D drive launcher for maximum real-time performance. |
 
-### Phase 3 Commands:
-* **Fast Analytical Benchmark (Headless, ~1 second)**:
-  ```pwsh
-  python launchers/12_phase3_live_webots.py --benchmark
-  ```
-* **Interactive Live Simulation (Webots 3D + PyQt5 2D Radar GUI)**:
-  ```pwsh
-  python launchers/12_phase3_live_webots.py
-  ```
-* **Automated Mode Sweep (Cycles modes 1 to 6 automatically)**:
-  ```pwsh
-  python launchers/12_phase3_live_webots.py --auto-sweep --sweep-interval 6.0
-  ```
-* **Start Directly in Longitudinal or Lateral Mode**:
-  ```pwsh
-  python launchers/12_phase3_live_webots.py --mode 2    # Longitudinal Motion
-  python launchers/12_phase3_live_webots.py --mode 3    # Lateral Crossing
-  ```
-
-### Full Track Integration & Race Deployment:
-To evaluate the full autonomous racing pipeline (ToF Gap Scout + Curvilinear SL-MPC + Anti-Wrong-Way Watchdog + Dynamic Obstacle Tracker) on the full walled circuit with 3 moving opponent cars:
+### Track Race Deployment:
+To evaluate the full autonomous racing pipeline (ToF Gap Scout + Curvilinear SL-MPC + Anti-Wrong-Way Watchdog) on the full walled circuit with opponent cars:
 ```pwsh
 python launchers/1_champion_preview.py
+```
+For ultra-fast simulation without GUI overhead:
+```pwsh
+python launchers/13_fast_champion_drive.py
 ```
 
 ---

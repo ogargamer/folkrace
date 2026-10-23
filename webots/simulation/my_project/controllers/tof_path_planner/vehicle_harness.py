@@ -52,7 +52,6 @@ from tof_gap_scout import ToFGapScout
 from planner_sl_mpc import CurvilinearSLMPC
 from stuck_recovery_manager import StuckRecoveryManager, StuckRecoveryState
 from anti_wrong_way_watchdog import AntiWrongWayWatchdog
-from dynamic_obstacle_tracker import DynamicObstacleTracker
 from planner_config import (
     TIME_STEP_MS,
     DT,
@@ -296,16 +295,6 @@ class FolkraceVehicle:
             r_inflation_m=R_INFLATION_M,
         )
 
-        # Dynamic moving obstacle tracker (NOTE: Disabled because it is not working properly, WIP)
-        self.obstacle_tracker = DynamicObstacleTracker(
-            grid_bounds=(GRID_X_MIN, GRID_X_MAX, GRID_Y_MIN, GRID_Y_MAX),
-            resolution=GRID_RES,
-            enabled=False,
-        )
-        self.last_dynamic_tracks = []
-        self.last_obs_telem = {}
-        self.last_enlarged_hazard = None
-
         self.gap_scout = ToFGapScout()
         self.planner = CurvilinearSLMPC(costmap_engine=self.costmap)
         self.planner.costmap = self.costmap
@@ -375,7 +364,6 @@ class FolkraceVehicle:
         self.cached_plan_cpu_ms = 0.0
         self.cached_map_ms = 0.0
         self.cached_scout_ms = 0.0
-        self.cached_obs_ms = 0.0
         self.cached_opt_ms = 0.0
         self.cached_opt_prim_ms = 0.0
         self.cached_opt_alt_ms = 0.0
@@ -505,25 +493,6 @@ class FolkraceVehicle:
             arc_lookahead_m=float(genes.get("recovery_arc_lookahead_m", RECOVERY_ARC_LOOKAHEAD_M)),
         )
 
-        # Dynamic Obstacle Tracker Configuration
-        if hasattr(self, "obstacle_tracker") and self.obstacle_tracker is not None:
-            self.obstacle_tracker.configure(
-                prob_threshold=genes.get("obs_prob_threshold"),
-                max_wall_dim_cells=genes.get("obs_max_wall_dim_cells"),
-                min_area_cells=genes.get("obs_min_area_cells"),
-                gating_radius_m=genes.get("obs_gating_radius_m"),
-                persistence_frames=genes.get("obs_persistence_frames"),
-                dynamic_threshold_mps=genes.get("obs_dynamic_threshold_mps"),
-                dyn_confirm_frames=genes.get("obs_dyn_confirm_frames"),
-                lead_time_s=genes.get("obs_lead_time_s"),
-                max_lead_m=genes.get("obs_max_lead_m"),
-                tail_clear_m=genes.get("obs_tail_clear_m"),
-                max_missed_frames=genes.get("obs_max_missed_frames"),
-                alpha_ab=genes.get("obs_alpha_ab"),
-                beta_ab=genes.get("obs_beta_ab"),
-                vel_decay=genes.get("obs_vel_decay"),
-            )
-
     def reset(self, start_pos: Optional[List[float]] = None, start_rot: Optional[List[float]] = None) -> None:
         """Resets vehicle physics state, odometry, costmap, and controller memories."""
         self._step_gt_pose = None
@@ -579,10 +548,6 @@ class FolkraceVehicle:
         self.x_est = float(start_pos[0]) if start_pos else 0.0
         self.y_est = float(start_pos[1]) if start_pos else 0.0
         self.yaw_est = 0.0
-        self.obstacle_tracker.reset()
-        self.last_dynamic_tracks = []
-        self.last_obs_telem = {}
-        self.last_enlarged_hazard = None
 
         # Reset latency queues & pose history
         initial_tofs = {name: TOF_MAX_RANGE_M for name in TOF_SENSOR_NAMES}
@@ -798,8 +763,6 @@ class FolkraceVehicle:
                 "grid_bounds": [float(GRID_X_MIN), float(GRID_X_MAX), float(GRID_Y_MIN), float(GRID_Y_MAX)],
                 "grid_data": "",
                 "hazard_data": "",
-                "dynamic_obstacles": [],
-                "obs_telem": {},
                 "escape_state": "NORMAL",
                 "f_tof": round(float(min(tof_readings.get("tof_front_left_4.1deg", TOF_MAX_RANGE_M), tof_readings.get("tof_front_right_4.1deg", TOF_MAX_RANGE_M))), 2),
                 "plan": {},
@@ -841,25 +804,6 @@ class FolkraceVehicle:
         if self.step_counter % PLANNER_DECIMATION == 0:
             prob_map, hazard_mask, map_ms = self.costmap.process_tof_frame(tof_readings)
             self.cached_map_ms = map_ms
-
-            # Dynamic Moving Obstacle Detection, Tracking & Vector Enlargement
-            # NOTE: Disabled because it is not working properly, WIP.
-            t_obs_0 = time.perf_counter()
-            enlarged_hazard_mask, dyn_tracks, obs_telem = self.obstacle_tracker.process_frame(
-                prob_map=prob_map,
-                robot_pose=(self.x_est, self.y_est, self.yaw_est),
-                now_s=sim_time,
-                base_hazard_mask=hazard_mask,
-                source_grid_bounds=(GRID_X_MIN, GRID_X_MAX, GRID_Y_MIN, GRID_Y_MAX),
-                v_ego=self.v_est,
-                yaw_rate=self.cached_yaw_rate,
-                tof_readings=tof_readings,
-            )
-            self.cached_obs_ms = (time.perf_counter() - t_obs_0) * 1000.0
-            self.last_dynamic_tracks = dyn_tracks
-            self.last_confirmed_tracks = getattr(self.obstacle_tracker, "last_confirmed_tracks", dyn_tracks)
-            self.last_obs_telem = obs_telem
-            self.last_enlarged_hazard = enlarged_hazard_mask
 
             # ------------------------------------------------------------------
             # 3-STEP SE(2) FORWARD LOOKAHEAD PROJECTION
@@ -908,7 +852,7 @@ class FolkraceVehicle:
             t_scout_0 = time.perf_counter()
             xg, yg, width, theta_g = self.gap_scout.scout_gap(
                 tof_readings=tof_readings,
-                hazard_mask=enlarged_hazard_mask,
+                hazard_mask=hazard_mask,
                 costmap_obj=self.costmap,
                 target_lookahead_m=self.target_lookahead_m,
                 steer_current=steer_3,
@@ -1333,7 +1277,7 @@ class FolkraceVehicle:
             v_est=self.v_est,
             yaw_rate=self.cached_yaw_rate,
             now_s=sim_time,
-            hazard_mask=self.last_enlarged_hazard,
+            hazard_mask=self.costmap.hazard_mask,
         )
         aww_detailed["corrective_substate"] = getattr(self.recovery_manager, "corrective_substate", "FORWARD")
         # Compose combined operational mode string (e.g. "SL_MPC", "SL_MPC_ARM", "SL_MPC_DRIFT")
@@ -1382,7 +1326,6 @@ class FolkraceVehicle:
                 "map_ms": round(float(self.cached_map_ms), 2),
                 "map_perf": getattr(self.costmap, "last_perf", (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)),
                 "scout_ms": round(float(self.cached_scout_ms), 2),
-                "obs_ms": round(float(self.cached_obs_ms), 2),
                 "opt_ms": round(float(self.cached_opt_ms), 2),
                 "opt_prim_ms": round(float(self.cached_opt_prim_ms), 2),
                 "opt_alt_ms": round(float(self.cached_opt_alt_ms), 2),
@@ -1427,7 +1370,7 @@ class FolkraceVehicle:
         ])
         prob_down = (prob_max * 255.0).astype(np.uint8)
 
-        active_hazard = self.last_enlarged_hazard if self.last_enlarged_hazard is not None else self.costmap.hazard_mask
+        active_hazard = self.costmap.hazard_mask
         haz_even = active_hazard[:h_even, :w_even]
         haz_max = np.maximum.reduce([
             haz_even[0::2, 0::2],
@@ -1503,7 +1446,6 @@ class FolkraceVehicle:
             "map_ms": round(float(self.cached_map_ms), 2),
             "map_perf": getattr(self.costmap, "last_perf", (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)),
             "scout_ms": round(float(self.cached_scout_ms), 2),
-            "obs_ms": round(float(self.cached_obs_ms), 2),
             "opt_ms": round(float(self.cached_opt_ms), 2),
             "opt_prim_ms": round(float(self.cached_opt_prim_ms), 2),
             "opt_alt_ms": round(float(self.cached_opt_alt_ms), 2),
@@ -1529,21 +1471,6 @@ class FolkraceVehicle:
             "grid_bounds": [float(GRID_X_MIN), float(GRID_X_MAX), float(GRID_Y_MIN), float(GRID_Y_MAX)],
             "grid_data": grid_compressed,
             "hazard_data": hazard_compressed,
-            "dynamic_obstacles": [
-                {
-                    "id": t.track_id,
-                    "x_r": round(float(t.x_r), 3),
-                    "y_r": round(float(t.y_r), 3),
-                    "v_mag": round(float(t.v_mag), 3),
-                    "v_rx": round(float(t.v_rx), 3),
-                    "v_ry": round(float(t.v_ry), 3),
-                    "v_longitudinal": round(float(getattr(t, "v_longitudinal", 0.0)), 3),
-                    "state": str(getattr(t, "state", "STATIC")),
-                    "is_dynamic": bool(t.is_dynamic),
-                }
-                for t in getattr(self, "last_confirmed_tracks", getattr(self, "last_dynamic_tracks", []))
-            ],
-            "obs_telem": getattr(self, "last_obs_telem", {}),
             "escape_state": str(getattr(self.recovery_manager.state, "name", self.recovery_manager.state)),
             "watchdog_mode": str(getattr(self.watchdog.mode, "name", self.watchdog.mode)),
             "aww": aww_detailed,

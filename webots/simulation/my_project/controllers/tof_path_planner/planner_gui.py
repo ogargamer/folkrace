@@ -369,7 +369,6 @@ class PlannerCostmapCanvas(QtWidgets.QWidget):
         corridor_left: Optional[List[List[float]]] = None,
         corridor_right: Optional[List[List[float]]] = None,
         shield_info: Optional[dict] = None,
-        dynamic_obstacles: Optional[List[dict]] = None,
         trail: Optional[List[List[float]]] = None,
         sightlines: Optional[List[dict]] = None,
         is_wrong_way: bool = False,
@@ -404,7 +403,6 @@ class PlannerCostmapCanvas(QtWidgets.QWidget):
 
         self.gap_info = gap
         self.targets = targets
-        self.dynamic_obstacles = dynamic_obstacles or []
         self.steer_deg = float(steer_deg)
         self.recovery_state = str(recovery_state)
 
@@ -819,44 +817,6 @@ class PlannerCostmapCanvas(QtWidgets.QWidget):
                 painter.setBrush(QBrush(QColor(0, 220, 255, 40)))
                 painter.drawEllipse(pc, 6, 6)
 
-        # 8. Dynamic Moving Obstacles with Velocity Vectors
-        if hasattr(self, "dynamic_obstacles") and self.dynamic_obstacles:
-            for obs in self.dynamic_obstacles:
-                ox = float(obs.get("x_r", 0.0))
-                oy = float(obs.get("y_r", 0.0))
-                vrx = float(obs.get("v_rx", 0.0))
-                vry = float(obs.get("v_ry", 0.0))
-                v_mag = float(obs.get("v_mag", 0.0))
-                is_dyn = bool(obs.get("is_dynamic", False))
-
-                p_obs = self.world_to_screen(ox, oy)
-                p_rad = self.world_to_screen(ox + 0.075, oy)
-                r_px = max(5.0, abs(p_rad.x() - p_obs.x()))
-
-                # Halo and outline
-                painter.setPen(QPen(QColor(255, 60, 220, 240) if is_dyn else QColor(160, 160, 160, 180), 2.0))
-                painter.setBrush(QBrush(QColor(255, 60, 220, 80) if is_dyn else QColor(100, 100, 100, 50)))
-                painter.drawEllipse(p_obs, r_px, r_px)
-
-                if is_dyn and v_mag >= 0.10:
-                    # Velocity vector arrow (0.40s forward projection)
-                    scale = 0.40
-                    p_arr = self.world_to_screen(ox + vrx * scale, oy + vry * scale)
-                    state = obs.get("state", "APPROACHING" if vry < 0 else "RECEDING")
-                    arrow_col = QColor(255, 70, 70, 250) if vry < 0 else QColor(70, 255, 130, 250)
-                    painter.setPen(QPen(arrow_col, 2.5, Qt.SolidLine))
-                    painter.drawLine(p_obs, p_arr)
-
-                    # Text label with estimated speed and 1D classification state
-                    painter.setFont(QFont("Consolas", 8, QFont.Bold))
-                    painter.setPen(QPen(arrow_col))
-                    tag = "APPR" if vry < 0 else "REC"
-                    painter.drawText(QPointF(p_obs.x() + 10, p_obs.y() - 6), f"{tag} {v_mag:.2f} m/s")
-                else:
-                    painter.setFont(QFont("Consolas", 8, QFont.Bold))
-                    painter.setPen(QPen(QColor(180, 180, 180, 220)))
-                    painter.drawText(QPointF(p_obs.x() + 10, p_obs.y() - 6), "STATIC")
-
         if self.show_gap and self.gap_info:
             xg, yg, width = self.gap_info
             pg = self.world_to_screen(xg, yg)
@@ -1205,57 +1165,6 @@ class ComprehensivePlannerGUI(QMainWindow):
         obs_layout.addLayout(obs_spd_row)
 
         panel_layout.addWidget(obs_group)
-
-        # 2c. PHASE 3 DYNAMIC OBSTACLE TEST CONTROLS
-        phase3_group = QGroupBox("Phase 3 Dynamic Obstacle Controls")
-        phase3_layout = QVBoxLayout(phase3_group)
-
-        self.lbl_phase3_status = QLabel("Active: [1] Static Obstacle (Robot Oscillates)")
-        self.lbl_phase3_status.setStyleSheet("color: #00e676; font-weight: bold; font-size: 11px;")
-        phase3_layout.addWidget(self.lbl_phase3_status)
-
-        p3_row1 = QHBoxLayout()
-        self.btn_p3_mode1 = QPushButton("1: Static (Reject)")
-        self.btn_p3_mode1.setStyleSheet("background-color: #263238; color: #80cbc4; font-weight: bold;")
-        self.btn_p3_mode1.clicked.connect(lambda: self._send_phase3_mode(1))
-        self.btn_p3_mode2 = QPushButton("2: Longitudinal")
-        self.btn_p3_mode2.setStyleSheet("background-color: #37474f; color: #ff80ab; font-weight: bold;")
-        self.btn_p3_mode2.clicked.connect(lambda: self._send_phase3_mode(2))
-        self.btn_p3_mode3 = QPushButton("3: Lateral Cross")
-        self.btn_p3_mode3.setStyleSheet("background-color: #37474f; color: #82b1ff; font-weight: bold;")
-        self.btn_p3_mode3.clicked.connect(lambda: self._send_phase3_mode(3))
-        p3_row1.addWidget(self.btn_p3_mode1)
-        p3_row1.addWidget(self.btn_p3_mode2)
-        p3_row1.addWidget(self.btn_p3_mode3)
-        phase3_layout.addLayout(p3_row1)
-
-        p3_row2 = QHBoxLayout()
-        self.btn_p3_mode4 = QPushButton("4: Diagonal")
-        self.btn_p3_mode4.setStyleSheet("background-color: #263238; color: #ea80fc; font-weight: bold;")
-        self.btn_p3_mode4.clicked.connect(lambda: self._send_phase3_mode(4))
-        self.btn_p3_mode5 = QPushButton("5: Accel/Decel")
-        self.btn_p3_mode5.setStyleSheet("background-color: #263238; color: #80d8ff; font-weight: bold;")
-        self.btn_p3_mode5.clicked.connect(lambda: self._send_phase3_mode(5))
-        self.btn_p3_mode6 = QPushButton("6: S-Curve Weave")
-        self.btn_p3_mode6.setStyleSheet("background-color: #263238; color: #ffd54f; font-weight: bold;")
-        self.btn_p3_mode6.clicked.connect(lambda: self._send_phase3_mode(6))
-        p3_row2.addWidget(self.btn_p3_mode4)
-        p3_row2.addWidget(self.btn_p3_mode5)
-        p3_row2.addWidget(self.btn_p3_mode6)
-        phase3_layout.addLayout(p3_row2)
-
-        p3_row3 = QHBoxLayout()
-        self.btn_p3_sweep = QPushButton("🔄 Toggle Auto-Sweep")
-        self.btn_p3_sweep.setStyleSheet("background-color: #0277bd; color: white; font-weight: bold; padding: 4px;")
-        self.btn_p3_sweep.clicked.connect(self._toggle_phase3_sweep)
-        self.btn_p3_reset = QPushButton("↺ Reset Pose")
-        self.btn_p3_reset.setStyleSheet("background-color: #455a64; color: white; font-weight: bold; padding: 4px;")
-        self.btn_p3_reset.clicked.connect(self._reset_phase3)
-        p3_row3.addWidget(self.btn_p3_sweep)
-        p3_row3.addWidget(self.btn_p3_reset)
-        phase3_layout.addLayout(p3_row3)
-
-        panel_layout.addWidget(phase3_group)
 
         # 3. LIVE PARAMETER TUNING
         tune_group = QGroupBox("Live SL-MPC & Scout Parameter Tuner")
@@ -1733,18 +1642,6 @@ class ComprehensivePlannerGUI(QMainWindow):
         self.lbl_separation.setText(f"{val} cm")
         self._send_cmd({"cmd": "set_param", "name": "alt_min_separation_m", "val": sep_m})
 
-    def _send_phase3_mode(self, mode_int: int):
-        print(f"[GUI] Phase 3 mode command sent: Mode {mode_int}", flush=True)
-        self._send_cmd({"cmd": "set_phase3_mode", "mode": int(mode_int)})
-
-    def _toggle_phase3_sweep(self):
-        print("[GUI] Phase 3 toggle auto-sweep command sent", flush=True)
-        self._send_cmd({"cmd": "toggle_sweep"})
-
-    def _reset_phase3(self):
-        print("[GUI] Phase 3 reset pose command sent", flush=True)
-        self._send_cmd({"cmd": "reset"})
-
     def _toggle_obs_direction(self):
         self.obs_direction = -1 if getattr(self, "obs_direction", 1) > 0 else 1
         if self.obs_direction > 0:
@@ -1836,7 +1733,6 @@ class ComprehensivePlannerGUI(QMainWindow):
             targets = pkt.get("targets", [])
             grid_bounds = pkt.get("grid_bounds", None)
             tof = pkt.get("tof", {})
-            dynamic_obstacles = pkt.get("dynamic_obstacles", [])
 
             # Update Labels
             p_name = pkt.get("planner", "Curvilinear SL-MPC")
@@ -1888,7 +1784,6 @@ class ComprehensivePlannerGUI(QMainWindow):
                 corridor_left=corridor_left,
                 corridor_right=corridor_right,
                 shield_info=shield_info,
-                dynamic_obstacles=dynamic_obstacles,
                 trail=trail,
                 sightlines=sightlines,
                 is_wrong_way=is_wrong_way,
@@ -1909,16 +1804,6 @@ class ComprehensivePlannerGUI(QMainWindow):
             if is_wrong_way:
                 self.lbl_recovery.setText("Wrong-Way: 🚨 WRONG-WAY DETECTED (Corrective 180°)")
                 self.lbl_recovery.setStyleSheet("color: #ff1744; font-weight: bold;")
-            elif dynamic_obstacles:
-                any_dyn = any(obs.get("is_dynamic", False) for obs in dynamic_obstacles)
-                max_v = max((obs.get("v_mag", 0.0) for obs in dynamic_obstacles), default=0.0)
-                n_dyn = sum(1 for obs in dynamic_obstacles if obs.get("is_dynamic", False))
-                if any_dyn:
-                    self.lbl_recovery.setText(f"Obstacle: ⚠️ {n_dyn} DYNAMIC ({max_v:.2f} m/s) - Enlarged")
-                    self.lbl_recovery.setStyleSheet("color: #ff3df0; font-weight: bold;")
-                else:
-                    self.lbl_recovery.setText(f"Obstacle: ⚪ {len(dynamic_obstacles)} TRACKED ({max_v:.2f} m/s)")
-                    self.lbl_recovery.setStyleSheet("color: #80cbc4; font-weight: bold;")
             elif shield_info and shield_info.get("active", False):
                 c_name = shield_info.get("chosen_name", "ACTIVE").replace("_", " ").upper()
                 self.lbl_recovery.setText(f"Shield: 🛡️ ACTIVE ESCAPE ({c_name})")
@@ -1932,15 +1817,6 @@ class ComprehensivePlannerGUI(QMainWindow):
             else:
                 self.lbl_recovery.setText(f"Recovery: 🟢 Normal Drive ({rec_state})")
                 self.lbl_recovery.setStyleSheet("color: #ce93d8;")
-
-            # Update Phase 3 active badge in panel if present
-            p3_mode = pkt.get("phase3_mode", None)
-            is_auto_sweep = pkt.get("auto_sweep", False)
-            if p3_mode is not None and hasattr(self, "lbl_phase3_status"):
-                sweep_prefix = "[AUTO-SWEEP] " if is_auto_sweep else "[MANUAL] "
-                mode_desc = pkt.get("test_stage", f"Mode {p3_mode}")
-                self.lbl_phase3_status.setText(f"Active: {sweep_prefix}{mode_desc}")
-                self.lbl_phase3_status.setStyleSheet("color: #00e676; font-weight: bold; font-size: 11px;")
 
             self.lbl_dist.setText(f"Distance Traveled: {dist:.2f} m")
             self._update_tof_dashboard(tof)
