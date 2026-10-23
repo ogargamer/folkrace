@@ -990,13 +990,14 @@ def run_ga_worker(robot: any, vehicle: FolkraceVehicle) -> None:
             "mean_speed_mps": round(mean_speed, 3),
             "laps_completed": int(track_tracker.current_lap),
             "duration_s": round(sim_time, 2),
+            "eval_duration_s": round(duration_s, 2),
             "crashed": bool(crashed),
             "crash_reason": crash_reason,
             "stalled": bool(stalled),
             "obstacle_speed_mps": float(obstacle_speed_mps),
         }
         trial_metrics["compute_multiplier"] = round(compute_efficiency_multiplier(gene_dict), 4)
-        trial_metrics["fitness"] = round(compute_scalar_fitness(trial_metrics, gene_dict=gene_dict), 2)
+        trial_metrics["fitness"] = round(compute_scalar_fitness(trial_metrics, gene_dict=gene_dict, eval_duration_s=duration_s), 2)
         return trial_metrics
 
     def evaluate_candidate(gene_dict: Dict[str, Any], duration_s: float, use_track2: bool = USE_TRACK2) -> Dict[str, Any]:
@@ -1027,6 +1028,7 @@ def run_ga_worker(robot: any, vehicle: FolkraceVehicle) -> None:
             "mean_speed_mps": round(min(float(m1.get("mean_speed_mps", 0.0)), float(m2.get("mean_speed_mps", 0.0))), 3),
             "laps_completed": int(min(int(m1.get("laps_completed", 0)), int(m2.get("laps_completed", 0)))),
             "duration_s": round(float(m1.get("duration_s", 0.0)) + float(m2.get("duration_s", 0.0)), 2),
+            "eval_duration_s": round(duration_s, 2),
             "crashed": bool(crashed),
             "crash_reason": crash_reason,
             "stalled": bool(stalled),

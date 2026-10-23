@@ -95,6 +95,11 @@ FITNESS_STALL_PENALTY: float = 900.0
 STALL_SPEED_THRESHOLD_MPS: float = 0.15
 STALL_MAX_DURATION_S: float = 1.50
 
+# Duration Normalization & Survival Bonus Hyperparameters
+FITNESS_BASE_DURATION_S: float = 25.0        # Reference baseline duration (s) for standard ~10k fitness scaling
+FITNESS_DURATION_BONUS_MAX: float = 0.10     # Max bonus fraction (+10%) for running longer sim without crashing
+
+
 
 # ==============================================================================
 # 3. GENE SPECIFICATIONS FOR C++ CURVILINEAR SL-MPC
@@ -364,8 +369,18 @@ SPEED_PHYSICAL_MAX_MPS: float = 5.00
 DISTANCE_VALID_MIN_M: float = 0.10
 
 
-def compute_scalar_fitness(metrics: Dict[str, Any], gene_dict: Optional[Dict[str, Any]] = None) -> float:
-    """Computes scalar optimization fitness from Webots trial metrics."""
+def compute_scalar_fitness(
+    metrics: Dict[str, Any],
+    gene_dict: Optional[Dict[str, Any]] = None,
+    eval_duration_s: Optional[float] = None,
+) -> float:
+    """Computes duration-normalized scalar optimization fitness from Webots trial metrics.
+
+    Normalizes distance and lap metrics relative to FITNESS_BASE_DURATION_S (25.0s) so that
+    longer simulation runs (e.g. 50s-60s) do not inflate the fitness score. When a candidate
+    survives longer runs without crashing or stalling, a modest bonus (up to +10% at
+    EVAL_DURATION_MAX_S) is applied to reward extended collision-free survival.
+    """
     dist_m = float(metrics.get("distance_m", 0.0))
     mean_speed = float(metrics.get("mean_speed_mps", 0.0))
     laps = int(metrics.get("laps_completed", 0))
@@ -380,11 +395,36 @@ def compute_scalar_fitness(metrics: Dict[str, Any], gene_dict: Optional[Dict[str
     elif mean_speed > SPEED_PHYSICAL_MAX_MPS:
         mean_speed = SPEED_PHYSICAL_MAX_MPS
 
-    base_score = (dist_m * FITNESS_PROGRESS_WEIGHT) + (mean_speed * FITNESS_SPEED_WEIGHT) + (laps * FITNESS_LAP_BONUS)
+    # Determine planned trial evaluation duration for normalization
+    trial_dur = eval_duration_s
+    if trial_dur is None:
+        trial_dur = metrics.get("eval_duration_s") or metrics.get("target_duration_s")
+    if trial_dur is None:
+        # Fallback to duration_s; if crashed/stuck early, guard against small sim_time inflating distance
+        raw_dur = float(metrics.get("duration_s", FITNESS_BASE_DURATION_S))
+        trial_dur = max(FITNESS_BASE_DURATION_S, raw_dur) if (crashed or stuck) else raw_dur
+    trial_dur = max(1.0, float(trial_dur))
+
+    # Duration normalization: scale distance and laps to baseline 25.0s equivalent
+    norm_scale = FITNESS_BASE_DURATION_S / trial_dur
+    effective_dist_m = dist_m * norm_scale
+    effective_laps = laps * norm_scale
+
+    base_score = (
+        (effective_dist_m * FITNESS_PROGRESS_WEIGHT)
+        + (mean_speed * FITNESS_SPEED_WEIGHT)
+        + (effective_laps * FITNESS_LAP_BONUS)
+    )
 
     if crashed:
         return float(base_score - FITNESS_COLLISION_PENALTY)
     elif stuck:
         return float(base_score - FITNESS_STALL_PENALTY)
     else:
-        return float(base_score)
+        # Survival bonus: up to +10% for completing longer evaluations without crashing
+        dur_excess = max(0.0, trial_dur - FITNESS_BASE_DURATION_S)
+        dur_span = max(1.0, EVAL_DURATION_MAX_S - FITNESS_BASE_DURATION_S)
+        bonus_factor = min(1.0, dur_excess / dur_span)
+        duration_bonus_mult = 1.0 + (FITNESS_DURATION_BONUS_MAX * bonus_factor)
+        return float(base_score * duration_bonus_mult)
+

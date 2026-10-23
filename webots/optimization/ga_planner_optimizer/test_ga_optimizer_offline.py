@@ -77,16 +77,48 @@ def test_reverse_obstacle_engine():
 
 
 def test_fitness_computation():
-    print("Testing Fitness Function...")
+    print("Testing Fitness Function & Duration Scaling...")
     clean_metrics = {"distance_m": 22.5, "mean_speed_mps": 2.2, "laps_completed": 1, "crashed": False, "stalled": False}
     fit_clean = compute_scalar_fitness(clean_metrics)
     assert fit_clean > 2000.0
-    print(f"  -> Clean run fitness (22.5m, 1 lap): {fit_clean:.1f}")
+    print(f"  -> Clean run fitness (22.5m, 1 lap, default 25s): {fit_clean:.1f}")
 
     crash_metrics = {"distance_m": 5.0, "mean_speed_mps": 1.5, "laps_completed": 0, "crashed": True, "stalled": False}
     fit_crash = compute_scalar_fitness(crash_metrics)
     print(f"  -> Crashed run fitness (5.0m): {fit_crash:.1f}")
     assert fit_crash < fit_clean and fit_crash > 0.0
+
+    # 1. Verify duration normalization: longer sim without crashing doesn't inflate ~2.4x, but gets ~10% bonus
+    # Baseline 25s run at 2.5 m/s
+    m_25s = {"distance_m": 62.5, "mean_speed_mps": 2.5, "laps_completed": 4, "crashed": False, "stalled": False, "eval_duration_s": 25.0}
+    f_25s = compute_scalar_fitness(m_25s)
+
+    # 60s run at identical speed (2.5 m/s) -> 2.4x distance and laps (150m, 10 laps)
+    m_60s = {"distance_m": 150.0, "mean_speed_mps": 2.5, "laps_completed": 10, "crashed": False, "stalled": False, "eval_duration_s": 60.0}
+    f_60s = compute_scalar_fitness(m_60s)
+
+    # Without normalization f_60s would be ~24,000 (+140% inflation).
+    # With normalization + 10% bonus: f_60s should be ~1.10x of f_25s!
+    ratio = f_60s / f_25s
+    print(f"  -> Duration Scaling: 25s clean = {f_25s:.1f}, 60s clean = {f_60s:.1f} (Ratio: {ratio:.3f}x, expected ~1.100x)")
+    assert 1.09 <= ratio <= 1.11, f"Expected ~1.10x ratio, got {ratio:.4f}"
+
+    # 50s run at identical speed -> 2.0x distance and laps (125m, 8 laps)
+    m_50s = {"distance_m": 125.0, "mean_speed_mps": 2.5, "laps_completed": 8, "crashed": False, "stalled": False, "eval_duration_s": 50.0}
+    f_50s = compute_scalar_fitness(m_50s)
+    ratio_50 = f_50s / f_25s
+    print(f"  -> Duration Scaling: 50s clean = {f_50s:.1f} (Ratio: {ratio_50:.3f}x, expected ~1.071x)")
+    assert 1.06 <= ratio_50 <= 1.08, f"Expected ~1.071x ratio, got {ratio_50:.4f}"
+
+    # 2. Verify crashed runs: no survival bonus awarded, normalized distance stays consistent
+    m_crash_25s = {"distance_m": 31.25, "mean_speed_mps": 2.5, "laps_completed": 2, "crashed": True, "stalled": False, "eval_duration_s": 25.0}
+    m_crash_60s = {"distance_m": 75.0, "mean_speed_mps": 2.5, "laps_completed": 5, "crashed": True, "stalled": False, "eval_duration_s": 60.0}
+    f_crash_25s = compute_scalar_fitness(m_crash_25s)
+    f_crash_60s = compute_scalar_fitness(m_crash_60s)
+    diff_crash = abs(f_crash_60s - f_crash_25s)
+    print(f"  -> Halfway crash: 25s trial = {f_crash_25s:.1f}, 60s trial = {f_crash_60s:.1f} (Difference: {diff_crash:.2f})")
+    assert diff_crash <= 20.0, "Normalized crashed fitness across different durations should closely match within lap rounding!"
+
 
 
 def test_load_best_genome_and_seeding():

@@ -308,7 +308,7 @@ class HeadlessWebotsWorker:
                     if "fitness" in metrics:
                         fitness = float(metrics["fitness"])
                     else:
-                        fitness = compute_scalar_fitness(metrics, gene_dict=gene_dict)
+                        fitness = compute_scalar_fitness(metrics, gene_dict=gene_dict, eval_duration_s=duration_s)
                         metrics["fitness"] = fitness
                     return fitness, metrics
                 else:

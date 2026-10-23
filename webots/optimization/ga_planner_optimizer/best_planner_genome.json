@@ -1,39 +1,42 @@
 {
   "planner": "OPTION_2_SL_MPC",
-  "fitness": 14387.28,
+  "fitness": 10853.88,
   "metrics": {
     "distance_m": 89.42,
     "mean_speed_mps": 2.475,
     "laps_completed": 6,
     "duration_s": 68.12,
+    "eval_duration_s": 34.06,
     "crashed": false,
     "crash_reason": "none",
     "stalled": false,
     "compute_multiplier": 1.0,
-    "fitness": 14387.28,
+    "fitness": 10853.88,
     "track1_metrics": {
       "distance_m": 89.455,
       "mean_speed_mps": 2.475,
       "laps_completed": 6,
       "duration_s": 34.06,
+      "eval_duration_s": 34.06,
       "crashed": false,
       "crash_reason": "none",
       "stalled": false,
       "obstacle_speed_mps": 1.0,
       "compute_multiplier": 1.0,
-      "fitness": 14392.5
+      "fitness": 10857.8
     },
     "track2_metrics": {
       "distance_m": 89.42,
       "mean_speed_mps": 2.476,
       "laps_completed": 6,
       "duration_s": 34.06,
+      "eval_duration_s": 34.06,
       "crashed": false,
       "crash_reason": "none",
       "stalled": false,
       "obstacle_speed_mps": -1.0,
       "compute_multiplier": 1.0,
-      "fitness": 14387.28
+      "fitness": 10853.88
     }
   },
   "genes": {
