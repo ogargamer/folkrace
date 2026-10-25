@@ -72,7 +72,7 @@ class DualSerialEngine(QThread):
             self._latest_by_sensor[sensor_id] = None
         return pkt
 
-    def is_sensor_active(self, sensor_id, timeout_s=1.5):
+    def is_sensor_active(self, sensor_id, timeout_s=0.25):
         with self._lock:
             st = self.sensor_stats.get(sensor_id)
             if not st or not st["last_rx_time"]:
@@ -215,11 +215,12 @@ class RadarArcCanvas(QWidget):
         self.is_clear_fallback = [False] * 8
         self.is_t2_fallback = [False] * 8
         self.is_t3_fallback = [False] * 8
+        self.all_targets = [[] for _ in range(8)]
 
         self.hovered_zone = -1
         self.setMouseTracking(True)
 
-    def set_zone_data(self, dists, raw_dists, raw_stats, blind_zeros, clear_fallbacks, t2_fallbacks=None, t3_fallbacks=None):
+    def set_zone_data(self, dists, raw_dists, raw_stats, blind_zeros, clear_fallbacks, t2_fallbacks=None, t3_fallbacks=None, all_targets=None):
         self.distances = list(dists)
         self.raw_distances = list(raw_dists)
         self.raw_statuses = list(raw_stats)
@@ -227,6 +228,7 @@ class RadarArcCanvas(QWidget):
         self.is_clear_fallback = list(clear_fallbacks)
         self.is_t2_fallback = list(t2_fallbacks) if t2_fallbacks else [False] * 8
         self.is_t3_fallback = list(t3_fallbacks) if t3_fallbacks else [False] * 8
+        self.all_targets = list(all_targets) if all_targets else [[] for _ in range(8)]
         self.update()
 
     def mouseMoveEvent(self, event):
@@ -441,6 +443,16 @@ class RadarArcCanvas(QWidget):
             is_blind = self.is_blind_zero[z]
             is_hover = (z == self.hovered_zone)
 
+            # Draw secondary & tertiary multi-target markers if detected
+            if not is_blind and z < len(self.all_targets):
+                for (tgt_d, tgt_st, tgt_num) in self.all_targets[z]:
+                    if abs(tgt_d - d) > 30:
+                        sec_pt = to_screen(mid_ang, max(30.0, min(self.max_range_mm, tgt_d)))
+                        sec_col = QColor(245, 158, 11, 200) if tgt_num == 2 else QColor(168, 85, 247, 200)
+                        p.setBrush(Qt.NoBrush)
+                        p.setPen(QPen(sec_col, 1.8, Qt.DashLine if tgt_num == 3 else Qt.SolidLine))
+                        p.drawEllipse(sec_pt, 4.2, 4.2)
+
             pt_col = QColor("#EF4444") if is_blind else (QColor("#00E5FF") if d < 2200 else QColor("#00E676"))
             if is_hover:
                 p.setBrush(QBrush(QColor(255, 255, 255)))
@@ -534,6 +546,15 @@ class ToFArcRadarApp(QMainWindow):
         self.is_t3_fallback = [False] * 8
         self.is_blind_zero = [False] * 8
         self.is_clear_fallback = [False] * 8
+        self.all_targets = [[] for _ in range(8)]
+
+        # 2-Frame error latch (hold last good distance for 1 frame before fallback)
+        self.error_frame_counts = [0] * 8
+        self.last_valid_dists = [3000] * 8
+
+        # 250ms Watchdog auto-reset tracking
+        self.last_auto_reset_time = 0.0
+        self.reset_status_until = 0.0
 
         self.serial_engine = DualSerialEngine()
         self.serial_engine.connection_changed.connect(self.on_connection_changed)
@@ -708,7 +729,7 @@ class ToFArcRadarApp(QMainWindow):
         foot_bar = QHBoxLayout()
         foot_bar.setContentsMargins(4, 0, 4, 0)
 
-        self.lbl_rule_info = QLabel("🛡️ Smart Fallback: Target #1 → #2 → #3 | Valid: s5, s6, s9, s10 | Hazard: <50mm or Both Neighbors Error → 0mm | Open: 3.0m")
+        self.lbl_rule_info = QLabel("🛡️ Smart Fallback: Multi-Target (Nearest) | 2-Frame Latch | 250ms Auto-Reset | Symmetrical 2-Neighbor Boundary | Valid: s5, s6, s9, s10")
         self.lbl_rule_info.setStyleSheet("color: #60a5fa; font-size: 7.5pt; font-style: italic;")
         foot_bar.addWidget(self.lbl_rule_info)
 
@@ -798,28 +819,31 @@ class ToFArcRadarApp(QMainWindow):
                     self.tof2_dists = d_mat[:, :3]
                     self.tof2_stats = s_mat[:, :3]
 
+        # 250ms Watchdog: detect dead sensor and dispatch RESET
+        if self.serial_engine.isRunning():
+            now = time.perf_counter()
+            st1 = self.serial_engine.sensor_stats.get(1)
+            st2 = self.serial_engine.sensor_stats.get(2)
+            s1_dead = bool(st1 and st1.get("rx_packets", 0) > 0 and (now - st1.get("last_rx_time", 0.0)) > 0.25)
+            s2_dead = bool(st2 and st2.get("rx_packets", 0) > 0 and (now - st2.get("last_rx_time", 0.0)) > 0.25)
+            if (s1_dead or s2_dead) and (now - self.last_auto_reset_time > 1.5):
+                self.last_auto_reset_time = now
+                self.reset_status_until = now + 1.2
+                self.serial_engine.send_command("RESET")
+
         self._fuse_and_filter_zones()
 
     def _fuse_and_filter_zones(self):
         """
-        Extract the 8 target zones from ToF 1 and ToF 2 with Smart Target 2 Fallback:
-          - Valid targets: ST UM3109 statuses 5 (100% valid), 6 (wrap-around 50%), 9 (merged 50%)
-          - In default settings of ToF GUI:
-            * Grid is 4x4 row-major:
-                Row 1 (r=0): [ 0,  1,  2,  3]
-                Row 2 (r=1): [ 4,  5,  6,  7]
-                Row 3 (r=2): [ 8,  9, 10, 11]
-                Row 4 (r=3): [12, 13, 14, 15]
-            * ToF 1 (Left): Column 2 (col index 1), row 4 is leftmost:
-                Zone 0: Row 4 (r=3, c=1) -> index 3*4 + 1 = 13
-                Zone 1: Row 3 (r=2, c=1) -> index 2*4 + 1 = 9
-                Zone 2: Row 2 (r=1, c=1) -> index 1*4 + 1 = 5
-                Zone 3: Row 1 (r=0, c=1) -> index 0*4 + 1 = 1
-            * ToF 2 (Right): Column 3 (col index 2), row 4 is rightmost:
-                Zone 4: Row 1 (r=0, c=2) -> index 0*4 + 2 = 2
-                Zone 5: Row 2 (r=1, c=2) -> index 1*4 + 2 = 6
-                Zone 6: Row 3 (r=2, c=2) -> index 2*4 + 2 = 10
-                Zone 7: Row 4 (r=3, c=2) -> index 3*4 + 2 = 14
+        Extract the 8 target zones from ToF 1 and ToF 2 with Smart Multi-Target Evaluation:
+          - Valid targets: ST UM3109 statuses 5 (100% valid), 6 (wrap-around 50%), 9 (merged 50%), 10 (new target)
+          - Priority: Closest valid target drives obstacle clearance envelope; all hits stored
+          - 2-Frame Latch: Hold last valid distance for 1 frame before fallback to eliminate single-frame dropouts
+          - Symmetrical 2-Neighbor Boundary:
+              * Z0 checks Z1 (adjacent) and Z2 (one over)
+              * Z7 checks Z6 (adjacent) and Z5 (one over)
+              * Z1..Z6 check immediate left and right neighbors
+          - Open vs Error Status: Statuses 0, 14, 255 indicate open space/no target, not hardware faults
         """
         # (sensor_id, zone_index_in_sensor)
         zone_sources = [
@@ -837,6 +861,7 @@ class ToFArcRadarApp(QMainWindow):
         raw_st = [0] * 8
         t2_fb = [False] * 8
         t3_fb = [False] * 8
+        all_targets = [[] for _ in range(8)]
 
         def is_valid_target(d, st):
             # Acceptance of valid ST status codes:
@@ -853,7 +878,7 @@ class ToFArcRadarApp(QMainWindow):
                 return False
             return True
 
-        # 1. Smart Target Fallback: Primary Target #1 -> Secondary Target #2 -> Tertiary Target #3
+        # 1. Multi-Target Evaluation: collect all valid hits, prioritize nearest for clearance envelope
         for z, (sid, src_idx) in enumerate(zone_sources):
             d_mat = self.tof1_dists if sid == 1 else self.tof2_dists
             s_mat = self.tof1_stats if sid == 1 else self.tof2_stats
@@ -867,30 +892,41 @@ class ToFArcRadarApp(QMainWindow):
             d2 = int(d_mat[src_idx, 2]) if (len(d_mat) > src_idx and d_mat.shape[1] > 2) else 0
             st2 = int(s_mat[src_idx, 2]) if (len(s_mat) > src_idx and s_mat.shape[1] > 2) else 0
 
+            valid_hits = []
             if is_valid_target(d0, st0):
-                raw_d[z] = d0
-                raw_st[z] = st0
-                t2_fb[z] = False
-                t3_fb[z] = False
-            elif is_valid_target(d1, st1):
-                raw_d[z] = d1
-                raw_st[z] = st1
-                t2_fb[z] = True
-                t3_fb[z] = False
-            elif is_valid_target(d2, st2):
-                raw_d[z] = d2
-                raw_st[z] = st2
-                t2_fb[z] = False
-                t3_fb[z] = True
-            else:
-                raw_d[z] = None
-                raw_st[z] = st0
-                t2_fb[z] = False
-                t3_fb[z] = False
+                valid_hits.append((d0, st0, 1))
+            if is_valid_target(d1, st1):
+                valid_hits.append((d1, st1, 2))
+            if is_valid_target(d2, st2):
+                valid_hits.append((d2, st2, 3))
 
-        # 2. Apply Adjacent Blind-Spot / Open-Space Rule:
-        # "If it doesn't get a reading and one of the adjecent zones is below 50mm make it 0mm
-        #  but if both adjecent zones are above 50mm then the no reading is 3m."
+            all_targets[z] = valid_hits
+
+            if valid_hits:
+                # Immediate recovery on valid reading
+                self.error_frame_counts[z] = 0
+                # Select closest valid target for obstacle envelope
+                closest = min(valid_hits, key=lambda x: x[0])
+                raw_d[z] = closest[0]
+                raw_st[z] = closest[1]
+                t2_fb[z] = (closest[2] == 2)
+                t3_fb[z] = (closest[2] == 3)
+                self.last_valid_dists[z] = raw_d[z]
+            else:
+                # 2-frame latch for errors/dropouts: hold last good distance for 1 frame
+                self.error_frame_counts[z] += 1
+                if self.error_frame_counts[z] < 2:
+                    raw_d[z] = self.last_valid_dists[z]
+                    raw_st[z] = 0
+                    t2_fb[z] = False
+                    t3_fb[z] = False
+                else:
+                    raw_d[z] = None
+                    raw_st[z] = st0
+                    t2_fb[z] = False
+                    t3_fb[z] = False
+
+        # 2. Symmetrical 2-Neighbor Blind-Spot / Open-Space Rule:
         final_d = [3000] * 8
         blind_zeros = [False] * 8
         clear_fallbacks = [False] * 8
@@ -902,14 +938,18 @@ class ToFArcRadarApp(QMainWindow):
             else:
                 final_d[z] = None  # Pending neighbor resolution
 
-        # Second pass: resolve zones with no reading
+        # Second pass: resolve zones with no reading (persisted 2+ frames)
         for z in range(8):
             if final_d[z] is None:
-                neighbor_indices = []
-                if z > 0:
-                    neighbor_indices.append(z - 1)
-                if z < 7:
-                    neighbor_indices.append(z + 1)
+                # Symmetrical 2-neighbor model:
+                # Edge zones check adjacent and one-over (Z0 -> Z1, Z2; Z7 -> Z6, Z5)
+                # Interior zones check left and right
+                if z == 0:
+                    neighbor_indices = [1, 2]
+                elif z == 7:
+                    neighbor_indices = [6, 5]
+                else:
+                    neighbor_indices = [z - 1, z + 1]
 
                 has_sub50_neighbor = False
                 error_neighbor_count = 0
@@ -921,14 +961,14 @@ class ToFArcRadarApp(QMainWindow):
                         if nd < 50:
                             has_sub50_neighbor = True
                     else:
-                        # No valid reading: if status is not s14 (out-of-range), it's an error
-                        if nst != 14:
+                        # Genuine error only if status is not clear/open-space codes (0, 14, 255)
+                        if nst not in (0, 14, 255):
                             error_neighbor_count += 1
 
                 # Becomes 0mm only if:
                 # 1) At least one neighbor has an actual reading < 50mm, OR
-                # 2) Both adjacent neighbors have an error (all available neighbors have error)
-                both_have_error = (error_neighbor_count == len(neighbor_indices)) and (len(neighbor_indices) > 0)
+                # 2) Both neighbors have confirmed hardware/signal errors
+                both_have_error = (error_neighbor_count == len(neighbor_indices))
                 is_hazard = has_sub50_neighbor or both_have_error
 
                 if is_hazard:
@@ -945,11 +985,13 @@ class ToFArcRadarApp(QMainWindow):
         self.is_t3_fallback = t3_fb
         self.is_blind_zero = blind_zeros
         self.is_clear_fallback = clear_fallbacks
+        self.all_targets = all_targets
 
         # Update radar canvas
         self.radar_canvas.set_zone_data(self.zone_dists, self.raw_dists, self.raw_stats,
                                        self.is_blind_zero, self.is_clear_fallback, 
-                                       self.is_t2_fallback, self.is_t3_fallback)
+                                       self.is_t2_fallback, self.is_t3_fallback,
+                                       all_targets=self.all_targets)
 
         # Update bottom cards
         min_d = 3000
@@ -960,6 +1002,7 @@ class ToFArcRadarApp(QMainWindow):
             st = self.raw_stats[z]
             is_t2 = self.is_t2_fallback[z]
             is_t3 = self.is_t3_fallback[z]
+            hits = self.all_targets[z]
 
             if d < min_d and d > 0:
                 min_d = d
@@ -970,13 +1013,12 @@ class ToFArcRadarApp(QMainWindow):
             elif self.is_clear_fallback[z]:
                 card["lbl_tag"].setText(f"{meta['sensor']} • {meta['hw']} • OPEN")
             else:
-                if is_t3:
-                    tgt_badge = " [T3 FB]"
-                elif is_t2:
-                    tgt_badge = " [T2 FB]"
+                if len(hits) > 1:
+                    hits_summary = " | ".join([f"T{h[2]}:{h[0]}" for h in hits])
+                    card["lbl_tag"].setText(f"{meta['sensor']} • {hits_summary}")
                 else:
-                    tgt_badge = " [T1]"
-                card["lbl_tag"].setText(f"{meta['sensor']} • s{st}{tgt_badge}")
+                    tgt_badge = " [T3]" if is_t3 else (" [T2]" if is_t2 else " [T1]")
+                    card["lbl_tag"].setText(f"{meta['sensor']} • s{st}{tgt_badge}")
 
             if self.is_blind_zero[z]:
                 card["lbl_dist"].setText("0 mm")
@@ -1039,6 +1081,14 @@ class ToFArcRadarApp(QMainWindow):
             if tof2_active else
             "background-color: #1e293b; color: #94a3b8; font-weight: bold; padding: 3px 8px; border-radius: 4px; font-size: 8pt;"
         )
+
+        now = time.perf_counter()
+        if now < self.reset_status_until:
+            self.status_pill.setText("RESETTING...")
+            self.status_pill.setStyleSheet("background-color: #b45309; color: #fef3c7; font-weight: bold; padding: 2px 8px; border-radius: 4px; font-size: 8pt;")
+        elif self.serial_engine.isRunning():
+            self.status_pill.setText("ONLINE")
+            self.status_pill.setStyleSheet("background-color: #065f46; color: #34d399; font-weight: bold; padding: 2px 8px; border-radius: 4px; font-size: 8pt;")
 
     def closeEvent(self, event):
         if self.serial_engine.isRunning():
