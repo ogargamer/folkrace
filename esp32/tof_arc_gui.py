@@ -708,7 +708,7 @@ class ToFArcRadarApp(QMainWindow):
         foot_bar = QHBoxLayout()
         foot_bar.setContentsMargins(4, 0, 4, 0)
 
-        self.lbl_rule_info = QLabel("🛡️ Smart Fallback: Target #1 → #2 → #3 | Valid: s5, s6, s9, s10 | Proximity: <50mm or Neighbor Error (non-s14) → 0mm | Open: 3.0m")
+        self.lbl_rule_info = QLabel("🛡️ Smart Fallback: Target #1 → #2 → #3 | Valid: s5, s6, s9, s10 | Hazard: <50mm or Both Neighbors Error → 0mm | Open: 3.0m")
         self.lbl_rule_info.setStyleSheet("color: #60a5fa; font-size: 7.5pt; font-style: italic;")
         foot_bar.addWidget(self.lbl_rule_info)
 
@@ -911,21 +911,25 @@ class ToFArcRadarApp(QMainWindow):
                 if z < 7:
                     neighbor_indices.append(z + 1)
 
-                is_hazard = False
+                has_sub50_neighbor = False
+                error_neighbor_count = 0
+
                 for n_idx in neighbor_indices:
                     nd = raw_d[n_idx]
                     nst = raw_st[n_idx]
                     if nd is not None:
-                        # Neighbor has an actual reading: must be >= 50mm
                         if nd < 50:
-                            is_hazard = True
-                            break
+                            has_sub50_neighbor = True
                     else:
-                        # Neighbor has no actual reading:
-                        # If neighbor's error code is not s14, treat as hazard (0mm)
+                        # No valid reading: if status is not s14 (out-of-range), it's an error
                         if nst != 14:
-                            is_hazard = True
-                            break
+                            error_neighbor_count += 1
+
+                # Becomes 0mm only if:
+                # 1) At least one neighbor has an actual reading < 50mm, OR
+                # 2) Both adjacent neighbors have an error (all available neighbors have error)
+                both_have_error = (error_neighbor_count == len(neighbor_indices)) and (len(neighbor_indices) > 0)
+                is_hazard = has_sub50_neighbor or both_have_error
 
                 if is_hazard:
                     final_d[z] = 0
