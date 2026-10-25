@@ -214,17 +214,19 @@ class RadarArcCanvas(QWidget):
         self.is_blind_zero = [False] * 8
         self.is_clear_fallback = [False] * 8
         self.is_t2_fallback = [False] * 8
+        self.is_t3_fallback = [False] * 8
 
         self.hovered_zone = -1
         self.setMouseTracking(True)
 
-    def set_zone_data(self, dists, raw_dists, raw_stats, blind_zeros, clear_fallbacks, t2_fallbacks=None):
+    def set_zone_data(self, dists, raw_dists, raw_stats, blind_zeros, clear_fallbacks, t2_fallbacks=None, t3_fallbacks=None):
         self.distances = list(dists)
         self.raw_distances = list(raw_dists)
         self.raw_statuses = list(raw_stats)
         self.is_blind_zero = list(blind_zeros)
         self.is_clear_fallback = list(clear_fallbacks)
         self.is_t2_fallback = list(t2_fallbacks) if t2_fallbacks else [False] * 8
+        self.is_t3_fallback = list(t3_fallbacks) if t3_fallbacks else [False] * 8
         self.update()
 
     def mouseMoveEvent(self, event):
@@ -458,6 +460,8 @@ class RadarArcCanvas(QWidget):
                 txt_d = "0mm!"
             elif self.is_t2_fallback[z]:
                 txt_d = f"{d:.0f} (T2)"
+            elif self.is_t3_fallback[z]:
+                txt_d = f"{d:.0f} (T3)"
 
             txt_pt = to_screen(mid_ang, max(80.0, min(self.max_range_mm - 140.0, d - 40.0)))
             p.setPen(QColor(255, 255, 255, 230))
@@ -516,17 +520,18 @@ class ToFArcRadarApp(QMainWindow):
         self.setMinimumSize(860, 620)
         self.setStyleSheet("background-color: #0b0f19; color: #f1f5f9; font-family: 'Segoe UI', sans-serif;")
 
-        # Multi-target data matrices (16 zones, 2 targets each)
-        self.tof1_dists = np.zeros((16, 2), dtype=int)
-        self.tof1_stats = np.zeros((16, 2), dtype=int)
-        self.tof2_dists = np.zeros((16, 2), dtype=int)
-        self.tof2_stats = np.zeros((16, 2), dtype=int)
+        # Multi-target data matrices (16 zones, up to 3 targets each)
+        self.tof1_dists = np.zeros((16, 3), dtype=int)
+        self.tof1_stats = np.zeros((16, 3), dtype=int)
+        self.tof2_dists = np.zeros((16, 3), dtype=int)
+        self.tof2_stats = np.zeros((16, 3), dtype=int)
 
         # Processed 8 zones
         self.zone_dists = [3000] * 8
         self.raw_dists = [None] * 8
         self.raw_stats = [0] * 8
         self.is_t2_fallback = [False] * 8
+        self.is_t3_fallback = [False] * 8
         self.is_blind_zero = [False] * 8
         self.is_clear_fallback = [False] * 8
 
@@ -703,7 +708,7 @@ class ToFArcRadarApp(QMainWindow):
         foot_bar = QHBoxLayout()
         foot_bar.setContentsMargins(4, 0, 4, 0)
 
-        self.lbl_rule_info = QLabel("🛡️ Smart Fallback: Target #1 → Target #2 | Valid Status: s5, s6, s9 | Blind Proximity Gate: <50mm → 0mm / 3.0m")
+        self.lbl_rule_info = QLabel("🛡️ Smart Fallback: Target #1 → #2 → #3 | Valid: s5, s6, s9, s10 | Proximity: <50mm or Neighbor Error (non-s14) → 0mm | Open: 3.0m")
         self.lbl_rule_info.setStyleSheet("color: #60a5fa; font-size: 7.5pt; font-style: italic;")
         foot_bar.addWidget(self.lbl_rule_info)
 
@@ -765,8 +770,14 @@ class ToFArcRadarApp(QMainWindow):
             if len(d_list) >= tot and len(st_list) >= tot:
                 d_mat = np.array(d_list[:tot], dtype=int).reshape((res, nt))
                 s_mat = np.array(st_list[:tot], dtype=int).reshape((res, nt))
-                self.tof1_dists = d_mat[:, :min(2, nt)]
-                self.tof1_stats = s_mat[:, :min(2, nt)]
+                target_count = min(3, nt)
+                if target_count < 3:
+                    pad_w = 3 - target_count
+                    self.tof1_dists = np.pad(d_mat[:, :target_count], ((0, 0), (0, pad_w)), mode='constant')
+                    self.tof1_stats = np.pad(s_mat[:, :target_count], ((0, 0), (0, pad_w)), mode='constant')
+                else:
+                    self.tof1_dists = d_mat[:, :3]
+                    self.tof1_stats = s_mat[:, :3]
 
         pkt2 = self.serial_engine.take_latest(2)
         if pkt2 is not None:
@@ -778,8 +789,14 @@ class ToFArcRadarApp(QMainWindow):
             if len(d_list) >= tot and len(st_list) >= tot:
                 d_mat = np.array(d_list[:tot], dtype=int).reshape((res, nt))
                 s_mat = np.array(st_list[:tot], dtype=int).reshape((res, nt))
-                self.tof2_dists = d_mat[:, :min(2, nt)]
-                self.tof2_stats = s_mat[:, :min(2, nt)]
+                target_count = min(3, nt)
+                if target_count < 3:
+                    pad_w = 3 - target_count
+                    self.tof2_dists = np.pad(d_mat[:, :target_count], ((0, 0), (0, pad_w)), mode='constant')
+                    self.tof2_stats = np.pad(s_mat[:, :target_count], ((0, 0), (0, pad_w)), mode='constant')
+                else:
+                    self.tof2_dists = d_mat[:, :3]
+                    self.tof2_stats = s_mat[:, :3]
 
         self._fuse_and_filter_zones()
 
@@ -819,21 +836,24 @@ class ToFArcRadarApp(QMainWindow):
         raw_d = [None] * 8
         raw_st = [0] * 8
         t2_fb = [False] * 8
+        t3_fb = [False] * 8
 
         def is_valid_target(d, st):
-            # Acceptance of the 3 validish ST status codes (valid_5_6_9):
+            # Acceptance of valid ST status codes:
             # 5: Range Valid (100% confidence, clean single pulse return)
             # 6: Wrap Around (50% confidence, valid range)
             # 9: Range Valid with Large Pulse (50% confidence, merged pulse)
+            # 10: Range Valid (new target / no previous range)
+            # Note: s13 excluded to prevent false obstacle detections on driveable ramps
             if d <= 0:
                 return False
-            if st not in (5, 6, 9):
+            if st not in (5, 6, 9, 10):
                 return False
             if d < 20 or d > 4000:
                 return False
             return True
 
-        # 1. Smart Target Fallback: Primary Target #1 -> Secondary Target #2
+        # 1. Smart Target Fallback: Primary Target #1 -> Secondary Target #2 -> Tertiary Target #3
         for z, (sid, src_idx) in enumerate(zone_sources):
             d_mat = self.tof1_dists if sid == 1 else self.tof2_dists
             s_mat = self.tof1_stats if sid == 1 else self.tof2_stats
@@ -844,18 +864,29 @@ class ToFArcRadarApp(QMainWindow):
             d1 = int(d_mat[src_idx, 1]) if (len(d_mat) > src_idx and d_mat.shape[1] > 1) else 0
             st1 = int(s_mat[src_idx, 1]) if (len(s_mat) > src_idx and s_mat.shape[1] > 1) else 0
 
+            d2 = int(d_mat[src_idx, 2]) if (len(d_mat) > src_idx and d_mat.shape[1] > 2) else 0
+            st2 = int(s_mat[src_idx, 2]) if (len(s_mat) > src_idx and s_mat.shape[1] > 2) else 0
+
             if is_valid_target(d0, st0):
                 raw_d[z] = d0
                 raw_st[z] = st0
                 t2_fb[z] = False
+                t3_fb[z] = False
             elif is_valid_target(d1, st1):
                 raw_d[z] = d1
                 raw_st[z] = st1
                 t2_fb[z] = True
+                t3_fb[z] = False
+            elif is_valid_target(d2, st2):
+                raw_d[z] = d2
+                raw_st[z] = st2
+                t2_fb[z] = False
+                t3_fb[z] = True
             else:
                 raw_d[z] = None
                 raw_st[z] = st0
                 t2_fb[z] = False
+                t3_fb[z] = False
 
         # 2. Apply Adjacent Blind-Spot / Open-Space Rule:
         # "If it doesn't get a reading and one of the adjecent zones is below 50mm make it 0mm
@@ -874,14 +905,29 @@ class ToFArcRadarApp(QMainWindow):
         # Second pass: resolve zones with no reading
         for z in range(8):
             if final_d[z] is None:
-                neighbors = []
-                if z > 0 and raw_d[z - 1] is not None:
-                    neighbors.append(raw_d[z - 1])
-                if z < 7 and raw_d[z + 1] is not None:
-                    neighbors.append(raw_d[z + 1])
+                neighbor_indices = []
+                if z > 0:
+                    neighbor_indices.append(z - 1)
+                if z < 7:
+                    neighbor_indices.append(z + 1)
 
-                has_sub50_neighbor = any(n < 50 for n in neighbors)
-                if has_sub50_neighbor:
+                is_hazard = False
+                for n_idx in neighbor_indices:
+                    nd = raw_d[n_idx]
+                    nst = raw_st[n_idx]
+                    if nd is not None:
+                        # Neighbor has an actual reading: must be >= 50mm
+                        if nd < 50:
+                            is_hazard = True
+                            break
+                    else:
+                        # Neighbor has no actual reading:
+                        # If neighbor's error code is not s14, treat as hazard (0mm)
+                        if nst != 14:
+                            is_hazard = True
+                            break
+
+                if is_hazard:
                     final_d[z] = 0
                     blind_zeros[z] = True
                 else:
@@ -892,12 +938,14 @@ class ToFArcRadarApp(QMainWindow):
         self.raw_dists = raw_d
         self.raw_stats = raw_st
         self.is_t2_fallback = t2_fb
+        self.is_t3_fallback = t3_fb
         self.is_blind_zero = blind_zeros
         self.is_clear_fallback = clear_fallbacks
 
         # Update radar canvas
         self.radar_canvas.set_zone_data(self.zone_dists, self.raw_dists, self.raw_stats,
-                                       self.is_blind_zero, self.is_clear_fallback, self.is_t2_fallback)
+                                       self.is_blind_zero, self.is_clear_fallback, 
+                                       self.is_t2_fallback, self.is_t3_fallback)
 
         # Update bottom cards
         min_d = 3000
@@ -907,6 +955,7 @@ class ToFArcRadarApp(QMainWindow):
             meta = card["meta"]
             st = self.raw_stats[z]
             is_t2 = self.is_t2_fallback[z]
+            is_t3 = self.is_t3_fallback[z]
 
             if d < min_d and d > 0:
                 min_d = d
@@ -917,7 +966,12 @@ class ToFArcRadarApp(QMainWindow):
             elif self.is_clear_fallback[z]:
                 card["lbl_tag"].setText(f"{meta['sensor']} • {meta['hw']} • OPEN")
             else:
-                tgt_badge = " [T2 FB]" if is_t2 else " [T1]"
+                if is_t3:
+                    tgt_badge = " [T3 FB]"
+                elif is_t2:
+                    tgt_badge = " [T2 FB]"
+                else:
+                    tgt_badge = " [T1]"
                 card["lbl_tag"].setText(f"{meta['sensor']} • s{st}{tgt_badge}")
 
             if self.is_blind_zero[z]:

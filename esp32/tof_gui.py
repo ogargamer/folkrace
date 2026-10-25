@@ -325,13 +325,13 @@ class MatrixHeatmapWidget(QFrame):
 
         self.resolution = 16
         self.grid_dim = 4
-        self.nb_targets = 2  # Only Target 1 and Target 2
+        self.nb_targets = 3  # Target 1, Target 2, and Target 3
 
-        # Multi-target data matrices (zones, 2)
-        self.distances = np.zeros((16, 2), dtype=int)
-        self.statuses = np.zeros((16, 2), dtype=int)
-        self.sigmas = np.zeros((16, 2), dtype=int)
-        self.signals = np.zeros((16, 2), dtype=int)
+        # Multi-target data matrices (zones, 3)
+        self.distances = np.zeros((16, 3), dtype=int)
+        self.statuses = np.zeros((16, 3), dtype=int)
+        self.sigmas = np.zeros((16, 3), dtype=int)
+        self.signals = np.zeros((16, 3), dtype=int)
         self.target_counts = np.zeros(16, dtype=int)
         self.ambient = np.zeros(16, dtype=int)
         self.spads = np.zeros(16, dtype=int)
@@ -365,7 +365,7 @@ class MatrixHeatmapWidget(QFrame):
         elif self.status_filter == "valid_5_6_9":
             if st not in (5, 6, 9): return False
         elif self.status_filter == "valid_extended":
-            if st not in (5, 6, 9, 10, 13): return False
+            if st not in (5, 6, 9, 10): return False
         
         # 2. Distance Range Gate
         if dist < self.min_dist_gate or dist > self.max_dist_gate:
@@ -388,22 +388,38 @@ class MatrixHeatmapWidget(QFrame):
         n_zones = res
         tot_elems = n_zones * raw_nt
 
-        # Reshape incoming raw data to (n_zones, raw_nt) and slice only Target 1 & Target 2
+        # Reshape incoming raw data to (n_zones, raw_nt) and slice Target 1, Target 2, Target 3
         d_arr = np.array(dists[:tot_elems], dtype=int) if len(dists) >= tot_elems else np.zeros(tot_elems, dtype=int)
         d_mat = d_arr.reshape((n_zones, raw_nt))
-        self.distances = d_mat[:, :2]
+        if raw_nt < 3:
+            pad_w = 3 - raw_nt
+            self.distances = np.pad(d_mat[:, :raw_nt], ((0, 0), (0, pad_w)), mode='constant')
+        else:
+            self.distances = d_mat[:, :3]
 
         s_arr = np.array(stats[:tot_elems], dtype=int) if len(stats) >= tot_elems else np.zeros(tot_elems, dtype=int)
         s_mat = s_arr.reshape((n_zones, raw_nt))
-        self.statuses = s_mat[:, :2]
+        if raw_nt < 3:
+            pad_w = 3 - raw_nt
+            self.statuses = np.pad(s_mat[:, :raw_nt], ((0, 0), (0, pad_w)), mode='constant')
+        else:
+            self.statuses = s_mat[:, :3]
 
         sig_arr = np.array(sigs[:tot_elems], dtype=int) if len(sigs) >= tot_elems else np.zeros(tot_elems, dtype=int)
         sig_mat = sig_arr.reshape((n_zones, raw_nt))
-        self.signals = sig_mat[:, :2]
+        if raw_nt < 3:
+            pad_w = 3 - raw_nt
+            self.signals = np.pad(sig_mat[:, :raw_nt], ((0, 0), (0, pad_w)), mode='constant')
+        else:
+            self.signals = sig_mat[:, :3]
 
         sigm_arr = np.array(sigms[:tot_elems], dtype=int) if len(sigms) >= tot_elems else np.zeros(tot_elems, dtype=int)
         sigm_mat = sigm_arr.reshape((n_zones, raw_nt))
-        self.sigmas = sigm_mat[:, :2]
+        if raw_nt < 3:
+            pad_w = 3 - raw_nt
+            self.sigmas = np.pad(sigm_mat[:, :raw_nt], ((0, 0), (0, pad_w)), mode='constant')
+        else:
+            self.sigmas = sigm_mat[:, :3]
 
         self.target_counts = np.array(ntar[:n_zones], dtype=int) if len(ntar) >= n_zones else np.zeros(n_zones, dtype=int)
         self.ambient = np.array(ambs[:n_zones], dtype=int) if len(ambs) >= n_zones else np.zeros(n_zones, dtype=int)
@@ -426,7 +442,7 @@ class MatrixHeatmapWidget(QFrame):
                     "sig": int(self.signals[z_idx, t]),
                     "sigm": int(self.sigmas[z_idx, t]),
                 }
-                for t in range(min(2, self.distances.shape[1]))
+                for t in range(min(3, self.distances.shape[1]))
             ]
         }
 
@@ -466,8 +482,8 @@ class MatrixHeatmapWidget(QFrame):
         """
         Returns (dists, stats, sigs, sigms, tgt_indices) for current target_layer.
         If target_layer == 100 ('Smart Fallback'):
-            For each zone, uses Target #1 if valid; otherwise automatically falls back
-            to Target #2 if Target #2 is valid.
+            For each zone, uses Target #1 if valid; falls back to Target #2 if valid;
+            then falls back to Target #3 if Target #2 is invalid.
         """
         n_zones = self.resolution
         if self.target_layer == 100:
@@ -491,32 +507,45 @@ class MatrixHeatmapWidget(QFrame):
                     sigms[z] = sigm0
                     tgt_indices[z] = 0
                 else:
-                    # 2. Primary has no reading or is filtered; search secondary target (Target #2, index 1)
+                    # 2. Search secondary target (Target #2, index 1)
                     d1 = self.distances[z, 1] if (len(self.distances) > z and self.distances.shape[1] > 1) else 0
                     st1 = self.statuses[z, 1] if (len(self.statuses) > z and self.statuses.shape[1] > 1) else 0
                     sig1 = self.signals[z, 1] if (len(self.signals) > z and self.signals.shape[1] > 1) else 0
                     sigm1 = self.sigmas[z, 1] if (len(self.sigmas) > z and self.sigmas.shape[1] > 1) else 0
 
-                    if self.is_valid_reading(d1, st1, sig=sig1, sigm=sigm1) or (d1 > 0 and st1 in (5, 6, 9, 10, 13)):
+                    if self.is_valid_reading(d1, st1, sig=sig1, sigm=sigm1):
                         dists[z] = d1
                         stats[z] = st1
                         sigs[z] = sig1
                         sigms[z] = sigm1
                         tgt_indices[z] = 1
                     else:
-                        dists[z] = d0
-                        stats[z] = st0
-                        sigs[z] = sig0
-                        sigms[z] = sigm0
-                        tgt_indices[z] = 0
+                        # 3. Search tertiary target (Target #3, index 2)
+                        d2 = self.distances[z, 2] if (len(self.distances) > z and self.distances.shape[1] > 2) else 0
+                        st2 = self.statuses[z, 2] if (len(self.statuses) > z and self.statuses.shape[1] > 2) else 0
+                        sig2 = self.signals[z, 2] if (len(self.signals) > z and self.signals.shape[1] > 2) else 0
+                        sigm2 = self.sigmas[z, 2] if (len(self.sigmas) > z and self.sigmas.shape[1] > 2) else 0
+
+                        if self.is_valid_reading(d2, st2, sig=sig2, sigm=sigm2):
+                            dists[z] = d2
+                            stats[z] = st2
+                            sigs[z] = sig2
+                            sigms[z] = sigm2
+                            tgt_indices[z] = 2
+                        else:
+                            dists[z] = d0
+                            stats[z] = st0
+                            sigs[z] = sig0
+                            sigms[z] = sigm0
+                            tgt_indices[z] = 0
 
             return dists, stats, sigs, sigms, tgt_indices
         else:
-            t_idx = 0 if self.target_layer <= 0 else min(1, self.target_layer)
-            dists = self.distances[:, t_idx] if len(self.distances) else np.zeros(n_zones, dtype=int)
-            stats = self.statuses[:, t_idx] if len(self.statuses) else np.zeros(n_zones, dtype=int)
-            sigs = self.signals[:, t_idx] if len(self.signals) else np.zeros(n_zones, dtype=int)
-            sigms = self.sigmas[:, t_idx] if len(self.sigmas) else np.zeros(n_zones, dtype=int)
+            t_idx = 0 if self.target_layer <= 0 else min(2, self.target_layer)
+            dists = self.distances[:, t_idx] if (len(self.distances) and self.distances.shape[1] > t_idx) else np.zeros(n_zones, dtype=int)
+            stats = self.statuses[:, t_idx] if (len(self.statuses) and self.statuses.shape[1] > t_idx) else np.zeros(n_zones, dtype=int)
+            sigs = self.signals[:, t_idx] if (len(self.signals) and self.signals.shape[1] > t_idx) else np.zeros(n_zones, dtype=int)
+            sigms = self.sigmas[:, t_idx] if (len(self.sigmas) and self.sigmas.shape[1] > t_idx) else np.zeros(n_zones, dtype=int)
             tgt_indices = np.full(n_zones, t_idx, dtype=int)
             return dists, stats, sigs, sigms, tgt_indices
 
@@ -557,7 +586,9 @@ class MatrixHeatmapWidget(QFrame):
                 z_idx = int(zones_grid[r, c])
 
                 valid = self.is_valid_reading(dist, st, sig=sig, sigm=sigm)
-                is_fallback = (self.target_layer == 100 and tgt_idx == 1 and valid)
+                is_t2 = (self.target_layer == 100 and tgt_idx == 1 and valid)
+                is_t3 = (self.target_layer == 100 and tgt_idx == 2 and valid)
+                is_fallback = is_t2 or is_t3
 
                 # Determine Tile Background Color based on Active Metric
                 if not valid and self.active_metric in ("dist", "sig", "sigm"):
@@ -591,8 +622,10 @@ class MatrixHeatmapWidget(QFrame):
                 painter.setBrush(QBrush(cell_color))
                 if z_idx == self.selected_zone:
                     painter.setPen(QPen(QColor("#00E5FF"), 2.5))
-                elif is_fallback:
+                elif is_t2:
                     painter.setPen(QPen(QColor("#38BDF8"), 2.0, Qt.DashLine))
+                elif is_t3:
+                    painter.setPen(QPen(QColor("#F59E0B"), 2.0, Qt.DashLine))
                 else:
                     painter.setPen(QPen(QColor("#141824"), 1))
                 painter.drawRoundedRect(int(x + 2), int(y + 2), int(cell_w - 4), int(cell_h - 4), 6, 6)
@@ -632,11 +665,16 @@ class MatrixHeatmapWidget(QFrame):
                 sub_y = int(y + cell_h * 0.44 if self.grid_dim == 4 else y + cell_h * 0.42)
                 sub_r = 4 if self.grid_dim == 4 else 3
 
-                if is_fallback:
+                if is_t2:
                     badge_bg = QColor(14, 116, 144, 230)
                     badge_fg = QColor("#E0F2FE")
                     badge_border = QColor("#38BDF8")
                     txt_sub = "🥈 T2 Fallback" if self.grid_dim == 4 else "T2 FB"
+                elif is_t3:
+                    badge_bg = QColor(180, 83, 9, 230)
+                    badge_fg = QColor("#FEF3C7")
+                    badge_border = QColor("#F59E0B")
+                    txt_sub = "🥉 T3 Fallback" if self.grid_dim == 4 else "T3 FB"
                 elif valid:
                     badge_bg = QColor(18, 24, 38, 210)
                     badge_fg = QColor("#CBD5E1")
@@ -669,7 +707,12 @@ class MatrixHeatmapWidget(QFrame):
                 painter.drawRoundedRect(pill_x, pill_y, pill_w, pill_h, pill_r, pill_r)
 
                 status_desc, st_hex, _ = get_status_info(st)
-                tgt_dot = " • T2" if is_fallback else (" • T1" if valid else "")
+                if is_t2:
+                    tgt_dot = " • T2"
+                elif is_t3:
+                    tgt_dot = " • T3"
+                else:
+                    tgt_dot = " • T1" if valid else ""
 
                 if self.grid_dim == 4:
                     sub_txt = f"Z{z_idx} • s{st}{tgt_dot}"
@@ -1074,15 +1117,17 @@ class VL53L8CXDashboard(QMainWindow):
 
         toolbar.addWidget(QLabel("🎯 Target Layer:"))
         self.layer_combo = QComboBox()
-        self.layer_combo.addItem("🔄 Smart Fallback (T1 → T2)", 100)
+        self.layer_combo.addItem("🔄 Smart Fallback (T1 → T2 → T3)", 100)
         self.layer_combo.addItem("🥇 Target #1 (Primary)", 0)
         self.layer_combo.addItem("🥈 Target #2 (Secondary)", 1)
+        self.layer_combo.addItem("🥉 Target #3 (Tertiary)", 2)
         self.layer_combo.currentIndexChanged.connect(self.on_layer_changed)
         toolbar.addWidget(self.layer_combo)
 
         toolbar.addWidget(QLabel("🛡️ Filter:"))
         self.filter_combo = QComboBox()
         self.filter_combo.addItem("Valid & Merged (s5, s6, s9)", "valid_5_6_9")
+        self.filter_combo.addItem("Valid & New (s5, s6, s9, s10)", "valid_extended")
         self.filter_combo.addItem("100% Valid Only (s5)", "valid_5")
         self.filter_combo.addItem("Show All (Include Errors)", "all")
         self.filter_combo.currentIndexChanged.connect(self.on_filter_changed)
@@ -1312,7 +1357,7 @@ class VL53L8CXDashboard(QMainWindow):
         self.conf_combo = QComboBox()
         self.conf_combo.addItem("🛡️ Ultra Picky (100% Valid / s5)", "valid_5")
         self.conf_combo.addItem("⚖️ Balanced (>=50% Conf / s5,s6,s9)", "valid_5_6_9")
-        self.conf_combo.addItem("👁️ Sensitive (+ Secondary / s10,s13)", "valid_extended")
+        self.conf_combo.addItem("👁️ Valid & New (s5, s6, s9, s10)", "valid_extended")
         self.conf_combo.addItem("🔬 Raw / Diagnostics (All 0-255)", "all")
         self.conf_combo.setCurrentIndex(1)
         self.conf_combo.currentIndexChanged.connect(self.on_pickiness_conf_changed)
@@ -1644,7 +1689,7 @@ class VL53L8CXDashboard(QMainWindow):
             self.conf_desc_lbl.setText("⚖️ Accepting: s5 (100% Valid), s6 (Wrap-around), s9 (Merged pulse)")
             self.conf_desc_lbl.setStyleSheet("color: #38bdf8; font-size: 7.5pt; font-style: italic; padding: 2px 4px; background: #161c2b; border-radius: 3px;")
         elif val == "valid_extended":
-            self.conf_desc_lbl.setText("👁️ Accepting: s5, s6, s9, s10 (New Entry), s13 (Secondary Targets)")
+            self.conf_desc_lbl.setText("👁️ Accepting: s5, s6, s9, s10 (Rejects s13 ramp noise & errors)")
             self.conf_desc_lbl.setStyleSheet("color: #facc15; font-size: 7.5pt; font-style: italic; padding: 2px 4px; background: #161c2b; border-radius: 3px;")
         else:
             self.conf_desc_lbl.setText("🔬 Accepting ALL status codes (s0 to s255, including errors & noise)")
@@ -1942,7 +1987,7 @@ class VL53L8CXDashboard(QMainWindow):
 
         # Route updates to active tab
         tab_idx = self.vis_tabs.currentIndex()
-        dists_layer, _, _, _, _ = self.heatmap.get_effective_layer_data()
+        dists_layer, stats_layer, sigs_layer, sigms_layer, _ = self.heatmap.get_effective_layer_data()
 
         if tab_idx == 1:
             self.strip_chart.add_telemetry_point(dists_layer, self.heatmap.selected_zone)
@@ -1953,9 +1998,9 @@ class VL53L8CXDashboard(QMainWindow):
             z for z in range(res)
             if self.heatmap.is_valid_reading(
                 dists_layer[z],
-                self.heatmap.statuses[z, 0],
-                sig=self.heatmap.signals[z, 0],
-                sigm=self.heatmap.sigmas[z, 0]
+                stats_layer[z],
+                sig=sigs_layer[z] if len(sigs_layer) > z else 0,
+                sigm=sigms_layer[z] if len(sigms_layer) > z else 0
             )
         ]
         if valid_indices:

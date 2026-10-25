@@ -86,7 +86,7 @@ bool tof2_active = false;
 
 uint8_t current_resolution = VL53L8CX_RESOLUTION_4X4;
 uint8_t current_frequency_hz = 60;
-uint32_t current_integration_ms = 8;
+uint32_t current_integration_ms = 12;
 uint8_t current_target_order = VL53L8CX_TARGET_ORDER_CLOSEST;
 uint8_t current_sharpener = 1;
 
@@ -358,22 +358,17 @@ static inline int append_array_u(char *buf, int pos, const char *key, const uint
 
 void send_json_telemetry(uint8_t sensor_id, VL53L8CX_ResultsData *p_res, unsigned long f_count) {
     const int n_zones = (current_resolution == VL53L8CX_RESOLUTION_8X8) ? 64 : 16;
-    const int nt_out = (VL53L8CX_NB_TARGET_PER_ZONE < 2) ? VL53L8CX_NB_TARGET_PER_ZONE : 2;
+    const int nt_out = (VL53L8CX_NB_TARGET_PER_ZONE < 3) ? VL53L8CX_NB_TARGET_PER_ZONE : 3;
     const int n_vals = n_zones * nt_out;
 
-    uint32_t d[128], st[128], sig[128], sigm[128], ntar[64], amb[64], spad[64];
+    uint32_t d[256], st[256];
     for (int z = 0; z < n_zones; z++) {
         for (int t = 0; t < nt_out; t++) {
             int src = z * VL53L8CX_NB_TARGET_PER_ZONE + t;
             int dst = z * nt_out + t;
-            d[dst]    = (uint32_t)(int32_t)p_res->distance_mm[src];
-            st[dst]   = p_res->target_status[src];
-            sig[dst]  = p_res->signal_per_spad[src];
-            sigm[dst] = p_res->range_sigma_mm[src];
+            d[dst]  = (uint32_t)(int32_t)p_res->distance_mm[src];
+            st[dst] = p_res->target_status[src];
         }
-        ntar[z] = p_res->nb_target_detected[z];
-        amb[z]  = p_res->ambient_per_spad[z];
-        spad[z] = p_res->nb_spads_enabled[z];
     }
     for (int i = 0; i < n_vals; i++) if ((int32_t)d[i] < 0) d[i] = 0;
 
@@ -381,13 +376,8 @@ void send_json_telemetry(uint8_t sensor_id, VL53L8CX_ResultsData *p_res, unsigne
                        "{\"t\":\"D\",\"id\":%u,\"seq\":%lu,\"ts\":%lu,\"r\":%d,\"nt\":%d,\"temp\":%d",
                        sensor_id, (unsigned long)f_count, (unsigned long)millis(),
                        n_zones, nt_out, (int)p_res->silicon_temp_degc);
-    pos = append_array_u(telemetry_buf, pos, "ntar", ntar, n_zones);
     pos = append_array_u(telemetry_buf, pos, "d", d, n_vals);
     pos = append_array_u(telemetry_buf, pos, "st", st, n_vals);
-    pos = append_array_u(telemetry_buf, pos, "sig", sig, n_vals);
-    pos = append_array_u(telemetry_buf, pos, "sigm", sigm, n_vals);
-    pos = append_array_u(telemetry_buf, pos, "amb", amb, n_zones);
-    pos = append_array_u(telemetry_buf, pos, "spad", spad, n_zones);
     telemetry_buf[pos++] = '}';
     telemetry_buf[pos++] = '\n';
     Serial.write((const uint8_t *)telemetry_buf, pos);
