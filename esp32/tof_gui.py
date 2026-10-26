@@ -607,7 +607,8 @@ class MatrixHeatmapWidget(QFrame):
                         norm = min(1.0, max(0.0, amb / 200.0))
                         cell_color = turbo_colormap(norm)
                     elif self.active_metric == "spad":
-                        norm = min(1.0, max(0.0, spad / 250.0))
+                        max_sp = 70.0 if self.grid_dim == 8 else 260.0
+                        norm = min(1.0, max(0.0, spad / max_sp))
                         cell_color = amber_colormap(norm)
                     elif self.active_metric == "ntar":
                         norm = min(1.0, max(0.0, nt / 2.0))
@@ -675,6 +676,11 @@ class MatrixHeatmapWidget(QFrame):
                     badge_fg = QColor("#FEF3C7")
                     badge_border = QColor("#F59E0B")
                     txt_sub = "🥉 T3 Fallback" if self.grid_dim == 4 else "T3 FB"
+                elif self.active_metric == "spad":
+                    badge_bg = QColor(18, 24, 38, 210)
+                    badge_fg = QColor("#CBD5E1")
+                    badge_border = QColor(35, 45, 65)
+                    txt_sub = (f"{dist} mm" if self.grid_dim == 4 else f"{dist}") if valid else ("No Target" if self.grid_dim == 4 else "---")
                 elif valid:
                     badge_bg = QColor(18, 24, 38, 210)
                     badge_fg = QColor("#CBD5E1")
@@ -2003,7 +2009,10 @@ class VL53L8CXDashboard(QMainWindow):
                 sigm=sigms_layer[z] if len(sigms_layer) > z else 0
             )
         ]
-        if valid_indices:
+        if self.heatmap.active_metric == "spad":
+            mean_sp = np.mean(self.heatmap.spads[:res]) if len(self.heatmap.spads) >= res else 0.0
+            self.kpi_mean_lbl.setText(f"Mean SPADs: {mean_sp:.1f} SP")
+        elif valid_indices:
             valid_d = [dists_layer[z] for z in valid_indices]
             self.kpi_mean_lbl.setText(f"Mean Depth: {np.mean(valid_d):.1f} mm")
         else:
@@ -2011,10 +2020,19 @@ class VL53L8CXDashboard(QMainWindow):
 
         valid_count = len(valid_indices)
         self.kpi_valid_lbl.setText(f"Valid Targets: {valid_count} / {res} ({int(100*valid_count/res)}%)")
-        self.kpi_sel_lbl.setText(f"ToF #{self.active_sensor_id} | Zone #{self.heatmap.selected_zone}")
+        sel_z = self.heatmap.selected_zone
+        sel_sp = int(self.heatmap.spads[sel_z]) if sel_z < len(self.heatmap.spads) else 0
+        if self.heatmap.active_metric == "spad":
+            self.kpi_sel_lbl.setText(f"ToF #{self.active_sensor_id} | Zone #{sel_z} | ⚡ {sel_sp} SPADs")
+        else:
+            self.kpi_sel_lbl.setText(f"ToF #{self.active_sensor_id} | Zone #{sel_z} ({sel_sp} SP)")
 
     def on_cell_selected(self, idx):
-        self.kpi_sel_lbl.setText(f"ToF #{self.active_sensor_id} | Zone #{idx}")
+        sel_sp = int(self.heatmap.spads[idx]) if idx < len(self.heatmap.spads) else 0
+        if self.heatmap.active_metric == "spad":
+            self.kpi_sel_lbl.setText(f"ToF #{self.active_sensor_id} | Zone #{idx} | ⚡ {sel_sp} SPADs")
+        else:
+            self.kpi_sel_lbl.setText(f"ToF #{self.active_sensor_id} | Zone #{idx} ({sel_sp} SP)")
         self.strip_chart.last_selected_idx = idx
 
     def on_raw_log(self, text):

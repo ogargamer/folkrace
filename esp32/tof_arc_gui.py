@@ -27,7 +27,7 @@ import serial.tools.list_ports
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QGridLayout, QLabel, QPushButton, QComboBox, QFrame, QSizePolicy,
-    QProgressBar, QToolTip
+    QProgressBar, QToolTip, QSlider
 )
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QThread, QPointF, QRectF
 from PyQt5.QtGui import (
@@ -49,6 +49,8 @@ class DualSerialEngine(QThread):
     Maintains independent latest-frame slots for ToF 1 and ToF 2.
     """
     connection_changed = pyqtSignal(bool, str)
+    ack_received = pyqtSignal(dict)
+    config_received = pyqtSignal(dict)
 
     RX_BUFFER_BYTES = 1 << 20
 
@@ -150,6 +152,10 @@ class DualSerialEngine(QThread):
                                 ptype = packet.get("type", packet.get("t", ""))
                                 if ptype == "D":
                                     self._store_frame(packet)
+                                elif ptype == "ACK":
+                                    self.ack_received.emit(packet)
+                                elif ptype == "CONFIG":
+                                    self.config_received.emit(packet)
                             except Exception:
                                 pass
                 else:
@@ -284,6 +290,25 @@ class RadarArcCanvas(QWidget):
         # Border
         p.setPen(QPen(QColor(28, 36, 52), 1))
         p.drawRect(0, 0, w - 1, h - 1)
+
+        # Multi-target legend in top-left
+        p.setFont(QFont("Segoe UI", 7, QFont.Bold))
+        p.setBrush(QBrush(QColor("#00E5FF")))
+        p.setPen(Qt.NoPen)
+        p.drawEllipse(QPointF(18, 15), 3.5, 3.5)
+        p.setPen(QColor(148, 163, 184))
+        p.drawText(26, 19, "Primary (Closest)")
+
+        p.setBrush(Qt.NoBrush)
+        p.setPen(QPen(QColor(245, 158, 11, 220), 1.6, Qt.SolidLine))
+        p.drawEllipse(QPointF(130, 15), 4.0, 4.0)
+        p.setPen(QColor(148, 163, 184))
+        p.drawText(138, 19, "T2 Hit")
+
+        p.setPen(QPen(QColor(168, 85, 247, 220), 1.6, Qt.DashLine))
+        p.drawEllipse(QPointF(182, 15), 4.0, 4.0)
+        p.setPen(QColor(148, 163, 184))
+        p.drawText(190, 19, "T3 Hit")
 
         # Origin for top-down arc (bottom-center)
         origin_x = w / 2.0
@@ -448,10 +473,18 @@ class RadarArcCanvas(QWidget):
                 for (tgt_d, tgt_st, tgt_num) in self.all_targets[z]:
                     if abs(tgt_d - d) > 30:
                         sec_pt = to_screen(mid_ang, max(30.0, min(self.max_range_mm, tgt_d)))
-                        sec_col = QColor(245, 158, 11, 200) if tgt_num == 2 else QColor(168, 85, 247, 200)
+                        if tgt_num == 1:
+                            sec_col = QColor(56, 189, 248, 220)
+                            line_style = Qt.SolidLine
+                        elif tgt_num == 2:
+                            sec_col = QColor(245, 158, 11, 220)
+                            line_style = Qt.SolidLine
+                        else:
+                            sec_col = QColor(168, 85, 247, 220)
+                            line_style = Qt.DashLine
                         p.setBrush(Qt.NoBrush)
-                        p.setPen(QPen(sec_col, 1.8, Qt.DashLine if tgt_num == 3 else Qt.SolidLine))
-                        p.drawEllipse(sec_pt, 4.2, 4.2)
+                        p.setPen(QPen(sec_col, 1.8, line_style))
+                        p.drawEllipse(sec_pt, 4.5, 4.5)
 
             pt_col = QColor("#EF4444") if is_blind else (QColor("#00E5FF") if d < 2200 else QColor("#00E676"))
             if is_hover:
@@ -559,8 +592,18 @@ class ToFArcRadarApp(QMainWindow):
         self.auto_reset_count = 0
         self.reset_failed = False
 
+        # Multi-target configuration (Order, Targets depth, Sharpener)
+        self.target_order = 1       # 1: Closest, 2: Strongest
+        self.max_targets = 3        # 2 or 3 targets
+        self.sharpener_percent = 1  # 1% to 10%
+        self.config_debounce_timer = QTimer(self)
+        self.config_debounce_timer.setSingleShot(True)
+        self.config_debounce_timer.timeout.connect(self.apply_config_to_sensor)
+
         self.serial_engine = DualSerialEngine()
         self.serial_engine.connection_changed.connect(self.on_connection_changed)
+        self.serial_engine.ack_received.connect(self.on_ack_received)
+        self.serial_engine.config_received.connect(self.on_config_received)
 
         self._build_ui()
 
@@ -640,6 +683,95 @@ class ToFArcRadarApp(QMainWindow):
         top_layout.addWidget(self.status_pill)
 
         main_layout.addWidget(top_bar, 0)
+
+        # ---------------------------------------------------------------------
+        # SENSOR CONFIGURATION & TUNING TOOLBAR
+        # ---------------------------------------------------------------------
+        self.cfg_bar = QFrame(central)
+        self.cfg_bar.setStyleSheet("background-color: #111827; border: 1px solid #1f2937; border-radius: 8px; padding: 4px;")
+        cfg_layout = QHBoxLayout(self.cfg_bar)
+        cfg_layout.setContentsMargins(8, 4, 8, 4)
+        cfg_layout.setSpacing(10)
+
+        lbl_tuning = QLabel("⚙️ TUNING:", self.cfg_bar)
+        lbl_tuning.setFont(QFont("Segoe UI", 8, QFont.Bold))
+        lbl_tuning.setStyleSheet("color: #94a3b8; letter-spacing: 0.5px;")
+        cfg_layout.addWidget(lbl_tuning)
+
+        # 1. Target Order Switch Button (Closest vs Strongest)
+        self.btn_order = QPushButton(self.cfg_bar)
+        self.btn_order.setFixedHeight(26)
+        self.btn_order.setCursor(Qt.PointingHandCursor)
+        self.btn_order.setToolTip("Switch VL53L8CX target order between Closest (1) and Strongest (2)")
+        self.btn_order.clicked.connect(self.toggle_target_order)
+        self._update_order_button_style()
+        cfg_layout.addWidget(self.btn_order)
+
+        # 2. Target Count Switch Button (2 vs 3 Targets)
+        self.btn_targets = QPushButton(self.cfg_bar)
+        self.btn_targets.setFixedHeight(26)
+        self.btn_targets.setCursor(Qt.PointingHandCursor)
+        self.btn_targets.setToolTip("Toggle multi-target fallback depth between 2 targets and 3 targets")
+        self.btn_targets.clicked.connect(self.toggle_max_targets)
+        self._update_targets_button_style()
+        cfg_layout.addWidget(self.btn_targets)
+
+        # Separator
+        sep = QFrame(self.cfg_bar)
+        sep.setFrameShape(QFrame.VLine)
+        sep.setFrameShadow(QFrame.Sunken)
+        sep.setStyleSheet("color: #334155; margin: 2px 4px;")
+        cfg_layout.addWidget(sep)
+
+        # 3. Veiling Glare Sharpener Slider (1-10%)
+        self.lbl_sharp = QLabel("✨ Sharpener: 1%", self.cfg_bar)
+        self.lbl_sharp.setFont(QFont("Segoe UI", 8, QFont.Bold))
+        self.lbl_sharp.setStyleSheet("color: #e2e8f0; min-width: 95px;")
+        cfg_layout.addWidget(self.lbl_sharp)
+
+        self.slider_sharp = QSlider(Qt.Horizontal, self.cfg_bar)
+        self.slider_sharp.setRange(1, 10)
+        self.slider_sharp.setValue(1)
+        self.slider_sharp.setFixedWidth(110)
+        self.slider_sharp.setFixedHeight(22)
+        self.slider_sharp.setCursor(Qt.PointingHandCursor)
+        self.slider_sharp.setToolTip("Veiling glare sharpener percentage (1% - 10%, default: 1%)")
+        self.slider_sharp.setStyleSheet("""
+            QSlider::groove:horizontal {
+                height: 4px;
+                background: #1e293b;
+                border-radius: 2px;
+            }
+            QSlider::sub-page:horizontal {
+                background: #00E5FF;
+                border-radius: 2px;
+            }
+            QSlider::handle:horizontal {
+                background: #f8fafc;
+                border: 2px solid #00E5FF;
+                width: 14px;
+                margin-top: -5px;
+                margin-bottom: -5px;
+                border-radius: 7px;
+            }
+            QSlider::handle:horizontal:hover {
+                background: #00E5FF;
+                border-color: #ffffff;
+            }
+        """)
+        self.slider_sharp.valueChanged.connect(self.on_sharpener_changed)
+        self.slider_sharp.sliderReleased.connect(self.apply_config_to_sensor)
+        cfg_layout.addWidget(self.slider_sharp)
+
+        cfg_layout.addStretch()
+
+        # Status / Feedback label for sensor reconfiguration
+        self.lbl_config_status = QLabel("", self.cfg_bar)
+        self.lbl_config_status.setFont(QFont("Segoe UI", 8, QFont.Bold))
+        self.lbl_config_status.setStyleSheet("color: #94a3b8;")
+        cfg_layout.addWidget(self.lbl_config_status)
+
+        main_layout.addWidget(self.cfg_bar, 0)
 
         # ---------------------------------------------------------------------
         # CENTER: RADAR CANVAS
@@ -732,7 +864,8 @@ class ToFArcRadarApp(QMainWindow):
         foot_bar = QHBoxLayout()
         foot_bar.setContentsMargins(4, 0, 4, 0)
 
-        self.lbl_rule_info = QLabel("🛡️ Smart Fallback: Multi-Target (Nearest) | 2-Frame Latch | 250ms Auto-Reset | Symmetrical 2-Neighbor Boundary | Valid: s5, s6, s9, s10")
+        order_str = "Closest" if self.target_order == 1 else "Strongest"
+        self.lbl_rule_info = QLabel(f"🛡️ Smart Fallback: {self.max_targets}-Targets Max | ToF DSP: {order_str} | Sharpener: {self.sharpener_percent}% | Closest Target Envelope | Fallback (0/3000mm) ONLY on 0 Valid Hits")
         self.lbl_rule_info.setStyleSheet("color: #60a5fa; font-size: 7.5pt; font-style: italic;")
         foot_bar.addWidget(self.lbl_rule_info)
 
@@ -743,6 +876,159 @@ class ToFArcRadarApp(QMainWindow):
         foot_bar.addWidget(self.lbl_kpi_min)
 
         main_layout.addLayout(foot_bar)
+
+    def _update_order_button_style(self):
+        if self.target_order == 1:
+            self.btn_order.setText("🎯 ToF DSP: Closest")
+            self.btn_order.setStyleSheet("""
+                QPushButton {
+                    background-color: #0c2838;
+                    color: #38bdf8;
+                    border: 1px solid #0284c7;
+                    border-radius: 4px;
+                    font-weight: bold;
+                    padding: 3px 12px;
+                    font-size: 8pt;
+                }
+                QPushButton:hover {
+                    background-color: #0369a1;
+                    color: #ffffff;
+                }
+            """)
+        else:
+            self.btn_order.setText("💪 ToF DSP: Strongest")
+            self.btn_order.setStyleSheet("""
+                QPushButton {
+                    background-color: #2c1a08;
+                    color: #fbbf24;
+                    border: 1px solid #d97706;
+                    border-radius: 4px;
+                    font-weight: bold;
+                    padding: 3px 12px;
+                    font-size: 8pt;
+                }
+                QPushButton:hover {
+                    background-color: #b45309;
+                    color: #ffffff;
+                }
+            """)
+
+    def _update_targets_button_style(self):
+        if self.max_targets == 3:
+            self.btn_targets.setText("🔢 Targets: 3 (T1, T2, T3)")
+            self.btn_targets.setStyleSheet("""
+                QPushButton {
+                    background-color: #241432;
+                    color: #c084fc;
+                    border: 1px solid #9333ea;
+                    border-radius: 4px;
+                    font-weight: bold;
+                    padding: 3px 12px;
+                    font-size: 8pt;
+                }
+                QPushButton:hover {
+                    background-color: #7e22ce;
+                    color: #ffffff;
+                }
+            """)
+        else:
+            self.btn_targets.setText("🔢 Targets: 2 (T1, T2)")
+            self.btn_targets.setStyleSheet("""
+                QPushButton {
+                    background-color: #062b20;
+                    color: #34d399;
+                    border: 1px solid #059669;
+                    border-radius: 4px;
+                    font-weight: bold;
+                    padding: 3px 12px;
+                    font-size: 8pt;
+                }
+                QPushButton:hover {
+                    background-color: #047857;
+                    color: #ffffff;
+                }
+            """)
+
+    def toggle_target_order(self):
+        self.target_order = 2 if self.target_order == 1 else 1
+        self._update_order_button_style()
+        self.queue_config_apply()
+
+    def toggle_max_targets(self):
+        self.max_targets = 2 if self.max_targets == 3 else 3
+        self._update_targets_button_style()
+        self.queue_config_apply()
+
+    def on_sharpener_changed(self, val):
+        self.sharpener_percent = val
+        self.lbl_sharp.setText(f"✨ Sharpener: {val}%")
+        self.queue_config_apply()
+
+    def queue_config_apply(self):
+        self._update_rule_info()
+        self.config_debounce_timer.start(500)
+
+    def apply_config_to_sensor(self):
+        self.config_debounce_timer.stop()
+        self._update_rule_info()
+        if self.serial_engine.isRunning():
+            now = time.perf_counter()
+            self.reset_grace_until = now + 4.5
+            self.reset_status_until = now + 2.5
+            order_name = "Closest" if self.target_order == 1 else "Strongest"
+            self.lbl_config_status.setText(f"⏳ ToF resetting ({order_name}, {self.max_targets} Tgt, {self.sharpener_percent}%)...")
+            self.lbl_config_status.setStyleSheet("color: #f59e0b; font-weight: bold; font-size: 8pt;")
+            cmd = f"SET_CONFIG:order={self.target_order},sharp={self.sharpener_percent},targets={self.max_targets}"
+            self.serial_engine.send_command(cmd)
+        else:
+            self.lbl_config_status.setText("⚙️ Settings saved (connect to apply)")
+            self.lbl_config_status.setStyleSheet("color: #94a3b8; font-size: 8pt;")
+
+    def _update_rule_info(self):
+        order_str = "Closest" if self.target_order == 1 else "Strongest"
+        self.lbl_rule_info.setText(
+            f"🛡️ Smart Fallback: {self.max_targets}-Targets Max | ToF DSP: {order_str} | Sharpener: {self.sharpener_percent}% | Closest Target Envelope | Fallback (0/3000mm) ONLY on 0 Valid Hits"
+        )
+
+    def on_ack_received(self, pkt):
+        try:
+            cmd = pkt.get("cmd", "")
+            if cmd == "SET_CONFIG":
+                order_name = "Closest" if self.target_order == 1 else "Strongest"
+                if hasattr(self, 'lbl_config_status'):
+                    self.lbl_config_status.setText(f"✅ Applied ({order_name} | {self.max_targets} Tgt | Sharp {self.sharpener_percent}%)")
+                    self.lbl_config_status.setStyleSheet("color: #34d399; font-weight: bold; font-size: 8pt;")
+        except Exception as e:
+            pass
+
+    def on_config_received(self, pkt):
+        try:
+            order = pkt.get("order")
+            if order in (1, 2):
+                self.target_order = order
+                if hasattr(self, 'btn_order'):
+                    self._update_order_button_style()
+            sharp = pkt.get("sharp")
+            if sharp is not None and hasattr(self, 'slider_sharp'):
+                clamped_sharp = max(1, min(10, sharp))
+                self.sharpener_percent = clamped_sharp
+                self.slider_sharp.blockSignals(True)
+                self.slider_sharp.setValue(clamped_sharp)
+                self.slider_sharp.blockSignals(False)
+                if hasattr(self, 'lbl_sharp'):
+                    self.lbl_sharp.setText(f"✨ Sharpener: {clamped_sharp}%")
+            tgts = pkt.get("targets")
+            if tgts in (2, 3):
+                self.max_targets = tgts
+                if hasattr(self, 'btn_targets'):
+                    self._update_targets_button_style()
+            if hasattr(self, 'lbl_rule_info'):
+                self._update_rule_info()
+            if hasattr(self, 'lbl_config_status'):
+                self.lbl_config_status.setText("✅ Hardware Synced")
+                self.lbl_config_status.setStyleSheet("color: #38bdf8; font-weight: bold; font-size: 8pt;")
+        except Exception as e:
+            pass
 
     def refresh_ports(self):
         self.combo_port.clear()
@@ -883,27 +1169,7 @@ class ToFArcRadarApp(QMainWindow):
         blind_zeros = [False] * 8
         clear_fallbacks = [False] * 8
         all_targets = [[] for _ in range(8)]
-
-        def classify_target(d, st, target_num):
-            """
-            Evaluates target status and distance:
-              - Status 4: Consistency Fail -> Near-field optical saturation (<20mm) = 0 mm hazard
-              - Status 5, 6, 9, 10 with d < 20 mm: Touching/near-contact = 0 mm hazard
-              - Status 5, 6, 9, 10 with 20 <= d <= 4000: Standard valid obstacle = d mm
-              - Returns (effective_dist_mm, raw_status, target_num, is_blind_hit) or None
-            """
-            if st == 4:
-                # Direct S4 near-field saturation / phase consistency failure
-                return (0, 4, target_num, True)
-            if st in (5, 6, 9, 10):
-                if d < 20:
-                    # Valid close proximity / physical contact with bumper
-                    return (0, st, target_num, True)
-                if d <= 4000:
-                    return (d, st, target_num, False)
-            return None
-
-        # 1. Multi-Target Evaluation: collect all valid hits, prioritize nearest for clearance envelope
+        # 1. Multi-Target Evaluation: collect all targets with a valid reading (Status 5, 6, 9, 10 and d > 0)
         for z, (sid, src_idx) in enumerate(zone_sources):
             d_mat = self.tof1_dists if sid == 1 else self.tof2_dists
             s_mat = self.tof1_stats if sid == 1 else self.tof2_stats
@@ -918,69 +1184,64 @@ class ToFArcRadarApp(QMainWindow):
             st2 = int(s_mat[src_idx, 2]) if (len(s_mat) > src_idx and s_mat.shape[1] > 2) else 0
 
             valid_hits = []
-            h0 = classify_target(d0, st0, 1)
-            if h0 is not None:
-                valid_hits.append(h0)
-            h1 = classify_target(d1, st1, 2)
-            if h1 is not None:
-                valid_hits.append(h1)
-            h2 = classify_target(d2, st2, 3)
-            if h2 is not None:
-                valid_hits.append(h2)
+            if st0 in (5, 6, 9, 10) and 0 < d0 <= 4000:
+                valid_hits.append((d0, st0, 1))
+            if st1 in (5, 6, 9, 10) and 0 < d1 <= 4000:
+                valid_hits.append((d1, st1, 2))
+            if self.max_targets >= 3:
+                if st2 in (5, 6, 9, 10) and 0 < d2 <= 4000:
+                    valid_hits.append((d2, st2, 3))
 
-            all_targets[z] = [(h[0], h[1], h[2]) for h in valid_hits]
+            all_targets[z] = valid_hits
 
             if valid_hits:
-                # Immediate recovery on valid reading
+                # Target count > 0: MUST use valid target's measured reading (NEVER 0 or 3000mm)
                 self.error_frame_counts[z] = 0
-                closest = min(valid_hits, key=lambda x: x[0])
-                d_val = closest[0]
-                raw_d[z] = d_val
-                raw_st[z] = closest[1]
-                t2_fb[z] = (closest[2] == 2)
-                t3_fb[z] = (closest[2] == 3)
-                self.last_valid_dists[z] = d_val
-                if d_val == 0:
-                    blind_zeros[z] = True
+                chosen = min(valid_hits, key=lambda x: x[0])
+
+                raw_d[z] = chosen[0]
+                raw_st[z] = chosen[1]
+                t2_fb[z] = (chosen[2] == 2)
+                t3_fb[z] = (chosen[2] == 3)
+                self.last_valid_dists[z] = chosen[0]
+                blind_zeros[z] = False
+                clear_fallbacks[z] = False
             else:
-                # 2-frame latch for errors/dropouts: hold last good distance for 1 frame
+                # 0 targets in zone get a valid reading with Status 5, 6, 9, 10
                 self.error_frame_counts[z] += 1
-                if self.error_frame_counts[z] < 2:
-                    raw_d[z] = self.last_valid_dists[z]
-                    raw_st[z] = 0
-                    t2_fb[z] = False
-                    t3_fb[z] = False
-                else:
-                    raw_d[z] = None
-                    raw_st[z] = st0
-                    t2_fb[z] = False
-                    t3_fb[z] = False
+                raw_d[z] = None
+                raw_st[z] = st0
+                t2_fb[z] = False
+                t3_fb[z] = False
 
         # 2. Symmetrical 2-Neighbor Blind-Spot & Open-Space Fallback:
+        # The 0 or 3000mm fallback ONLY happens if 0 targets in zone get a valid reading with Status 5, 6, 9, 10
         final_d = [3000] * 8
 
-        # First pass: check direct valid readings
+        # First pass: direct valid readings from zones with >= 1 valid target
         for z in range(8):
             if raw_d[z] is not None:
-                final_d[z] = max(0, min(3000, raw_d[z]))
-                if final_d[z] == 0:
-                    blind_zeros[z] = True
+                final_d[z] = raw_d[z]
+                blind_zeros[z] = False
+                clear_fallbacks[z] = False
             else:
-                final_d[z] = None  # Pending neighbor / status resolution
+                final_d[z] = None
 
-        # Second pass: resolve zones with no reading (persisted 2+ frames)
+        # Second pass: ONLY zones with 0 valid targets resolve to 0 or 3000 mm
         for z in range(8):
             if final_d[z] is None:
                 nst0 = raw_st[z]
                 # Direct check on primary zone status:
                 if nst0 in (0, 14, 255):
-                    # Official ST clear open space (no target / out-of-range wrap-around)
+                    # Clear open space (no target / out-of-range wrap-around)
                     final_d[z] = 3000
                     clear_fallbacks[z] = True
+                    blind_zeros[z] = False
                 elif nst0 == 4:
-                    # Status 4 consistency fail -> blind spot contact
+                    # Status 4 consistency fail -> blind spot contact (<20mm)
                     final_d[z] = 0
                     blind_zeros[z] = True
+                    clear_fallbacks[z] = False
                 else:
                     # Ambiguous hardware/signal error (s1, s2, s3, etc.) -> check neighbors
                     if z == 0:
@@ -1010,9 +1271,11 @@ class ToFArcRadarApp(QMainWindow):
                     if is_hazard:
                         final_d[z] = 0
                         blind_zeros[z] = True
+                        clear_fallbacks[z] = False
                     else:
                         final_d[z] = 3000
                         clear_fallbacks[z] = True
+                        blind_zeros[z] = False
 
         self.zone_dists = final_d
         self.raw_dists = raw_d
@@ -1045,7 +1308,7 @@ class ToFArcRadarApp(QMainWindow):
 
             # Dynamic tag with target number and status
             if self.is_blind_zero[z]:
-                st_desc = "s4" if st == 4 else ("<20mm" if st in (5, 6, 9, 10) else "BLIND")
+                st_desc = "s4" if st == 4 else (f"s{st}" if st > 0 else "HAZARD")
                 card["lbl_tag"].setText(f"{meta['sensor']} • {meta['hw']} • BLIND ({st_desc})")
             elif self.is_clear_fallback[z]:
                 st_desc = f"s{st}" if st in (14, 255) else "OPEN"
@@ -1125,7 +1388,7 @@ class ToFArcRadarApp(QMainWindow):
             self.status_pill.setText("SENSOR DEAD")
             self.status_pill.setStyleSheet("background-color: #7f1d1d; color: #fca5a5; font-weight: bold; padding: 2px 8px; border-radius: 4px; font-size: 8pt;")
         elif now < self.reset_status_until:
-            self.status_pill.setText("RESETTING...")
+            self.status_pill.setText("RECONFIGURING..." if self.auto_reset_count == 0 else "RESETTING...")
             self.status_pill.setStyleSheet("background-color: #b45309; color: #fef3c7; font-weight: bold; padding: 2px 8px; border-radius: 4px; font-size: 8pt;")
         elif self.serial_engine.isRunning():
             self.status_pill.setText("ONLINE")

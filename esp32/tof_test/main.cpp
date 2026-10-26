@@ -89,6 +89,7 @@ uint8_t current_frequency_hz = 60;
 uint32_t current_integration_ms = 12;
 uint8_t current_target_order = VL53L8CX_TARGET_ORDER_CLOSEST;
 uint8_t current_sharpener = 1;
+uint8_t current_nb_targets = 3;
 
 unsigned long frame_count1 = 0;
 unsigned long frame_count2 = 0;
@@ -358,10 +359,11 @@ static inline int append_array_u(char *buf, int pos, const char *key, const uint
 
 void send_json_telemetry(uint8_t sensor_id, VL53L8CX_ResultsData *p_res, unsigned long f_count) {
     const int n_zones = (current_resolution == VL53L8CX_RESOLUTION_8X8) ? 64 : 16;
-    const int nt_out = (VL53L8CX_NB_TARGET_PER_ZONE < 3) ? VL53L8CX_NB_TARGET_PER_ZONE : 3;
+    const int max_hw_targets = (VL53L8CX_NB_TARGET_PER_ZONE < 3) ? VL53L8CX_NB_TARGET_PER_ZONE : 3;
+    const int nt_out = (current_nb_targets < 2) ? 2 : ((current_nb_targets > max_hw_targets) ? max_hw_targets : current_nb_targets);
     const int n_vals = n_zones * nt_out;
 
-    uint32_t d[256], st[256];
+    uint32_t d[256], st[256], spad[64];
     for (int z = 0; z < n_zones; z++) {
         for (int t = 0; t < nt_out; t++) {
             int src = z * VL53L8CX_NB_TARGET_PER_ZONE + t;
@@ -369,6 +371,11 @@ void send_json_telemetry(uint8_t sensor_id, VL53L8CX_ResultsData *p_res, unsigne
             d[dst]  = (uint32_t)(int32_t)p_res->distance_mm[src];
             st[dst] = p_res->target_status[src];
         }
+#ifndef VL53L8CX_DISABLE_NB_SPADS_ENABLED
+        spad[z] = p_res->nb_spads_enabled[z];
+#else
+        spad[z] = 0;
+#endif
     }
     for (int i = 0; i < n_vals; i++) if ((int32_t)d[i] < 0) d[i] = 0;
 
@@ -378,6 +385,9 @@ void send_json_telemetry(uint8_t sensor_id, VL53L8CX_ResultsData *p_res, unsigne
                        n_zones, nt_out, (int)p_res->silicon_temp_degc);
     pos = append_array_u(telemetry_buf, pos, "d", d, n_vals);
     pos = append_array_u(telemetry_buf, pos, "st", st, n_vals);
+#ifndef VL53L8CX_DISABLE_NB_SPADS_ENABLED
+    pos = append_array_u(telemetry_buf, pos, "spad", spad, n_zones);
+#endif
     telemetry_buf[pos++] = '}';
     telemetry_buf[pos++] = '\n';
     Serial.write((const uint8_t *)telemetry_buf, pos);
@@ -443,7 +453,7 @@ bool fast_soft_recover_sensor(VL53L8CX_Configuration *p_dev, ToF_Device_Context 
 }
 
 void apply_sensor_configuration(String params) {
-    int res = -1, freq = -1, integ = -1, order = -1, sharp = -1;
+    int res = -1, freq = -1, integ = -1, order = -1, sharp = -1, targets = -1;
     
     int start = 0;
     while (start < params.length()) {
@@ -461,6 +471,7 @@ void apply_sensor_configuration(String params) {
         else if (key == "integ") integ = val.toInt();
         else if (key == "order") order = val.toInt();
         else if (key == "sharp") sharp = val.toInt();
+        else if (key == "targets" || key == "nt") targets = val.toInt();
         
         start = comma + 1;
     }
@@ -505,6 +516,10 @@ void apply_sensor_configuration(String params) {
         if (tof2_active) vl53l8cx_set_sharpener_percent(&Dev2, current_sharpener);
     }
     
+    if (targets == 2 || targets == 3) {
+        current_nb_targets = (uint8_t)targets;
+    }
+    
     if (tof1_active) {
         vl53l8cx_set_VHV_repeat_count(&Dev1, 14400);
         vl53l8cx_start_ranging(&Dev1);
@@ -518,9 +533,9 @@ void apply_sensor_configuration(String params) {
 
 void dispatch_command(const String &cmd) {
     if (cmd == "GET_CONFIG") {
-        Serial.printf("{\"type\":\"CONFIG\",\"res\":%u,\"freq\":%u,\"integ\":%lu,\"order\":%u,\"sharp\":%u,\"mode\":1,\"power\":1,\"margin\":50}\n",
+        Serial.printf("{\"type\":\"CONFIG\",\"res\":%u,\"freq\":%u,\"integ\":%lu,\"order\":%u,\"sharp\":%u,\"targets\":%u,\"mode\":1,\"power\":1,\"margin\":50}\n",
                       (current_resolution == VL53L8CX_RESOLUTION_8X8 ? 64 : 16),
-                      current_frequency_hz, current_integration_ms, current_target_order, current_sharpener);
+                      current_frequency_hz, current_integration_ms, current_target_order, current_sharpener, current_nb_targets);
     } else if (cmd == "RESET") {
         Serial.println(F("{\"type\":\"ACK\",\"status\":\"OK\",\"cmd\":\"RESET\"}"));
         tof1_active = initialize_tof_sensor(&Dev1, &ctx_tof1);
