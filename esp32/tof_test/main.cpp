@@ -9,28 +9,42 @@
 #include "vl53l8cx_plugin_xtalk.h"
 
 // =========================================================================
-// HARDWARE PIN DEFINITIONS (DUAL TOF ON SHARED HSPI BUS)
+// HARDWARE PIN DEFINITIONS (QUAD TOF ON SHARED HSPI BUS)
 // =========================================================================
+
+#define NUM_TOFS             4
 
 // --- Shared SPI Bus Lines ---
 #define TOF_SHARED_SCK_PIN   39
 #define TOF_SHARED_MOSI_PIN  40
 
-// --- ToF 1 (CS=10, INT=5, LPN=6, MISO=41) ---
+// --- ToF 1 ---
 #define TOF1_CS_PIN          10
+#define TOF1_MISO_PIN        41
 #define TOF1_INT_PIN         5
 #define TOF1_LPN_PIN         6
-#define TOF1_MISO_PIN        41
 
-// --- ToF 2 (CS=9, INT=4, LPN=8, MISO=13) ---
+// --- ToF 2 ---
 #define TOF2_CS_PIN          9
+#define TOF2_MISO_PIN        13
 #define TOF2_INT_PIN         4
 #define TOF2_LPN_PIN         8
-#define TOF2_MISO_PIN        13
 
-// ST-certified SPI clock frequency (1 MHz for rock-solid breadboard init, 2 MHz for ranging)
-#define SPI_INIT_SPEED_HZ    1000000
-#define SPI_RANGING_SPEED_HZ 3000000
+// --- ToF 3 ---
+#define TOF3_CS_PIN          7
+#define TOF3_MISO_PIN        16
+#define TOF3_INT_PIN         14
+#define TOF3_LPN_PIN         15
+
+// --- ToF 4 ---
+#define TOF4_CS_PIN          17
+#define TOF4_MISO_PIN        38
+#define TOF4_INT_PIN         18
+#define TOF4_LPN_PIN         21
+
+// ST-certified SPI clock frequency (400 kHz for breadboard jumper cables, 2 MHz for ranging)
+#define SPI_INIT_SPEED_HZ    400000
+#define SPI_RANGING_SPEED_HZ 2000000
 #define CHUNK_SIZE           1024
 
 // =========================================================================
@@ -47,48 +61,34 @@ struct ToF_Device_Context {
     int mosi_pin;
     uint32_t speed_hz;
     const char *name;
+    uint8_t id;
 };
 
 SPIClass HardwareSPI(HSPI);
 
-ToF_Device_Context ctx_tof1 = { 
-    &HardwareSPI, 
-    TOF1_CS_PIN, 
-    TOF1_LPN_PIN, 
-    TOF1_INT_PIN, 
-    TOF_SHARED_SCK_PIN, 
-    TOF1_MISO_PIN, 
-    TOF_SHARED_MOSI_PIN, 
-    SPI_INIT_SPEED_HZ, 
-    "ToF 1 (CS:10, MISO:41)" 
+ToF_Device_Context ctx_tofs[NUM_TOFS] = {
+    { &HardwareSPI, TOF1_CS_PIN, TOF1_LPN_PIN, TOF1_INT_PIN, TOF_SHARED_SCK_PIN, TOF1_MISO_PIN, TOF_SHARED_MOSI_PIN, SPI_INIT_SPEED_HZ, "ToF 1 (CS:10, MISO:41)", 1 },
+    { &HardwareSPI, TOF2_CS_PIN, TOF2_LPN_PIN, TOF2_INT_PIN, TOF_SHARED_SCK_PIN, TOF2_MISO_PIN, TOF_SHARED_MOSI_PIN, SPI_INIT_SPEED_HZ, "ToF 2 (CS:9, MISO:13)",  2 },
+    { &HardwareSPI, TOF3_CS_PIN, TOF3_LPN_PIN, TOF3_INT_PIN, TOF_SHARED_SCK_PIN, TOF3_MISO_PIN, TOF_SHARED_MOSI_PIN, SPI_INIT_SPEED_HZ, "ToF 3 (CS:7, MISO:16)",  3 },
+    { &HardwareSPI, TOF4_CS_PIN, TOF4_LPN_PIN, TOF4_INT_PIN, TOF_SHARED_SCK_PIN, TOF4_MISO_PIN, TOF_SHARED_MOSI_PIN, SPI_INIT_SPEED_HZ, "ToF 4 (CS:17, MISO:38)", 4 }
 };
 
-ToF_Device_Context ctx_tof2 = { 
-    &HardwareSPI, 
-    TOF2_CS_PIN, 
-    TOF2_LPN_PIN, 
-    TOF2_INT_PIN, 
-    TOF_SHARED_SCK_PIN, 
-    TOF2_MISO_PIN, 
-    TOF_SHARED_MOSI_PIN, 
-    SPI_INIT_SPEED_HZ, 
-    "ToF 2 (CS:9, MISO:13)" 
-};
+VL53L8CX_Configuration Dev[NUM_TOFS];
+VL53L8CX_ResultsData Results[NUM_TOFS];
+bool tof_active[NUM_TOFS] = {false, false, false, false};
+volatile bool int_triggered[NUM_TOFS] = {false, false, false, false};
 
-VL53L8CX_Configuration Dev1, Dev2;
-VL53L8CX_ResultsData Results1, Results2;
-bool tof1_active = false;
-bool tof2_active = false;
-volatile bool int1_triggered = false;
-volatile bool int2_triggered = false;
+void IRAM_ATTR isr_tof1() { int_triggered[0] = true; }
+void IRAM_ATTR isr_tof2() { int_triggered[1] = true; }
+void IRAM_ATTR isr_tof3() { int_triggered[2] = true; }
+void IRAM_ATTR isr_tof4() { int_triggered[3] = true; }
 
-void IRAM_ATTR isr_tof1() {
-    int1_triggered = true;
-}
+typedef void (*isr_t)();
+const isr_t isrs[NUM_TOFS] = { isr_tof1, isr_tof2, isr_tof3, isr_tof4 };
 
-void IRAM_ATTR isr_tof2() {
-    int2_triggered = true;
-}
+unsigned long frame_count[NUM_TOFS] = {0, 0, 0, 0};
+unsigned long last_frame_time_ms[NUM_TOFS] = {0, 0, 0, 0};
+unsigned long last_poll_ms[NUM_TOFS] = {0, 0, 0, 0};
 
 // =========================================================================
 // RUNTIME SENSOR CONFIGURATION STATE (Default: 4x4 @ 60 Hz)
@@ -101,27 +101,18 @@ uint8_t current_target_order = VL53L8CX_TARGET_ORDER_CLOSEST;
 uint8_t current_sharpener = 1;
 uint8_t current_nb_targets = 2;
 
-unsigned long frame_count1 = 0;
-unsigned long frame_count2 = 0;
-unsigned long last_frame_time1_ms = 0;
-unsigned long last_frame_time2_ms = 0;
-unsigned long last_recovery_attempt1_ms = 0;
-unsigned long last_recovery_attempt2_ms = 0;
-uint8_t recovery_tier1 = 0;
-uint8_t recovery_tier2 = 0;
-
 // =========================================================================
-// ON-CHIP 8-ZONE 90° RADAR FUSION ENGINE (STANDALONE ROBOT BACKEND)
+// ON-CHIP 8-ZONE 90° RADAR FUSION ENGINE (BACKWARD COMPATIBILITY)
 // =========================================================================
 
 struct FusedRadarZone {
-    uint16_t distance_mm;   // Fused clearance: 0mm contact, 3000mm clear, or valid min target
-    uint8_t  status;        // Target status code
-    uint16_t spad_count;    // Active SPAD count
-    uint8_t  target_num;    // 1 for T1, 2 for T2, 3 for T3, 0 for fallback
-    uint8_t  fallback_type; // 0 = valid hit, 1 = blind-spot contact (0mm), 2 = open space (3m), 3 = error latch held
-    uint16_t t2_dist;       // Candidate T2 distance (0 if none)
-    uint16_t t3_dist;       // Candidate T3 distance (0 if none)
+    uint16_t distance_mm;
+    uint8_t  status;
+    uint16_t spad_count;
+    uint8_t  target_num;
+    uint8_t  fallback_type;
+    uint16_t t2_dist;
+    uint16_t t3_dist;
 };
 
 struct FusedRadarState {
@@ -133,13 +124,12 @@ struct FusedRadarState {
 
 FusedRadarState fused_radar = {};
 
-// 2-Frame error latch per zone (holds last valid distance for 1 frame before fallback)
 static uint8_t error_latch_count[8] = {0};
 static uint16_t last_valid_dist[8] = {3000, 3000, 3000, 3000, 3000, 3000, 3000, 3000};
 
 // Telemetry stream configuration
-bool stream_arc_mode = true;      // Fused 8-zone radar telemetry (default high-speed)
-bool stream_diag_matrix = false;  // Full 16-zone raw matrix telemetry (for diagnostic matrix GUI)
+bool stream_diag_matrix = true;   // Full 16-zone raw matrix telemetry for all 4 ToFs (DEFAULT)
+bool stream_arc_mode = false;     // Fused 8-zone radar telemetry (only ToF 1 & 2)
 bool print_ascii_enabled = false; // ASCII table monitor output (disabled during telemetry streaming)
 
 static uint8_t tx_chunk_buffer[CHUNK_SIZE + 4];
@@ -157,12 +147,13 @@ uint8_t VL53L8CX_WrByte(VL53L8CX_Platform *p_platform, uint16_t RegisterAddress,
 
     ctx->spi->beginTransaction(SPISettings(ctx->speed_hz, MSBFIRST, SPI_MODE3));
     digitalWrite(ctx->cs_pin, LOW);
-    delayMicroseconds(2);
+    delayMicroseconds(5);
     ctx->spi->transferBytes(buf, NULL, 3);
-    delayMicroseconds(2);
+    delayMicroseconds(5);
     digitalWrite(ctx->cs_pin, HIGH);
+    delayMicroseconds(5);
     ctx->spi->endTransaction();
-    delayMicroseconds(10); // Guard time for internal PMU register latching
+    delayMicroseconds(10);
     return 0;
 }
 
@@ -179,10 +170,11 @@ uint8_t VL53L8CX_WrMulti(VL53L8CX_Platform *p_platform, uint16_t RegisterAddress
 
         ctx->spi->beginTransaction(SPISettings(ctx->speed_hz, MSBFIRST, SPI_MODE3));
         digitalWrite(ctx->cs_pin, LOW);
-        delayMicroseconds(2);
+        delayMicroseconds(5);
         ctx->spi->transferBytes(tx_chunk_buffer, NULL, chunk + 2);
-        delayMicroseconds(2);
+        delayMicroseconds(5);
         digitalWrite(ctx->cs_pin, HIGH);
+        delayMicroseconds(5);
         ctx->spi->endTransaction();
         delayMicroseconds(10);
 
@@ -191,47 +183,83 @@ uint8_t VL53L8CX_WrMulti(VL53L8CX_Platform *p_platform, uint16_t RegisterAddress
     return 0;
 }
 
+#include "soc/gpio_sig_map.h"
+
 extern "C" {
     void spiAttachMISO(spi_t *spi, int8_t miso);
 }
 
+static inline void attach_miso_matrix(ToF_Device_Context *ctx) {
+    int miso_pin = ctx->miso_pin;
+    pinMode(miso_pin, INPUT_PULLUP);
+    esp_rom_gpio_pad_select_gpio(miso_pin);
+
+    spiAttachMISO(ctx->spi->bus(), miso_pin);
+
+    #ifdef FSPIQ_IN_IDX
+    esp_rom_gpio_connect_in_signal(miso_pin, FSPIQ_IN_IDX, false);
+    #endif
+    #ifdef FSPID_IN_IDX
+    esp_rom_gpio_connect_in_signal(miso_pin, FSPID_IN_IDX, false);
+    #endif
+    #ifdef SPI3_Q_IN_IDX
+    esp_rom_gpio_connect_in_signal(miso_pin, SPI3_Q_IN_IDX, false);
+    #endif
+    #ifdef SPI3_D_IN_IDX
+    esp_rom_gpio_connect_in_signal(miso_pin, SPI3_D_IN_IDX, false);
+    #endif
+}
+
 uint8_t VL53L8CX_RdByte(VL53L8CX_Platform *p_platform, uint16_t RegisterAddress, uint8_t *p_value) {
     ToF_Device_Context *ctx = (ToF_Device_Context *)p_platform->handle;
-    spiAttachMISO(ctx->spi->bus(), ctx->miso_pin);
+    attach_miso_matrix(ctx);
 
-    uint8_t addr_buf[2];
-    addr_buf[0] = (uint8_t)(((RegisterAddress & ~0x8000) >> 8) & 0xFF);
-    addr_buf[1] = (uint8_t)(RegisterAddress & 0xFF);
+    uint8_t tx[3];
+    uint8_t rx[3] = {0};
+    tx[0] = (uint8_t)(((RegisterAddress & ~0x8000) >> 8) & 0xFF);
+    tx[1] = (uint8_t)(RegisterAddress & 0xFF);
+    tx[2] = 0x00;
 
     ctx->spi->beginTransaction(SPISettings(ctx->speed_hz, MSBFIRST, SPI_MODE3));
     digitalWrite(ctx->cs_pin, LOW);
-    delayMicroseconds(1);
-    ctx->spi->transferBytes(addr_buf, NULL, 2);
-    ctx->spi->transferBytes(NULL, p_value, 1);
-    delayMicroseconds(1);
+    delayMicroseconds(5);
+    ctx->spi->transferBytes(tx, rx, 3);
+    delayMicroseconds(5);
     digitalWrite(ctx->cs_pin, HIGH);
-    delayMicroseconds(2);
+    delayMicroseconds(5);
     ctx->spi->endTransaction();
+
+    *p_value = rx[2];
     return 0;
 }
 
+static uint8_t rx_chunk_buffer[CHUNK_SIZE + 4];
+
 uint8_t VL53L8CX_RdMulti(VL53L8CX_Platform *p_platform, uint16_t RegisterAddress, uint8_t *p_values, uint32_t size) {
     ToF_Device_Context *ctx = (ToF_Device_Context *)p_platform->handle;
-    spiAttachMISO(ctx->spi->bus(), ctx->miso_pin);
+    attach_miso_matrix(ctx);
 
-    uint8_t addr_buf[2];
-    addr_buf[0] = (uint8_t)(((RegisterAddress & ~0x8000) >> 8) & 0xFF);
-    addr_buf[1] = (uint8_t)(RegisterAddress & 0xFF);
+    uint32_t pos = 0;
+    while (pos < size) {
+        uint32_t chunk = (size - pos > CHUNK_SIZE) ? CHUNK_SIZE : (size - pos);
+        uint16_t r = RegisterAddress + pos;
 
-    ctx->spi->beginTransaction(SPISettings(ctx->speed_hz, MSBFIRST, SPI_MODE3));
-    digitalWrite(ctx->cs_pin, LOW);
-    delayMicroseconds(2);
-    ctx->spi->transferBytes(addr_buf, NULL, 2);
-    ctx->spi->transferBytes(NULL, p_values, size);
-    delayMicroseconds(2);
-    digitalWrite(ctx->cs_pin, HIGH);
-    delayMicroseconds(3);
-    ctx->spi->endTransaction();
+        tx_chunk_buffer[0] = (uint8_t)(((r & ~0x8000) >> 8) & 0xFF);
+        tx_chunk_buffer[1] = (uint8_t)(r & 0xFF);
+        memset(&tx_chunk_buffer[2], 0, chunk);
+
+        ctx->spi->beginTransaction(SPISettings(ctx->speed_hz, MSBFIRST, SPI_MODE3));
+        digitalWrite(ctx->cs_pin, LOW);
+        delayMicroseconds(5);
+        ctx->spi->transferBytes(tx_chunk_buffer, rx_chunk_buffer, chunk + 2);
+        delayMicroseconds(5);
+        digitalWrite(ctx->cs_pin, HIGH);
+        delayMicroseconds(5);
+        ctx->spi->endTransaction();
+
+        memcpy(&p_values[pos], &rx_chunk_buffer[2], chunk);
+        pos += chunk;
+    }
     return 0;
 }
 
@@ -255,14 +283,155 @@ uint8_t VL53L8CX_WaitMs(VL53L8CX_Platform *p_platform, uint32_t TimeMs) {
 // SENSOR INITIALIZATION HELPER
 // =========================================================================
 
+void run_deep_sensor_diagnostics(ToF_Device_Context *ctx) {
+    Serial.printf("\n--- [DEEP HARDWARE DIAGNOSTIC] for %s ---\n", ctx->name);
+
+    // 1. Check MISO with CS=HIGH vs CS=LOW
+    pinMode(ctx->cs_pin, OUTPUT);
+    digitalWrite(ctx->cs_pin, HIGH);
+    pinMode(ctx->miso_pin, INPUT_PULLUP);
+    int miso_cs_high = digitalRead(ctx->miso_pin);
+
+    digitalWrite(ctx->cs_pin, LOW);
+    delayMicroseconds(10);
+    int miso_cs_low = digitalRead(ctx->miso_pin);
+    digitalWrite(ctx->cs_pin, HIGH);
+
+    Serial.printf("  1. CS Toggling: CS=HIGH -> MISO=%d | CS=LOW -> MISO=%d\n", miso_cs_high, miso_cs_low);
+
+    // 2. Bit-Bang SPI Read of Device ID (Bank 0, Reg 0x0000)
+    pinMode(ctx->sck_pin, OUTPUT);
+    digitalWrite(ctx->sck_pin, HIGH);
+    pinMode(ctx->mosi_pin, OUTPUT);
+    digitalWrite(ctx->mosi_pin, HIGH);
+    pinMode(ctx->lpn_pin, OUTPUT);
+    digitalWrite(ctx->lpn_pin, HIGH);
+    delay(20);
+
+    auto bb_send_byte = [&](uint8_t b) {
+        for (int i = 7; i >= 0; i--) {
+            digitalWrite(ctx->sck_pin, LOW);
+            digitalWrite(ctx->mosi_pin, (b >> i) & 1);
+            delayMicroseconds(10);
+            digitalWrite(ctx->sck_pin, HIGH);
+            delayMicroseconds(10);
+        }
+    };
+
+    auto bb_recv_byte = [&](char *bits_str) -> uint8_t {
+        uint8_t res = 0;
+        for (int i = 7; i >= 0; i--) {
+            digitalWrite(ctx->sck_pin, LOW);
+            delayMicroseconds(10);
+            digitalWrite(ctx->sck_pin, HIGH);
+            delayMicroseconds(4);
+            int bit = digitalRead(ctx->miso_pin);
+            bits_str[7 - i] = bit ? '1' : '0';
+            res = (res << 1) | bit;
+            delayMicroseconds(6);
+        }
+        bits_str[8] = '\0';
+        return res;
+    };
+
+    // Bitbang Bank 0 select
+    digitalWrite(ctx->cs_pin, LOW);
+    delayMicroseconds(10);
+    bb_send_byte(0xFF);
+    bb_send_byte(0xFF);
+    bb_send_byte(0x00);
+    delayMicroseconds(10);
+    digitalWrite(ctx->cs_pin, HIGH);
+    delayMicroseconds(20);
+
+    // Bitbang Read 0x0000
+    char bits_dev[9] = {0};
+    char bits_rev[9] = {0};
+    digitalWrite(ctx->cs_pin, LOW);
+    delayMicroseconds(10);
+    bb_send_byte(0x00);
+    bb_send_byte(0x00);
+    uint8_t bb_dev = bb_recv_byte(bits_dev);
+    uint8_t bb_rev = bb_recv_byte(bits_rev);
+    delayMicroseconds(10);
+    digitalWrite(ctx->cs_pin, HIGH);
+
+    Serial.printf("  2. Bit-Bang SPI Mode 3 (50kHz): dev_id=0x%02X [bits: %s], rev_id=0x%02X [bits: %s]\n",
+                  bb_dev, bits_dev, bb_rev, bits_rev);
+
+    // 3. I2C ACK Detection Probe on (SCK, MOSI) and (SCK, MISO)
+    auto i2c_ping = [&](int scl, int sda) -> bool {
+        pinMode(scl, OUTPUT);
+        pinMode(sda, OUTPUT);
+        digitalWrite(scl, HIGH);
+        digitalWrite(sda, HIGH);
+        delayMicroseconds(10);
+        digitalWrite(sda, LOW);
+        delayMicroseconds(10);
+        digitalWrite(scl, LOW);
+        delayMicroseconds(10);
+
+        uint8_t addr = 0x52; // 0x29 << 1
+        for (int i = 7; i >= 0; i--) {
+            digitalWrite(sda, (addr >> i) & 1);
+            delayMicroseconds(10);
+            digitalWrite(scl, HIGH);
+            delayMicroseconds(10);
+            digitalWrite(scl, LOW);
+            delayMicroseconds(10);
+        }
+        pinMode(sda, INPUT_PULLUP);
+        digitalWrite(scl, HIGH);
+        delayMicroseconds(10);
+        int ack = (digitalRead(sda) == LOW);
+        digitalWrite(scl, LOW);
+        delayMicroseconds(10);
+        // Stop
+        pinMode(sda, OUTPUT);
+        digitalWrite(sda, LOW);
+        delayMicroseconds(10);
+        digitalWrite(scl, HIGH);
+        delayMicroseconds(10);
+        digitalWrite(sda, HIGH);
+        return ack;
+    };
+
+    bool i2c_mosi = i2c_ping(ctx->sck_pin, ctx->mosi_pin);
+    bool i2c_miso = i2c_ping(ctx->sck_pin, ctx->miso_pin);
+    Serial.printf("  3. I2C Ping (0x29): on SCL/MOSI = %s | on SCL/MISO = %s\n",
+                  i2c_mosi ? "ACK RECEIVED (Sensor in I2C Mode!)" : "No ACK",
+                  i2c_miso ? "ACK RECEIVED (Sensor in I2C Mode!)" : "No ACK");
+
+    // Restore hardware SPI pins
+    HardwareSPI.begin(TOF_SHARED_SCK_PIN, ctx_tofs[0].miso_pin, TOF_SHARED_MOSI_PIN, -1);
+    Serial.println(F("--------------------------------------------------\n"));
+}
+
 bool initialize_tof_sensor(VL53L8CX_Configuration *p_dev, ToF_Device_Context *ctx) {
     Serial.printf("\n>>> [STARTING] %s Init Sequence <<<\n", ctx->name);
 
     ctx->speed_hz = SPI_INIT_SPEED_HZ;
 
+    // Explicitly configure HardwareSPI with this sensor's MISO pin
+    HardwareSPI.begin(TOF_SHARED_SCK_PIN, ctx->miso_pin, TOF_SHARED_MOSI_PIN, -1);
+    delay(10);
+
     memset(p_dev, 0, sizeof(VL53L8CX_Configuration));
     p_dev->platform.handle = (void *)ctx;
     p_dev->platform.address = 0x29;
+
+    // 1. Physical pin state probe
+    pinMode(ctx->miso_pin, INPUT_PULLUP);
+    int miso_pu = digitalRead(ctx->miso_pin);
+    pinMode(ctx->miso_pin, INPUT_PULLDOWN);
+    int miso_pd = digitalRead(ctx->miso_pin);
+    pinMode(ctx->miso_pin, INPUT_PULLUP);
+
+    pinMode(ctx->int_pin, INPUT_PULLUP);
+    int int_pu = digitalRead(ctx->int_pin);
+
+    Serial.printf("[%s] Pin Probe: MISO %d [PU=%d, PD=%d] | INT %d [PU=%d] | CS=%d | LPN=%d\n",
+                  ctx->name, ctx->miso_pin, miso_pu, miso_pd, ctx->int_pin, int_pu, ctx->cs_pin, ctx->lpn_pin);
 
     // 1. Hardware Reset via LPn with physical continuity test
     uint8_t dev_id = 0, rev_id = 0;
@@ -299,8 +468,9 @@ bool initialize_tof_sensor(VL53L8CX_Configuration *p_dev, ToF_Device_Context *ct
 
         status = vl53l8cx_is_alive(p_dev, &isAlive);
 
-        if (isAlive && dev_id == 0xF0 && rev_id == 0x0C) {
+        if ((isAlive && dev_id == 0xF0) || dev_id == 0xF0 || dev_id_high == 0xF0) {
             found_alive = true;
+            Serial.printf("[%s] Sensor responded with dev_id=0xF0! Proceeding with init...\n", ctx->name);
             break;
         }
         delay(30);
@@ -309,6 +479,7 @@ bool initialize_tof_sensor(VL53L8CX_Configuration *p_dev, ToF_Device_Context *ct
     if (!found_alive) {
         Serial.printf("[ERROR] %s did not report alive! (dev_id=0x%02X, rev_id=0x%02X, isAlive=%u)\n", 
                       ctx->name, dev_id, rev_id, isAlive);
+        run_deep_sensor_diagnostics(ctx);
         return false;
     }
 
@@ -385,7 +556,6 @@ bool initialize_tof_sensor(VL53L8CX_Configuration *p_dev, ToF_Device_Context *ct
 }
 
 // =========================================================================
-// =========================================================================
 // ON-CHIP 8-ZONE 90° RADAR FUSION & TELEMETRY
 // =========================================================================
 
@@ -394,17 +564,6 @@ static inline bool is_valid_tof_target(int16_t d, uint8_t st) {
 }
 
 void update_onchip_fused_radar() {
-    // Zone mapping:
-    // Zone 0..3: ToF 1 (Left), Col 2 (0-indexed col 1), Rows 4..1 (0-indexed rows 3, 2, 1, 0)
-    // -> Row 3: 3*4+1 = 13 (Zone 0, Leftmost)
-    // -> Row 2: 2*4+1 = 9  (Zone 1)
-    // -> Row 1: 1*4+1 = 5  (Zone 2)
-    // -> Row 0: 0*4+1 = 1  (Zone 3, Center-Left)
-    // Zone 4..7: ToF 2 (Right), Col 3 (0-indexed col 2), Rows 1..4 (0-indexed rows 0, 1, 2, 3)
-    // -> Row 0: 0*4+2 = 2  (Zone 4, Center-Right)
-    // -> Row 1: 1*4+2 = 6  (Zone 5)
-    // -> Row 2: 2*4+2 = 10 (Zone 6)
-    // -> Row 3: 3*4+2 = 14 (Zone 7, Rightmost)
     static const uint8_t zone_sensor[8] = {1, 1, 1, 1, 2, 2, 2, 2};
     static const uint8_t zone_src_idx[8] = {13, 9, 5, 1, 2, 6, 10, 14};
 
@@ -413,8 +572,8 @@ void update_onchip_fused_radar() {
     for (int z = 0; z < 8; z++) {
         uint8_t sid = zone_sensor[z];
         uint8_t src = zone_src_idx[z];
-        bool active = (sid == 1) ? tof1_active : tof2_active;
-        VL53L8CX_ResultsData *res = (sid == 1) ? &Results1 : &Results2;
+        bool active = (sid == 1) ? tof_active[0] : tof_active[1];
+        VL53L8CX_ResultsData *res = (sid == 1) ? &Results[0] : &Results[1];
 
         if (!active) {
             fused_radar.zones[z].distance_mm = 3000;
@@ -454,7 +613,6 @@ void update_onchip_fused_radar() {
         fused_radar.zones[z].t3_dist = v2 ? (uint16_t)d2 : 0;
 
         if (v0 || v1 || v2) {
-            // Target found: find closest valid target for obstacle clearance
             uint16_t best_d = 4000;
             uint8_t best_st = 0;
             uint8_t best_t = 1;
@@ -483,16 +641,13 @@ void update_onchip_fused_radar() {
             error_latch_count[z] = 0;
             last_valid_dist[z] = best_d;
         } else {
-            // No valid target inside zone: apply 2-frame dropout latch before fallback
             error_latch_count[z]++;
             if (error_latch_count[z] < 2 && last_valid_dist[z] > 0) {
-                // Hold last valid reading for 1 frame to eliminate flicker
                 fused_radar.zones[z].distance_mm = last_valid_dist[z];
                 fused_radar.zones[z].status = st0;
                 fused_radar.zones[z].target_num = 0;
                 fused_radar.zones[z].fallback_type = 3; // latched frame
             } else {
-                // Fallback rule: exactly 1024 SPADs = 0mm contact / saturation; other = 3000mm open space
                 fused_radar.zones[z].status = st0;
                 fused_radar.zones[z].target_num = 0;
                 if (spad_val == 1024) {
@@ -572,7 +727,8 @@ void send_json_telemetry(uint8_t sensor_id, VL53L8CX_ResultsData *p_res, unsigne
         for (int t = 0; t < nt_out; t++) {
             int src = z * VL53L8CX_NB_TARGET_PER_ZONE + t;
             int dst = z * nt_out + t;
-            d[dst]  = (uint32_t)(int32_t)p_res->distance_mm[src];
+            int16_t raw_d = p_res->distance_mm[src];
+            d[dst]  = (raw_d < 0) ? 0 : (uint32_t)raw_d;
             st[dst] = p_res->target_status[src];
         }
 #ifndef VL53L8CX_DISABLE_NB_SPADS_ENABLED
@@ -581,7 +737,6 @@ void send_json_telemetry(uint8_t sensor_id, VL53L8CX_ResultsData *p_res, unsigne
         spad[z] = 0;
 #endif
     }
-    for (int i = 0; i < n_vals; i++) if ((int32_t)d[i] < 0) d[i] = 0;
 
     int pos = snprintf(telemetry_buf, sizeof(telemetry_buf),
                        "{\"t\":\"D\",\"id\":%u,\"seq\":%lu,\"ts\":%lu,\"r\":%d,\"nt\":%d,\"temp\":%d",
@@ -597,50 +752,39 @@ void send_json_telemetry(uint8_t sensor_id, VL53L8CX_ResultsData *p_res, unsigne
     Serial.write((const uint8_t *)telemetry_buf, pos);
 }
 
-// Beautiful human-readable side-by-side 4x4 ASCII display for Serial Monitor
+// Beautiful human-readable 4x4 ASCII display for Serial Monitor
 void print_ascii_matrices() {
     static unsigned long last_print_ms = 0;
-    if (millis() - last_print_ms < 500) return; // Print every 500 ms (2 Hz)
+    if (millis() - last_print_ms < 500) return; // 2 Hz
     last_print_ms = millis();
 
-    Serial.println(F("\n================================================================================"));
-    Serial.printf(" [ToF 1 CS:10] %s (Frames: %lu)   |   [ToF 2 CS:9] %s (Frames: %lu)\n",
-                  tof1_active ? "ONLINE" : "OFFLINE", frame_count1,
-                  tof2_active ? "ONLINE" : "OFFLINE", frame_count2);
-    Serial.println(F("------------------------------------------------+-------------------------------"));
+    Serial.println(F("\n========================================================================================================================="));
+    Serial.printf(" [ToF 1 CS:10] %s (%lu f) | [ToF 2 CS:9] %s (%lu f) | [ToF 3 CS:7] %s (%lu f) | [ToF 4 CS:17] %s (%lu f)\n",
+                  tof_active[0] ? "ONLINE" : "OFFLINE", frame_count[0],
+                  tof_active[1] ? "ONLINE" : "OFFLINE", frame_count[1],
+                  tof_active[2] ? "ONLINE" : "OFFLINE", frame_count[2],
+                  tof_active[3] ? "ONLINE" : "OFFLINE", frame_count[3]);
+    Serial.println(F("------------------------------+------------------------------+------------------------------+----------------------------"));
 
     const int n_side = (current_resolution == VL53L8CX_RESOLUTION_8X8) ? 8 : 4;
     for (int r = 0; r < n_side; r++) {
-        // Left column: ToF 1
-        Serial.print(F(" "));
-        for (int c = 0; c < n_side; c++) {
-            int z = r * n_side + c;
-            int src = z * VL53L8CX_NB_TARGET_PER_ZONE;
-            int d = tof1_active ? (int)Results1.distance_mm[src] : -1;
-            int st = tof1_active ? Results1.target_status[src] : 0;
-            if (tof1_active && (st == 5 || st == 6 || st == 9 || st == 10)) {
-                Serial.printf("%5dmm", d);
-            } else {
-                Serial.print(F("    ---"));
-            }
-        }
-        // Separator
-        Serial.print(F("   |  "));
-        // Right column: ToF 2
-        for (int c = 0; c < n_side; c++) {
-            int z = r * n_side + c;
-            int src = z * VL53L8CX_NB_TARGET_PER_ZONE;
-            int d = tof2_active ? (int)Results2.distance_mm[src] : -1;
-            int st = tof2_active ? Results2.target_status[src] : 0;
-            if (tof2_active && (st == 5 || st == 6 || st == 9 || st == 10)) {
-                Serial.printf("%5dmm", d);
-            } else {
-                Serial.print(F("    ---"));
+        for (int s = 0; s < NUM_TOFS; s++) {
+            if (s > 0) Serial.print(F(" | "));
+            for (int c = 0; c < n_side; c++) {
+                int z = r * n_side + c;
+                int src = z * VL53L8CX_NB_TARGET_PER_ZONE;
+                int d = tof_active[s] ? (int)Results[s].distance_mm[src] : -1;
+                int st = tof_active[s] ? Results[s].target_status[src] : 0;
+                if (tof_active[s] && (st == 5 || st == 6 || st == 9 || st == 10)) {
+                    Serial.printf("%5d", d);
+                } else {
+                    Serial.print(F("  ---"));
+                }
             }
         }
         Serial.println();
     }
-    Serial.println(F("================================================================================"));
+    Serial.println(F("========================================================================================================================="));
 }
 
 // =========================================================================
@@ -680,14 +824,16 @@ void apply_sensor_configuration(String params) {
         start = comma + 1;
     }
     
-    if (tof1_active) vl53l8cx_stop_ranging(&Dev1);
-    if (tof2_active) vl53l8cx_stop_ranging(&Dev2);
+    for (int i = 0; i < NUM_TOFS; i++) {
+        if (tof_active[i]) vl53l8cx_stop_ranging(&Dev[i]);
+    }
     delay(5);
     
     if (res == 16 || res == 64) {
         current_resolution = (res == 64) ? VL53L8CX_RESOLUTION_8X8 : VL53L8CX_RESOLUTION_4X4;
-        if (tof1_active) vl53l8cx_set_resolution(&Dev1, current_resolution);
-        if (tof2_active) vl53l8cx_set_resolution(&Dev2, current_resolution);
+        for (int i = 0; i < NUM_TOFS; i++) {
+            if (tof_active[i]) vl53l8cx_set_resolution(&Dev[i], current_resolution);
+        }
     }
     
     if (freq >= 1 && freq <= 60) {
@@ -695,8 +841,9 @@ void apply_sensor_configuration(String params) {
             freq = 15;
         }
         current_frequency_hz = freq;
-        if (tof1_active) vl53l8cx_set_ranging_frequency_hz(&Dev1, current_frequency_hz);
-        if (tof2_active) vl53l8cx_set_ranging_frequency_hz(&Dev2, current_frequency_hz);
+        for (int i = 0; i < NUM_TOFS; i++) {
+            if (tof_active[i]) vl53l8cx_set_ranging_frequency_hz(&Dev[i], current_frequency_hz);
+        }
     }
     
     if (integ >= 2 && integ <= 1000) {
@@ -705,32 +852,33 @@ void apply_sensor_configuration(String params) {
     if (current_integration_ms * current_frequency_hz > 950) {
         current_integration_ms = max(2UL, 950UL / current_frequency_hz);
     }
-    if (tof1_active) vl53l8cx_set_integration_time_ms(&Dev1, current_integration_ms);
-    if (tof2_active) vl53l8cx_set_integration_time_ms(&Dev2, current_integration_ms);
+    for (int i = 0; i < NUM_TOFS; i++) {
+        if (tof_active[i]) vl53l8cx_set_integration_time_ms(&Dev[i], current_integration_ms);
+    }
     
     if (order == 1 || order == 2) {
         current_target_order = order;
-        if (tof1_active) vl53l8cx_set_target_order(&Dev1, current_target_order);
-        if (tof2_active) vl53l8cx_set_target_order(&Dev2, current_target_order);
+        for (int i = 0; i < NUM_TOFS; i++) {
+            if (tof_active[i]) vl53l8cx_set_target_order(&Dev[i], current_target_order);
+        }
     }
     
     if (sharp >= 0 && sharp <= 99) {
         current_sharpener = sharp;
-        if (tof1_active) vl53l8cx_set_sharpener_percent(&Dev1, current_sharpener);
-        if (tof2_active) vl53l8cx_set_sharpener_percent(&Dev2, current_sharpener);
+        for (int i = 0; i < NUM_TOFS; i++) {
+            if (tof_active[i]) vl53l8cx_set_sharpener_percent(&Dev[i], current_sharpener);
+        }
     }
     
     if (targets == 2 || targets == 3) {
         current_nb_targets = (uint8_t)targets;
     }
     
-    if (tof1_active) {
-        vl53l8cx_set_VHV_repeat_count(&Dev1, 14400);
-        vl53l8cx_start_ranging(&Dev1);
-    }
-    if (tof2_active) {
-        vl53l8cx_set_VHV_repeat_count(&Dev2, 14400);
-        vl53l8cx_start_ranging(&Dev2);
+    for (int i = 0; i < NUM_TOFS; i++) {
+        if (tof_active[i]) {
+            vl53l8cx_set_VHV_repeat_count(&Dev[i], 14400);
+            vl53l8cx_start_ranging(&Dev[i]);
+        }
     }
     Serial.println(F("{\"type\":\"ACK\",\"status\":\"OK\",\"cmd\":\"SET_CONFIG\"}"));
 }
@@ -742,8 +890,9 @@ void dispatch_command(const String &cmd) {
                       current_frequency_hz, current_integration_ms, current_target_order, current_sharpener, current_nb_targets);
     } else if (cmd == "RESET") {
         Serial.println(F("{\"type\":\"ACK\",\"status\":\"OK\",\"cmd\":\"RESET\"}"));
-        tof1_active = initialize_tof_sensor(&Dev1, &ctx_tof1);
-        tof2_active = initialize_tof_sensor(&Dev2, &ctx_tof2);
+        for (int i = 0; i < NUM_TOFS; i++) {
+            tof_active[i] = initialize_tof_sensor(&Dev[i], &ctx_tofs[i]);
+        }
     } else if (cmd == "SET_STREAM:arc") {
         stream_arc_mode = true;
         stream_diag_matrix = false;
@@ -763,6 +912,18 @@ void dispatch_command(const String &cmd) {
     } else if (cmd == "PRINT_ASCII=0") {
         print_ascii_enabled = false;
         Serial.println(F("{\"type\":\"ACK\",\"status\":\"OK\",\"ascii\":0}"));
+    } else if (cmd.startsWith("TEST") || cmd == "SCAN") {
+        int sid = 0;
+        if (cmd.startsWith("TEST ") || cmd.startsWith("TEST:")) {
+            sid = cmd.substring(5).toInt();
+        }
+        if (sid >= 1 && sid <= 4) {
+            run_deep_sensor_diagnostics(&ctx_tofs[sid - 1]);
+        } else {
+            for (int i = 0; i < NUM_TOFS; i++) {
+                run_deep_sensor_diagnostics(&ctx_tofs[i]);
+            }
+        }
     } else if (cmd.startsWith("SET_CONFIG:") || cmd.startsWith("SET_CONFIG ")) {
         int colon = cmd.indexOf(':');
         if (colon == -1) colon = cmd.indexOf(' ');
@@ -799,80 +960,68 @@ void setup() {
     delay(200);
 
     Serial.println(F("\n================================================================="));
-    Serial.println(F("   DA WINNA — DUAL VL53L8CX TOF SENSOR HUB (HSPI BUS)           "));
+    Serial.println(F("   DA WINNA — QUAD VL53L8CX TOF SENSOR HUB (HSPI BUS)           "));
     Serial.println(F("   Shared SPI: SCK=39, MOSI=40                                   "));
-    Serial.printf ("   ToF 1: CS=%d, INT=%d, LPN=%d, MISO=%d                         \n", TOF1_CS_PIN, TOF1_INT_PIN, TOF1_LPN_PIN, TOF1_MISO_PIN);
-    Serial.printf ("   ToF 2: CS=%d, INT=%d, LPN=%d, MISO=%d                         \n", TOF2_CS_PIN, TOF2_INT_PIN, TOF2_LPN_PIN, TOF2_MISO_PIN);
+    for (int i = 0; i < NUM_TOFS; i++) {
+        Serial.printf("   ToF %d: CS=%d, INT=%d, LPN=%d, MISO=%d\n",
+                      i + 1, ctx_tofs[i].cs_pin, ctx_tofs[i].int_pin, ctx_tofs[i].lpn_pin, ctx_tofs[i].miso_pin);
+    }
     Serial.println(F("================================================================="));
 
     // Reset GPIOs and detach any JTAG / Matrix functions
-    gpio_reset_pin((gpio_num_t)TOF1_CS_PIN);
-    gpio_reset_pin((gpio_num_t)TOF1_LPN_PIN);
-    gpio_reset_pin((gpio_num_t)TOF1_INT_PIN);
-    gpio_reset_pin((gpio_num_t)TOF1_MISO_PIN);
+    for (int i = 0; i < NUM_TOFS; i++) {
+        gpio_reset_pin((gpio_num_t)ctx_tofs[i].cs_pin);
+        gpio_reset_pin((gpio_num_t)ctx_tofs[i].lpn_pin);
+        gpio_reset_pin((gpio_num_t)ctx_tofs[i].int_pin);
+        gpio_reset_pin((gpio_num_t)ctx_tofs[i].miso_pin);
 
-    gpio_reset_pin((gpio_num_t)TOF2_CS_PIN);
-    gpio_reset_pin((gpio_num_t)TOF2_LPN_PIN);
-    gpio_reset_pin((gpio_num_t)TOF2_INT_PIN);
-    gpio_reset_pin((gpio_num_t)TOF2_MISO_PIN);
+        // Initial pin state: CS pins HIGH (inactive)
+        pinMode(ctx_tofs[i].cs_pin, OUTPUT);
+        digitalWrite(ctx_tofs[i].cs_pin, HIGH);
+
+        // Staggered LPn startup: keep ALL in low-power standby initially
+        pinMode(ctx_tofs[i].lpn_pin, OUTPUT);
+        digitalWrite(ctx_tofs[i].lpn_pin, LOW);
+
+        pinMode(ctx_tofs[i].int_pin, INPUT_PULLUP);
+        attachInterrupt(digitalPinToInterrupt(ctx_tofs[i].int_pin), isrs[i], FALLING);
+        pinMode(ctx_tofs[i].miso_pin, INPUT_PULLUP);
+    }
 
     gpio_reset_pin((gpio_num_t)TOF_SHARED_SCK_PIN);
     gpio_reset_pin((gpio_num_t)TOF_SHARED_MOSI_PIN);
 
-    // Initial pin state: CS pins HIGH (disabled/inactive)
-    pinMode(TOF1_CS_PIN, OUTPUT);
-    digitalWrite(TOF1_CS_PIN, HIGH);
-    pinMode(TOF2_CS_PIN, OUTPUT);
-    digitalWrite(TOF2_CS_PIN, HIGH);
-
-    // Staggered LPn startup: keep BOTH in low-power standby initially
-    pinMode(TOF1_LPN_PIN, OUTPUT);
-    digitalWrite(TOF1_LPN_PIN, LOW);
-    pinMode(TOF2_LPN_PIN, OUTPUT);
-    digitalWrite(TOF2_LPN_PIN, LOW);
     delay(50);
 
-    pinMode(TOF1_INT_PIN, INPUT_PULLUP);
-    pinMode(TOF2_INT_PIN, INPUT_PULLUP);
-    attachInterrupt(digitalPinToInterrupt(TOF1_INT_PIN), isr_tof1, FALLING);
-    attachInterrupt(digitalPinToInterrupt(TOF2_INT_PIN), isr_tof2, FALLING);
-    pinMode(TOF1_MISO_PIN, INPUT_PULLUP);
-    pinMode(TOF2_MISO_PIN, INPUT_PULLUP);
-
-    // Initialize SPI
-    HardwareSPI.begin(TOF_SHARED_SCK_PIN, TOF1_MISO_PIN, TOF_SHARED_MOSI_PIN, -1);
+    // Initialize SPI with default pins
+    HardwareSPI.begin(TOF_SHARED_SCK_PIN, ctx_tofs[0].miso_pin, TOF_SHARED_MOSI_PIN, -1);
     delay(50);
 
-    // 1. Initialize ToF 1 (ToF 2 held in hardware sleep LPn=LOW)
-    Serial.println(F("[POWER] Bringing ToF 1 out of reset (ToF 2 held in reset)..."));
-    digitalWrite(TOF1_LPN_PIN, HIGH);
-    delay(100);
-    tof1_active = initialize_tof_sensor(&Dev1, &ctx_tof1);
-    delay(50);
-
-    // 2. Initialize ToF 2
-    Serial.println(F("[POWER] Bringing ToF 2 out of reset..."));
-    digitalWrite(TOF2_LPN_PIN, HIGH);
-    delay(100);
-    tof2_active = initialize_tof_sensor(&Dev2, &ctx_tof2);
-    delay(50);
-
-    // Immediate boot retry if either sensor failed initial negotiation
-    if (!tof1_active) {
-        Serial.println(F("\n[BOOT-RETRY] Retrying ToF 1 initialization..."));
-        delay(150);
-        tof1_active = initialize_tof_sensor(&Dev1, &ctx_tof1);
+    // Staggered initialization: bring each sensor out of reset one by one
+    for (int i = 0; i < NUM_TOFS; i++) {
+        Serial.printf("\n[POWER] Bringing %s out of reset...\n", ctx_tofs[i].name);
+        digitalWrite(ctx_tofs[i].lpn_pin, HIGH);
+        delay(100);
+        tof_active[i] = initialize_tof_sensor(&Dev[i], &ctx_tofs[i]);
+        delay(50);
     }
-    if (!tof2_active) {
-        Serial.println(F("\n[BOOT-RETRY] Retrying ToF 2 initialization..."));
-        delay(150);
-        tof2_active = initialize_tof_sensor(&Dev2, &ctx_tof2);
+
+    // Immediate boot retry if any sensor failed initial negotiation
+    for (int i = 0; i < NUM_TOFS; i++) {
+        if (!tof_active[i]) {
+            Serial.printf("\n[BOOT-RETRY] Retrying %s initialization...\n", ctx_tofs[i].name);
+            delay(150);
+            tof_active[i] = initialize_tof_sensor(&Dev[i], &ctx_tofs[i]);
+        }
     }
 
     Serial.println(F("\n================================================================="));
-    Serial.printf(" DUAL TOF INITIALIZATION SUMMARY:\n");
-    Serial.printf("   ToF 1 (CS 10): %s\n", tof1_active ? "ONLINE" : "FAILED / NOT FOUND");
-    Serial.printf("   ToF 2 (CS  9): %s\n", tof2_active ? "ONLINE" : "FAILED / NOT FOUND");
+    Serial.printf(" QUAD TOF INITIALIZATION SUMMARY:\n");
+    for (int i = 0; i < NUM_TOFS; i++) {
+        Serial.printf("   ToF %d (CS %2d, MISO %2d): %s\n",
+                      i + 1, ctx_tofs[i].cs_pin, ctx_tofs[i].miso_pin,
+                      tof_active[i] ? "ONLINE" : "FAILED / NOT FOUND");
+    }
     Serial.println(F("=================================================================\n"));
 }
 
@@ -883,64 +1032,47 @@ void setup() {
 void loop() {
     handle_serial_commands();
 
-    // 1. Service ToF 1 (hardware INT pin driven + 1ms fast fallback)
-    if (tof1_active) {
-        bool ready1 = int1_triggered || (digitalRead(TOF1_INT_PIN) == LOW);
-        static unsigned long last_poll1_ms = 0;
-        if (ready1 || (millis() - last_poll1_ms >= 1)) {
-            last_poll1_ms = millis();
-            int1_triggered = false;
-            uint8_t isReady1 = 0;
-            vl53l8cx_check_data_ready(&Dev1, &isReady1);
-            if (isReady1) {
-                if (vl53l8cx_get_ranging_data(&Dev1, &Results1) == 0) {
-                    frame_count1++;
-                    last_frame_time1_ms = millis();
-                    recovery_tier1 = 0;
-                    update_onchip_fused_radar();
-                    if (stream_arc_mode) send_arc_telemetry(1);
-                    if (stream_diag_matrix) send_json_telemetry(1, &Results1, frame_count1);
+    // Service each active ToF
+    for (int i = 0; i < NUM_TOFS; i++) {
+        if (tof_active[i]) {
+            bool ready = int_triggered[i] || (digitalRead(ctx_tofs[i].int_pin) == LOW);
+            if (ready || (millis() - last_poll_ms[i] >= 1)) {
+                last_poll_ms[i] = millis();
+                int_triggered[i] = false;
+                uint8_t isReady = 0;
+                vl53l8cx_check_data_ready(&Dev[i], &isReady);
+                if (isReady) {
+                    if (vl53l8cx_get_ranging_data(&Dev[i], &Results[i]) == 0) {
+                        frame_count[i]++;
+                        last_frame_time_ms[i] = millis();
+                        if (stream_diag_matrix) {
+                            send_json_telemetry(i + 1, &Results[i], frame_count[i]);
+                        }
+                        if (stream_arc_mode && (i == 0 || i == 1)) {
+                            update_onchip_fused_radar();
+                            send_arc_telemetry(i + 1);
+                        }
+                    }
                 }
             }
         }
     }
 
-    // 2. Service ToF 2 (hardware INT pin driven + 1ms fast fallback)
-    if (tof2_active) {
-        bool ready2 = int2_triggered || (digitalRead(TOF2_INT_PIN) == LOW);
-        static unsigned long last_poll2_ms = 0;
-        if (ready2 || (millis() - last_poll2_ms >= 1)) {
-            last_poll2_ms = millis();
-            int2_triggered = false;
-            uint8_t isReady2 = 0;
-            vl53l8cx_check_data_ready(&Dev2, &isReady2);
-            if (isReady2) {
-                if (vl53l8cx_get_ranging_data(&Dev2, &Results2) == 0) {
-                    frame_count2++;
-                    last_frame_time2_ms = millis();
-                    recovery_tier2 = 0;
-                    update_onchip_fused_radar();
-                    if (stream_arc_mode) send_arc_telemetry(2);
-                    if (stream_diag_matrix) send_json_telemetry(2, &Results2, frame_count2);
-                }
-            }
-        }
-    }
-
-    // 3. Periodic ASCII table print ONLY if explicitly enabled
+    // Periodic ASCII table print ONLY if explicitly enabled
     if (print_ascii_enabled) {
         print_ascii_matrices();
     }
 
-    // 4. Background auto-reconnect only if BOTH are dead or at initial boot
-    // Never freeze an actively working sensor during navigation!
+    // Background auto-reconnect if any sensor is dead (attempt every 10 seconds)
     static unsigned long last_reconnect_attempt_ms = 0;
-    unsigned long reconnect_interval = (last_reconnect_attempt_ms == 0) ? 5000 : 30000;
-    if (!tof1_active && !tof2_active && (millis() - last_reconnect_attempt_ms > reconnect_interval)) {
+    if (millis() - last_reconnect_attempt_ms > 10000) {
         last_reconnect_attempt_ms = millis();
-        Serial.println(F("\n[AUTO-RETRY] Retrying dual ToF initialization..."));
-        tof1_active = initialize_tof_sensor(&Dev1, &ctx_tof1);
-        tof2_active = initialize_tof_sensor(&Dev2, &ctx_tof2);
+        for (int i = 0; i < NUM_TOFS; i++) {
+            if (!tof_active[i]) {
+                Serial.printf("\n[AUTO-RETRY] Retrying %s initialization...\n", ctx_tofs[i].name);
+                tof_active[i] = initialize_tof_sensor(&Dev[i], &ctx_tofs[i]);
+            }
+        }
     }
 
     delayMicroseconds(50);

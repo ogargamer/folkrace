@@ -25,4 +25,6 @@ All hardware-dependent launchers explicitly identify their target platform in th
 | **9** | Simulation | [`9_wrong_way_studio.py`](./9_wrong_way_studio.py) | Anti-Wrong-Way Watchdog & 180 Auto-Correction Studio (`test_wrong_way.wbt` + 2D Tactical Radar & Thought Matrix GUI). |
 | **13** | Simulation | [`13_fast_champion_drive.py`](./13_fast_champion_drive.py) | Ultra-lean champion 3D drive launcher for maximum real-time rendering & physics performance (zero GUI, zero UDP/HUD overhead). |
 | **14** | **ESP32** | [`14_esp32_tof_arc_gui.py`](./14_esp32_tof_arc_gui.py) | Physical ESP32 dual VL53L8CX 8-zone 90° top-down 2D radar visualizer with proximity blind-spot / open-space fallback. |
+| **15** | **ESP32** | [`15_esp32_servo_gui.py`](./15_esp32_servo_gui.py) | Physical ESP32 333Hz high-rate digital steering servo test bench & calibration GUI. |
+| **16** | **ESP32** | [`16_esp32_4tof_costmap_gui.py`](./16_esp32_4tof_costmap_gui.py) | Physical ESP32 quad VL53L8CX 2D costmap & multi-target radar GUI with guarded ray clearing and dual-target obstacle stamping. |
 

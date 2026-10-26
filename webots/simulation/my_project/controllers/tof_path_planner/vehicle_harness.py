@@ -915,7 +915,7 @@ class FolkraceVehicle:
                     yaw_rate=self.cached_yaw_rate,
                     cached_tofs=tof_readings,
                     now_s=sim_time,
-                    hazard_mask=enlarged_hazard_mask,
+                    hazard_mask=hazard_mask,
                     state=self.recovery_manager.state,
                     candidate_gaps=candidate_gaps,
                 )
