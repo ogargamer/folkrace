@@ -10,8 +10,9 @@ Fused 8-Zone Top-Down 2D Field-of-View (FoV) Visualizer:
   - 8 contiguous 11.25° sectors covering exactly 90° (-45° to +45° forward)
   - Max range: 3000 mm (3.0 m)
   - Proximity Blind-Spot & Open-Space Fallback:
-      * If a zone has NO valid reading and at least one adjacent zone < 50mm -> 0 mm (blind/touching)
-      * If a zone has NO valid reading and both adjacent zones >= 50mm -> 3000 mm (clear space)
+      * 0 mm reading strictly requires having 1024 active SPADs (near-field saturation confirmation)
+      * If a zone has NO valid reading, is_hazard (s4 or neighbor < 50mm / error) AND has 1024 SPADs -> 0 mm (blind/touching)
+      * If a zone has NO valid reading and does NOT meet 1024 SPAD requirement or is clear -> 3000 mm (clear space)
 """
 
 import sys
@@ -222,11 +223,12 @@ class RadarArcCanvas(QWidget):
         self.is_t2_fallback = [False] * 8
         self.is_t3_fallback = [False] * 8
         self.all_targets = [[] for _ in range(8)]
+        self.spads = [0] * 8
 
         self.hovered_zone = -1
         self.setMouseTracking(True)
 
-    def set_zone_data(self, dists, raw_dists, raw_stats, blind_zeros, clear_fallbacks, t2_fallbacks=None, t3_fallbacks=None, all_targets=None):
+    def set_zone_data(self, dists, raw_dists, raw_stats, blind_zeros, clear_fallbacks, t2_fallbacks=None, t3_fallbacks=None, all_targets=None, spads=None):
         self.distances = list(dists)
         self.raw_distances = list(raw_dists)
         self.raw_statuses = list(raw_stats)
@@ -235,6 +237,7 @@ class RadarArcCanvas(QWidget):
         self.is_t2_fallback = list(t2_fallbacks) if t2_fallbacks else [False] * 8
         self.is_t3_fallback = list(t3_fallbacks) if t3_fallbacks else [False] * 8
         self.all_targets = list(all_targets) if all_targets else [[] for _ in range(8)]
+        self.spads = list(spads) if spads else [0] * 8
         self.update()
 
     def mouseMoveEvent(self, event):
@@ -260,18 +263,25 @@ class RadarArcCanvas(QWidget):
                 if z_idx != self.hovered_zone:
                     self.hovered_zone = z_idx
                     self.zone_hovered.emit(z_idx)
+                    sp = self.spads[z_idx] if z_idx < len(self.spads) else 0
+                    d = self.distances[z_idx]
+                    st = self.raw_statuses[z_idx]
+                    status_str = "BLIND (0mm contact)" if self.is_blind_zero[z_idx] else ("OPEN (3.0m)" if self.is_clear_fallback[z_idx] else f"s{st}")
+                    QToolTip.showText(event.globalPos(), f"Sector Z{z_idx}: {d} mm\nStatus: {status_str}\nSPADs: {sp}", self)
                     self.update()
                 return
 
         if self.hovered_zone != -1:
             self.hovered_zone = -1
             self.zone_hovered.emit(-1)
+            QToolTip.hideText()
             self.update()
 
     def leaveEvent(self, event):
         if self.hovered_zone != -1:
             self.hovered_zone = -1
             self.zone_hovered.emit(-1)
+            QToolTip.hideText()
             self.update()
 
     def paintEvent(self, event):
@@ -568,13 +578,16 @@ class ToFArcRadarApp(QMainWindow):
         # Multi-target data matrices (16 zones, up to 3 targets each)
         self.tof1_dists = np.zeros((16, 3), dtype=int)
         self.tof1_stats = np.zeros((16, 3), dtype=int)
+        self.tof1_spads = np.zeros(16, dtype=int)
         self.tof2_dists = np.zeros((16, 3), dtype=int)
         self.tof2_stats = np.zeros((16, 3), dtype=int)
+        self.tof2_spads = np.zeros(16, dtype=int)
 
         # Processed 8 zones
         self.zone_dists = [3000] * 8
         self.raw_dists = [None] * 8
         self.raw_stats = [0] * 8
+        self.zone_spads = [0] * 8
         self.is_t2_fallback = [False] * 8
         self.is_t3_fallback = [False] * 8
         self.is_blind_zero = [False] * 8
@@ -865,7 +878,7 @@ class ToFArcRadarApp(QMainWindow):
         foot_bar.setContentsMargins(4, 0, 4, 0)
 
         order_str = "Closest" if self.target_order == 1 else "Strongest"
-        self.lbl_rule_info = QLabel(f"🛡️ Smart Fallback: {self.max_targets}-Targets Max | ToF DSP: {order_str} | Sharpener: {self.sharpener_percent}% | Closest Target Envelope | Fallback (0/3000mm) ONLY on 0 Valid Hits")
+        self.lbl_rule_info = QLabel(f"🛡️ Smart Fallback: {self.max_targets}-Targets Max | ToF DSP: {order_str} | Sharpener: {self.sharpener_percent}% | 0mm Hazard requires 1024 SPADs | Fallback (0/3000mm) on 0 Valid Hits")
         self.lbl_rule_info.setStyleSheet("color: #60a5fa; font-size: 7.5pt; font-style: italic;")
         foot_bar.addWidget(self.lbl_rule_info)
 
@@ -1080,6 +1093,9 @@ class ToFArcRadarApp(QMainWindow):
             nt = max(1, pkt1.get("nt", 2))
             d_list = pkt1.get("d", [])
             st_list = pkt1.get("st", [])
+            sp_list = pkt1.get("spad", [])
+            if len(sp_list) >= res:
+                self.tof1_spads = np.array(sp_list[:res], dtype=int)
             tot = res * nt
             if len(d_list) >= tot and len(st_list) >= tot:
                 d_mat = np.array(d_list[:tot], dtype=int).reshape((res, nt))
@@ -1099,6 +1115,9 @@ class ToFArcRadarApp(QMainWindow):
             nt = max(1, pkt2.get("nt", 2))
             d_list = pkt2.get("d", [])
             st_list = pkt2.get("st", [])
+            sp_list = pkt2.get("spad", [])
+            if len(sp_list) >= res:
+                self.tof2_spads = np.array(sp_list[:res], dtype=int)
             tot = res * nt
             if len(d_list) >= tot and len(st_list) >= tot:
                 d_mat = np.array(d_list[:tot], dtype=int).reshape((res, nt))
@@ -1164,15 +1183,20 @@ class ToFArcRadarApp(QMainWindow):
 
         raw_d = [None] * 8
         raw_st = [0] * 8
+        raw_spad = [0] * 8
         t2_fb = [False] * 8
         t3_fb = [False] * 8
         blind_zeros = [False] * 8
         clear_fallbacks = [False] * 8
         all_targets = [[] for _ in range(8)]
-        # 1. Multi-Target Evaluation: collect all targets with a valid reading (Status 5, 6, 9, 10 and d > 0)
+        # 1. Multi-Target Evaluation: collect all targets with a valid reading (Status 5, 6, 9, 10 and d > 0; or d == 0 with 1024 SPADs)
         for z, (sid, src_idx) in enumerate(zone_sources):
             d_mat = self.tof1_dists if sid == 1 else self.tof2_dists
             s_mat = self.tof1_stats if sid == 1 else self.tof2_stats
+            sp_arr = self.tof1_spads if sid == 1 else self.tof2_spads
+
+            spad_val = int(sp_arr[src_idx]) if len(sp_arr) > src_idx else 0
+            raw_spad[z] = spad_val
 
             d0 = int(d_mat[src_idx, 0]) if len(d_mat) > src_idx else 0
             st0 = int(s_mat[src_idx, 0]) if len(s_mat) > src_idx else 0
@@ -1183,19 +1207,22 @@ class ToFArcRadarApp(QMainWindow):
             d2 = int(d_mat[src_idx, 2]) if (len(d_mat) > src_idx and d_mat.shape[1] > 2) else 0
             st2 = int(s_mat[src_idx, 2]) if (len(s_mat) > src_idx and s_mat.shape[1] > 2) else 0
 
-            valid_hits = []
-            if st0 in (5, 6, 9, 10) and 0 < d0 <= 4000:
-                valid_hits.append((d0, st0, 1))
-            if st1 in (5, 6, 9, 10) and 0 < d1 <= 4000:
-                valid_hits.append((d1, st1, 2))
+            candidate_targets = [(d0, st0, 1), (d1, st1, 2)]
             if self.max_targets >= 3:
-                if st2 in (5, 6, 9, 10) and 0 < d2 <= 4000:
-                    valid_hits.append((d2, st2, 3))
+                candidate_targets.append((d2, st2, 3))
+
+            valid_hits = []
+            for dt, stt, tid in candidate_targets:
+                if stt in (5, 6, 9, 10):
+                    if 0 < dt <= 4000:
+                        valid_hits.append((dt, stt, tid))
+                    elif dt == 0 and spad_val >= 1024:
+                        valid_hits.append((0, stt, tid))
 
             all_targets[z] = valid_hits
 
             if valid_hits:
-                # Target count > 0: MUST use valid target's measured reading (NEVER 0 or 3000mm)
+                # Target count > 0: MUST use valid target's measured reading (NEVER 0 unless 1024 SPADs confirmed)
                 self.error_frame_counts[z] = 0
                 chosen = min(valid_hits, key=lambda x: x[0])
 
@@ -1204,7 +1231,7 @@ class ToFArcRadarApp(QMainWindow):
                 t2_fb[z] = (chosen[2] == 2)
                 t3_fb[z] = (chosen[2] == 3)
                 self.last_valid_dists[z] = chosen[0]
-                blind_zeros[z] = False
+                blind_zeros[z] = (chosen[0] == 0)
                 clear_fallbacks[z] = False
             else:
                 # 0 targets in zone get a valid reading with Status 5, 6, 9, 10
@@ -1216,13 +1243,14 @@ class ToFArcRadarApp(QMainWindow):
 
         # 2. Symmetrical 2-Neighbor Blind-Spot & Open-Space Fallback:
         # The 0 or 3000mm fallback ONLY happens if 0 targets in zone get a valid reading with Status 5, 6, 9, 10
+        # CRITICAL REQUIREMENT: 0mm reading strictly requires having 1024 SPADs (near-field saturation confirmation).
         final_d = [3000] * 8
 
         # First pass: direct valid readings from zones with >= 1 valid target
         for z in range(8):
             if raw_d[z] is not None:
                 final_d[z] = raw_d[z]
-                blind_zeros[z] = False
+                blind_zeros[z] = (raw_d[z] == 0)
                 clear_fallbacks[z] = False
             else:
                 final_d[z] = None
@@ -1231,6 +1259,8 @@ class ToFArcRadarApp(QMainWindow):
         for z in range(8):
             if final_d[z] is None:
                 nst0 = raw_st[z]
+                spad_z = raw_spad[z]
+
                 # Direct check on primary zone status:
                 if nst0 in (0, 14, 255):
                     # Clear open space (no target / out-of-range wrap-around)
@@ -1239,9 +1269,15 @@ class ToFArcRadarApp(QMainWindow):
                     blind_zeros[z] = False
                 elif nst0 == 4:
                     # Status 4 consistency fail -> blind spot contact (<20mm)
-                    final_d[z] = 0
-                    blind_zeros[z] = True
-                    clear_fallbacks[z] = False
+                    # Requires 1024 SPADs to confirm actual physical contact
+                    if spad_z >= 1024:
+                        final_d[z] = 0
+                        blind_zeros[z] = True
+                        clear_fallbacks[z] = False
+                    else:
+                        final_d[z] = 3000
+                        clear_fallbacks[z] = True
+                        blind_zeros[z] = False
                 else:
                     # Ambiguous hardware/signal error (s1, s2, s3, etc.) -> check neighbors
                     if z == 0:
@@ -1268,7 +1304,8 @@ class ToFArcRadarApp(QMainWindow):
                     both_have_error = (error_neighbor_count == len(neighbor_indices))
                     is_hazard = has_sub50_neighbor or both_have_error
 
-                    if is_hazard:
+                    # 0mm reading requires having 1024 SPADs
+                    if is_hazard and spad_z >= 1024:
                         final_d[z] = 0
                         blind_zeros[z] = True
                         clear_fallbacks[z] = False
@@ -1277,9 +1314,17 @@ class ToFArcRadarApp(QMainWindow):
                         clear_fallbacks[z] = True
                         blind_zeros[z] = False
 
+        # Global safety guarantee: ANY 0mm reading MUST have 1024 SPADs
+        for z in range(8):
+            if (final_d[z] == 0 or blind_zeros[z]) and raw_spad[z] < 1024:
+                final_d[z] = 3000
+                blind_zeros[z] = False
+                clear_fallbacks[z] = True
+
         self.zone_dists = final_d
         self.raw_dists = raw_d
         self.raw_stats = raw_st
+        self.zone_spads = raw_spad
         self.is_t2_fallback = t2_fb
         self.is_t3_fallback = t3_fb
         self.is_blind_zero = blind_zeros
@@ -1290,7 +1335,8 @@ class ToFArcRadarApp(QMainWindow):
         self.radar_canvas.set_zone_data(self.zone_dists, self.raw_dists, self.raw_stats,
                                        self.is_blind_zero, self.is_clear_fallback, 
                                        self.is_t2_fallback, self.is_t3_fallback,
-                                       all_targets=self.all_targets)
+                                       all_targets=self.all_targets,
+                                       spads=self.zone_spads)
 
         # Update bottom cards
         min_d = 3000
@@ -1299,6 +1345,7 @@ class ToFArcRadarApp(QMainWindow):
             d = self.zone_dists[z]
             meta = card["meta"]
             st = self.raw_stats[z]
+            sp_count = self.zone_spads[z]
             is_t2 = self.is_t2_fallback[z]
             is_t3 = self.is_t3_fallback[z]
             hits = self.all_targets[z]
@@ -1306,20 +1353,28 @@ class ToFArcRadarApp(QMainWindow):
             if d < min_d and d > 0:
                 min_d = d
 
-            # Dynamic tag with target number and status
+            # Dynamic tag with target number, status, and live SPAD count
             if self.is_blind_zero[z]:
                 st_desc = "s4" if st == 4 else (f"s{st}" if st > 0 else "HAZARD")
-                card["lbl_tag"].setText(f"{meta['sensor']} • {meta['hw']} • BLIND ({st_desc})")
+                card["lbl_tag"].setText(f"{meta['sensor']} • BLIND ({st_desc}) • {sp_count} SP")
             elif self.is_clear_fallback[z]:
                 st_desc = f"s{st}" if st in (14, 255) else "OPEN"
-                card["lbl_tag"].setText(f"{meta['sensor']} • {meta['hw']} • {st_desc}")
+                card["lbl_tag"].setText(f"{meta['sensor']} • {st_desc} • {sp_count} SP")
             else:
                 if len(hits) > 1:
                     hits_summary = " | ".join([f"T{h[2]}:{h[0]}" for h in hits])
-                    card["lbl_tag"].setText(f"{meta['sensor']} • {hits_summary}")
+                    card["lbl_tag"].setText(f"{meta['sensor']} • {hits_summary} • {sp_count} SP")
                 else:
                     tgt_badge = " [T3]" if is_t3 else (" [T2]" if is_t2 else " [T1]")
-                    card["lbl_tag"].setText(f"{meta['sensor']} • s{st}{tgt_badge}")
+                    card["lbl_tag"].setText(f"{meta['sensor']} • s{st}{tgt_badge} • {sp_count} SP")
+
+            card["frame"].setToolTip(
+                f"Sector {meta['name']} ({meta['ang']})\n"
+                f"Sensor: {meta['sensor']} ({meta['hw']})\n"
+                f"Distance: {d} mm\n"
+                f"Status: s{st}\n"
+                f"Active SPADs: {sp_count}"
+            )
 
             if self.is_blind_zero[z]:
                 card["lbl_dist"].setText("0 mm")
