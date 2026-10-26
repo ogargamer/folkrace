@@ -880,22 +880,28 @@ class ToFArcRadarApp(QMainWindow):
         raw_st = [0] * 8
         t2_fb = [False] * 8
         t3_fb = [False] * 8
+        blind_zeros = [False] * 8
+        clear_fallbacks = [False] * 8
         all_targets = [[] for _ in range(8)]
 
-        def is_valid_target(d, st):
-            # Acceptance of valid ST status codes:
-            # 5: Range Valid (100% confidence, clean single pulse return)
-            # 6: Wrap Around (50% confidence, valid range)
-            # 9: Range Valid with Large Pulse (50% confidence, merged pulse)
-            # 10: Range Valid (new target / no previous range)
-            # Note: s13 excluded to prevent false obstacle detections on driveable ramps
-            if d <= 0:
-                return False
-            if st not in (5, 6, 9, 10):
-                return False
-            if d < 20 or d > 4000:
-                return False
-            return True
+        def classify_target(d, st, target_num):
+            """
+            Evaluates target status and distance:
+              - Status 4: Consistency Fail -> Near-field optical saturation (<20mm) = 0 mm hazard
+              - Status 5, 6, 9, 10 with d < 20 mm: Touching/near-contact = 0 mm hazard
+              - Status 5, 6, 9, 10 with 20 <= d <= 4000: Standard valid obstacle = d mm
+              - Returns (effective_dist_mm, raw_status, target_num, is_blind_hit) or None
+            """
+            if st == 4:
+                # Direct S4 near-field saturation / phase consistency failure
+                return (0, 4, target_num, True)
+            if st in (5, 6, 9, 10):
+                if d < 20:
+                    # Valid close proximity / physical contact with bumper
+                    return (0, st, target_num, True)
+                if d <= 4000:
+                    return (d, st, target_num, False)
+            return None
 
         # 1. Multi-Target Evaluation: collect all valid hits, prioritize nearest for clearance envelope
         for z, (sid, src_idx) in enumerate(zone_sources):
@@ -912,25 +918,30 @@ class ToFArcRadarApp(QMainWindow):
             st2 = int(s_mat[src_idx, 2]) if (len(s_mat) > src_idx and s_mat.shape[1] > 2) else 0
 
             valid_hits = []
-            if is_valid_target(d0, st0):
-                valid_hits.append((d0, st0, 1))
-            if is_valid_target(d1, st1):
-                valid_hits.append((d1, st1, 2))
-            if is_valid_target(d2, st2):
-                valid_hits.append((d2, st2, 3))
+            h0 = classify_target(d0, st0, 1)
+            if h0 is not None:
+                valid_hits.append(h0)
+            h1 = classify_target(d1, st1, 2)
+            if h1 is not None:
+                valid_hits.append(h1)
+            h2 = classify_target(d2, st2, 3)
+            if h2 is not None:
+                valid_hits.append(h2)
 
-            all_targets[z] = valid_hits
+            all_targets[z] = [(h[0], h[1], h[2]) for h in valid_hits]
 
             if valid_hits:
                 # Immediate recovery on valid reading
                 self.error_frame_counts[z] = 0
-                # Select closest valid target for obstacle envelope
                 closest = min(valid_hits, key=lambda x: x[0])
-                raw_d[z] = closest[0]
+                d_val = closest[0]
+                raw_d[z] = d_val
                 raw_st[z] = closest[1]
                 t2_fb[z] = (closest[2] == 2)
                 t3_fb[z] = (closest[2] == 3)
-                self.last_valid_dists[z] = raw_d[z]
+                self.last_valid_dists[z] = d_val
+                if d_val == 0:
+                    blind_zeros[z] = True
             else:
                 # 2-frame latch for errors/dropouts: hold last good distance for 1 frame
                 self.error_frame_counts[z] += 1
@@ -945,57 +956,63 @@ class ToFArcRadarApp(QMainWindow):
                     t2_fb[z] = False
                     t3_fb[z] = False
 
-        # 2. Symmetrical 2-Neighbor Blind-Spot / Open-Space Rule:
+        # 2. Symmetrical 2-Neighbor Blind-Spot & Open-Space Fallback:
         final_d = [3000] * 8
-        blind_zeros = [False] * 8
-        clear_fallbacks = [False] * 8
 
         # First pass: check direct valid readings
         for z in range(8):
             if raw_d[z] is not None:
                 final_d[z] = max(0, min(3000, raw_d[z]))
+                if final_d[z] == 0:
+                    blind_zeros[z] = True
             else:
-                final_d[z] = None  # Pending neighbor resolution
+                final_d[z] = None  # Pending neighbor / status resolution
 
         # Second pass: resolve zones with no reading (persisted 2+ frames)
         for z in range(8):
             if final_d[z] is None:
-                # Symmetrical 2-neighbor model:
-                # Edge zones check adjacent and one-over (Z0 -> Z1, Z2; Z7 -> Z6, Z5)
-                # Interior zones check left and right
-                if z == 0:
-                    neighbor_indices = [1, 2]
-                elif z == 7:
-                    neighbor_indices = [6, 5]
-                else:
-                    neighbor_indices = [z - 1, z + 1]
-
-                has_sub50_neighbor = False
-                error_neighbor_count = 0
-
-                for n_idx in neighbor_indices:
-                    nd = raw_d[n_idx]
-                    nst = raw_st[n_idx]
-                    if nd is not None:
-                        if nd < 50:
-                            has_sub50_neighbor = True
-                    else:
-                        # Genuine error only if status is not clear/open-space codes (0, 14, 255)
-                        if nst not in (0, 14, 255):
-                            error_neighbor_count += 1
-
-                # Becomes 0mm only if:
-                # 1) At least one neighbor has an actual reading < 50mm, OR
-                # 2) Both neighbors have confirmed hardware/signal errors
-                both_have_error = (error_neighbor_count == len(neighbor_indices))
-                is_hazard = has_sub50_neighbor or both_have_error
-
-                if is_hazard:
+                nst0 = raw_st[z]
+                # Direct check on primary zone status:
+                if nst0 in (0, 14, 255):
+                    # Official ST clear open space (no target / out-of-range wrap-around)
+                    final_d[z] = 3000
+                    clear_fallbacks[z] = True
+                elif nst0 == 4:
+                    # Status 4 consistency fail -> blind spot contact
                     final_d[z] = 0
                     blind_zeros[z] = True
                 else:
-                    final_d[z] = 3000
-                    clear_fallbacks[z] = True
+                    # Ambiguous hardware/signal error (s1, s2, s3, etc.) -> check neighbors
+                    if z == 0:
+                        neighbor_indices = [1, 2]
+                    elif z == 7:
+                        neighbor_indices = [6, 5]
+                    else:
+                        neighbor_indices = [z - 1, z + 1]
+
+                    has_sub50_neighbor = False
+                    error_neighbor_count = 0
+
+                    for n_idx in neighbor_indices:
+                        nd = raw_d[n_idx]
+                        nst = raw_st[n_idx]
+                        if nd is not None:
+                            if nd < 50:
+                                has_sub50_neighbor = True
+                        else:
+                            # Genuine error only if status is not clear/open-space codes (0, 14, 255)
+                            if nst not in (0, 14, 255):
+                                error_neighbor_count += 1
+
+                    both_have_error = (error_neighbor_count == len(neighbor_indices))
+                    is_hazard = has_sub50_neighbor or both_have_error
+
+                    if is_hazard:
+                        final_d[z] = 0
+                        blind_zeros[z] = True
+                    else:
+                        final_d[z] = 3000
+                        clear_fallbacks[z] = True
 
         self.zone_dists = final_d
         self.raw_dists = raw_d
@@ -1028,9 +1045,11 @@ class ToFArcRadarApp(QMainWindow):
 
             # Dynamic tag with target number and status
             if self.is_blind_zero[z]:
-                card["lbl_tag"].setText(f"{meta['sensor']} • {meta['hw']} • BLIND")
+                st_desc = "s4" if st == 4 else ("<20mm" if st in (5, 6, 9, 10) else "BLIND")
+                card["lbl_tag"].setText(f"{meta['sensor']} • {meta['hw']} • BLIND ({st_desc})")
             elif self.is_clear_fallback[z]:
-                card["lbl_tag"].setText(f"{meta['sensor']} • {meta['hw']} • OPEN")
+                st_desc = f"s{st}" if st in (14, 255) else "OPEN"
+                card["lbl_tag"].setText(f"{meta['sensor']} • {meta['hw']} • {st_desc}")
             else:
                 if len(hits) > 1:
                     hits_summary = " | ".join([f"T{h[2]}:{h[0]}" for h in hits])
