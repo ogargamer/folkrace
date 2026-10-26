@@ -7,7 +7,7 @@
     - 11.25° angular sectors (8 zones total)
     - ToF 1 (Left):  Column 2, Row 4 (Leftmost, Z0) to Row 1 (Center-Left, Z3)
     - ToF 2 (Right): Column 3, Row 1 (Center-Right, Z4) to Row 4 (Rightmost, Z7)
-    - Proximity blind spot (<50mm -> 0mm) and open space fallback (-> 3.0m)
+    - Fallback on 0 targets: 1024 SPADs -> 0mm, over 1024 / other -> 3.0m
     - Max range: 3000 mm (3.0 m)
 
   Usage:

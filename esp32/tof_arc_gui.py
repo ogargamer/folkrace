@@ -10,9 +10,9 @@ Fused 8-Zone Top-Down 2D Field-of-View (FoV) Visualizer:
   - 8 contiguous 11.25° sectors covering exactly 90° (-45° to +45° forward)
   - Max range: 3000 mm (3.0 m)
   - Proximity Blind-Spot & Open-Space Fallback:
-      * 0 mm reading strictly requires having 1024 active SPADs (near-field saturation confirmation)
-      * If a zone has NO valid reading, is_hazard (s4 or neighbor < 50mm / error) AND has 1024 SPADs -> 0 mm (blind/touching)
-      * If a zone has NO valid reading and does NOT meet 1024 SPAD requirement or is clear -> 3000 mm (clear space)
+      * Fallback occurs only when no target inside the zone reports anything else.
+      * Active SPAD count == 1024 -> 0 mm (blind-spot contact / saturation).
+      * Over 1024 / other -> 3000 mm (3.0 m open-space fallback).
 """
 
 import sys
@@ -878,7 +878,7 @@ class ToFArcRadarApp(QMainWindow):
         foot_bar.setContentsMargins(4, 0, 4, 0)
 
         order_str = "Closest" if self.target_order == 1 else "Strongest"
-        self.lbl_rule_info = QLabel(f"🛡️ Smart Fallback: {self.max_targets}-Targets Max | ToF DSP: {order_str} | Sharpener: {self.sharpener_percent}% | 0mm Hazard requires 1024 SPADs | Fallback (0/3000mm) on 0 Valid Hits")
+        self.lbl_rule_info = QLabel(f"🛡️ Fallback (0 targets): 1024 SPADs = 0mm | Over 1024 / Other = 3m | ToF DSP: {order_str} | Depth: {self.max_targets} Tgt | Sharpener: {self.sharpener_percent}%")
         self.lbl_rule_info.setStyleSheet("color: #60a5fa; font-size: 7.5pt; font-style: italic;")
         foot_bar.addWidget(self.lbl_rule_info)
 
@@ -1000,7 +1000,7 @@ class ToFArcRadarApp(QMainWindow):
     def _update_rule_info(self):
         order_str = "Closest" if self.target_order == 1 else "Strongest"
         self.lbl_rule_info.setText(
-            f"🛡️ Smart Fallback: {self.max_targets}-Targets Max | ToF DSP: {order_str} | Sharpener: {self.sharpener_percent}% | Closest Target Envelope | Fallback (0/3000mm) ONLY on 0 Valid Hits"
+            f"🛡️ Fallback (0 targets): 1024 SPADs = 0mm | Over 1024 / Other = 3m | ToF DSP: {order_str} | Depth: {self.max_targets} Tgt | Sharpener: {self.sharpener_percent}%"
         )
 
     def on_ack_received(self, pkt):
@@ -1159,15 +1159,12 @@ class ToFArcRadarApp(QMainWindow):
 
     def _fuse_and_filter_zones(self):
         """
-        Extract the 8 target zones from ToF 1 and ToF 2 with Smart Multi-Target Evaluation:
-          - Valid targets: ST UM3109 statuses 5 (100% valid), 6 (wrap-around 50%), 9 (merged 50%), 10 (new target)
-          - Priority: Closest valid target drives obstacle clearance envelope; all hits stored
-          - 2-Frame Latch: Hold last valid distance for 1 frame before fallback to eliminate single-frame dropouts
-          - Symmetrical 2-Neighbor Boundary:
-              * Z0 checks Z1 (adjacent) and Z2 (one over)
-              * Z7 checks Z6 (adjacent) and Z5 (one over)
-              * Z1..Z6 check immediate left and right neighbors
-          - Open vs Error Status: Statuses 0, 14, 255 indicate open space/no target, not hardware faults
+        Extract the 8 target zones from ToF 1 and ToF 2:
+          - Valid targets: ST UM3109 statuses 5, 6, 9, 10 and 0 < d <= 4000
+          - Priority: Closest valid target inside zone drives obstacle clearance envelope
+          - Fallback (ONLY when no other target inside zone reports anything):
+              * Active SPADs == 1024 -> 0 mm (blind-spot contact/saturation)
+              * Active SPADs != 1024 (over 1024 or under 1024) -> 3000 mm (clear space)
         """
         # (sensor_id, zone_index_in_sensor)
         zone_sources = [
@@ -1181,6 +1178,7 @@ class ToFArcRadarApp(QMainWindow):
             (2, 14),  # Zone 7: ToF 2, Col 3, Row 4 (Rightmost)
         ]
 
+        final_d = [3000] * 8
         raw_d = [None] * 8
         raw_st = [0] * 8
         raw_spad = [0] * 8
@@ -1189,7 +1187,7 @@ class ToFArcRadarApp(QMainWindow):
         blind_zeros = [False] * 8
         clear_fallbacks = [False] * 8
         all_targets = [[] for _ in range(8)]
-        # 1. Multi-Target Evaluation: collect all targets with a valid reading (Status 5, 6, 9, 10 and d > 0; or d == 0 with 1024 SPADs)
+
         for z, (sid, src_idx) in enumerate(zone_sources):
             d_mat = self.tof1_dists if sid == 1 else self.tof2_dists
             s_mat = self.tof1_stats if sid == 1 else self.tof2_stats
@@ -1211,115 +1209,39 @@ class ToFArcRadarApp(QMainWindow):
             if self.max_targets >= 3:
                 candidate_targets.append((d2, st2, 3))
 
-            valid_hits = []
-            for dt, stt, tid in candidate_targets:
-                if stt in (5, 6, 9, 10):
-                    if 0 < dt <= 4000:
-                        valid_hits.append((dt, stt, tid))
-                    elif dt == 0 and spad_val >= 1024:
-                        valid_hits.append((0, stt, tid))
-
+            # Valid targets have status 5, 6, 9, 10 and real distance (0 < dt <= 4000)
+            valid_hits = [
+                (dt, stt, tid) for dt, stt, tid in candidate_targets
+                if stt in (5, 6, 9, 10) and 0 < dt <= 4000
+            ]
             all_targets[z] = valid_hits
 
             if valid_hits:
-                # Target count > 0: MUST use valid target's measured reading (NEVER 0 unless 1024 SPADs confirmed)
-                self.error_frame_counts[z] = 0
+                # Target reported inside zone: use closest valid target reading
                 chosen = min(valid_hits, key=lambda x: x[0])
-
+                final_d[z] = chosen[0]
                 raw_d[z] = chosen[0]
                 raw_st[z] = chosen[1]
                 t2_fb[z] = (chosen[2] == 2)
                 t3_fb[z] = (chosen[2] == 3)
-                self.last_valid_dists[z] = chosen[0]
-                blind_zeros[z] = (chosen[0] == 0)
+                blind_zeros[z] = False
                 clear_fallbacks[z] = False
             else:
-                # 0 targets in zone get a valid reading with Status 5, 6, 9, 10
-                self.error_frame_counts[z] += 1
+                # No target inside zone reports anything: trigger fallback
                 raw_d[z] = None
                 raw_st[z] = st0
                 t2_fb[z] = False
                 t3_fb[z] = False
 
-        # 2. Symmetrical 2-Neighbor Blind-Spot & Open-Space Fallback:
-        # The 0 or 3000mm fallback ONLY happens if 0 targets in zone get a valid reading with Status 5, 6, 9, 10
-        # CRITICAL REQUIREMENT: 0mm reading strictly requires having 1024 SPADs (near-field saturation confirmation).
-        final_d = [3000] * 8
-
-        # First pass: direct valid readings from zones with >= 1 valid target
-        for z in range(8):
-            if raw_d[z] is not None:
-                final_d[z] = raw_d[z]
-                blind_zeros[z] = (raw_d[z] == 0)
-                clear_fallbacks[z] = False
-            else:
-                final_d[z] = None
-
-        # Second pass: ONLY zones with 0 valid targets resolve to 0 or 3000 mm
-        for z in range(8):
-            if final_d[z] is None:
-                nst0 = raw_st[z]
-                spad_z = raw_spad[z]
-
-                # Direct check on primary zone status:
-                if nst0 in (0, 14, 255):
-                    # Clear open space (no target / out-of-range wrap-around)
-                    final_d[z] = 3000
-                    clear_fallbacks[z] = True
-                    blind_zeros[z] = False
-                elif nst0 == 4:
-                    # Status 4 consistency fail -> blind spot contact (<20mm)
-                    # Requires 1024 SPADs to confirm actual physical contact
-                    if spad_z >= 1024:
-                        final_d[z] = 0
-                        blind_zeros[z] = True
-                        clear_fallbacks[z] = False
-                    else:
-                        final_d[z] = 3000
-                        clear_fallbacks[z] = True
-                        blind_zeros[z] = False
+                # Fallback rule: spad count 1024 = 0mm, over 1024 / other = 3000mm (3m)
+                if spad_val == 1024:
+                    final_d[z] = 0
+                    blind_zeros[z] = True
+                    clear_fallbacks[z] = False
                 else:
-                    # Ambiguous hardware/signal error (s1, s2, s3, etc.) -> check neighbors
-                    if z == 0:
-                        neighbor_indices = [1, 2]
-                    elif z == 7:
-                        neighbor_indices = [6, 5]
-                    else:
-                        neighbor_indices = [z - 1, z + 1]
-
-                    has_sub50_neighbor = False
-                    error_neighbor_count = 0
-
-                    for n_idx in neighbor_indices:
-                        nd = raw_d[n_idx]
-                        nst = raw_st[n_idx]
-                        if nd is not None:
-                            if nd < 50:
-                                has_sub50_neighbor = True
-                        else:
-                            # Genuine error only if status is not clear/open-space codes (0, 14, 255)
-                            if nst not in (0, 14, 255):
-                                error_neighbor_count += 1
-
-                    both_have_error = (error_neighbor_count == len(neighbor_indices))
-                    is_hazard = has_sub50_neighbor or both_have_error
-
-                    # 0mm reading requires having 1024 SPADs
-                    if is_hazard and spad_z >= 1024:
-                        final_d[z] = 0
-                        blind_zeros[z] = True
-                        clear_fallbacks[z] = False
-                    else:
-                        final_d[z] = 3000
-                        clear_fallbacks[z] = True
-                        blind_zeros[z] = False
-
-        # Global safety guarantee: ANY 0mm reading MUST have 1024 SPADs
-        for z in range(8):
-            if (final_d[z] == 0 or blind_zeros[z]) and raw_spad[z] < 1024:
-                final_d[z] = 3000
-                blind_zeros[z] = False
-                clear_fallbacks[z] = True
+                    final_d[z] = 3000
+                    blind_zeros[z] = False
+                    clear_fallbacks[z] = True
 
         self.zone_dists = final_d
         self.raw_dists = raw_d
@@ -1355,11 +1277,11 @@ class ToFArcRadarApp(QMainWindow):
 
             # Dynamic tag with target number, status, and live SPAD count
             if self.is_blind_zero[z]:
-                st_desc = "s4" if st == 4 else (f"s{st}" if st > 0 else "HAZARD")
-                card["lbl_tag"].setText(f"{meta['sensor']} • BLIND ({st_desc}) • {sp_count} SP")
+                st_desc = f"s{st}" if st > 0 else "BLIND"
+                card["lbl_tag"].setText(f"{meta['sensor']} • 0mm ({st_desc}) • {sp_count} SP")
             elif self.is_clear_fallback[z]:
                 st_desc = f"s{st}" if st in (14, 255) else "OPEN"
-                card["lbl_tag"].setText(f"{meta['sensor']} • {st_desc} • {sp_count} SP")
+                card["lbl_tag"].setText(f"{meta['sensor']} • 3m ({st_desc}) • {sp_count} SP")
             else:
                 if len(hits) > 1:
                     hits_summary = " | ".join([f"T{h[2]}:{h[0]}" for h in hits])
