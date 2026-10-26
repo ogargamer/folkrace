@@ -63,11 +63,15 @@ class DualSerialEngine(QThread):
         self._running = False
         self._lock = threading.Lock()
 
-        self._latest_by_sensor = {1: None, 2: None}
-        self.sensor_stats = {
-            1: {"rx_packets": 0, "lost_packets": 0, "last_seq": None, "last_rx_time": 0.0, "current_dt_ms": 0.0},
-            2: {"rx_packets": 0, "lost_packets": 0, "last_seq": None, "last_rx_time": 0.0, "current_dt_ms": 0.0}
-        }
+        self.reset_stats()
+
+    def reset_stats(self):
+        with self._lock:
+            self._latest_by_sensor = {1: None, 2: None}
+            self.sensor_stats = {
+                1: {"rx_packets": 0, "lost_packets": 0, "last_seq": None, "last_rx_time": 0.0, "current_dt_ms": 0.0},
+                2: {"rx_packets": 0, "lost_packets": 0, "last_seq": None, "last_rx_time": 0.0, "current_dt_ms": 0.0}
+            }
 
     def take_latest(self, sensor_id):
         with self._lock:
@@ -125,6 +129,7 @@ class DualSerialEngine(QThread):
                 self.ser.set_buffer_size(rx_size=self.RX_BUFFER_BYTES, tx_size=1 << 16)
             except Exception:
                 pass
+            self.reset_stats()
             self._running = True
             self.connection_changed.emit(True, f"Connected to {self.port} @ {self.baud}")
             self.send_command("GET_CONFIG")
@@ -598,7 +603,7 @@ class ToFArcRadarApp(QMainWindow):
         self.error_frame_counts = [0] * 8
         self.last_valid_dists = [3000] * 8
 
-        # 250ms Watchdog auto-reset tracking (single attempt with 4.5s grace period)
+        # Watchdog auto-reset tracking (allows up to 2 attempts with 5.0s grace period)
         self.last_auto_reset_time = 0.0
         self.reset_grace_until = 0.0
         self.reset_status_until = 0.0
@@ -689,6 +694,19 @@ class ToFArcRadarApp(QMainWindow):
         self.btn_connect.setStyleSheet("background-color: #0284c7; color: white; font-weight: bold; border-radius: 4px; padding: 2px 12px;")
         self.btn_connect.clicked.connect(self.toggle_connection)
         top_layout.addWidget(self.btn_connect)
+
+        self.btn_reset = QPushButton("🔄 Reset Sensors")
+        self.btn_reset.setFixedHeight(26)
+        self.btn_reset.setEnabled(False)
+        self.btn_reset.setCursor(Qt.PointingHandCursor)
+        self.btn_reset.setStyleSheet(
+            "QPushButton { background-color: #374151; color: #f1f5f9; font-weight: bold; border-radius: 4px; padding: 2px 10px; border: 1px solid #4b5563; } "
+            "QPushButton:hover { background-color: #4b5563; } "
+            "QPushButton:disabled { background-color: #1f2937; color: #64748b; border-color: #374151; }"
+        )
+        self.btn_reset.setToolTip("Dispatch hardware RESET command to re-initialize both VL53L8CX sensors")
+        self.btn_reset.clicked.connect(self.manual_reset_sensors)
+        top_layout.addWidget(self.btn_reset)
 
         self.status_pill = QLabel("DISCONNECTED")
         self.status_pill.setFixedHeight(26)
@@ -1053,6 +1071,19 @@ class ToFArcRadarApp(QMainWindow):
         if idx >= 0:
             self.combo_port.setCurrentIndex(idx)
 
+    def manual_reset_sensors(self):
+        if not self.serial_engine.isRunning():
+            return
+        now = time.perf_counter()
+        self.auto_reset_count = 0
+        self.reset_failed = False
+        self.reset_grace_until = now + 5.0
+        self.reset_status_until = now + 5.0
+        self.status_pill.setText("RESETTING...")
+        self.status_pill.setStyleSheet("background-color: #b45309; color: #fef3c7; font-weight: bold; padding: 2px 8px; border-radius: 4px; font-size: 8pt;")
+        self.serial_engine.reset_stats()
+        self.serial_engine.send_command("RESET")
+
     def toggle_connection(self):
         if self.serial_engine.isRunning():
             self.serial_engine.stop()
@@ -1060,15 +1091,19 @@ class ToFArcRadarApp(QMainWindow):
             self.btn_connect.setStyleSheet("background-color: #0284c7; color: white; font-weight: bold; border-radius: 4px; padding: 2px 12px;")
             self.status_pill.setText("DISCONNECTED")
             self.status_pill.setStyleSheet("background-color: #374151; color: #cbd5e1; font-weight: bold; padding: 2px 8px; border-radius: 4px; font-size: 8pt;")
+            if hasattr(self, "btn_reset"):
+                self.btn_reset.setEnabled(False)
         else:
             port = self.combo_port.currentText()
             baud = int(self.combo_baud.currentText())
             if not port:
                 return
+            now = time.perf_counter()
             self.auto_reset_count = 0
             self.reset_failed = False
-            self.reset_grace_until = 0.0
+            self.reset_grace_until = now + 3.0  # 3.0s startup grace period for telemetry stream
             self.reset_status_until = 0.0
+            self.serial_engine.reset_stats()
             self.serial_engine.port = port
             self.serial_engine.baud = baud
             self.serial_engine.start()
@@ -1077,13 +1112,19 @@ class ToFArcRadarApp(QMainWindow):
 
     def on_connection_changed(self, connected, msg):
         if connected:
+            now = time.perf_counter()
+            self.reset_grace_until = now + 3.0
             self.status_pill.setText("ONLINE")
             self.status_pill.setStyleSheet("background-color: #065f46; color: #34d399; font-weight: bold; padding: 2px 8px; border-radius: 4px; font-size: 8pt;")
+            if hasattr(self, "btn_reset"):
+                self.btn_reset.setEnabled(True)
         else:
             self.status_pill.setText("OFFLINE")
             self.status_pill.setStyleSheet("background-color: #7f1d1d; color: #f87171; font-weight: bold; padding: 2px 8px; border-radius: 4px; font-size: 8pt;")
             self.btn_connect.setText("🔌 Connect")
             self.btn_connect.setStyleSheet("background-color: #0284c7; color: white; font-weight: bold; border-radius: 4px; padding: 2px 12px;")
+            if hasattr(self, "btn_reset"):
+                self.btn_reset.setEnabled(False)
 
     def on_render_tick(self):
         # Pull latest available frames from ToF 1 and ToF 2
@@ -1131,29 +1172,46 @@ class ToFArcRadarApp(QMainWindow):
                     self.tof2_dists = d_mat[:, :3]
                     self.tof2_stats = s_mat[:, :3]
 
-        # 250ms Watchdog: detect dead sensor and dispatch RESET (with 4.5s grace period and retry latch)
+        # Watchdog: detect dead / offline sensor and dispatch RESET (with 5.0s grace period and retry latch)
         if self.serial_engine.isRunning():
             now = time.perf_counter()
             if now >= self.reset_grace_until:
-                st1 = self.serial_engine.sensor_stats.get(1)
-                st2 = self.serial_engine.sensor_stats.get(2)
-                # Arm watchdog only once sensors have established streaming (at least 3 packets)
-                s1_dead = bool(st1 and st1.get("rx_packets", 0) >= 3 and (now - st1.get("last_rx_time", 0.0)) > 0.25)
-                s2_dead = bool(st2 and st2.get("rx_packets", 0) >= 3 and (now - st2.get("last_rx_time", 0.0)) > 0.25)
+                st1 = self.serial_engine.sensor_stats.get(1, {})
+                st2 = self.serial_engine.sensor_stats.get(2, {})
 
-                if (s1_dead or s2_dead) and not self.reset_failed:
-                    if self.auto_reset_count < 1:
-                        self.auto_reset_count += 1
-                        self.last_auto_reset_time = now
-                        self.reset_grace_until = now + 4.5
-                        self.reset_status_until = now + 4.5
-                        self.serial_engine.send_command("RESET")
-                    else:
-                        # Attempted reset already; latch as failed to prevent perpetual reset storm
-                        self.reset_failed = True
-                elif not s1_dead and not s2_dead and (st1 and st1.get("rx_packets", 0) >= 3 and st2 and st2.get("rx_packets", 0) >= 3):
+                rx1 = st1.get("rx_packets", 0) if st1 else 0
+                rx2 = st2.get("rx_packets", 0) if st2 else 0
+                last1 = st1.get("last_rx_time", 0.0) if st1 else 0.0
+                last2 = st2.get("last_rx_time", 0.0) if st2 else 0.0
+
+                # A sensor is currently actively streaming if it has received packets and recent frame is within 350ms
+                s1_active = bool(rx1 >= 1 and (now - last1) <= 0.35)
+                s2_active = bool(rx2 >= 1 and (now - last2) <= 0.35)
+
+                if s1_active and s2_active:
+                    # Both sensors streaming normally -> healthy state
                     self.auto_reset_count = 0
                     self.reset_failed = False
+                else:
+                    # Trigger auto-reset if:
+                    # 1. One sensor is streaming but the other is offline / never started / stalled
+                    # 2. Both sensors had started but are now stalled (>350ms)
+                    # 3. Neither sensor started streaming after the startup grace period
+                    one_offline = (s1_active and not s2_active) or (s2_active and not s1_active)
+                    both_stalled = (rx1 >= 1 or rx2 >= 1) and (not s1_active and not s2_active)
+                    neither_started = (rx1 == 0 and rx2 == 0)
+
+                    if (one_offline or both_stalled or neither_started) and not self.reset_failed:
+                        if self.auto_reset_count < 2:
+                            self.auto_reset_count += 1
+                            self.last_auto_reset_time = now
+                            self.reset_grace_until = now + 5.0
+                            self.reset_status_until = now + 5.0
+                            self.serial_engine.reset_stats()
+                            self.serial_engine.send_command("RESET")
+                        else:
+                            # Reached maximum reset attempts; latch failure to prevent endless reset loop
+                            self.reset_failed = True
 
         self._fuse_and_filter_zones()
 

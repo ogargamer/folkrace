@@ -632,6 +632,18 @@ void setup() {
     tof2_active = initialize_tof_sensor(&Dev2, &ctx_tof2);
     delay(50);
 
+    // Immediate boot retry if either sensor failed initial negotiation
+    if (!tof1_active) {
+        Serial.println(F("\n[BOOT-RETRY] Retrying ToF 1 initialization..."));
+        delay(150);
+        tof1_active = initialize_tof_sensor(&Dev1, &ctx_tof1);
+    }
+    if (!tof2_active) {
+        Serial.println(F("\n[BOOT-RETRY] Retrying ToF 2 initialization..."));
+        delay(150);
+        tof2_active = initialize_tof_sensor(&Dev2, &ctx_tof2);
+    }
+
     Serial.println(F("\n================================================================="));
     Serial.printf(" DUAL TOF INITIALIZATION SUMMARY:\n");
     Serial.printf("   ToF 1 (CS 10): %s\n", tof1_active ? "ONLINE" : "FAILED / NOT FOUND");
@@ -677,9 +689,11 @@ void loop() {
     // 3. Periodic ASCII table print for live Serial Monitor viewing
     print_ascii_matrices();
 
-    // 4. Background auto-reconnect for any offline sensor (every 60s to avoid blocking active sensor)
+    // 4. Background auto-reconnect for any offline sensor
+    // First retry quickly after boot (5s), subsequent retries every 30s
     static unsigned long last_reconnect_attempt_ms = 0;
-    if ((!tof1_active || !tof2_active) && (millis() - last_reconnect_attempt_ms > 60000)) {
+    unsigned long reconnect_interval = (last_reconnect_attempt_ms == 0) ? 5000 : 30000;
+    if ((!tof1_active || !tof2_active) && (millis() - last_reconnect_attempt_ms > reconnect_interval)) {
         last_reconnect_attempt_ms = millis();
         if (!tof1_active) {
             Serial.println(F("\n[AUTO-RETRY] Retrying ToF 1 initialization..."));
