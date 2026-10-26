@@ -30,7 +30,7 @@
 
 // ST-certified SPI clock frequency (1 MHz for rock-solid breadboard init, 2 MHz for ranging)
 #define SPI_INIT_SPEED_HZ    1000000
-#define SPI_RANGING_SPEED_HZ 2000000
+#define SPI_RANGING_SPEED_HZ 3000000
 #define CHUNK_SIZE           1024
 
 // =========================================================================
@@ -79,6 +79,16 @@ VL53L8CX_Configuration Dev1, Dev2;
 VL53L8CX_ResultsData Results1, Results2;
 bool tof1_active = false;
 bool tof2_active = false;
+volatile bool int1_triggered = false;
+volatile bool int2_triggered = false;
+
+void IRAM_ATTR isr_tof1() {
+    int1_triggered = true;
+}
+
+void IRAM_ATTR isr_tof2() {
+    int2_triggered = true;
+}
 
 // =========================================================================
 // RUNTIME SENSOR CONFIGURATION STATE (Default: 4x4 @ 60 Hz)
@@ -86,10 +96,10 @@ bool tof2_active = false;
 
 uint8_t current_resolution = VL53L8CX_RESOLUTION_4X4;
 uint8_t current_frequency_hz = 60;
-uint32_t current_integration_ms = 12;
+uint32_t current_integration_ms = 10;
 uint8_t current_target_order = VL53L8CX_TARGET_ORDER_CLOSEST;
 uint8_t current_sharpener = 1;
-uint8_t current_nb_targets = 3;
+uint8_t current_nb_targets = 2;
 
 unsigned long frame_count1 = 0;
 unsigned long frame_count2 = 0;
@@ -535,10 +545,6 @@ void send_arc_telemetry(uint8_t sensor_id) {
     for (int i = 0; i < 8; i++) {
         pos += snprintf(arc_buf + pos, sizeof(arc_buf) - pos, i ? ",%u" : "%u", fused_radar.zones[i].t2_dist);
     }
-    pos += snprintf(arc_buf + pos, sizeof(arc_buf) - pos, "],\"t3\":[");
-    for (int i = 0; i < 8; i++) {
-        pos += snprintf(arc_buf + pos, sizeof(arc_buf) - pos, i ? ",%u" : "%u", fused_radar.zones[i].t3_dist);
-    }
     pos += snprintf(arc_buf + pos, sizeof(arc_buf) - pos, "]}\n");
 
     Serial.write((const uint8_t *)arc_buf, pos);
@@ -828,6 +834,8 @@ void setup() {
 
     pinMode(TOF1_INT_PIN, INPUT_PULLUP);
     pinMode(TOF2_INT_PIN, INPUT_PULLUP);
+    attachInterrupt(digitalPinToInterrupt(TOF1_INT_PIN), isr_tof1, FALLING);
+    attachInterrupt(digitalPinToInterrupt(TOF2_INT_PIN), isr_tof2, FALLING);
     pinMode(TOF1_MISO_PIN, INPUT_PULLUP);
     pinMode(TOF2_MISO_PIN, INPUT_PULLUP);
 
@@ -875,12 +883,13 @@ void setup() {
 void loop() {
     handle_serial_commands();
 
-    // 1. Service ToF 1 (hardware INT pin driven with 25ms timeout fallback)
+    // 1. Service ToF 1 (hardware INT pin driven + 1ms fast fallback)
     if (tof1_active) {
-        bool ready1 = (digitalRead(TOF1_INT_PIN) == LOW);
+        bool ready1 = int1_triggered || (digitalRead(TOF1_INT_PIN) == LOW);
         static unsigned long last_poll1_ms = 0;
-        if (ready1 || (millis() - last_poll1_ms > 25)) {
+        if (ready1 || (millis() - last_poll1_ms >= 1)) {
             last_poll1_ms = millis();
+            int1_triggered = false;
             uint8_t isReady1 = 0;
             vl53l8cx_check_data_ready(&Dev1, &isReady1);
             if (isReady1) {
@@ -896,12 +905,13 @@ void loop() {
         }
     }
 
-    // 2. Service ToF 2 (hardware INT pin driven with 25ms timeout fallback)
+    // 2. Service ToF 2 (hardware INT pin driven + 1ms fast fallback)
     if (tof2_active) {
-        bool ready2 = (digitalRead(TOF2_INT_PIN) == LOW);
+        bool ready2 = int2_triggered || (digitalRead(TOF2_INT_PIN) == LOW);
         static unsigned long last_poll2_ms = 0;
-        if (ready2 || (millis() - last_poll2_ms > 25)) {
+        if (ready2 || (millis() - last_poll2_ms >= 1)) {
             last_poll2_ms = millis();
+            int2_triggered = false;
             uint8_t isReady2 = 0;
             vl53l8cx_check_data_ready(&Dev2, &isReady2);
             if (isReady2) {
@@ -933,5 +943,5 @@ void loop() {
         tof2_active = initialize_tof_sensor(&Dev2, &ctx_tof2);
     }
 
-    delayMicroseconds(200);
+    delayMicroseconds(50);
 }
