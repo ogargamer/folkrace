@@ -33,7 +33,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QThread, QPointF, QRectF
 from PyQt5.QtGui import (
     QColor, QFont, QPainter, QBrush, QPen, QLinearGradient, QRadialGradient,
-    QPolygonF, QPainterPath
+    QPolygonF, QPainterPath, QPixmap
 )
 
 if hasattr(Qt, 'HighDpiScaleFactorRoundingPolicy'):
@@ -68,6 +68,7 @@ class DualSerialEngine(QThread):
     def reset_stats(self):
         with self._lock:
             self._latest_by_sensor = {1: None, 2: None}
+            self._latest_arc_frame = None
             self.sensor_stats = {
                 1: {"rx_packets": 0, "lost_packets": 0, "last_seq": None, "last_rx_time": 0.0, "current_dt_ms": 0.0},
                 2: {"rx_packets": 0, "lost_packets": 0, "last_seq": None, "last_rx_time": 0.0, "current_dt_ms": 0.0}
@@ -79,7 +80,13 @@ class DualSerialEngine(QThread):
             self._latest_by_sensor[sensor_id] = None
         return pkt
 
-    def is_sensor_active(self, sensor_id, timeout_s=0.25):
+    def take_latest_arc(self):
+        with self._lock:
+            pkt = self._latest_arc_frame
+            self._latest_arc_frame = None
+        return pkt
+
+    def is_sensor_active(self, sensor_id, timeout_s=1.2):
         with self._lock:
             st = self.sensor_stats.get(sensor_id)
             if not st or not st["last_rx_time"]:
@@ -116,6 +123,26 @@ class DualSerialEngine(QThread):
                 st["last_seq"] = seq
             self._latest_by_sensor[sensor_id] = packet
 
+    def _store_arc_frame(self, packet):
+        now = time.perf_counter()
+        sensor_id = packet.get("id", 1)
+        seq = packet.get("seq")
+        with self._lock:
+            # Update active stats for the sensor that triggered this arc frame
+            if sensor_id in self.sensor_stats:
+                st = self.sensor_stats[sensor_id]
+                if st["last_rx_time"]:
+                    st["current_dt_ms"] = (now - st["last_rx_time"]) * 1000.0
+                st["last_rx_time"] = now
+                st["rx_packets"] += 1
+                if isinstance(seq, int):
+                    if st["last_seq"] is not None:
+                        gap = seq - st["last_seq"]
+                        if 1 < gap < 1000000:
+                            st["lost_packets"] += gap - 1
+                    st["last_seq"] = seq
+            self._latest_arc_frame = packet
+
     def run(self):
         try:
             self.ser = serial.Serial()
@@ -132,31 +159,40 @@ class DualSerialEngine(QThread):
             self.reset_stats()
             self._running = True
             self.connection_changed.emit(True, f"Connected to {self.port} @ {self.baud}")
+            self.send_command("SET_STREAM:arc")
             self.send_command("GET_CONFIG")
         except Exception as e:
             self._running = False
             self.connection_changed.emit(False, f"Connection Failed: {str(e)}")
             return
 
-        buffer = ""
+        buf = bytearray()
         while self._running:
             try:
                 waiting = self.ser.in_waiting if (self.ser and self.ser.is_open) else 0
                 if waiting:
-                    raw = self.ser.read(waiting).decode('utf-8', errors='replace')
-                    buffer += raw
-                    if len(buffer) > 32768:
-                        buffer = buffer[-4096:]
-                        if "\n" in buffer:
-                            _, buffer = buffer.split("\n", 1)
-                    while "\n" in buffer:
-                        line, buffer = buffer.split("\n", 1)
-                        line = line.strip()
-                        if line.startswith("{") and line.endswith("}"):
+                    raw = self.ser.read(waiting)
+                    buf.extend(raw)
+                    if len(buf) > 65536:
+                        # Keep recent 8KB aligned to newline
+                        nl_last = buf.rfind(b'\n', len(buf) - 8192)
+                        if nl_last != -1:
+                            del buf[:nl_last + 1]
+                        else:
+                            del buf[:-8192]
+                    while True:
+                        nl_pos = buf.find(b'\n')
+                        if nl_pos == -1:
+                            break
+                        line_bytes = bytes(buf[:nl_pos]).strip()
+                        del buf[:nl_pos + 1]
+                        if line_bytes.startswith(b'{') and line_bytes.endswith(b'}'):
                             try:
-                                packet = json.loads(line)
+                                packet = json.loads(line_bytes.decode('utf-8', errors='replace'))
                                 ptype = packet.get("type", packet.get("t", ""))
-                                if ptype == "D":
+                                if ptype == "A":
+                                    self._store_arc_frame(packet)
+                                elif ptype == "D":
                                     self._store_frame(packet)
                                 elif ptype == "ACK":
                                     self.ack_received.emit(packet)
@@ -231,7 +267,12 @@ class RadarArcCanvas(QWidget):
         self.spads = [0] * 8
 
         self.hovered_zone = -1
+        self._bg_cache = None
         self.setMouseTracking(True)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._bg_cache = None
 
     def set_zone_data(self, dists, raw_dists, raw_stats, blind_zeros, clear_fallbacks, t2_fallbacks=None, t3_fallbacks=None, all_targets=None, spads=None):
         self.distances = list(dists)
@@ -252,17 +293,14 @@ class RadarArcCanvas(QWidget):
         origin_y = h * 0.88
 
         dx = event.x() - origin_x
-        dy = origin_y - event.y()  # Forward is positive y
+        dy = origin_y - event.y()
 
         dist_px = math.hypot(dx, dy)
         max_px = (origin_y - 25.0)
 
         if dist_px > 0 and dist_px <= max_px * 1.05 and dy > 0:
-            # Angle in degrees from straight ahead (0° = straight ahead, negative = left, positive = right)
             angle_deg = math.degrees(math.atan2(dx, dy))
             if -45.0 <= angle_deg <= 45.0:
-                # 8 zones across [-45, +45]
-                # zone = (angle_deg + 45.0) / 11.25
                 z_idx = int((angle_deg + 45.0) / 11.25)
                 z_idx = max(0, min(7, z_idx))
                 if z_idx != self.hovered_zone:
@@ -289,12 +327,10 @@ class RadarArcCanvas(QWidget):
             QToolTip.hideText()
             self.update()
 
-    def paintEvent(self, event):
-        p = QPainter(self)
+    def _build_bg_cache(self, w, h):
+        pix = QPixmap(w, h)
+        p = QPainter(pix)
         p.setRenderHint(QPainter.Antialiasing)
-
-        w = self.width()
-        h = self.height()
 
         # Canvas background gradient
         bg_grad = QLinearGradient(0, 0, 0, h)
@@ -325,14 +361,11 @@ class RadarArcCanvas(QWidget):
         p.setPen(QColor(148, 163, 184))
         p.drawText(190, 19, "T3 Hit")
 
-        # Origin for top-down arc (bottom-center)
         origin_x = w / 2.0
         origin_y = h * 0.88
         radius_max = min(origin_y - 25.0, (w / 2.0) / math.sin(math.radians(45.0)))
         scale = radius_max / self.max_range_mm
 
-        # Helper to convert (angle_deg, dist_mm) to screen point
-        # angle_deg: 0 = straight ahead, -45 = left, +45 = right
         def to_screen(deg, dist_mm):
             r_px = dist_mm * scale
             rad = math.radians(deg)
@@ -340,17 +373,9 @@ class RadarArcCanvas(QWidget):
             sy = origin_y - r_px * math.cos(rad)
             return QPointF(sx, sy)
 
-        # ---------------------------------------------------------------------
         # 1. 90° FOV BACKGROUND MESH & CONCENTRIC RANGE RINGS
-        # ---------------------------------------------------------------------
-        rings_m = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0]
-
-        # Draw full 90° pie background wedge
         p_wedge = QPainterPath()
         p_wedge.moveTo(origin_x, origin_y)
-        # In Qt drawArc: 0 deg is 3 o'clock, counterclockwise.
-        # Straight ahead is 90 deg (12 o'clock).
-        # -45 to +45 deg ahead corresponds to Qt angles 45 deg to 135 deg.
         arc_rect = QRectF(origin_x - radius_max, origin_y - radius_max, radius_max * 2, radius_max * 2)
         p_wedge.arcTo(arc_rect, 45.0, 90.0)
         p_wedge.closeSubpath()
@@ -361,43 +386,35 @@ class RadarArcCanvas(QWidget):
         wedge_grad.setColorAt(1.0, QColor(8, 12, 20, 240))
         p.fillPath(p_wedge, QBrush(wedge_grad))
 
-        # Concentric distance rings
+        rings_m = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0]
         p.setFont(QFont("Consolas", 8, QFont.Bold))
         for r_m in rings_m:
             r_px = r_m * 1000.0 * scale
             ring_rect = QRectF(origin_x - r_px, origin_y - r_px, r_px * 2, r_px * 2)
-            
-            # Subtle arc line
             pen_ring = QPen(QColor(38, 54, 78, 130), 1, Qt.DashLine if r_m < 3.0 else Qt.SolidLine)
             p.setPen(pen_ring)
             p.drawArc(ring_rect, int(45.0 * 16), int(90.0 * 16))
 
-            # Range label along center axis
             lbl_pt = to_screen(0.0, r_m * 1000.0)
             p.setPen(QColor(100, 130, 170, 200))
             p.drawText(int(lbl_pt.x() + 4), int(lbl_pt.y() + 11), f"{r_m:.1f}m")
 
-        # ---------------------------------------------------------------------
-        # 2. RADIAL SECTOR BOUNDARIES (11.25° EVERY SPOKE)
-        # ---------------------------------------------------------------------
+        # 2. RADIAL SECTOR BOUNDARIES
         for i in range(9):
             ang = -45.0 + i * 11.25
             pt_end = to_screen(ang, self.max_range_mm)
-            is_center = (abs(ang) < 0.01)
             is_sensor_boundary = (abs(ang) < 0.01)
             is_edge = (i == 0 or i == 8)
 
             if is_edge:
                 p.setPen(QPen(QColor(56, 189, 248, 180), 1.5))
             elif is_sensor_boundary:
-                # Cyan solid line separating ToF 1 (Left) and ToF 2 (Right)
                 p.setPen(QPen(QColor(0, 229, 255, 230), 1.8))
             else:
                 p.setPen(QPen(QColor(32, 44, 64, 150), 1, Qt.DotLine))
 
             p.drawLine(QPointF(origin_x, origin_y), pt_end)
 
-            # Outer angular tags
             if i < 8:
                 mid_ang = ang + 5.625
                 tag_pt = to_screen(mid_ang, self.max_range_mm + 90.0)
@@ -405,8 +422,58 @@ class RadarArcCanvas(QWidget):
                 p.setPen(QColor(90, 115, 150))
                 p.drawText(int(tag_pt.x() - 14), int(tag_pt.y() - 6), 28, 14, Qt.AlignCenter, f"Z{i}")
 
+        # 3. SENSOR DOMAIN BANNER
+        banner_y = int(origin_y + 12)
+        p.setFont(QFont("Segoe UI", 8, QFont.Bold))
+        p.setPen(QColor("#38BDF8"))
+        p.drawText(int(origin_x - radius_max * 0.75), banner_y, 160, 18, Qt.AlignCenter, "◄ ToF 1 (Left / CS 10)")
+        p.setPen(QColor("#34D399"))
+        p.drawText(int(origin_x + radius_max * 0.75 - 160), banner_y, 160, 18, Qt.AlignCenter, "ToF 2 (Right / CS 9) ►")
+
+        # 4. EGO-VEHICLE SILHOUETTE & NOSE BUMPER
+        car_w = 48.0
+        car_h = 36.0
+        car_rect = QRectF(origin_x - car_w / 2.0, origin_y - 8.0, car_w, car_h)
+        p.setBrush(QBrush(QColor(30, 41, 59)))
+        p.setPen(QPen(QColor(56, 189, 248), 1.5))
+        p.drawRoundedRect(car_rect, 6, 6)
+
+        bumper_rect = QRectF(origin_x - car_w / 2.0 + 4, origin_y - 12.0, car_w - 8, 5)
+        p.setBrush(QBrush(QColor(0, 229, 255)))
+        p.setPen(Qt.NoPen)
+        p.drawRoundedRect(bumper_rect, 2, 2)
+
+        p.setFont(QFont("Segoe UI", 7, QFont.Bold))
+        p.setPen(QColor(241, 245, 249))
+        p.drawText(int(origin_x - 14), int(origin_y + 4), 28, 14, Qt.AlignCenter, "▲ FRONT")
+
+        p.end()
+        self._bg_cache = pix
+
+    def paintEvent(self, event):
+        w = self.width()
+        h = self.height()
+        if self._bg_cache is None or self._bg_cache.size() != self.size():
+            self._build_bg_cache(w, h)
+
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.drawPixmap(0, 0, self._bg_cache)
+
+        origin_x = w / 2.0
+        origin_y = h * 0.88
+        radius_max = min(origin_y - 25.0, (w / 2.0) / math.sin(math.radians(45.0)))
+        scale = radius_max / self.max_range_mm
+
+        def to_screen(deg, dist_mm):
+            r_px = dist_mm * scale
+            rad = math.radians(deg)
+            sx = origin_x + r_px * math.sin(rad)
+            sy = origin_y - r_px * math.cos(rad)
+            return QPointF(sx, sy)
+
         # ---------------------------------------------------------------------
-        # 3. 8-ZONE FILLED DETECTION SECTOR WEDGES
+        # 1. 8-ZONE FILLED DETECTION SECTOR WEDGES
         # ---------------------------------------------------------------------
         for z in range(8):
             ang_start = -45.0 + z * 11.25
@@ -415,54 +482,42 @@ class RadarArcCanvas(QWidget):
             is_blind = self.is_blind_zero[z]
             is_hover = (z == self.hovered_zone)
 
-            # Sector fill color based on distance
             if is_blind or d <= 50:
-                # Blind spot hazard / touching (<50mm) -> Pulsing vivid crimson red
                 col_sector = QColor(239, 68, 68, 190)
                 col_border = QColor(255, 82, 82)
             elif d < 400:
-                # Danger proximity -> Vibrant Red/Orange
                 col_sector = QColor(249, 115, 22, 170)
                 col_border = QColor(255, 138, 43)
             elif d < 1000:
-                # Caution -> Amber / Gold
                 col_sector = QColor(245, 158, 11, 150)
                 col_border = QColor(255, 179, 0)
             elif d < 2200:
-                # Nominal navigation -> Neon Cyan
                 col_sector = QColor(6, 182, 212, 120)
                 col_border = QColor(0, 229, 255)
             else:
-                # Clear open space / 3m -> Deep Forest/Emerald Green
                 col_sector = QColor(16, 185, 129, 90)
                 col_border = QColor(0, 230, 118)
 
             if is_hover:
                 col_sector = col_sector.lighter(140)
 
-            # Construct wedge polygon path
             wedge_path = QPainterPath()
             wedge_path.moveTo(origin_x, origin_y)
 
-            # Draw outer arc boundary for this zone
             d_clamped = max(30.0, min(self.max_range_mm, d))
             r_z_px = d_clamped * scale
             z_rect = QRectF(origin_x - r_z_px, origin_y - r_z_px, r_z_px * 2, r_z_px * 2)
 
-            # Qt arc angles: 90 - ang_end to span
-            # ang_start is e.g. -45, ang_end is -33.75 -> Qt angles 90 - (-33.75) = 123.75
             qt_start = 90.0 - ang_end
             wedge_path.arcTo(z_rect, qt_start, 11.25)
             wedge_path.closeSubpath()
 
             p.fillPath(wedge_path, QBrush(col_sector))
-
-            # Outer arc rim highlight
             p.setPen(QPen(col_border, 2.5 if is_hover else 1.8))
             p.drawArc(z_rect, int(qt_start * 16), int(11.25 * 16))
 
         # ---------------------------------------------------------------------
-        # 4. CONTOUR ENVELOPE POLYLINE ACROSS ALL 8 TARGET TIP POINTS
+        # 2. CONTOUR ENVELOPE POLYLINE
         # ---------------------------------------------------------------------
         contour_poly = QPolygonF()
         contour_poly.append(to_screen(-45.0, self.distances[0]))
@@ -471,11 +526,12 @@ class RadarArcCanvas(QWidget):
             contour_poly.append(to_screen(mid_ang, self.distances[z]))
         contour_poly.append(to_screen(45.0, self.distances[7]))
 
-        # Smooth contour envelope line
         p.setPen(QPen(QColor(255, 255, 255, 180), 2.0, Qt.SolidLine))
         p.drawPolyline(contour_poly)
 
-        # Draw glowing target points at center of each zone tip
+        # ---------------------------------------------------------------------
+        # 3. GLOWING TARGET POINTS AND MULTI-TARGET MARKERS
+        # ---------------------------------------------------------------------
         for z in range(8):
             mid_ang = -45.0 + z * 11.25 + 5.625
             d = self.distances[z]
@@ -483,7 +539,6 @@ class RadarArcCanvas(QWidget):
             is_blind = self.is_blind_zero[z]
             is_hover = (z == self.hovered_zone)
 
-            # Draw secondary & tertiary multi-target markers if detected
             if not is_blind and z < len(self.all_targets):
                 for (tgt_d, tgt_st, tgt_num) in self.all_targets[z]:
                     if abs(tgt_d - d) > 30:
@@ -511,7 +566,6 @@ class RadarArcCanvas(QWidget):
                 p.setPen(QPen(QColor(10, 14, 22), 1.5))
                 p.drawEllipse(tip_pt, 3.8, 3.8)
 
-            # Zone distance text tag near detection rim
             p.setFont(QFont("Consolas", 8, QFont.Bold))
             txt_d = f"{d:.0f}" if d > 0 else "0"
             if self.is_clear_fallback[z]:
@@ -526,41 +580,6 @@ class RadarArcCanvas(QWidget):
             txt_pt = to_screen(mid_ang, max(80.0, min(self.max_range_mm - 140.0, d - 40.0)))
             p.setPen(QColor(255, 255, 255, 230))
             p.drawText(int(txt_pt.x() - 22), int(txt_pt.y() - 7), 44, 14, Qt.AlignCenter, txt_d)
-
-        # ---------------------------------------------------------------------
-        # 5. SENSOR DOMAIN BANNER (ToF 1 vs ToF 2)
-        # ---------------------------------------------------------------------
-        banner_y = int(origin_y + 12)
-        p.setFont(QFont("Segoe UI", 8, QFont.Bold))
-        # Left sensor label
-        p.setPen(QColor("#38BDF8"))
-        p.drawText(int(origin_x - radius_max * 0.75), banner_y, 160, 18, Qt.AlignCenter, "◄ ToF 1 (Left / CS 10)")
-        # Right sensor label
-        p.setPen(QColor("#34D399"))
-        p.drawText(int(origin_x + radius_max * 0.75 - 160), banner_y, 160, 18, Qt.AlignCenter, "ToF 2 (Right / CS 9) ►")
-
-        # ---------------------------------------------------------------------
-        # 6. EGO-VEHICLE SILHOUETTE & NOSE BUMPER AT ORIGIN
-        # ---------------------------------------------------------------------
-        car_w = 48.0
-        car_h = 36.0
-        car_rect = QRectF(origin_x - car_w / 2.0, origin_y - 8.0, car_w, car_h)
-        
-        # Vehicle chassis rounded rect
-        p.setBrush(QBrush(QColor(30, 41, 59)))
-        p.setPen(QPen(QColor(56, 189, 248), 1.5))
-        p.drawRoundedRect(car_rect, 6, 6)
-
-        # Front bumper sensor bar
-        bumper_rect = QRectF(origin_x - car_w / 2.0 + 4, origin_y - 12.0, car_w - 8, 5)
-        p.setBrush(QBrush(QColor(0, 229, 255)))
-        p.setPen(Qt.NoPen)
-        p.drawRoundedRect(bumper_rect, 2, 2)
-
-        # Forward Direction Arrow
-        p.setFont(QFont("Segoe UI", 7, QFont.Bold))
-        p.setPen(QColor(241, 245, 249))
-        p.drawText(int(origin_x - 14), int(origin_y + 4), 28, 14, Qt.AlignCenter, "▲ FRONT")
 
 
 # =============================================================================
@@ -602,6 +621,29 @@ class ToFArcRadarApp(QMainWindow):
         # 2-Frame error latch (hold last good distance for 1 frame before fallback)
         self.error_frame_counts = [0] * 8
         self.last_valid_dists = [3000] * 8
+
+        # UI styling cache: prevents 960 CSS re-parses and widget layout stalls per second
+        self.card_alert_state = [-1] * 8
+        self.card_last_dist_text = [""] * 8
+        self.card_last_tag_text = [""] * 8
+        self.card_last_pbar_val = [-1] * 8
+        self.last_kpi_text = ""
+        self.last_kpi_color = ""
+
+        self.STYLE_PROGRESS = {
+            0: "QProgressBar { background: #1e1b2e; border-radius: 2px; } QProgressBar::chunk { background: #EF4444; border-radius: 2px; }",
+            1: "QProgressBar { background: #0f172a; border-radius: 2px; } QProgressBar::chunk { background: #F97316; border-radius: 2px; }",
+            2: "QProgressBar { background: #0f172a; border-radius: 2px; } QProgressBar::chunk { background: #F59E0B; border-radius: 2px; }",
+            3: "QProgressBar { background: #0f172a; border-radius: 2px; } QProgressBar::chunk { background: #00E5FF; border-radius: 2px; }",
+            4: "QProgressBar { background: #0f172a; border-radius: 2px; } QProgressBar::chunk { background: #10B981; border-radius: 2px; }",
+        }
+        self.STYLE_DIST = {
+            0: "color: #EF4444; font-weight: bold;",
+            1: "color: #F97316; font-weight: bold;",
+            2: "color: #F59E0B; font-weight: bold;",
+            3: "color: #00E5FF; font-weight: bold;",
+            4: "color: #10B981; font-weight: bold;",
+        }
 
         # Watchdog auto-reset tracking (allows up to 2 attempts with 5.0s grace period)
         self.last_auto_reset_time = 0.0
@@ -1127,52 +1169,29 @@ class ToFArcRadarApp(QMainWindow):
                 self.btn_reset.setEnabled(False)
 
     def on_render_tick(self):
-        # Pull latest available frames from ToF 1 and ToF 2
-        pkt1 = self.serial_engine.take_latest(1)
-        if pkt1 is not None:
-            res = pkt1.get("r", 16)
-            nt = max(1, pkt1.get("nt", 2))
-            d_list = pkt1.get("d", [])
-            st_list = pkt1.get("st", [])
-            sp_list = pkt1.get("spad", [])
-            if len(sp_list) >= res:
-                self.tof1_spads = np.array(sp_list[:res], dtype=int)
-            tot = res * nt
-            if len(d_list) >= tot and len(st_list) >= tot:
-                d_mat = np.array(d_list[:tot], dtype=int).reshape((res, nt))
-                s_mat = np.array(st_list[:tot], dtype=int).reshape((res, nt))
-                target_count = min(3, nt)
-                if target_count < 3:
-                    pad_w = 3 - target_count
-                    self.tof1_dists = np.pad(d_mat[:, :target_count], ((0, 0), (0, pad_w)), mode='constant')
-                    self.tof1_stats = np.pad(s_mat[:, :target_count], ((0, 0), (0, pad_w)), mode='constant')
-                else:
-                    self.tof1_dists = d_mat[:, :3]
-                    self.tof1_stats = s_mat[:, :3]
+        new_data = False
 
-        pkt2 = self.serial_engine.take_latest(2)
-        if pkt2 is not None:
-            res = pkt2.get("r", 16)
-            nt = max(1, pkt2.get("nt", 2))
-            d_list = pkt2.get("d", [])
-            st_list = pkt2.get("st", [])
-            sp_list = pkt2.get("spad", [])
-            if len(sp_list) >= res:
-                self.tof2_spads = np.array(sp_list[:res], dtype=int)
-            tot = res * nt
-            if len(d_list) >= tot and len(st_list) >= tot:
-                d_mat = np.array(d_list[:tot], dtype=int).reshape((res, nt))
-                s_mat = np.array(st_list[:tot], dtype=int).reshape((res, nt))
-                target_count = min(3, nt)
-                if target_count < 3:
-                    pad_w = 3 - target_count
-                    self.tof2_dists = np.pad(d_mat[:, :target_count], ((0, 0), (0, pad_w)), mode='constant')
-                    self.tof2_stats = np.pad(s_mat[:, :target_count], ((0, 0), (0, pad_w)), mode='constant')
-                else:
-                    self.tof2_dists = d_mat[:, :3]
-                    self.tof2_stats = s_mat[:, :3]
+        # 1. Primary path: check for lightweight fused 8-zone telemetry from ESP32 on-chip engine
+        arc_pkt = self.serial_engine.take_latest_arc()
+        if arc_pkt is not None:
+            self._apply_arc_packet(arc_pkt)
+            new_data = True
+        else:
+            # 2. Legacy fallback: check for raw 16-zone matrices (if older firmware or matrix mode)
+            pkt1 = self.serial_engine.take_latest(1)
+            if pkt1 is not None:
+                self._process_raw_frame(1, pkt1)
+                new_data = True
 
-        # Watchdog: detect dead / offline sensor and dispatch RESET (with 5.0s grace period and retry latch)
+            pkt2 = self.serial_engine.take_latest(2)
+            if pkt2 is not None:
+                self._process_raw_frame(2, pkt2)
+                new_data = True
+
+            if new_data:
+                self._fuse_and_filter_zones()
+
+        # Watchdog: detect dead / offline sensor and dispatch RESET (with 1.2s timeout and grace period)
         if self.serial_engine.isRunning():
             now = time.perf_counter()
             if now >= self.reset_grace_until:
@@ -1184,19 +1203,13 @@ class ToFArcRadarApp(QMainWindow):
                 last1 = st1.get("last_rx_time", 0.0) if st1 else 0.0
                 last2 = st2.get("last_rx_time", 0.0) if st2 else 0.0
 
-                # A sensor is currently actively streaming if it has received packets and recent frame is within 350ms
-                s1_active = bool(rx1 >= 1 and (now - last1) <= 0.35)
-                s2_active = bool(rx2 >= 1 and (now - last2) <= 0.35)
+                s1_active = bool(rx1 >= 1 and (now - last1) <= 1.2)
+                s2_active = bool(rx2 >= 1 and (now - last2) <= 1.2)
 
                 if s1_active and s2_active:
-                    # Both sensors streaming normally -> healthy state
                     self.auto_reset_count = 0
                     self.reset_failed = False
                 else:
-                    # Trigger auto-reset if:
-                    # 1. One sensor is streaming but the other is offline / never started / stalled
-                    # 2. Both sensors had started but are now stalled (>350ms)
-                    # 3. Neither sensor started streaming after the startup grace period
                     one_offline = (s1_active and not s2_active) or (s2_active and not s1_active)
                     both_stalled = (rx1 >= 1 or rx2 >= 1) and (not s1_active and not s2_active)
                     neither_started = (rx1 == 0 and rx2 == 0)
@@ -1210,21 +1223,84 @@ class ToFArcRadarApp(QMainWindow):
                             self.serial_engine.reset_stats()
                             self.serial_engine.send_command("RESET")
                         else:
-                            # Reached maximum reset attempts; latch failure to prevent endless reset loop
                             self.reset_failed = True
 
-        self._fuse_and_filter_zones()
+    def _apply_arc_packet(self, pkt):
+        dists = pkt.get("d", [])
+        if len(dists) != 8:
+            return
+        stats = pkt.get("st", [0] * 8)
+        spads = pkt.get("sp", [0] * 8)
+        fallbacks = pkt.get("fb", [0] * 8)
+        target_nums = pkt.get("tn", [0] * 8)
+        t2_dists = pkt.get("t2", [0] * 8)
+        t3_dists = pkt.get("t3", [0] * 8)
+        min_d = pkt.get("min", 3000)
+
+        self.zone_dists = list(dists)
+        self.raw_stats = list(stats)
+        self.zone_spads = list(spads)
+        self.is_blind_zero = [fb == 1 for fb in fallbacks]
+        self.is_clear_fallback = [fb == 2 for fb in fallbacks]
+        self.is_t2_fallback = [tn == 2 for tn in target_nums]
+        self.is_t3_fallback = [tn == 3 for tn in target_nums]
+
+        all_targets = [[] for _ in range(8)]
+        for z in range(8):
+            d = dists[z]
+            st = stats[z]
+            fb = fallbacks[z]
+            if fb == 0:
+                all_targets[z].append((d, st, target_nums[z]))
+            if z < len(t2_dists) and t2_dists[z] > 0 and t2_dists[z] != d:
+                all_targets[z].append((t2_dists[z], 5, 2))
+            if z < len(t3_dists) and t3_dists[z] > 0 and t3_dists[z] != d:
+                all_targets[z].append((t3_dists[z], 5, 3))
+        self.all_targets = all_targets
+
+        # Update radar canvas
+        self.radar_canvas.set_zone_data(
+            self.zone_dists, self.raw_dists, self.raw_stats,
+            self.is_blind_zero, self.is_clear_fallback,
+            self.is_t2_fallback, self.is_t3_fallback,
+            all_targets=self.all_targets,
+            spads=self.zone_spads
+        )
+
+        # Update bottom cards with zero CSS re-parsing overhead
+        self._update_cards_optimized(min_d)
+
+    def _process_raw_frame(self, sid, pkt):
+        res = pkt.get("r", 16)
+        nt = max(1, pkt.get("nt", 2))
+        d_list = pkt.get("d", [])
+        st_list = pkt.get("st", [])
+        sp_list = pkt.get("spad", [])
+        if sid == 1 and len(sp_list) >= res:
+            self.tof1_spads = np.array(sp_list[:res], dtype=int)
+        elif sid == 2 and len(sp_list) >= res:
+            self.tof2_spads = np.array(sp_list[:res], dtype=int)
+        tot = res * nt
+        if len(d_list) >= tot and len(st_list) >= tot:
+            d_mat = np.array(d_list[:tot], dtype=int).reshape((res, nt))
+            s_mat = np.array(st_list[:tot], dtype=int).reshape((res, nt))
+            target_count = min(3, nt)
+            if target_count < 3:
+                pad_w = 3 - target_count
+                d_pad = np.pad(d_mat[:, :target_count], ((0, 0), (0, pad_w)), mode='constant')
+                s_pad = np.pad(s_mat[:, :target_count], ((0, 0), (0, pad_w)), mode='constant')
+            else:
+                d_pad = d_mat[:, :3]
+                s_pad = s_mat[:, :3]
+            if sid == 1:
+                self.tof1_dists = d_pad
+                self.tof1_stats = s_pad
+            else:
+                self.tof2_dists = d_pad
+                self.tof2_stats = s_pad
 
     def _fuse_and_filter_zones(self):
-        """
-        Extract the 8 target zones from ToF 1 and ToF 2:
-          - Valid targets: ST UM3109 statuses 5, 6, 9, 10 and 0 < d <= 4000
-          - Priority: Closest valid target inside zone drives obstacle clearance envelope
-          - Fallback (ONLY when no other target inside zone reports anything):
-              * Active SPADs == 1024 -> 0 mm (blind-spot contact/saturation)
-              * Active SPADs != 1024 (over 1024 or under 1024) -> 3000 mm (clear space)
-        """
-        # (sensor_id, zone_index_in_sensor)
+        """Legacy fallback zone extraction with 1-frame error latching."""
         zone_sources = [
             (1, 13),  # Zone 0: ToF 1, Col 2, Row 4 (Leftmost)
             (1, 9),   # Zone 1: ToF 1, Col 2, Row 3
@@ -1246,6 +1322,7 @@ class ToFArcRadarApp(QMainWindow):
         clear_fallbacks = [False] * 8
         all_targets = [[] for _ in range(8)]
 
+        min_d = 3000
         for z, (sid, src_idx) in enumerate(zone_sources):
             d_mat = self.tof1_dists if sid == 1 else self.tof2_dists
             s_mat = self.tof1_stats if sid == 1 else self.tof2_stats
@@ -1267,7 +1344,6 @@ class ToFArcRadarApp(QMainWindow):
             if self.max_targets >= 3:
                 candidate_targets.append((d2, st2, 3))
 
-            # Valid targets have status 5, 6, 9, 10 and real distance (0 < dt <= 4000)
             valid_hits = [
                 (dt, stt, tid) for dt, stt, tid in candidate_targets
                 if stt in (5, 6, 9, 10) and 0 < dt <= 4000
@@ -1275,31 +1351,43 @@ class ToFArcRadarApp(QMainWindow):
             all_targets[z] = valid_hits
 
             if valid_hits:
-                # Target reported inside zone: use closest valid target reading
+                self.error_frame_counts[z] = 0
                 chosen = min(valid_hits, key=lambda x: x[0])
                 final_d[z] = chosen[0]
                 raw_d[z] = chosen[0]
                 raw_st[z] = chosen[1]
                 t2_fb[z] = (chosen[2] == 2)
                 t3_fb[z] = (chosen[2] == 3)
+                self.last_valid_dists[z] = chosen[0]
                 blind_zeros[z] = False
                 clear_fallbacks[z] = False
             else:
-                # No target inside zone reports anything: trigger fallback
-                raw_d[z] = None
-                raw_st[z] = st0
-                t2_fb[z] = False
-                t3_fb[z] = False
-
-                # Fallback rule: spad count 1024 = 0mm, over 1024 / other = 3000mm (3m)
-                if spad_val == 1024:
-                    final_d[z] = 0
-                    blind_zeros[z] = True
+                self.error_frame_counts[z] += 1
+                if self.error_frame_counts[z] < 2 and self.last_valid_dists[z] > 0:
+                    # Hold last valid reading for 1 frame to eliminate flicker
+                    final_d[z] = self.last_valid_dists[z]
+                    raw_d[z] = self.last_valid_dists[z]
+                    raw_st[z] = st0
+                    t2_fb[z] = False
+                    t3_fb[z] = False
+                    blind_zeros[z] = False
                     clear_fallbacks[z] = False
                 else:
-                    final_d[z] = 3000
-                    blind_zeros[z] = False
-                    clear_fallbacks[z] = True
+                    raw_d[z] = None
+                    raw_st[z] = st0
+                    t2_fb[z] = False
+                    t3_fb[z] = False
+                    if spad_val == 1024:
+                        final_d[z] = 0
+                        blind_zeros[z] = True
+                        clear_fallbacks[z] = False
+                    else:
+                        final_d[z] = 3000
+                        blind_zeros[z] = False
+                        clear_fallbacks[z] = True
+
+            if final_d[z] > 0 and final_d[z] < min_d:
+                min_d = final_d[z]
 
         self.zone_dists = final_d
         self.raw_dists = raw_d
@@ -1312,14 +1400,19 @@ class ToFArcRadarApp(QMainWindow):
         self.all_targets = all_targets
 
         # Update radar canvas
-        self.radar_canvas.set_zone_data(self.zone_dists, self.raw_dists, self.raw_stats,
-                                       self.is_blind_zero, self.is_clear_fallback, 
-                                       self.is_t2_fallback, self.is_t3_fallback,
-                                       all_targets=self.all_targets,
-                                       spads=self.zone_spads)
+        self.radar_canvas.set_zone_data(
+            self.zone_dists, self.raw_dists, self.raw_stats,
+            self.is_blind_zero, self.is_clear_fallback,
+            self.is_t2_fallback, self.is_t3_fallback,
+            all_targets=self.all_targets,
+            spads=self.zone_spads
+        )
 
         # Update bottom cards
-        min_d = 3000
+        self._update_cards_optimized(min_d)
+
+    def _update_cards_optimized(self, min_d):
+        """Zero-overhead card widget updates: only updates styles/text when values change."""
         for z in range(8):
             card = self.card_widgets[z]
             d = self.zone_dists[z]
@@ -1329,24 +1422,58 @@ class ToFArcRadarApp(QMainWindow):
             is_t2 = self.is_t2_fallback[z]
             is_t3 = self.is_t3_fallback[z]
             hits = self.all_targets[z]
+            is_blind = self.is_blind_zero[z]
+            is_clear = self.is_clear_fallback[z]
 
-            if d < min_d and d > 0:
-                min_d = d
-
-            # Dynamic tag with target number, status, and live SPAD count
-            if self.is_blind_zero[z]:
-                st_desc = f"s{st}" if st > 0 else "BLIND"
-                card["lbl_tag"].setText(f"{meta['sensor']} • 0mm ({st_desc}) • {sp_count} SP")
-            elif self.is_clear_fallback[z]:
-                st_desc = f"s{st}" if st in (14, 255) else "OPEN"
-                card["lbl_tag"].setText(f"{meta['sensor']} • 3m ({st_desc}) • {sp_count} SP")
+            # 1. Alert color state
+            if is_blind or d <= 50:
+                state = 0
+            elif d < 400:
+                state = 1
+            elif d < 1000:
+                state = 2
+            elif d < 2200:
+                state = 3
             else:
+                state = 4
+
+            if self.card_alert_state[z] != state:
+                card["pbar"].setStyleSheet(self.STYLE_PROGRESS[state])
+                card["lbl_dist"].setStyleSheet(self.STYLE_DIST[state])
+                self.card_alert_state[z] = state
+
+            # 2. Text and tag strings
+            if is_blind:
+                dist_txt = "0 mm"
+                pbar_val = 0
+                st_desc = f"s{st}" if st > 0 else "BLIND"
+                tag_txt = f"{meta['sensor']} • 0mm ({st_desc}) • {sp_count} SP"
+            elif is_clear:
+                dist_txt = "3.00 m*"
+                pbar_val = 3000
+                st_desc = f"s{st}" if st in (14, 255) else "OPEN"
+                tag_txt = f"{meta['sensor']} • 3m ({st_desc}) • {sp_count} SP"
+            else:
+                dist_txt = f"{d} mm"
+                pbar_val = min(3000, max(0, d))
                 if len(hits) > 1:
                     hits_summary = " | ".join([f"T{h[2]}:{h[0]}" for h in hits])
-                    card["lbl_tag"].setText(f"{meta['sensor']} • {hits_summary} • {sp_count} SP")
+                    tag_txt = f"{meta['sensor']} • {hits_summary} • {sp_count} SP"
                 else:
                     tgt_badge = " [T3]" if is_t3 else (" [T2]" if is_t2 else " [T1]")
-                    card["lbl_tag"].setText(f"{meta['sensor']} • s{st}{tgt_badge} • {sp_count} SP")
+                    tag_txt = f"{meta['sensor']} • s{st}{tgt_badge} • {sp_count} SP"
+
+            if self.card_last_dist_text[z] != dist_txt:
+                card["lbl_dist"].setText(dist_txt)
+                self.card_last_dist_text[z] = dist_txt
+
+            if self.card_last_tag_text[z] != tag_txt:
+                card["lbl_tag"].setText(tag_txt)
+                self.card_last_tag_text[z] = tag_txt
+
+            if self.card_last_pbar_val[z] != pbar_val:
+                card["pbar"].setValue(pbar_val)
+                self.card_last_pbar_val[z] = pbar_val
 
             card["frame"].setToolTip(
                 f"Sector {meta['name']} ({meta['ang']})\n"
@@ -1356,36 +1483,21 @@ class ToFArcRadarApp(QMainWindow):
                 f"Active SPADs: {sp_count}"
             )
 
-            if self.is_blind_zero[z]:
-                card["lbl_dist"].setText("0 mm")
-                card["lbl_dist"].setStyleSheet("color: #EF4444; font-weight: bold;")
-                card["pbar"].setValue(0)
-                card["pbar"].setStyleSheet("QProgressBar { background: #1e1b2e; } QProgressBar::chunk { background: #EF4444; }")
-            elif self.is_clear_fallback[z]:
-                card["lbl_dist"].setText("3.00 m*")
-                card["lbl_dist"].setStyleSheet("color: #10B981; font-weight: bold;")
-                card["pbar"].setValue(3000)
-                card["pbar"].setStyleSheet("QProgressBar { background: #0f172a; } QProgressBar::chunk { background: #10B981; }")
-            else:
-                card["lbl_dist"].setText(f"{d} mm")
-                if d < 300:
-                    col = "#EF4444"
-                elif d < 800:
-                    col = "#F59E0B"
-                elif d < 2000:
-                    col = "#00E5FF"
-                else:
-                    col = "#10B981"
-                card["lbl_dist"].setStyleSheet(f"color: {col}; font-weight: bold;")
-                card["pbar"].setValue(min(3000, d))
-                card["pbar"].setStyleSheet(f"QProgressBar {{ background: #0f172a; }} QProgressBar::chunk {{ background: {col}; }}")
-
+        # 3. KPI banner update
         if min_d < 3000:
-            self.lbl_kpi_min.setText(f"Min Clearance: {min_d} mm")
-            self.lbl_kpi_min.setStyleSheet("color: #EF4444; font-weight: bold;" if min_d < 300 else "color: #00E5FF; font-weight: bold;")
+            kpi_txt = f"Min Clearance: {min_d} mm"
+            kpi_col = "color: #EF4444; font-weight: bold;" if min_d < 300 else "color: #00E5FF; font-weight: bold;"
         else:
-            self.lbl_kpi_min.setText("Min Clearance: > 3.0 m (All Clear)")
-            self.lbl_kpi_min.setStyleSheet("color: #10B981; font-weight: bold;")
+            kpi_txt = "Min Clearance: > 3.0 m (All Clear)"
+            kpi_col = "color: #10B981; font-weight: bold;"
+
+        if self.last_kpi_text != kpi_txt:
+            self.lbl_kpi_min.setText(kpi_txt)
+            self.last_kpi_text = kpi_txt
+
+        if self.last_kpi_color != kpi_col:
+            self.lbl_kpi_min.setStyleSheet(kpi_col)
+            self.last_kpi_color = kpi_col
 
     def on_zone_hovered(self, z_idx):
         for z, card in enumerate(self.card_widgets):

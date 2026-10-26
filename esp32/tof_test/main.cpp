@@ -100,6 +100,38 @@ unsigned long last_recovery_attempt2_ms = 0;
 uint8_t recovery_tier1 = 0;
 uint8_t recovery_tier2 = 0;
 
+// =========================================================================
+// ON-CHIP 8-ZONE 90° RADAR FUSION ENGINE (STANDALONE ROBOT BACKEND)
+// =========================================================================
+
+struct FusedRadarZone {
+    uint16_t distance_mm;   // Fused clearance: 0mm contact, 3000mm clear, or valid min target
+    uint8_t  status;        // Target status code
+    uint16_t spad_count;    // Active SPAD count
+    uint8_t  target_num;    // 1 for T1, 2 for T2, 3 for T3, 0 for fallback
+    uint8_t  fallback_type; // 0 = valid hit, 1 = blind-spot contact (0mm), 2 = open space (3m), 3 = error latch held
+    uint16_t t2_dist;       // Candidate T2 distance (0 if none)
+    uint16_t t3_dist;       // Candidate T3 distance (0 if none)
+};
+
+struct FusedRadarState {
+    FusedRadarZone zones[8];
+    uint16_t min_distance_mm;
+    uint32_t last_update_ms;
+    unsigned long seq;
+};
+
+FusedRadarState fused_radar = {};
+
+// 2-Frame error latch per zone (holds last valid distance for 1 frame before fallback)
+static uint8_t error_latch_count[8] = {0};
+static uint16_t last_valid_dist[8] = {3000, 3000, 3000, 3000, 3000, 3000, 3000, 3000};
+
+// Telemetry stream configuration
+bool stream_arc_mode = true;      // Fused 8-zone radar telemetry (default high-speed)
+bool stream_diag_matrix = false;  // Full 16-zone raw matrix telemetry (for diagnostic matrix GUI)
+bool print_ascii_enabled = false; // ASCII table monitor output (disabled during telemetry streaming)
+
 static uint8_t tx_chunk_buffer[CHUNK_SIZE + 4];
 
 // =========================================================================
@@ -343,8 +375,174 @@ bool initialize_tof_sensor(VL53L8CX_Configuration *p_dev, ToF_Device_Context *ct
 }
 
 // =========================================================================
-// TELEMETRY & DISPLAY FORMATTERS
 // =========================================================================
+// ON-CHIP 8-ZONE 90° RADAR FUSION & TELEMETRY
+// =========================================================================
+
+static inline bool is_valid_tof_target(int16_t d, uint8_t st) {
+    return (st == 5 || st == 6 || st == 9 || st == 10) && (d > 0 && d <= 4000);
+}
+
+void update_onchip_fused_radar() {
+    // Zone mapping:
+    // Zone 0..3: ToF 1 (Left), Col 2 (0-indexed col 1), Rows 4..1 (0-indexed rows 3, 2, 1, 0)
+    // -> Row 3: 3*4+1 = 13 (Zone 0, Leftmost)
+    // -> Row 2: 2*4+1 = 9  (Zone 1)
+    // -> Row 1: 1*4+1 = 5  (Zone 2)
+    // -> Row 0: 0*4+1 = 1  (Zone 3, Center-Left)
+    // Zone 4..7: ToF 2 (Right), Col 3 (0-indexed col 2), Rows 1..4 (0-indexed rows 0, 1, 2, 3)
+    // -> Row 0: 0*4+2 = 2  (Zone 4, Center-Right)
+    // -> Row 1: 1*4+2 = 6  (Zone 5)
+    // -> Row 2: 2*4+2 = 10 (Zone 6)
+    // -> Row 3: 3*4+2 = 14 (Zone 7, Rightmost)
+    static const uint8_t zone_sensor[8] = {1, 1, 1, 1, 2, 2, 2, 2};
+    static const uint8_t zone_src_idx[8] = {13, 9, 5, 1, 2, 6, 10, 14};
+
+    uint16_t overall_min = 3000;
+
+    for (int z = 0; z < 8; z++) {
+        uint8_t sid = zone_sensor[z];
+        uint8_t src = zone_src_idx[z];
+        bool active = (sid == 1) ? tof1_active : tof2_active;
+        VL53L8CX_ResultsData *res = (sid == 1) ? &Results1 : &Results2;
+
+        if (!active) {
+            fused_radar.zones[z].distance_mm = 3000;
+            fused_radar.zones[z].status = 0;
+            fused_radar.zones[z].spad_count = 0;
+            fused_radar.zones[z].target_num = 0;
+            fused_radar.zones[z].fallback_type = 2; // open space
+            fused_radar.zones[z].t2_dist = 0;
+            fused_radar.zones[z].t3_dist = 0;
+            continue;
+        }
+
+        uint16_t spad_val = 0;
+#ifndef VL53L8CX_DISABLE_NB_SPADS_ENABLED
+        spad_val = res->nb_spads_enabled[src];
+#endif
+        fused_radar.zones[z].spad_count = spad_val;
+
+        int src0 = src * VL53L8CX_NB_TARGET_PER_ZONE;
+        int src1 = src * VL53L8CX_NB_TARGET_PER_ZONE + 1;
+        int src2 = src * VL53L8CX_NB_TARGET_PER_ZONE + 2;
+
+        int16_t d0 = res->distance_mm[src0];
+        uint8_t st0 = res->target_status[src0];
+
+        int16_t d1 = (VL53L8CX_NB_TARGET_PER_ZONE > 1) ? res->distance_mm[src1] : 0;
+        uint8_t st1 = (VL53L8CX_NB_TARGET_PER_ZONE > 1) ? res->target_status[src1] : 0;
+
+        int16_t d2 = (VL53L8CX_NB_TARGET_PER_ZONE > 2) ? res->distance_mm[src2] : 0;
+        uint8_t st2 = (VL53L8CX_NB_TARGET_PER_ZONE > 2) ? res->target_status[src2] : 0;
+
+        bool v0 = is_valid_tof_target(d0, st0);
+        bool v1 = is_valid_tof_target(d1, st1);
+        bool v2 = (current_nb_targets >= 3) ? is_valid_tof_target(d2, st2) : false;
+
+        fused_radar.zones[z].t2_dist = v1 ? (uint16_t)d1 : 0;
+        fused_radar.zones[z].t3_dist = v2 ? (uint16_t)d2 : 0;
+
+        if (v0 || v1 || v2) {
+            // Target found: find closest valid target for obstacle clearance
+            uint16_t best_d = 4000;
+            uint8_t best_st = 0;
+            uint8_t best_t = 1;
+
+            if (v0 && (uint16_t)d0 < best_d) {
+                best_d = (uint16_t)d0;
+                best_st = st0;
+                best_t = 1;
+            }
+            if (v1 && (uint16_t)d1 < best_d) {
+                best_d = (uint16_t)d1;
+                best_st = st1;
+                best_t = 2;
+            }
+            if (v2 && (uint16_t)d2 < best_d) {
+                best_d = (uint16_t)d2;
+                best_st = st2;
+                best_t = 3;
+            }
+
+            fused_radar.zones[z].distance_mm = best_d;
+            fused_radar.zones[z].status = best_st;
+            fused_radar.zones[z].target_num = best_t;
+            fused_radar.zones[z].fallback_type = 0; // valid hit
+
+            error_latch_count[z] = 0;
+            last_valid_dist[z] = best_d;
+        } else {
+            // No valid target inside zone: apply 2-frame dropout latch before fallback
+            error_latch_count[z]++;
+            if (error_latch_count[z] < 2 && last_valid_dist[z] > 0) {
+                // Hold last valid reading for 1 frame to eliminate flicker
+                fused_radar.zones[z].distance_mm = last_valid_dist[z];
+                fused_radar.zones[z].status = st0;
+                fused_radar.zones[z].target_num = 0;
+                fused_radar.zones[z].fallback_type = 3; // latched frame
+            } else {
+                // Fallback rule: exactly 1024 SPADs = 0mm contact / saturation; other = 3000mm open space
+                fused_radar.zones[z].status = st0;
+                fused_radar.zones[z].target_num = 0;
+                if (spad_val == 1024) {
+                    fused_radar.zones[z].distance_mm = 0;
+                    fused_radar.zones[z].fallback_type = 1; // 0mm contact
+                } else {
+                    fused_radar.zones[z].distance_mm = 3000;
+                    fused_radar.zones[z].fallback_type = 2; // 3m open space
+                }
+            }
+        }
+
+        uint16_t zd = fused_radar.zones[z].distance_mm;
+        if (zd > 0 && zd < overall_min) {
+            overall_min = zd;
+        }
+    }
+
+    fused_radar.min_distance_mm = overall_min;
+    fused_radar.last_update_ms = millis();
+    fused_radar.seq++;
+}
+
+void send_arc_telemetry(uint8_t sensor_id) {
+    static char arc_buf[512];
+    int pos = snprintf(arc_buf, sizeof(arc_buf),
+        "{\"t\":\"A\",\"id\":%u,\"seq\":%lu,\"ts\":%lu,\"min\":%u,\"d\":[",
+        sensor_id, fused_radar.seq, (unsigned long)millis(), fused_radar.min_distance_mm);
+
+    for (int i = 0; i < 8; i++) {
+        pos += snprintf(arc_buf + pos, sizeof(arc_buf) - pos, i ? ",%u" : "%u", fused_radar.zones[i].distance_mm);
+    }
+    pos += snprintf(arc_buf + pos, sizeof(arc_buf) - pos, "],\"st\":[");
+    for (int i = 0; i < 8; i++) {
+        pos += snprintf(arc_buf + pos, sizeof(arc_buf) - pos, i ? ",%u" : "%u", fused_radar.zones[i].status);
+    }
+    pos += snprintf(arc_buf + pos, sizeof(arc_buf) - pos, "],\"sp\":[");
+    for (int i = 0; i < 8; i++) {
+        pos += snprintf(arc_buf + pos, sizeof(arc_buf) - pos, i ? ",%u" : "%u", fused_radar.zones[i].spad_count);
+    }
+    pos += snprintf(arc_buf + pos, sizeof(arc_buf) - pos, "],\"fb\":[");
+    for (int i = 0; i < 8; i++) {
+        pos += snprintf(arc_buf + pos, sizeof(arc_buf) - pos, i ? ",%u" : "%u", (unsigned int)fused_radar.zones[i].fallback_type);
+    }
+    pos += snprintf(arc_buf + pos, sizeof(arc_buf) - pos, "],\"tn\":[");
+    for (int i = 0; i < 8; i++) {
+        pos += snprintf(arc_buf + pos, sizeof(arc_buf) - pos, i ? ",%u" : "%u", (unsigned int)fused_radar.zones[i].target_num);
+    }
+    pos += snprintf(arc_buf + pos, sizeof(arc_buf) - pos, "],\"t2\":[");
+    for (int i = 0; i < 8; i++) {
+        pos += snprintf(arc_buf + pos, sizeof(arc_buf) - pos, i ? ",%u" : "%u", fused_radar.zones[i].t2_dist);
+    }
+    pos += snprintf(arc_buf + pos, sizeof(arc_buf) - pos, "],\"t3\":[");
+    for (int i = 0; i < 8; i++) {
+        pos += snprintf(arc_buf + pos, sizeof(arc_buf) - pos, i ? ",%u" : "%u", fused_radar.zones[i].t3_dist);
+    }
+    pos += snprintf(arc_buf + pos, sizeof(arc_buf) - pos, "]}\n");
+
+    Serial.write((const uint8_t *)arc_buf, pos);
+}
 
 static char telemetry_buf[8192];
 
@@ -540,6 +738,25 @@ void dispatch_command(const String &cmd) {
         Serial.println(F("{\"type\":\"ACK\",\"status\":\"OK\",\"cmd\":\"RESET\"}"));
         tof1_active = initialize_tof_sensor(&Dev1, &ctx_tof1);
         tof2_active = initialize_tof_sensor(&Dev2, &ctx_tof2);
+    } else if (cmd == "SET_STREAM:arc") {
+        stream_arc_mode = true;
+        stream_diag_matrix = false;
+        print_ascii_enabled = false;
+        Serial.println(F("{\"type\":\"ACK\",\"status\":\"OK\",\"stream\":\"arc\"}"));
+    } else if (cmd == "SET_STREAM:matrix") {
+        stream_arc_mode = false;
+        stream_diag_matrix = true;
+        Serial.println(F("{\"type\":\"ACK\",\"status\":\"OK\",\"stream\":\"matrix\"}"));
+    } else if (cmd == "SET_STREAM:both") {
+        stream_arc_mode = true;
+        stream_diag_matrix = true;
+        Serial.println(F("{\"type\":\"ACK\",\"status\":\"OK\",\"stream\":\"both\"}"));
+    } else if (cmd == "ASCII" || cmd == "PRINT_ASCII=1") {
+        print_ascii_enabled = true;
+        Serial.println(F("{\"type\":\"ACK\",\"status\":\"OK\",\"ascii\":1}"));
+    } else if (cmd == "PRINT_ASCII=0") {
+        print_ascii_enabled = false;
+        Serial.println(F("{\"type\":\"ACK\",\"status\":\"OK\",\"ascii\":0}"));
     } else if (cmd.startsWith("SET_CONFIG:") || cmd.startsWith("SET_CONFIG ")) {
         int colon = cmd.indexOf(':');
         if (colon == -1) colon = cmd.indexOf(' ');
@@ -658,51 +875,62 @@ void setup() {
 void loop() {
     handle_serial_commands();
 
-    // 1. Service ToF 1
+    // 1. Service ToF 1 (hardware INT pin driven with 25ms timeout fallback)
     if (tof1_active) {
-        uint8_t isReady1 = 0;
-        vl53l8cx_check_data_ready(&Dev1, &isReady1);
-        if (isReady1) {
-            if (vl53l8cx_get_ranging_data(&Dev1, &Results1) == 0) {
-                frame_count1++;
-                last_frame_time1_ms = millis();
-                recovery_tier1 = 0;
-                send_json_telemetry(1, &Results1, frame_count1);
+        bool ready1 = (digitalRead(TOF1_INT_PIN) == LOW);
+        static unsigned long last_poll1_ms = 0;
+        if (ready1 || (millis() - last_poll1_ms > 25)) {
+            last_poll1_ms = millis();
+            uint8_t isReady1 = 0;
+            vl53l8cx_check_data_ready(&Dev1, &isReady1);
+            if (isReady1) {
+                if (vl53l8cx_get_ranging_data(&Dev1, &Results1) == 0) {
+                    frame_count1++;
+                    last_frame_time1_ms = millis();
+                    recovery_tier1 = 0;
+                    update_onchip_fused_radar();
+                    if (stream_arc_mode) send_arc_telemetry(1);
+                    if (stream_diag_matrix) send_json_telemetry(1, &Results1, frame_count1);
+                }
             }
         }
     }
 
-    // 2. Service ToF 2
+    // 2. Service ToF 2 (hardware INT pin driven with 25ms timeout fallback)
     if (tof2_active) {
-        uint8_t isReady2 = 0;
-        vl53l8cx_check_data_ready(&Dev2, &isReady2);
-        if (isReady2) {
-            if (vl53l8cx_get_ranging_data(&Dev2, &Results2) == 0) {
-                frame_count2++;
-                last_frame_time2_ms = millis();
-                recovery_tier2 = 0;
-                send_json_telemetry(2, &Results2, frame_count2);
+        bool ready2 = (digitalRead(TOF2_INT_PIN) == LOW);
+        static unsigned long last_poll2_ms = 0;
+        if (ready2 || (millis() - last_poll2_ms > 25)) {
+            last_poll2_ms = millis();
+            uint8_t isReady2 = 0;
+            vl53l8cx_check_data_ready(&Dev2, &isReady2);
+            if (isReady2) {
+                if (vl53l8cx_get_ranging_data(&Dev2, &Results2) == 0) {
+                    frame_count2++;
+                    last_frame_time2_ms = millis();
+                    recovery_tier2 = 0;
+                    update_onchip_fused_radar();
+                    if (stream_arc_mode) send_arc_telemetry(2);
+                    if (stream_diag_matrix) send_json_telemetry(2, &Results2, frame_count2);
+                }
             }
         }
     }
 
-    // 3. Periodic ASCII table print for live Serial Monitor viewing
-    print_ascii_matrices();
+    // 3. Periodic ASCII table print ONLY if explicitly enabled
+    if (print_ascii_enabled) {
+        print_ascii_matrices();
+    }
 
-    // 4. Background auto-reconnect for any offline sensor
-    // First retry quickly after boot (5s), subsequent retries every 30s
+    // 4. Background auto-reconnect only if BOTH are dead or at initial boot
+    // Never freeze an actively working sensor during navigation!
     static unsigned long last_reconnect_attempt_ms = 0;
     unsigned long reconnect_interval = (last_reconnect_attempt_ms == 0) ? 5000 : 30000;
-    if ((!tof1_active || !tof2_active) && (millis() - last_reconnect_attempt_ms > reconnect_interval)) {
+    if (!tof1_active && !tof2_active && (millis() - last_reconnect_attempt_ms > reconnect_interval)) {
         last_reconnect_attempt_ms = millis();
-        if (!tof1_active) {
-            Serial.println(F("\n[AUTO-RETRY] Retrying ToF 1 initialization..."));
-            tof1_active = initialize_tof_sensor(&Dev1, &ctx_tof1);
-        }
-        if (!tof2_active) {
-            Serial.println(F("\n[AUTO-RETRY] Retrying ToF 2 initialization..."));
-            tof2_active = initialize_tof_sensor(&Dev2, &ctx_tof2);
-        }
+        Serial.println(F("\n[AUTO-RETRY] Retrying dual ToF initialization..."));
+        tof1_active = initialize_tof_sensor(&Dev1, &ctx_tof1);
+        tof2_active = initialize_tof_sensor(&Dev2, &ctx_tof2);
     }
 
     delayMicroseconds(200);
