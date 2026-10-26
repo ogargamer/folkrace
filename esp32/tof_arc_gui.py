@@ -21,6 +21,7 @@ import json
 import time
 import math
 import threading
+from collections import deque
 import numpy as np
 import serial
 import serial.tools.list_ports
@@ -70,8 +71,8 @@ class DualSerialEngine(QThread):
             self._latest_by_sensor = {1: None, 2: None}
             self._latest_arc_frame = None
             self.sensor_stats = {
-                1: {"rx_packets": 0, "lost_packets": 0, "last_seq": None, "last_rx_time": 0.0, "current_dt_ms": 0.0},
-                2: {"rx_packets": 0, "lost_packets": 0, "last_seq": None, "last_rx_time": 0.0, "current_dt_ms": 0.0}
+                1: {"rx_packets": 0, "lost_packets": 0, "last_seq": None, "last_rx_time": 0.0, "current_dt_ms": 0.0, "timestamps": deque(maxlen=120), "smooth_hz": 0.0},
+                2: {"rx_packets": 0, "lost_packets": 0, "last_seq": None, "last_rx_time": 0.0, "current_dt_ms": 0.0, "timestamps": deque(maxlen=120), "smooth_hz": 0.0}
             }
 
     def take_latest(self, sensor_id):
@@ -94,12 +95,42 @@ class DualSerialEngine(QThread):
             return (time.perf_counter() - st["last_rx_time"]) < timeout_s
 
     def get_sensor_hz(self, sensor_id):
+        now = time.perf_counter()
         with self._lock:
             st = self.sensor_stats.get(sensor_id)
             if not st or not st["last_rx_time"]:
                 return 0.0
-            dt = st.get("current_dt_ms", 0.0)
-            return (1000.0 / dt) if dt > 0 else 0.0
+            if (now - st["last_rx_time"]) > 1.2:
+                st["smooth_hz"] = 0.0
+                return 0.0
+
+            dq = st.get("timestamps")
+            if not dq:
+                return 0.0
+
+            # Prune timestamps older than 1.2s window
+            cutoff = now - 1.2
+            while dq and dq[0] < cutoff:
+                dq.popleft()
+
+            count = len(dq)
+            if count < 2:
+                return st.get("smooth_hz", 0.0)
+
+            dt = dq[-1] - dq[0]
+            if dt <= 0.001:
+                return st.get("smooth_hz", 0.0)
+
+            raw_hz = (count - 1) / dt
+
+            # Low-pass EMA filter (0.7 * prev + 0.3 * raw) to eliminate residual USB buffer jitter
+            prev_hz = st.get("smooth_hz", 0.0)
+            if prev_hz <= 0.0:
+                smooth_hz = raw_hz
+            else:
+                smooth_hz = 0.7 * prev_hz + 0.3 * raw_hz
+            st["smooth_hz"] = smooth_hz
+            return smooth_hz
 
     def _store_frame(self, packet):
         now = time.perf_counter()
@@ -108,13 +139,15 @@ class DualSerialEngine(QThread):
         with self._lock:
             if sensor_id not in self.sensor_stats:
                 self.sensor_stats[sensor_id] = {
-                    "rx_packets": 0, "lost_packets": 0, "last_seq": None, "last_rx_time": 0.0, "current_dt_ms": 0.0
+                    "rx_packets": 0, "lost_packets": 0, "last_seq": None, "last_rx_time": 0.0,
+                    "current_dt_ms": 0.0, "timestamps": deque(maxlen=120), "smooth_hz": 0.0
                 }
             st = self.sensor_stats[sensor_id]
             if st["last_rx_time"]:
                 st["current_dt_ms"] = (now - st["last_rx_time"]) * 1000.0
             st["last_rx_time"] = now
             st["rx_packets"] += 1
+            st.setdefault("timestamps", deque(maxlen=120)).append(now)
             if isinstance(seq, int):
                 if st["last_seq"] is not None:
                     gap = seq - st["last_seq"]
@@ -129,18 +162,23 @@ class DualSerialEngine(QThread):
         seq = packet.get("seq")
         with self._lock:
             # Update active stats for the sensor that triggered this arc frame
-            if sensor_id in self.sensor_stats:
-                st = self.sensor_stats[sensor_id]
-                if st["last_rx_time"]:
-                    st["current_dt_ms"] = (now - st["last_rx_time"]) * 1000.0
-                st["last_rx_time"] = now
-                st["rx_packets"] += 1
-                if isinstance(seq, int):
-                    if st["last_seq"] is not None:
-                        gap = seq - st["last_seq"]
-                        if 1 < gap < 1000000:
-                            st["lost_packets"] += gap - 1
-                    st["last_seq"] = seq
+            if sensor_id not in self.sensor_stats:
+                self.sensor_stats[sensor_id] = {
+                    "rx_packets": 0, "lost_packets": 0, "last_seq": None, "last_rx_time": 0.0,
+                    "current_dt_ms": 0.0, "timestamps": deque(maxlen=120), "smooth_hz": 0.0
+                }
+            st = self.sensor_stats[sensor_id]
+            if st["last_rx_time"]:
+                st["current_dt_ms"] = (now - st["last_rx_time"]) * 1000.0
+            st["last_rx_time"] = now
+            st["rx_packets"] += 1
+            st.setdefault("timestamps", deque(maxlen=120)).append(now)
+            if isinstance(seq, int):
+                if st["last_seq"] is not None:
+                    gap = seq - st["last_seq"]
+                    if 1 < gap < 1000000:
+                        st["lost_packets"] += gap - 1
+                st["last_seq"] = seq
             self._latest_arc_frame = packet
 
     def run(self):
@@ -1516,8 +1554,8 @@ class ToFArcRadarApp(QMainWindow):
         dot1 = "🟢" if tof1_active else "⚪"
         dot2 = "🟢" if tof2_active else "⚪"
 
-        self.badge_tof1.setText(f"{dot1} ToF 1 (Left): {hz1:.0f} Hz" if tof1_active else f"{dot1} ToF 1 (Left): OFFLINE")
-        self.badge_tof2.setText(f"{dot2} ToF 2 (Right): {hz2:.0f} Hz" if tof2_active else f"{dot2} ToF 2 (Right): OFFLINE")
+        self.badge_tof1.setText(f"{dot1} ToF 1 (Left): {hz1:.0f} Hz" if tof1_active and hz1 >= 0.5 else (f"{dot1} ToF 1 (Left): -- Hz" if tof1_active else f"{dot1} ToF 1 (Left): OFFLINE"))
+        self.badge_tof2.setText(f"{dot2} ToF 2 (Right): {hz2:.0f} Hz" if tof2_active and hz2 >= 0.5 else (f"{dot2} ToF 2 (Right): -- Hz" if tof2_active else f"{dot2} ToF 2 (Right): OFFLINE"))
 
         self.badge_tof1.setStyleSheet(
             "background-color: #064e3b; color: #34d399; font-weight: bold; padding: 3px 8px; border-radius: 4px; font-size: 8pt;"
