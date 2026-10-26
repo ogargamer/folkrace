@@ -26,25 +26,29 @@ struct ToFSensor {
 };
 
 static const ToFSensor SENSOR_RIG[16] = {
-    // Front-Left Array (X = -0.070 m, Y = +0.095 m, cross-pointing Right)
-    {"tof_front_left_4.1deg",  -0.070f, 0.095f, 1.4987f, 0.1963f, 0.001f, 1.80f},
-    {"tof_front_left_15.4deg", -0.070f, 0.095f, 1.3024f, 0.1963f, 0.001f, 1.80f},
-    {"tof_front_left_26.6deg", -0.070f, 0.095f, 1.1060f, 0.1963f, 0.001f, 1.80f},
-    {"tof_front_left_37.9deg", -0.070f, 0.095f, 0.9097f, 0.1963f, 0.001f, 1.80f},
-    {"tof_front_left_49.1deg", -0.070f, 0.095f, 0.7134f, 0.1963f, 0.001f, 1.80f},
-    {"tof_front_left_60.4deg", -0.070f, 0.095f, 0.5170f, 0.1963f, 0.001f, 1.80f},
-    {"tof_front_left_71.6deg", -0.070f, 0.095f, 0.3207f, 0.1963f, 0.001f, 1.80f},
-    {"tof_front_left_82.9deg", -0.070f, 0.095f, 0.1243f, 0.1963f, 0.001f, 1.80f},
+    // Front-Left Array (cross-pointing Right, rotated 3 deg outwards)
+    // Leftmost ToF (pointing straight and right, zones 1.1 deg to 34.9 deg)
+    {"tof_front_left_4.1deg",  -0.058f, 0.092f, 1.5512f, 0.1963f, 0.001f, 1.80f},
+    {"tof_front_left_15.4deg", -0.058f, 0.092f, 1.3548f, 0.1963f, 0.001f, 1.80f},
+    {"tof_front_left_26.6deg", -0.058f, 0.092f, 1.1585f, 0.1963f, 0.001f, 1.80f},
+    {"tof_front_left_37.9deg", -0.058f, 0.092f, 0.9621f, 0.1963f, 0.001f, 1.80f},
+    // Left ToF (pointing right, zones 46.1 deg to 79.9 deg)
+    {"tof_front_left_49.1deg", -0.057f, 0.090f, 0.7658f, 0.1963f, 0.001f, 1.80f},
+    {"tof_front_left_60.4deg", -0.057f, 0.090f, 0.5694f, 0.1963f, 0.001f, 1.80f},
+    {"tof_front_left_71.6deg", -0.057f, 0.090f, 0.3731f, 0.1963f, 0.001f, 1.80f},
+    {"tof_front_left_82.9deg", -0.057f, 0.090f, 0.1767f, 0.1963f, 0.001f, 1.80f},
 
-    // Front-Right Array (X = +0.070 m, Y = +0.095 m, cross-pointing Left)
-    {"tof_front_right_4.1deg",   0.070f, 0.095f, 1.6428f, 0.1963f, 0.001f, 1.80f},
-    {"tof_front_right_15.4deg",  0.070f, 0.095f, 1.8391f, 0.1963f, 0.001f, 1.80f},
-    {"tof_front_right_26.6deg",  0.070f, 0.095f, 2.0356f, 0.1963f, 0.001f, 1.80f},
-    {"tof_front_right_37.9deg",  0.070f, 0.095f, 2.2318f, 0.1963f, 0.001f, 1.80f},
-    {"tof_front_right_49.1deg",  0.070f, 0.095f, 2.4282f, 0.1963f, 0.001f, 1.80f},
-    {"tof_front_right_60.4deg",  0.070f, 0.095f, 2.6245f, 0.1963f, 0.001f, 1.80f},
-    {"tof_front_right_71.6deg",  0.070f, 0.095f, 2.8208f, 0.1963f, 0.001f, 1.80f},
-    {"tof_front_right_82.9deg",  0.070f, 0.095f, 3.0172f, 0.1963f, 0.001f, 1.80f},
+    // Front-Right Array (cross-pointing Left, mirrored along Y axis, rotated 3 deg outwards)
+    // Rightmost ToF (pointing straight and left, zones 1.1 deg to 34.9 deg)
+    {"tof_front_right_4.1deg",   0.058f, 0.092f, 1.5904f, 0.1963f, 0.001f, 1.80f},
+    {"tof_front_right_15.4deg",  0.058f, 0.092f, 1.7868f, 0.1963f, 0.001f, 1.80f},
+    {"tof_front_right_26.6deg",  0.058f, 0.092f, 1.9831f, 0.1963f, 0.001f, 1.80f},
+    {"tof_front_right_37.9deg",  0.058f, 0.092f, 2.1795f, 0.1963f, 0.001f, 1.80f},
+    // Right ToF (pointing left, zones 46.1 deg to 79.9 deg)
+    {"tof_front_right_49.1deg",  0.057f, 0.090f, 2.3758f, 0.1963f, 0.001f, 1.80f},
+    {"tof_front_right_60.4deg",  0.057f, 0.090f, 2.5722f, 0.1963f, 0.001f, 1.80f},
+    {"tof_front_right_71.6deg",  0.057f, 0.090f, 2.7685f, 0.1963f, 0.001f, 1.80f},
+    {"tof_front_right_82.9deg",  0.057f, 0.090f, 2.9649f, 0.1963f, 0.001f, 1.80f},
 };
 
 static inline float wrap_angle(float a) {
@@ -493,15 +497,15 @@ public:
         constexpr float PI = 3.14159265358979323846f;
         constexpr float DEG2RAD = PI / 180.0f;
 
-        // Left Pod (-0.07m, 0.095m): -1.5 deg to +88.5 deg
-        // Right Pod (+0.07m, 0.095m): +1.5 deg to -88.5 deg
+        // Left Pod (-0.058m, 0.091m): -4.5 deg to +85.5 deg (outer edge meeting angle = 171 deg)
+        // Right Pod (+0.058m, 0.091m): +4.5 deg to -85.5 deg
         struct PodConfig {
             float ox, oy;
             float start_rel_deg, end_rel_deg;
         };
         const PodConfig pods[2] = {
-            {-0.070f, 0.095f, -1.5f, 88.5f},
-            {0.070f, 0.095f, 1.5f, -88.5f}
+            {-0.0575f, 0.091f, -4.5f, 85.5f},
+            {0.0575f, 0.091f, 4.5f, -85.5f}
         };
 
         for (int p = 0; p < 2; ++p) {

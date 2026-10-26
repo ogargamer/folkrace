@@ -52,24 +52,28 @@ def wrap_to_pi(angle_rad: float) -> float:
 
 # 16-Channel Physical ToF Sensor Mounting Poses (only_front_tofs.proto)
 FRONT_TOF_SENSOR_RIG = [
-    # Front-Left Array (X = -0.070 m, Y = +0.095 m, cross-pointing Right)
-    ("tof_front_left_4.1deg",  -0.070, 0.095, 1.4987, "FL 4.1°"),
-    ("tof_front_left_15.4deg", -0.070, 0.095, 1.3024, "FL 15.4°"),
-    ("tof_front_left_26.6deg", -0.070, 0.095, 1.1060, "FL 26.6°"),
-    ("tof_front_left_37.9deg", -0.070, 0.095, 0.9097, "FL 37.9°"),
-    ("tof_front_left_49.1deg", -0.070, 0.095, 0.7134, "FL 49.1°"),
-    ("tof_front_left_60.4deg", -0.070, 0.095, 0.5170, "FL 60.4°"),
-    ("tof_front_left_71.6deg", -0.070, 0.095, 0.3207, "FL 71.6°"),
-    ("tof_front_left_82.9deg", -0.070, 0.095, 0.1243, "FL 82.9°"),
-    # Front-Right Array (X = +0.070 m, Y = +0.095 m, cross-pointing Left)
-    ("tof_front_right_4.1deg",   0.070, 0.095, 1.6428, "FR 4.1°"),
-    ("tof_front_right_15.4deg",  0.070, 0.095, 1.8391, "FR 15.4°"),
-    ("tof_front_right_26.6deg",  0.070, 0.095, 2.0356, "FR 26.6°"),
-    ("tof_front_right_37.9deg",  0.070, 0.095, 2.2318, "FR 37.9°"),
-    ("tof_front_right_49.1deg",  0.070, 0.095, 2.4282, "FR 49.1°"),
-    ("tof_front_right_60.4deg",  0.070, 0.095, 2.6245, "FR 60.4°"),
-    ("tof_front_right_71.6deg",  0.070, 0.095, 2.8208, "FR 71.6°"),
-    ("tof_front_right_82.9deg",  0.070, 0.095, 3.0172, "FR 82.9°"),
+    # Front-Left Array (cross-pointing Right, rotated 3 deg outwards)
+    # Leftmost ToF (pointing straight and right, zones 1.1 deg to 34.9 deg)
+    ("tof_front_left_4.1deg",  -0.058, 0.092, 1.5512, "FL 1.1°"),
+    ("tof_front_left_15.4deg", -0.058, 0.092, 1.3548, "FL 12.4°"),
+    ("tof_front_left_26.6deg", -0.058, 0.092, 1.1585, "FL 23.6°"),
+    ("tof_front_left_37.9deg", -0.058, 0.092, 0.9621, "FL 34.9°"),
+    # Left ToF (pointing right, zones 46.1 deg to 79.9 deg)
+    ("tof_front_left_49.1deg", -0.057, 0.090, 0.7658, "FL 46.1°"),
+    ("tof_front_left_60.4deg", -0.057, 0.090, 0.5694, "FL 57.4°"),
+    ("tof_front_left_71.6deg", -0.057, 0.090, 0.3731, "FL 68.6°"),
+    ("tof_front_left_82.9deg", -0.057, 0.090, 0.1767, "FL 79.9°"),
+    # Front-Right Array (cross-pointing Left, mirrored along Y axis, rotated 3 deg outwards)
+    # Rightmost ToF (pointing straight and left, zones 1.1 deg to 34.9 deg)
+    ("tof_front_right_4.1deg",   0.058, 0.092, 1.5904, "FR 1.1°"),
+    ("tof_front_right_15.4deg",  0.058, 0.092, 1.7868, "FR 12.4°"),
+    ("tof_front_right_26.6deg",  0.058, 0.092, 1.9831, "FR 23.6°"),
+    ("tof_front_right_37.9deg",  0.058, 0.092, 2.1795, "FR 34.9°"),
+    # Right ToF (pointing left, zones 46.1 deg to 79.9 deg)
+    ("tof_front_right_49.1deg",  0.057, 0.090, 2.3758, "FR 46.1°"),
+    ("tof_front_right_60.4deg",  0.057, 0.090, 2.5722, "FR 57.4°"),
+    ("tof_front_right_71.6deg",  0.057, 0.090, 2.7685, "FR 68.6°"),
+    ("tof_front_right_82.9deg",  0.057, 0.090, 2.9649, "FR 79.9°"),
 ]
 
 
@@ -1419,12 +1423,12 @@ class ComprehensivePlannerGUI(QMainWindow):
         bars_layout.setContentsMargins(2, 2, 2, 2)
         bars_layout.setSpacing(8)
 
-        fl_group = QGroupBox("Front-Left Array (X = -7.0cm, Cross-Pointing Right)")
+        fl_group = QGroupBox("Front-Left Array (Cross-Pointing Right)")
         fl_layout = QVBoxLayout(fl_group)
         fl_layout.setContentsMargins(6, 6, 6, 6)
         fl_layout.setSpacing(4)
 
-        fr_group = QGroupBox("Front-Right Array (X = +7.0cm, Cross-Pointing Left)")
+        fr_group = QGroupBox("Front-Right Array (Cross-Pointing Left)")
         fr_layout = QVBoxLayout(fr_group)
         fr_layout.setContentsMargins(6, 6, 6, 6)
         fr_layout.setSpacing(4)

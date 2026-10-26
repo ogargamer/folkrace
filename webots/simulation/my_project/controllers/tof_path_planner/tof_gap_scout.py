@@ -70,41 +70,45 @@ except ImportError:
 # 16-Channel Physical ToF Sensor Mounting Poses
 # Format: (sensor_name, mount_x, mount_y, heading_rad, max_range_m)
 FRONT_TOF_SENSOR_RIG = [
-    # Front-Left Array (X = -0.070 m, Y = +0.095 m, cross-pointing Right)
-    ("tof_front_left_4.1deg",  -0.070, 0.095, 1.4987, 1.80),
-    ("tof_front_left_15.4deg", -0.070, 0.095, 1.3024, 1.80),
-    ("tof_front_left_26.6deg", -0.070, 0.095, 1.1060, 1.80),
-    ("tof_front_left_37.9deg", -0.070, 0.095, 0.9097, 1.80),
-    ("tof_front_left_49.1deg", -0.070, 0.095, 0.7134, 1.80),
-    ("tof_front_left_60.4deg", -0.070, 0.095, 0.5170, 1.80),
-    ("tof_front_left_71.6deg", -0.070, 0.095, 0.3207, 1.80),
-    ("tof_front_left_82.9deg", -0.070, 0.095, 0.1243, 1.80),
-    # Front-Right Array (X = +0.070 m, Y = +0.095 m, cross-pointing Left)
-    ("tof_front_right_4.1deg",   0.070, 0.095, 1.6428, 1.80),
-    ("tof_front_right_15.4deg",  0.070, 0.095, 1.8391, 1.80),
-    ("tof_front_right_26.6deg",  0.070, 0.095, 2.0356, 1.80),
-    ("tof_front_right_37.9deg",  0.070, 0.095, 2.2318, 1.80),
-    ("tof_front_right_49.1deg",  0.070, 0.095, 2.4282, 1.80),
-    ("tof_front_right_60.4deg",  0.070, 0.095, 2.6245, 1.80),
-    ("tof_front_right_71.6deg",  0.070, 0.095, 2.8208, 1.80),
-    ("tof_front_right_82.9deg",  0.070, 0.095, 3.0172, 1.80),
+    # Front-Left Array (cross-pointing Right, rotated 3 deg outwards)
+    # Leftmost ToF (pointing straight and right, zones 1.1 deg to 34.9 deg)
+    ("tof_front_left_4.1deg",  -0.058, 0.092, 1.5512, 1.80),
+    ("tof_front_left_15.4deg", -0.058, 0.092, 1.3548, 1.80),
+    ("tof_front_left_26.6deg", -0.058, 0.092, 1.1585, 1.80),
+    ("tof_front_left_37.9deg", -0.058, 0.092, 0.9621, 1.80),
+    # Left ToF (pointing right, zones 46.1 deg to 79.9 deg)
+    ("tof_front_left_49.1deg", -0.057, 0.090, 0.7658, 1.80),
+    ("tof_front_left_60.4deg", -0.057, 0.090, 0.5694, 1.80),
+    ("tof_front_left_71.6deg", -0.057, 0.090, 0.3731, 1.80),
+    ("tof_front_left_82.9deg", -0.057, 0.090, 0.1767, 1.80),
+    # Front-Right Array (cross-pointing Left, mirrored along Y axis, rotated 3 deg outwards)
+    # Rightmost ToF (pointing straight and left, zones 1.1 deg to 34.9 deg)
+    ("tof_front_right_4.1deg",   0.058, 0.092, 1.5904, 1.80),
+    ("tof_front_right_15.4deg",  0.058, 0.092, 1.7868, 1.80),
+    ("tof_front_right_26.6deg",  0.058, 0.092, 1.9831, 1.80),
+    ("tof_front_right_37.9deg",  0.058, 0.092, 2.1795, 1.80),
+    # Right ToF (pointing left, zones 46.1 deg to 79.9 deg)
+    ("tof_front_right_49.1deg",  0.057, 0.090, 2.3758, 1.80),
+    ("tof_front_right_60.4deg",  0.057, 0.090, 2.5722, 1.80),
+    ("tof_front_right_71.6deg",  0.057, 0.090, 2.7685, 1.80),
+    ("tof_front_right_82.9deg",  0.057, 0.090, 2.9649, 1.80),
 ]
 
 
 # 16-Channel ToF Pod Geometry:
 # 8 zones per corner, each zone has 11.25 deg FOV (8 * 11.25 deg = 90.0 deg total FOV per pod).
-# Zone midpoints: 4.125 deg, 15.375 deg, ..., 82.875 deg.
-# Zone outer bounds: from -1.5 deg (-0.0262 rad) to +88.5 deg (+1.5446 rad).
+# Zone midpoints: 1.125 deg, 12.375 deg, ..., 79.875 deg.
+# Zone outer bounds: from -4.5 deg (-0.0785 rad) to +85.5 deg (+1.4923 rad). Outer edges meet at 171 deg.
 _NUM_CORNER_RAYS = 90
 
-# Left Pod (-0.07m, 0.095m, cross-pointing Right): -1.5 deg to +88.5 deg rel to +Y
-_LEFT_REL_ANGLES = np.linspace(math.radians(-1.5), math.radians(88.5), _NUM_CORNER_RAYS)
+# Left Pod (-0.0575m, 0.091m, cross-pointing Right): -4.5 deg to +85.5 deg rel to +Y
+_LEFT_REL_ANGLES = np.linspace(math.radians(-4.5), math.radians(85.5), _NUM_CORNER_RAYS)
 _LEFT_AZIMUTHS = (math.pi / 2.0) - _LEFT_REL_ANGLES
 _LEFT_COS = np.cos(_LEFT_AZIMUTHS)
 _LEFT_SIN = np.sin(_LEFT_AZIMUTHS)
 
-# Right Pod (+0.07m, 0.095m, cross-pointing Left): +1.5 deg to -88.5 deg rel to +Y (i.e. -1.5 deg to +88.5 deg leftwards)
-_RIGHT_REL_ANGLES = np.linspace(math.radians(1.5), -math.radians(88.5), _NUM_CORNER_RAYS)
+# Right Pod (+0.0575m, 0.091m, cross-pointing Left): +4.5 deg to -85.5 deg rel to +Y (i.e. -4.5 deg to +85.5 deg leftwards)
+_RIGHT_REL_ANGLES = np.linspace(math.radians(4.5), -math.radians(85.5), _NUM_CORNER_RAYS)
 _RIGHT_AZIMUTHS = (math.pi / 2.0) - _RIGHT_REL_ANGLES
 _RIGHT_COS = np.cos(_RIGHT_AZIMUTHS)
 _RIGHT_SIN = np.sin(_RIGHT_AZIMUTHS)
@@ -132,7 +136,7 @@ class ToFGapScout:
         scout_block_dist_m: Optional[float] = None,
         scout_straight_pen_k: float = 2.50,
         scout_straight_exp_k: float = 1.50,
-        ray_origin_offset_m: float = 0.070,
+        ray_origin_offset_m: float = 0.0575,
         w_gap_clear: float = 3.00,
         **kwargs,
     ):
@@ -321,8 +325,8 @@ class ToFGapScout:
         n_steps = int(max_r / step_ds)
 
         corner_fans = [
-            (-self.ray_origin_offset_m, 0.095, _LEFT_COS, _LEFT_SIN),
-            (self.ray_origin_offset_m, 0.095, _RIGHT_COS, _RIGHT_SIN),
+            (-self.ray_origin_offset_m, 0.091, _LEFT_COS, _LEFT_SIN),
+            (self.ray_origin_offset_m, 0.091, _RIGHT_COS, _RIGHT_SIN),
         ]
 
         for ox, oy, cos_arr, sin_arr in corner_fans:
@@ -386,7 +390,7 @@ class ToFGapScout:
             for s in range(1, n_center_steps + 1):
                 d = s * step_ds
                 px = anchor_x + d * cos_fwd
-                py = anchor_y + 0.095 + d * sin_fwd
+                py = anchor_y + 0.091 + d * sin_fwd
                 col = int(round((px - x_min) / res))
                 row = int(round((py - y_min) / res))
                 if row < 0 or row >= h or col < 0 or col >= w or hazard_mask[row, col] > 0:
@@ -455,9 +459,9 @@ class ToFGapScout:
                 rel_deg = math.degrees(c["rel_angle"])
                 active_rig = FRONT_TOF_SENSOR_RIG
                 if rel_deg >= 0.0:
-                    z_idx = min(7, max(0, int(round((rel_deg - 4.1) / 11.25))))
+                    z_idx = min(7, max(0, int(round((rel_deg - 1.125) / 11.25))))
                 else:
-                    z_idx = min(15, max(8, 8 + int(round((-rel_deg - 4.1) / 11.25))))
+                    z_idx = min(15, max(8, 8 + int(round((-rel_deg - 1.125) / 11.25))))
                 
                 left_neighbor_dist = tof_readings.get(active_rig[z_idx - 1][0], 0.0) if (z_idx > 0 and z_idx != 8) else 0.0
                 right_neighbor_dist = tof_readings.get(active_rig[z_idx + 1][0], 0.0) if (z_idx < 15 and z_idx != 7) else 0.0

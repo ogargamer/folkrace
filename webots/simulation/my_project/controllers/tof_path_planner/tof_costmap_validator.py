@@ -22,24 +22,28 @@ class ToFSensor:
     max_range: float = 1.80
 
 SENSOR_RIG = [
-    # Front-Left Array (X = -0.070 m, Y = +0.095 m, cross-pointing Right)
-    ToFSensor("tof_front_left_4.1deg",  -0.070, 0.095, 1.4987),
-    ToFSensor("tof_front_left_15.4deg", -0.070, 0.095, 1.3024),
-    ToFSensor("tof_front_left_26.6deg", -0.070, 0.095, 1.1060),
-    ToFSensor("tof_front_left_37.9deg", -0.070, 0.095, 0.9097),
-    ToFSensor("tof_front_left_49.1deg", -0.070, 0.095, 0.7134),
-    ToFSensor("tof_front_left_60.4deg", -0.070, 0.095, 0.5170),
-    ToFSensor("tof_front_left_71.6deg", -0.070, 0.095, 0.3207),
-    ToFSensor("tof_front_left_82.9deg", -0.070, 0.095, 0.1243),
-    # Front-Right Array (X = +0.070 m, Y = +0.095 m, cross-pointing Left)
-    ToFSensor("tof_front_right_4.1deg",   0.070, 0.095, 1.6428),
-    ToFSensor("tof_front_right_15.4deg",  0.070, 0.095, 1.8391),
-    ToFSensor("tof_front_right_26.6deg",  0.070, 0.095, 2.0356),
-    ToFSensor("tof_front_right_37.9deg",  0.070, 0.095, 2.2318),
-    ToFSensor("tof_front_right_49.1deg",  0.070, 0.095, 2.4282),
-    ToFSensor("tof_front_right_60.4deg",  0.070, 0.095, 2.6245),
-    ToFSensor("tof_front_right_71.6deg",  0.070, 0.095, 2.8208),
-    ToFSensor("tof_front_right_82.9deg",  0.070, 0.095, 3.0172),
+    # Front-Left Array (cross-pointing Right, rotated 3 deg outwards)
+    # Leftmost ToF (pointing straight and right, zones 1.1 deg to 34.9 deg)
+    ToFSensor("tof_front_left_4.1deg",  -0.058, 0.092, 1.5512),
+    ToFSensor("tof_front_left_15.4deg", -0.058, 0.092, 1.3548),
+    ToFSensor("tof_front_left_26.6deg", -0.058, 0.092, 1.1585),
+    ToFSensor("tof_front_left_37.9deg", -0.058, 0.092, 0.9621),
+    # Left ToF (pointing right, zones 46.1 deg to 79.9 deg)
+    ToFSensor("tof_front_left_49.1deg", -0.057, 0.090, 0.7658),
+    ToFSensor("tof_front_left_60.4deg", -0.057, 0.090, 0.5694),
+    ToFSensor("tof_front_left_71.6deg", -0.057, 0.090, 0.3731),
+    ToFSensor("tof_front_left_82.9deg", -0.057, 0.090, 0.1767),
+    # Front-Right Array (cross-pointing Left, mirrored along Y axis, rotated 3 deg outwards)
+    # Rightmost ToF (pointing straight and left, zones 1.1 deg to 34.9 deg)
+    ToFSensor("tof_front_right_4.1deg",   0.058, 0.092, 1.5904),
+    ToFSensor("tof_front_right_15.4deg",  0.058, 0.092, 1.7868),
+    ToFSensor("tof_front_right_26.6deg",  0.058, 0.092, 1.9831),
+    ToFSensor("tof_front_right_37.9deg",  0.058, 0.092, 2.1795),
+    # Right ToF (pointing left, zones 46.1 deg to 79.9 deg)
+    ToFSensor("tof_front_right_49.1deg",  0.057, 0.090, 2.3758),
+    ToFSensor("tof_front_right_60.4deg",  0.057, 0.090, 2.5722),
+    ToFSensor("tof_front_right_71.6deg",  0.057, 0.090, 2.7685),
+    ToFSensor("tof_front_right_82.9deg",  0.057, 0.090, 2.9649),
 ]
 
 

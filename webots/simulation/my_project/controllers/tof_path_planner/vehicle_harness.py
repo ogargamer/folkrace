@@ -446,7 +446,7 @@ class FolkraceVehicle:
             scout_block_dist_m=float(genes.get("scout_block_dist_m", genes.get("target_lookahead_m", 2.40))),
             scout_straight_pen_k=float(genes.get("scout_straight_pen_k", 2.50)),
             scout_straight_exp_k=float(genes.get("scout_straight_exp_k", 1.50)),
-            ray_origin_offset_m=float(genes.get("ray_origin_offset_m", 0.070)),
+            ray_origin_offset_m=float(genes.get("ray_origin_offset_m", 0.0575)),
             w_gap_clear=float(genes.get("w_gap_clear", genes.get("alt_lookahead_depth_weight", 3.00))),
         )
 
