@@ -552,9 +552,12 @@ class ToFArcRadarApp(QMainWindow):
         self.error_frame_counts = [0] * 8
         self.last_valid_dists = [3000] * 8
 
-        # 250ms Watchdog auto-reset tracking
+        # 250ms Watchdog auto-reset tracking (single attempt with 4.5s grace period)
         self.last_auto_reset_time = 0.0
+        self.reset_grace_until = 0.0
         self.reset_status_until = 0.0
+        self.auto_reset_count = 0
+        self.reset_failed = False
 
         self.serial_engine = DualSerialEngine()
         self.serial_engine.connection_changed.connect(self.on_connection_changed)
@@ -763,6 +766,10 @@ class ToFArcRadarApp(QMainWindow):
             baud = int(self.combo_baud.currentText())
             if not port:
                 return
+            self.auto_reset_count = 0
+            self.reset_failed = False
+            self.reset_grace_until = 0.0
+            self.reset_status_until = 0.0
             self.serial_engine.port = port
             self.serial_engine.baud = baud
             self.serial_engine.start()
@@ -819,17 +826,29 @@ class ToFArcRadarApp(QMainWindow):
                     self.tof2_dists = d_mat[:, :3]
                     self.tof2_stats = s_mat[:, :3]
 
-        # 250ms Watchdog: detect dead sensor and dispatch RESET
+        # 250ms Watchdog: detect dead sensor and dispatch RESET (with 4.5s grace period and retry latch)
         if self.serial_engine.isRunning():
             now = time.perf_counter()
-            st1 = self.serial_engine.sensor_stats.get(1)
-            st2 = self.serial_engine.sensor_stats.get(2)
-            s1_dead = bool(st1 and st1.get("rx_packets", 0) > 0 and (now - st1.get("last_rx_time", 0.0)) > 0.25)
-            s2_dead = bool(st2 and st2.get("rx_packets", 0) > 0 and (now - st2.get("last_rx_time", 0.0)) > 0.25)
-            if (s1_dead or s2_dead) and (now - self.last_auto_reset_time > 1.5):
-                self.last_auto_reset_time = now
-                self.reset_status_until = now + 1.2
-                self.serial_engine.send_command("RESET")
+            if now >= self.reset_grace_until:
+                st1 = self.serial_engine.sensor_stats.get(1)
+                st2 = self.serial_engine.sensor_stats.get(2)
+                # Arm watchdog only once sensors have established streaming (at least 3 packets)
+                s1_dead = bool(st1 and st1.get("rx_packets", 0) >= 3 and (now - st1.get("last_rx_time", 0.0)) > 0.25)
+                s2_dead = bool(st2 and st2.get("rx_packets", 0) >= 3 and (now - st2.get("last_rx_time", 0.0)) > 0.25)
+
+                if (s1_dead or s2_dead) and not self.reset_failed:
+                    if self.auto_reset_count < 1:
+                        self.auto_reset_count += 1
+                        self.last_auto_reset_time = now
+                        self.reset_grace_until = now + 4.5
+                        self.reset_status_until = now + 4.5
+                        self.serial_engine.send_command("RESET")
+                    else:
+                        # Attempted reset already; latch as failed to prevent perpetual reset storm
+                        self.reset_failed = True
+                elif not s1_dead and not s2_dead and (st1 and st1.get("rx_packets", 0) >= 3 and st2 and st2.get("rx_packets", 0) >= 3):
+                    self.auto_reset_count = 0
+                    self.reset_failed = False
 
         self._fuse_and_filter_zones()
 
@@ -1083,7 +1102,10 @@ class ToFArcRadarApp(QMainWindow):
         )
 
         now = time.perf_counter()
-        if now < self.reset_status_until:
+        if self.reset_failed:
+            self.status_pill.setText("SENSOR DEAD")
+            self.status_pill.setStyleSheet("background-color: #7f1d1d; color: #fca5a5; font-weight: bold; padding: 2px 8px; border-radius: 4px; font-size: 8pt;")
+        elif now < self.reset_status_until:
             self.status_pill.setText("RESETTING...")
             self.status_pill.setStyleSheet("background-color: #b45309; color: #fef3c7; font-weight: bold; padding: 2px 8px; border-radius: 4px; font-size: 8pt;")
         elif self.serial_engine.isRunning():
