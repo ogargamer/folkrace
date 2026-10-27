@@ -1,10 +1,11 @@
 """
 ================================================================================
-  5. LAUNCHER: STM32 MT6816 ENCODER & MOTOR CLOSED-LOOP CALIBRATION BENCH GUI
+  5. LAUNCHER: STM32G474 DUAL-MOTOR 20.0 kHz SIMPLEFOC BENCH & LIVE GUI
 ================================================================================
-  Connects over USB serial to the STM32 SimpleFOC controller to calibrate the
-  MT6816 magnetic angle encoder, tune motor control, monitor KV, phase currents,
-  and velocity response.
+  Connects over USB CDC serial (921600 baud) to the STM32G474 dual-motor FOC
+  controller with MT6816 dual magnetic angle encoders on shared SPI1.
+  Features real-time 26-byte binary telemetry, 14-bit angle visualizer dials,
+  stepped 128-point LUT calibration, live parameter tuning, and global E-stop.
 
   Usage:
     python 5_stm32_encoder_motor_gui.py
@@ -16,13 +17,18 @@ import sys
 import subprocess
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-STM32_SUITE = os.path.join(ROOT_DIR, "stm32", "test_mt6818_ui.py")
-WORK_DIR = os.path.join(ROOT_DIR, "stm32")
+GUI_APP = os.path.join(ROOT_DIR, "STM32", "gui", "app.py")
+WORK_DIR = os.path.join(ROOT_DIR, "STM32", "gui")
 
 if __name__ == "__main__":
-    if not os.path.exists(STM32_SUITE):
-        print(f"[Error] STM32 encoder test bench UI not found at {STM32_SUITE}")
+    if not os.path.exists(GUI_APP):
+        # Case fallback for Linux/macOS filesystems
+        GUI_APP = os.path.join(ROOT_DIR, "stm32", "gui", "app.py")
+        WORK_DIR = os.path.join(ROOT_DIR, "stm32", "gui")
+
+    if not os.path.exists(GUI_APP):
+        print(f"[Error] STM32 dual-motor live GUI not found at {GUI_APP}")
         sys.exit(1)
 
-    cmd = [sys.executable, STM32_SUITE] + sys.argv[1:]
+    cmd = [sys.executable, GUI_APP] + sys.argv[1:]
     sys.exit(subprocess.run(cmd, cwd=WORK_DIR).returncode)

@@ -25,6 +25,7 @@ CORE ALGORITHM SPECIFICATION:
 import sys
 import os
 import json
+import struct
 import time
 import math
 import threading
@@ -325,49 +326,122 @@ class QuadSerialEngine(QThread):
             except Exception:
                 pass
 
+    def _handle_data_packet(self, sid: int, pkt: dict):
+        if 1 <= sid <= 4:
+            now = time.perf_counter()
+            with self._lock:
+                self._latest_packets[sid] = pkt
+                st = self.sensor_stats[sid]
+                st["rx_packets"] += 1
+                st["last_rx_time"] = now
+                st["timestamps"].append(now)
+                st["temp_c"] = pkt.get("temp", 0)
+                st["flags"] = pkt.get("flags", 0)
+                st["min_d"] = pkt.get("min", 4000)
+
     def run(self):
         self._running = True
+        PACKET_SIZE = 144
+        buf = bytearray()
+
         while self._running:
             if not self.ser or not self.ser.is_open:
                 try:
-                    self.ser = serial.Serial(self.port, self.baud, timeout=0.1)
+                    self.ser = serial.Serial(self.port, self.baud, timeout=0.05)
+                    try:
+                        self.ser.dtr = False
+                        self.ser.rts = False
+                    except Exception:
+                        pass
                     self.ser.reset_input_buffer()
+                    buf.clear()
                     self.connection_changed.emit(True, f"Connected ({self.port} @ {self.baud})")
+                    # Request binary stream by default
+                    self.send_command("SET_STREAM:bin")
                 except Exception as e:
                     self.connection_changed.emit(False, f"Offline ({e})")
                     time.sleep(0.5)
                     continue
 
             try:
-                line = self.ser.readline()
-                if not line:
+                # Read whatever bytes are waiting in the OS serial buffer
+                waiting = self.ser.in_waiting
+                chunk = self.ser.read(max(1, waiting)) if waiting > 0 else self.ser.read(1)
+                if not chunk:
                     continue
-                line_str = line.decode('utf-8', errors='ignore').strip()
-                if not line_str.startswith("{") or not line_str.endswith("}"):
-                    continue
+                buf.extend(chunk)
 
-                pkt = json.loads(line_str)
-                p_type = pkt.get("t") or pkt.get("type")
+                # Process buffer
+                while len(buf) >= 2:
+                    # 1. Fast path: Binary Telemetry Packet (0xAA 0x55)
+                    if buf[0] == 0xAA and buf[1] == 0x55:
+                        if len(buf) < PACKET_SIZE:
+                            break  # Need more bytes for full binary frame
+                        pkt_bytes = bytes(buf[:PACKET_SIZE])
+                        del buf[:PACKET_SIZE]
 
-                if p_type == "D":  # Data packet
-                    sid = pkt.get("id", 1)
-                    if 1 <= sid <= 4:
-                        now = time.perf_counter()
-                        with self._lock:
-                            self._latest_packets[sid] = pkt
-                            st = self.sensor_stats[sid]
-                            st["rx_packets"] += 1
-                            st["last_rx_time"] = now
-                            st["timestamps"].append(now)
-                            st["temp_c"] = pkt.get("temp", 0)
+                        # Verify 16-bit additive checksum over bytes 0..141
+                        calc_chk = sum(pkt_bytes[:142]) & 0xFFFF
+                        exp_chk = struct.unpack('<H', pkt_bytes[142:144])[0]
 
-                elif p_type == "ACK":
-                    self.ack_received.emit(pkt)
-                elif p_type == "CONFIG":
-                    self.config_received.emit(pkt)
+                        if calc_chk == exp_chk:
+                            p_type, sid, seq, ts, min_d, temp, flags = struct.unpack('<BBHIhBB', pkt_bytes[2:14])
+                            d_list = list(struct.unpack('<32H', pkt_bytes[14:78]))
+                            st_list = list(struct.unpack('<32B', pkt_bytes[78:110]))
+                            spad_list = list(struct.unpack('<16H', pkt_bytes[110:142]))
+
+                            pkt = {
+                                "t": "D",
+                                "id": sid,
+                                "seq": seq,
+                                "ts": ts,
+                                "r": 16,
+                                "nt": 2,
+                                "min": min_d,
+                                "temp": temp,
+                                "flags": flags,
+                                "d": d_list,
+                                "st": st_list,
+                                "spad": spad_list
+                            }
+                            self._handle_data_packet(sid, pkt)
+                        else:
+                            # Bad checksum: advance by 1 byte to re-sync
+                            del buf[:1]
+                        continue
+
+                    # 2. Text / JSON Packet (ACK, CONFIG, or JSON matrix)
+                    elif buf[0] == ord('{'):
+                        nl_pos = buf.find(b'\n')
+                        if nl_pos == -1:
+                            if len(buf) > 4096:
+                                del buf[:1]
+                            break
+                        line_bytes = buf[:nl_pos]
+                        del buf[:nl_pos + 1]
+
+                        try:
+                            line_str = line_bytes.decode('utf-8', errors='ignore').strip()
+                            if line_str.startswith("{") and line_str.endswith("}"):
+                                pkt = json.loads(line_str)
+                                p_type = pkt.get("t") or pkt.get("type")
+                                if p_type == "D":
+                                    sid = pkt.get("id", 1)
+                                    self._handle_data_packet(sid, pkt)
+                                elif p_type == "ACK":
+                                    self.ack_received.emit(pkt)
+                                elif p_type == "CONFIG":
+                                    self.config_received.emit(pkt)
+                        except Exception:
+                            pass
+                        continue
+
+                    else:
+                        # Advance past noise / unaligned byte
+                        del buf[:1]
 
             except Exception:
-                pass
+                time.sleep(0.01)
 
         if self.ser and self.ser.is_open:
             try:
@@ -1121,23 +1195,14 @@ class MultiTargetInspector(QGroupBox):
         self.scroll.setWidget(self.card_container)
         layout.addWidget(self.scroll)
 
-    def update_records(self, records: List[dict]):
-        self.lbl_count.setText(f"Active Multi-Target Zones: {len(records)}")
+        # Pre-allocated card pool (up to 16 columns) to eliminate runtime widget destruction/creation
+        self.empty_lbl = QLabel("No zones currently reporting multiple targets.")
+        self.empty_lbl.setStyleSheet("color: #8b949e; font-size: 11px; padding: 10px;")
+        self.empty_lbl.setAlignment(Qt.AlignCenter)
+        self.card_layout.addWidget(self.empty_lbl)
 
-        # Clear existing card widgets
-        while self.card_layout.count():
-            item = self.card_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-
-        if not records:
-            empty_lbl = QLabel("No zones currently reporting multiple targets.")
-            empty_lbl.setStyleSheet("color: #8b949e; font-size: 11px; padding: 10px;")
-            empty_lbl.setAlignment(Qt.AlignCenter)
-            self.card_layout.addWidget(empty_lbl)
-            return
-
-        for r in records:
+        self.cards_pool = []
+        for _ in range(16):
             card = QFrame()
             card.setStyleSheet("""
                 QFrame {
@@ -1151,25 +1216,52 @@ class MultiTargetInspector(QGroupBox):
             c_lay.setContentsMargins(6, 4, 6, 4)
             c_lay.setSpacing(2)
 
-            header = QLabel(f"<b>{r['sensor_name']}</b> | Sector Column {r['col']}")
+            header = QLabel("")
             header.setStyleSheet("color: #ffaa00; font-size: 11px;")
-
-            t1_lbl = QLabel(f"• <b>Target 1 (Closest):</b> <font color='#00ffcc'>{r['t1_dist_mm']} mm</font> ➜ Obstacle + Ray Limit")
+            t1_lbl = QLabel("")
             t1_lbl.setStyleSheet("color: #e6edf3; font-size: 10px;")
-
-            t2_lbl = QLabel(f"• <b>Target 2 (Farther):</b> <font color='#ffaa00'>{r['t2_dist_mm']} mm</font> ➜ <b>Also Obstacle</b> (Δ={r['sep_mm']}mm)")
+            t2_lbl = QLabel("")
             t2_lbl.setStyleSheet("color: #e6edf3; font-size: 10px;")
-
-            clear_lbl = QLabel(f"• <b>Ray Cleared:</b> 0 to {r['cleared_to_mm']} mm (Shadow space protected)")
+            clear_lbl = QLabel("")
             clear_lbl.setStyleSheet("color: #79c0ff; font-size: 9px;")
 
             c_lay.addWidget(header)
             c_lay.addWidget(t1_lbl)
             c_lay.addWidget(t2_lbl)
             c_lay.addWidget(clear_lbl)
+            card.hide()
             self.card_layout.addWidget(card)
 
+            self.cards_pool.append({
+                "card": card,
+                "header": header,
+                "t1": t1_lbl,
+                "t2": t2_lbl,
+                "clear": clear_lbl
+            })
+
         self.card_layout.addStretch()
+
+    def update_records(self, records: List[dict]):
+        self.lbl_count.setText(f"Active Multi-Target Zones: {len(records)}")
+
+        if not records:
+            self.empty_lbl.show()
+            for c in self.cards_pool:
+                c["card"].hide()
+            return
+
+        self.empty_lbl.hide()
+        for i, c in enumerate(self.cards_pool):
+            if i < len(records):
+                r = records[i]
+                c["header"].setText(f"<b>{r['sensor_name']}</b> | Sector Column {r['col']}")
+                c["t1"].setText(f"• <b>Target 1 (Closest):</b> <font color='#00ffcc'>{r['t1_dist_mm']} mm</font> ➜ Obstacle + Ray Limit")
+                c["t2"].setText(f"• <b>Target 2 (Farther):</b> <font color='#ffaa00'>{r['t2_dist_mm']} mm</font> ➜ <b>Also Obstacle</b> (Δ={r['sep_mm']}mm)")
+                c["clear"].setText(f"• <b>Ray Cleared:</b> 0 to {r['cleared_to_mm']} mm (Shadow space protected)")
+                c["card"].show()
+            else:
+                c["card"].hide()
 
 
 # =============================================================================
@@ -1248,19 +1340,29 @@ class QuadSensorHUD(QGroupBox):
                 "temp": temp_lbl
             }
 
-    def update_sensor_state(self, sid: int, is_active: bool, hz: float, temp_c: int):
+    def update_sensor_state(self, sid: int, is_active: bool, hz: float, temp_c: int, flags: int = 0):
         c = self.cards.get(sid)
         if not c:
             return
 
         if is_active:
-            c["status"].setText("ONLINE")
-            c["status"].setStyleSheet("font-size: 9px; font-weight: bold; color: #00ffcc;")
+            if flags & 0x01:
+                c["status"].setText("ONLINE ⚠️ E-STOP (<80mm)")
+                c["status"].setStyleSheet("font-size: 9px; font-weight: bold; color: #ff3344;")
+                c["frame"].setStyleSheet("background-color: #2b0d14; border: 1px solid #da3633; border-radius: 4px;")
+            elif flags & 0x02:
+                c["status"].setText("ONLINE ⚠️ CONTACT (SPAD)")
+                c["status"].setStyleSheet("font-size: 9px; font-weight: bold; color: #ffaa00;")
+                c["frame"].setStyleSheet("background-color: #261c0d; border: 1px solid #d29922; border-radius: 4px;")
+            else:
+                c["status"].setText("ONLINE")
+                c["status"].setStyleSheet("font-size: 9px; font-weight: bold; color: #00ffcc;")
+                c["frame"].setStyleSheet("background-color: #101a26; border: 1px solid #1c3c54; border-radius: 4px;")
+
             c["hz"].setText(f"{hz:.1f} Hz")
             c["hz"].setStyleSheet("font-size: 10px; font-weight: bold; color: #58a6ff;")
             c["temp"].setText(f"Temp: {temp_c} °C")
             c["temp"].setStyleSheet("font-size: 9px; color: #8b949e;")
-            c["frame"].setStyleSheet("background-color: #101a26; border: 1px solid #1c3c54; border-radius: 4px;")
         else:
             c["status"].setText("OFFLINE")
             c["status"].setStyleSheet("font-size: 9px; font-weight: bold; color: #ff3344;")
@@ -1288,6 +1390,11 @@ class MainWindow(QMainWindow):
 
         self.serial_engine = QuadSerialEngine(port="COM7", baud=921600)
         self.serial_engine.connection_changed.connect(self._on_connection_changed)
+
+        # Persistent sensor cache to eliminate phase-jitter & beam dropouts
+        self.cached_packets: Dict[int, Optional[dict]] = {1: None, 2: None, 3: None, 4: None}
+        self.cached_packet_time: Dict[int, float] = {1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0}
+        self._last_inspector_update = 0.0
 
         self._build_ui()
 
@@ -1542,21 +1649,36 @@ class MainWindow(QMainWindow):
 
     def _on_tick(self):
         """Called at 60 Hz to process incoming sensor frames and refresh canvas."""
-        # Pull latest packets for all 4 sensors
-        raw_packets = {}
+        now = time.perf_counter()
+        has_new_data = False
+
         for sid in range(1, 5):
             pkt = self.serial_engine.take_latest_frame(sid)
-            raw_packets[sid] = pkt
+            if pkt:
+                self.cached_packets[sid] = pkt
+                self.cached_packet_time[sid] = now
+                has_new_data = True
 
             is_act = self.serial_engine.is_sensor_active(sid)
             hz = self.serial_engine.get_sensor_hz(sid)
-            temp = self.serial_engine.sensor_stats[sid]["temp_c"]
-            self.sensor_hud.update_sensor_state(sid, is_act, hz, temp)
+            st = self.serial_engine.sensor_stats[sid]
+            temp = st.get("temp_c", 0)
+            flags = st.get("flags", 0)
+            self.sensor_hud.update_sensor_state(sid, is_act, hz, temp, flags)
 
-        # Run Costmap Processing (Multi-Target Stamping + Ray Clearing)
-        if any(raw_packets.values()):
-            self.costmap_engine.process_sensor_frames(self.sensor_rig, raw_packets)
-            self.multi_inspector.update_records(self.costmap_engine.active_multi_targets)
+        # Assemble persistent fresh frames (<0.15s) across all active sensors
+        active_packets = {}
+        for sid in range(1, 5):
+            if self.cached_packets[sid] and (now - self.cached_packet_time[sid] < 0.15):
+                active_packets[sid] = self.cached_packets[sid]
+
+        # Run Costmap Processing if any new data arrived or fresh sensors are present
+        if has_new_data and active_packets:
+            self.costmap_engine.process_sensor_frames(self.sensor_rig, active_packets)
+            # Throttle inspector updates to 10 Hz to prevent UI thread memory churn
+            if (now - self._last_inspector_update) > 0.10:
+                self._last_inspector_update = now
+                self.multi_inspector.update_records(self.costmap_engine.active_multi_targets)
             self.canvas.update()
 
     def closeEvent(self, event):
