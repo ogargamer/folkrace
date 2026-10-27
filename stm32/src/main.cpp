@@ -194,79 +194,491 @@ void initMotorFOC(int motor_id) {
 }
 
 // ----------------------------------------------------------------------------
-// Stepped 128-Point Calibration Sweep (Background Task)
+// Calibration Helpers & Angle Normalization
+// ----------------------------------------------------------------------------
+void sendBinaryTelemetry(); // Forward declaration for real-time telemetry streaming
+
+static inline float normalizeAngleRad(float angle) {
+    float a = fmodf(angle, _2PI);
+    return (a >= 0.0f) ? a : (a + _2PI);
+}
+
+static inline float wrapAngleRad(float angle) {
+    while (angle > _PI) angle -= _2PI;
+    while (angle < -_PI) angle += _2PI;
+    return angle;
+}
+
+static inline bool checkCalibrationAbort() {
+    if (Serial.available()) {
+        char c = (char)Serial.peek();
+        if (c == 'x' || c == 'X' || c == 's' || c == 'S' || c == ' ') {
+            while (Serial.available()) Serial.read();
+            return true;
+        }
+    }
+    return false;
+}
+
+// Circular 1D inverse-distance interpolation from measured samples to 128 raw LUT segments
+static float interpolateLUTAtAngle(float target_rad, const float* sample_angles, const float* sample_errors, int n) {
+    target_rad = normalizeAngleRad(target_rad);
+    float best_dist1 = 1e9f, best_dist2 = 1e9f;
+    int idx1 = 0, idx2 = 0;
+
+    for (int i = 0; i < n; i++) {
+        float d = fabsf(wrapAngleRad(sample_angles[i] - target_rad));
+        if (d < best_dist1) {
+            best_dist2 = best_dist1;
+            idx2 = idx1;
+            best_dist1 = d;
+            idx1 = i;
+        } else if (d < best_dist2) {
+            best_dist2 = d;
+            idx2 = i;
+        }
+    }
+
+    float total_dist = best_dist1 + best_dist2;
+    if (total_dist < 1e-6f) return sample_errors[idx1];
+    float w1 = best_dist2 / total_dist;
+    float w2 = best_dist1 / total_dist;
+    return (w1 * sample_errors[idx1] + w2 * sample_errors[idx2]);
+}
+
+// ----------------------------------------------------------------------------
+// Stepped 128-Point Calibration Sweep (Dual-Pass Bidirectional + Stall Checks)
 // ----------------------------------------------------------------------------
 void runSteppedCalibration(int motor_id) {
-    Serial.print(">>> STARTING 128-POINT STEPPED CALIBRATION FOR MOTOR ");
+    Serial.println("\n================================================================================");
+    Serial.print(">>> 🔬 STARTING 128-POINT DUAL-PASS LUT CALIBRATION FOR MOTOR ");
     Serial.println(motor_id);
+    Serial.println("================================================================================");
+    Serial.println("Motor Model        : GM3506 (11 Pole Pairs on STM32G474)");
+    Serial.printf ("Step / Hold Voltage: %.2f V (move) / %.2f V (hold & sample)\n", CALIB_ALIGN_VOLTAGE, CALIB_HOLD_VOLTAGE);
+    Serial.println("Methodology        : 128-Step Dual-Pass Bidirectional Mechanical Sweep");
+    Serial.printf ("Oversampling       : %d Samples / Step with Micro-Dither\n", CALIB_OVERSAMPLE_COUNT);
+    Serial.printf ("Anomaly Guard      : |err| > %.3f rad (%.1f deg) -> FAIL (pole slip/stall)\n",
+                   LUT_ANOMALY_THRESHOLD_RAD, LUT_ANOMALY_THRESHOLD_RAD * 57.2957795f);
+    Serial.println("Press 'x' or 'STOP' anytime to abort");
+    Serial.println("--------------------------------------------------------------------------------");
 
-    if (motor_id == 1) {
-        m1_calib_active = true;
-        driver1.enable();
-    } else {
-        m2_calib_active = true;
-        driver2.enable();
+    BLDCMotor &motor = (motor_id == 1) ? motor1 : motor2;
+    BLDCDriver3PWM &driver = (motor_id == 1) ? driver1 : driver2;
+    MT6816Sensor &encoder = (motor_id == 1) ? encoder1 : encoder2;
+    volatile bool &calib_active = (motor_id == 1) ? m1_calib_active : m2_calib_active;
+    bool prev_enabled = (motor_id == 1) ? m1_enabled : m2_enabled;
+
+    calib_active = true;
+    live_calib_progress = 0;
+    encoder.clearLUT(); // Disable old LUT to measure pure raw sensor characteristics
+    driver.enable();
+
+    // ------------------------------------------------------------------------
+    // Step 1: Pre-flight Hardware Health Check
+    // ------------------------------------------------------------------------
+    Serial.print("1. Checking MT6816 Sensor Health... ");
+    delay(50); // Allow 20 kHz ISR to sample sensor at least 1,000 times
+
+    if (encoder.last_no_mag) {
+        Serial.println("FAILED!");
+        Serial.println("   ❌ ABORT: MT6816 reports NO_MAG flag (airgap too large or magnet missing).");
+        Serial.println("   FIX: Position diametric magnet 1.0 - 2.0 mm directly above MT6816 chip.");
+        motor.setPhaseVoltage(0.0f, 0.0f, 0.0f);
+        if (!prev_enabled) driver.disable();
+        calib_active = false;
+        live_calib_progress = 0;
+        Serial.print("[CALIB_FAILED]:M"); Serial.print(motor_id); Serial.println(" Magnet Missing");
+        return;
     }
 
-    const float align_volt = 3.5f;
-    const int total_steps = 128;
-    float recorded_errors[128];
+    if (!encoder.last_parity_ok || encoder.parity_errors > 200) {
+        Serial.println("FAILED!");
+        Serial.printf ("   ❌ ABORT: MT6816 SPI Parity Errors detected (total: %lu)!\n", encoder.parity_errors);
+        Serial.println("   FIX: Check SPI1 wiring (SCK/MISO/MOSI/CS), grounding, or termination.");
+        motor.setPhaseVoltage(0.0f, 0.0f, 0.0f);
+        if (!prev_enabled) driver.disable();
+        calib_active = false;
+        live_calib_progress = 0;
+        Serial.print("[CALIB_FAILED]:M"); Serial.print(motor_id); Serial.println(" SPI Parity Error");
+        return;
+    }
+    Serial.println("OK (Magnet present, Parity OK)");
 
-    // Sweep 128 electrical angles across one complete mechanical revolution
-    float elec_step = (2.0f * _PI * (float)MOTOR_POLE_PAIRS) / (float)total_steps;
+    // ------------------------------------------------------------------------
+    // Step 2: Commutation Direction & Initial Rotor Stall Verification
+    // ------------------------------------------------------------------------
+    Serial.print("2. Determining Sensor Direction & Verifying Motion (Stall Check)... ");
 
-    for (int i = 0; i < total_steps; i++) {
-        live_calib_progress = (uint8_t)((i * 100) / total_steps);
-        float test_elec_angle = (float)i * elec_step;
+    // Settle at electrical zero vector
+    motor.setPhaseVoltage(CALIB_ALIGN_VOLTAGE, 0.0f, _3PI_2);
+    delay(150);
+    motor.setPhaseVoltage(CALIB_HOLD_VOLTAGE, 0.0f, _3PI_2);
+    delay(150);
 
-        if (motor_id == 1) {
-            motor1.setPhaseVoltage(align_volt, 0.0f, test_elec_angle);
+    float start_raw = encoder.getRawMechanicalAngle();
+
+    // Sweep 200 micro-steps across 2 electrical revolutions
+    const int DIR_STEPS = 200;
+    for (int step = 0; step <= DIR_STEPS; step++) {
+        if (checkCalibrationAbort()) {
+            Serial.println("\n>>> 🛑 CALIBRATION ABORTED BY USER <<<");
+            motor.setPhaseVoltage(0.0f, 0.0f, 0.0f);
+            if (!prev_enabled) driver.disable();
+            calib_active = false;
+            live_calib_progress = 0;
+            return;
+        }
+        float el_ang = _3PI_2 + 2.0f * _2PI * ((float)step / (float)DIR_STEPS);
+        motor.setPhaseVoltage(CALIB_ALIGN_VOLTAGE, 0.0f, el_ang);
+        delayMicroseconds(1500);
+    }
+    delay(100);
+    float mid_raw = encoder.getRawMechanicalAngle();
+
+    // Sweep back to starting point
+    for (int step = DIR_STEPS; step >= 0; step--) {
+        if (checkCalibrationAbort()) {
+            Serial.println("\n>>> 🛑 CALIBRATION ABORTED BY USER <<<");
+            motor.setPhaseVoltage(0.0f, 0.0f, 0.0f);
+            if (!prev_enabled) driver.disable();
+            calib_active = false;
+            live_calib_progress = 0;
+            return;
+        }
+        float el_ang = _3PI_2 + 2.0f * _2PI * ((float)step / (float)DIR_STEPS);
+        motor.setPhaseVoltage(CALIB_ALIGN_VOLTAGE, 0.0f, el_ang);
+        delayMicroseconds(1500);
+    }
+    delay(100);
+
+    float d_ang = wrapAngleRad(mid_raw - start_raw);
+    float moved_deg = fabsf(d_ang) * 57.2957795f;
+    float expected_deg = (360.0f * 2.0f / (float)MOTOR_POLE_PAIRS) * 0.30f; // ~19.6 deg minimum
+
+    if (fabsf(d_ang) < 0.15f) { // Less than 8.6 deg mech
+        Serial.println("FAILED!");
+        Serial.println("   -------------------------------------------------------------");
+        Serial.printf ("   ❌ ROTOR MOTION CHECK FAILED: Rotor moved only %.2f deg mech (expected >= %.2f deg)!\n",
+                       moved_deg, expected_deg);
+        Serial.printf ("      Start Angle: %.4f rad (%.1f deg) | Mid Angle: %.4f rad (%.1f deg)\n",
+                       start_raw, start_raw * 57.2957795f, mid_raw, mid_raw * 57.2957795f);
+        Serial.println("   ⚠️ ROOT CAUSE DIAGNOSTICS:");
+        Serial.println("      1. 12V DC Bench Supply is switched OFF or current limit tripped.");
+        Serial.println("      2. Motor phase connector unplugged or high-resistance solder joint.");
+        Serial.println("      3. Inverter Gate Driver is disabled or damaged.");
+        Serial.println("      4. Physical mechanical binding (bearing locked, gear jamming).");
+        Serial.println("   -------------------------------------------------------------");
+        motor.setPhaseVoltage(0.0f, 0.0f, 0.0f);
+        if (!prev_enabled) driver.disable();
+        calib_active = false;
+        live_calib_progress = 0;
+        Serial.print("[CALIB_FAILED]:M"); Serial.print(motor_id); Serial.println(" Rotor Stalled (No Motion)");
+        return;
+    }
+
+    Direction sensor_dir = (d_ang > 0.0f) ? Direction::CW : Direction::CCW;
+    int dir_sign = (sensor_dir == Direction::CW) ? 1 : -1;
+    Serial.printf("OK: Detected %s (%+.2f deg mech)\n", (dir_sign == 1) ? "CW (+1)" : "CCW (-1)", moved_deg);
+
+    // ------------------------------------------------------------------------
+    // Step 3: Bidirectional 128-Step Sweep Across 360 Mechanical Degrees
+    // ------------------------------------------------------------------------
+    Serial.println("\n3. Executing Bidirectional 128-Step Sweep Across 360° Mechanical:");
+    const int TOTAL_STEPS = CALIB_TOTAL_STEPS;
+    const float step_mech_rad = _2PI / (float)TOTAL_STEPS;
+
+    float fwd_measured[TOTAL_STEPS];
+    float rev_measured[TOTAL_STEPS];
+    int consecutive_stalls = 0;
+
+    // --- PASS 1: FORWARD SWEEP ---
+    for (int i = 0; i < TOTAL_STEPS; i++) {
+        if (checkCalibrationAbort()) {
+            Serial.println("\n>>> 🛑 CALIBRATION ABORTED BY USER <<<");
+            motor.setPhaseVoltage(0.0f, 0.0f, 0.0f);
+            if (!prev_enabled) driver.disable();
+            calib_active = false;
+            live_calib_progress = 0;
+            return;
+        }
+
+        float target_mech = (float)i * step_mech_rad;
+        float target_elec = _3PI_2 + (float)dir_sign * (float)MOTOR_POLE_PAIRS * target_mech;
+
+        // Smooth micro-stepping transition from previous step
+        if (i > 0) {
+            const int INTERP = 8;
+            float prev_mech = (float)(i - 1) * step_mech_rad;
+            float prev_elec = _3PI_2 + (float)dir_sign * (float)MOTOR_POLE_PAIRS * prev_mech;
+            for (int s = 1; s <= INTERP; s++) {
+                float el = prev_elec + (target_elec - prev_elec) * ((float)s / (float)INTERP);
+                motor.setPhaseVoltage(CALIB_ALIGN_VOLTAGE, 0.0f, el);
+                delayMicroseconds(1000);
+            }
         } else {
-            motor2.setPhaseVoltage(align_volt, 0.0f, test_elec_angle);
+            motor.setPhaseVoltage(CALIB_ALIGN_VOLTAGE, 0.0f, target_elec);
+            delay(150);
         }
 
-        delay(30); // Allow rotor mechanical settling
+        // Micro-dither stiction cancellation
+        for (int d = 4; d >= 1; d--) {
+            float dither = 0.05f * ((float)d / 4.0f);
+            motor.setPhaseVoltage(CALIB_ALIGN_VOLTAGE, 0.0f, target_elec + dither);
+            delayMicroseconds(400);
+            motor.setPhaseVoltage(CALIB_ALIGN_VOLTAGE, 0.0f, target_elec - dither);
+            delayMicroseconds(400);
+        }
 
-        // Read angle from ISR's cached buffer with zero bus contention
-        float measured_rad = (motor_id == 1) ? encoder1.getCalibratedAngleRad() : encoder2.getCalibratedAngleRad();
-        float expected_rad = (float)i * (2.0f * _PI / (float)total_steps);
-        float err = measured_rad - expected_rad;
+        // Thermal hold & settle
+        motor.setPhaseVoltage(CALIB_HOLD_VOLTAGE, 0.0f, target_elec);
+        delay(25);
 
-        // Wrap error to [-PI, +PI]
-        while (err > _PI) err -= 2.0f * _PI;
-        while (err < -_PI) err += 2.0f * _PI;
+        // Oversampled vector averaging
+        float sum_sin = 0.0f, sum_cos = 0.0f;
+        for (int s = 0; s < CALIB_OVERSAMPLE_COUNT; s++) {
+            float a = encoder.getRawMechanicalAngle();
+            sum_sin += sinf(a);
+            sum_cos += cosf(a);
+            delayMicroseconds(100);
+        }
+        fwd_measured[i] = normalizeAngleRad(atan2f(sum_sin, sum_cos));
 
-        recorded_errors[i] = err;
+        // Per-Step Stall & Slip Monitor
+        if (i > 0) {
+            float step_delta = wrapAngleRad(fwd_measured[i] - fwd_measured[i - 1]);
+            if ((float)dir_sign * step_delta <= 0.003f) {
+                consecutive_stalls++;
+                if (consecutive_stalls >= 4) {
+                    Serial.println("\n❌ FORWARD SWEEP FAILED: ROTOR STALLED (No movement over 4 steps)!");
+                    Serial.printf ("   Step: %d / %d | Last Step Delta: %+.4f rad\n", i, TOTAL_STEPS, step_delta);
+                    motor.setPhaseVoltage(0.0f, 0.0f, 0.0f);
+                    if (!prev_enabled) driver.disable();
+                    calib_active = false;
+                    live_calib_progress = 0;
+                    Serial.print("[CALIB_FAILED]:M"); Serial.print(motor_id); Serial.println(" Forward Stall");
+                    return;
+                }
+            } else {
+                consecutive_stalls = 0;
+            }
+        }
 
-        if (i % 16 == 0) {
-            Serial.print("[CALIB_PROG]:");
-            Serial.print(live_calib_progress);
-            Serial.println("%");
+        live_calib_progress = (uint8_t)((i * 50) / TOTAL_STEPS);
+        sendBinaryTelemetry();
+
+        if ((i + 1) % 16 == 0 || i == TOTAL_STEPS - 1) {
+            Serial.printf("   Forward Sweep: %d%% Complete\n", (int)(((float)(i + 1) / (float)TOTAL_STEPS) * 100.0f));
+            Serial.printf("[CALIB_PROG]:%d%%\n", live_calib_progress);
         }
     }
+
+    // --- THERMAL RELIEF PAUSE (1.0s) ---
+    Serial.println(">>> ❄️ Thermal Relief Pause (1.0s)...");
+    motor.setPhaseVoltage(0.0f, 0.0f, 0.0f);
+    delay(1000);
+
+    // --- PASS 2: REVERSE SWEEP ---
+    consecutive_stalls = 0;
+    float rev_start_mech = (float)(TOTAL_STEPS - 1) * step_mech_rad;
+    float rev_start_elec = _3PI_2 + (float)dir_sign * (float)MOTOR_POLE_PAIRS * rev_start_mech;
+    motor.setPhaseVoltage(CALIB_ALIGN_VOLTAGE, 0.0f, rev_start_elec);
+    delay(100);
+
+    for (int i = TOTAL_STEPS - 1; i >= 0; i--) {
+        if (checkCalibrationAbort()) {
+            Serial.println("\n>>> 🛑 CALIBRATION ABORTED BY USER <<<");
+            motor.setPhaseVoltage(0.0f, 0.0f, 0.0f);
+            if (!prev_enabled) driver.disable();
+            calib_active = false;
+            live_calib_progress = 0;
+            return;
+        }
+
+        float target_mech = (float)i * step_mech_rad;
+        float target_elec = _3PI_2 + (float)dir_sign * (float)MOTOR_POLE_PAIRS * target_mech;
+
+        // Smooth micro-stepping transition
+        if (i < TOTAL_STEPS - 1) {
+            const int INTERP = 8;
+            float prev_mech = (float)(i + 1) * step_mech_rad;
+            float prev_elec = _3PI_2 + (float)dir_sign * (float)MOTOR_POLE_PAIRS * prev_mech;
+            for (int s = 1; s <= INTERP; s++) {
+                float el = prev_elec + (target_elec - prev_elec) * ((float)s / (float)INTERP);
+                motor.setPhaseVoltage(CALIB_ALIGN_VOLTAGE, 0.0f, el);
+                delayMicroseconds(1000);
+            }
+        }
+
+        // Micro-dither stiction cancellation
+        for (int d = 4; d >= 1; d--) {
+            float dither = 0.05f * ((float)d / 4.0f);
+            motor.setPhaseVoltage(CALIB_ALIGN_VOLTAGE, 0.0f, target_elec + dither);
+            delayMicroseconds(400);
+            motor.setPhaseVoltage(CALIB_ALIGN_VOLTAGE, 0.0f, target_elec - dither);
+            delayMicroseconds(400);
+        }
+
+        // Thermal hold & settle
+        motor.setPhaseVoltage(CALIB_HOLD_VOLTAGE, 0.0f, target_elec);
+        delay(25);
+
+        // Oversampled vector averaging
+        float sum_sin = 0.0f, sum_cos = 0.0f;
+        for (int s = 0; s < CALIB_OVERSAMPLE_COUNT; s++) {
+            float a = encoder.getRawMechanicalAngle();
+            sum_sin += sinf(a);
+            sum_cos += cosf(a);
+            delayMicroseconds(100);
+        }
+        rev_measured[i] = normalizeAngleRad(atan2f(sum_sin, sum_cos));
+
+        // Per-Step Stall Monitor (Reverse)
+        if (i < TOTAL_STEPS - 1) {
+            float step_delta = wrapAngleRad(rev_measured[i] - rev_measured[i + 1]);
+            if ((float)dir_sign * step_delta >= -0.003f) {
+                consecutive_stalls++;
+                if (consecutive_stalls >= 4) {
+                    Serial.println("\n❌ REVERSE SWEEP FAILED: ROTOR STALLED (No movement over 4 steps)!");
+                    Serial.printf ("   Step: %d / %d | Last Step Delta: %+.4f rad\n", i, TOTAL_STEPS, step_delta);
+                    motor.setPhaseVoltage(0.0f, 0.0f, 0.0f);
+                    if (!prev_enabled) driver.disable();
+                    calib_active = false;
+                    live_calib_progress = 0;
+                    Serial.print("[CALIB_FAILED]:M"); Serial.print(motor_id); Serial.println(" Reverse Stall");
+                    return;
+                }
+            } else {
+                consecutive_stalls = 0;
+            }
+        }
+
+        live_calib_progress = 50 + (uint8_t)(((TOTAL_STEPS - 1 - i) * 50) / TOTAL_STEPS);
+        sendBinaryTelemetry();
+
+        if (i % 16 == 0 || i == 0) {
+            Serial.printf("   Reverse Sweep: %d%% Complete\n", (int)(((float)(TOTAL_STEPS - i) / (float)TOTAL_STEPS) * 100.0f));
+            Serial.printf("[CALIB_PROG]:%d%%\n", live_calib_progress);
+        }
+    }
+
+    // ------------------------------------------------------------------------
+    // Step 4: Midpoint Synthesis, Filtering & Quality Diagnostics
+    // ------------------------------------------------------------------------
+    float start_mid = normalizeAngleRad(atan2f(sinf(fwd_measured[0]) + sinf(rev_measured[0]),
+                                               cosf(fwd_measured[0]) + cosf(rev_measured[0])));
+    float raw_errors[TOTAL_STEPS];
+    float mid_angles[TOTAL_STEPS];
+    float filtered_errors[TOTAL_STEPS];
+
+    for (int i = 0; i < TOTAL_STEPS; i++) {
+        float mid_meas = normalizeAngleRad(atan2f(sinf(fwd_measured[i]) + sinf(rev_measured[i]),
+                                                   cosf(fwd_measured[i]) + cosf(rev_measured[i])));
+        float expected_meas = normalizeAngleRad(start_mid + (float)dir_sign * ((float)i * step_mech_rad));
+        raw_errors[i] = wrapAngleRad(mid_meas - expected_meas);
+        mid_angles[i] = mid_meas;
+    }
+
+    // 3-point circular median filter (eliminates isolated single-point glitches)
+    float max_err = -100.0f, min_err = 100.0f, sum_sq_err = 0.0f;
+    int anomaly_count = 0;
+
+    for (int i = 0; i < TOTAL_STEPS; i++) {
+        int prev_i = (i - 1 + TOTAL_STEPS) % TOTAL_STEPS;
+        int next_i = (i + 1) % TOTAL_STEPS;
+        float a = raw_errors[prev_i];
+        float b = raw_errors[i];
+        float c = raw_errors[next_i];
+        float med = ((a >= b && a <= c) || (a <= b && a >= c)) ? a :
+                    ((b >= a && b <= c) || (b <= a && b >= c)) ? b : c;
+
+        float filtered_err = (fabsf(b - med) > 0.08f) ? med : b;
+        filtered_errors[i] = filtered_err;
+
+        if (filtered_err > max_err) max_err = filtered_err;
+        if (filtered_err < min_err) min_err = filtered_err;
+        sum_sq_err += filtered_err * filtered_err;
+
+        if (fabsf(filtered_err) > LUT_ANOMALY_THRESHOLD_RAD) {
+            anomaly_count++;
+            if (anomaly_count <= 4) {
+                Serial.printf("   ⚠️ Anomaly idx[%3d] @ %.1f deg mech | err = %+.4f rad (%+.2f deg)\n",
+                              i, ((float)i / (float)TOTAL_STEPS) * 360.0f, filtered_err, filtered_err * 57.2957795f);
+            }
+        }
+    }
+
+    // Fourier harmonic extraction (Harmonic 1 = runout, Harmonic 2 = tilt)
+    float f_a1 = 0.0f, f_b1 = 0.0f, f_a2 = 0.0f, f_b2 = 0.0f;
+    for (int i = 0; i < TOTAL_STEPS; i++) {
+        float angle_mech = (float)i * step_mech_rad;
+        f_a1 += filtered_errors[i] * cosf(angle_mech);
+        f_b1 += filtered_errors[i] * sinf(angle_mech);
+        f_a2 += filtered_errors[i] * cosf(2.0f * angle_mech);
+        f_b2 += filtered_errors[i] * sinf(2.0f * angle_mech);
+    }
+    float h1_amp_deg = (2.0f * sqrtf(f_a1 * f_a1 + f_b1 * f_b1) / (float)TOTAL_STEPS) * 57.2957795f;
+    float h2_amp_deg = (2.0f * sqrtf(f_a2 * f_a2 + f_b2 * f_b2) / (float)TOTAL_STEPS) * 57.2957795f;
+
+    float pk_pk_rad = max_err - min_err;
+    float pk_pk_deg = pk_pk_rad * 57.2957795f;
+    float rms_deg   = sqrtf(sum_sq_err / (float)TOTAL_STEPS) * 57.2957795f;
+
+    Serial.println("--------------------------------------------------------------------------------");
+    Serial.println("128-POINT NON-LINEARITY CALIBRATION METRICS:");
+    Serial.printf ("  • Peak-to-Peak Error Span : %.3f deg mech (±%.3f deg)\n", pk_pk_deg, pk_pk_deg * 0.5f);
+    Serial.printf ("  • RMS Residual Error      : %.3f deg mech\n", rms_deg);
+    Serial.printf ("  • Harmonic 1 (Eccentricity): ±%.3f deg\n", h1_amp_deg);
+    Serial.printf ("  • Harmonic 2 (Tilt)       : ±%.3f deg\n", h2_amp_deg);
+    Serial.printf ("  • Anomaly Points (>%.1f°) : %d\n", LUT_ANOMALY_THRESHOLD_RAD * 57.2957795f, anomaly_count);
+
+    // ------------------------------------------------------------------------
+    // Step 5: Quality Gate & Activation
+    // ------------------------------------------------------------------------
+    bool lut_valid = (anomaly_count <= 6) && (pk_pk_rad <= LUT_PKPK_LIMIT_RAD);
+
+    if (!lut_valid) {
+        Serial.println("--------------------------------------------------------------------------------");
+        Serial.println("❌ LUT CALIBRATION REJECTED — ROTOR STALL OR EXTREME DISTORTION DETECTED!");
+        Serial.println("--------------------------------------------------------------------------------");
+        if (anomaly_count > 6) {
+            Serial.printf ("  ⚠️ Excessive slip/stall points (%d anomalies exceed limit of 6).\n", anomaly_count);
+            Serial.println("     ROOT CAUSE: Motor stalled, lost steps, or phase current was insufficient.");
+            Serial.println("     FIX: Check power supply 12V rail and ensure motor shaft turns freely.");
+        }
+        if (pk_pk_rad > LUT_PKPK_LIMIT_RAD) {
+            Serial.printf ("  ⚠️ Peak-to-Peak error %.3f° exceeds allowable limit %.3f°!\n", pk_pk_deg, LUT_PKPK_LIMIT_RAD * 57.2957795f);
+            Serial.println("     ROOT CAUSE: Magnet runout > 0.15mm off-center or sensor tilt.");
+            Serial.println("     FIX: Re-center magnet on motor shaft axis.");
+        }
+        motor.setPhaseVoltage(0.0f, 0.0f, 0.0f);
+        if (!prev_enabled) driver.disable();
+        calib_active = false;
+        live_calib_progress = 0;
+        Serial.print("[CALIB_FAILED]:M"); Serial.print(motor_id); Serial.println(" Quality Gate Failure");
+        return;
+    }
+
+    // Interpolate circular error table onto the 128 raw encoder segments
+    for (int s = 0; s < TOTAL_STEPS; s++) {
+        float seg_angle = (float)s * step_mech_rad;
+        encoder.lut_errors[s] = interpolateLUTAtAngle(seg_angle, mid_angles, filtered_errors, TOTAL_STEPS);
+    }
+    encoder.is_lut_active = true;
 
     live_calib_progress = 100;
+    sendBinaryTelemetry();
 
-    // Apply recorded errors to encoder LUT
-    for (int line = 0; line < 8; line++) {
-        if (motor_id == 1) {
-            encoder1.setLUTLine(line, &recorded_errors[line * 16], 16);
-        } else {
-            encoder2.setLUTLine(line, &recorded_errors[line * 16], 16);
-        }
+    // Safe shutdown of test vectors
+    motor.setPhaseVoltage(0.0f, 0.0f, 0.0f);
+    calib_active = false;
+    if (!prev_enabled) {
+        driver.disable();
     }
 
-    if (motor_id == 1) {
-        m1_calib_active = false;
-        motor1.setPhaseVoltage(0.0f, 0.0f, 0.0f);
-        Serial.println("[LUT_READY]:M1");
-    } else {
-        m2_calib_active = false;
-        motor2.setPhaseVoltage(0.0f, 0.0f, 0.0f);
-        Serial.println("[LUT_READY]:M2");
-    }
-
+    Serial.print("[LUT_READY]:M"); Serial.println(motor_id);
     Serial.println(">>> 128-POINT CALIBRATION COMPLETE & LUT ACTIVATED! <<<");
+    Serial.println("================================================================================\n");
 }
 
 // ----------------------------------------------------------------------------

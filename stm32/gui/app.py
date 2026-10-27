@@ -582,6 +582,12 @@ class DualMotorDashboardApp(tk.Tk):
     def _on_serial_log(self, text):
         if not self.log_paused:
             self._log_console(text)
+        if "[CALIB_FAILED]" in text:
+            reason = text.split("[CALIB_FAILED]:")[-1].strip()
+            self.sys_status_lbl.configure(text=f"❌ CALIBRATION FAILED: {reason}", fg=COLOR_ACCENT_RED)
+        elif "[LUT_READY]" in text:
+            m_id = text.split("[LUT_READY]:")[-1].strip()
+            self.sys_status_lbl.configure(text=f"✅ {m_id} CALIBRATION SUCCESS (LUT ACTIVE)", fg=COLOR_ACCENT_GREEN)
 
     def _log_console(self, text):
         self.console_text.insert(tk.END, text)
@@ -662,8 +668,17 @@ class DualMotorDashboardApp(tk.Tk):
             # Calibration Progress Bars
             if st["m1_calib"]:
                 self.m1_lut_progress["value"] = st["calib_progress"]
+            elif st["m1_lut_active"]:
+                self.m1_lut_progress["value"] = 100
+            else:
+                self.m1_lut_progress["value"] = 0
+
             if st["m2_calib"]:
                 self.m2_lut_progress["value"] = st["calib_progress"]
+            elif st["m2_lut_active"]:
+                self.m2_lut_progress["value"] = 100
+            else:
+                self.m2_lut_progress["value"] = 0
 
         self.after(40, self._ui_poll_loop)
 

@@ -94,11 +94,19 @@
 #define MOTOR_KV_RATING             130.0f    // GM3506 Back-EMF Feed-Forward
 #define MOTOR_VELOCITY_LIMIT        150.0f    // 150 rad/s = 1432 RPM
 
+// Stepped 128-Point Calibration Constants
+#define CALIB_ALIGN_VOLTAGE         3.5f      // Stepped calibration movement voltage (V)
+#define CALIB_HOLD_VOLTAGE          2.4f      // Thermal relief hold voltage during sample (V)
+#define CALIB_TOTAL_STEPS           128       // 128-point LUT resolution
+#define CALIB_OVERSAMPLE_COUNT      32        // Samples per step for noise rejection
+#define LUT_ANOMALY_THRESHOLD_RAD   0.035f    // > 2.0 deg mech (~22 deg elec) = pole slip / stall
+#define LUT_PKPK_LIMIT_RAD          0.080f    // > 4.6 deg mech = bad sweep / binding / severe runout
+
 // Real-Time Control Loop Frequencies
 #define FOC_COMMUTATION_HZ          20000     // 20.0 kHz Hard Real-Time Commutation (50.0 us)
 #define MOTION_DOWNSAMPLE_RATIO     10        // Velocity PID downsampled to 2.0 kHz (500 us)
 #define TELEMETRY_RATE_HZ           25        // 25 Hz Binary Telemetry Stream (40 ms)
-#define SPI_SPEED_HZ                5312500   // 5.3125 MHz (170 MHz / 32 prescaler) matching ESP32 4-5 MHz band
+#define SPI_SPEED_HZ                2656250   // 2.656 MHz (170 MHz / 64 prescaler) for high EMI noise immunity
 
 // Pre-Loaded Zero Electrical Angles (Standalone Autonomous Startup Jerk Free)
 #ifndef M1_DEFAULT_ZERO_ELECTRIC_ANGLE

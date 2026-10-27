@@ -27,6 +27,9 @@ public:
     volatile uint32_t parity_errors;
     volatile uint32_t parity_retries;
     volatile uint32_t mag_faults;
+    volatile uint32_t consecutive_parity_errors;
+    volatile bool is_connected;
+    volatile uint16_t slow_poll_counter;
     volatile bool last_no_mag;
     volatile bool last_parity_ok;
     volatile uint8_t last_raw_h;
@@ -43,6 +46,7 @@ public:
     MT6816Sensor(int pin = PIN_M1_CS)
         : cs_pin(pin), cs_port(GPIOB), cs_set_mask(1 << 2), cs_reset_mask((1 << 2) << 16),
           total_reads(0), parity_errors(0), parity_retries(0), mag_faults(0),
+          consecutive_parity_errors(0), is_connected(true), slow_poll_counter(0),
           last_no_mag(false), last_parity_ok(true),
           last_raw_h(0), last_raw_l(0), last_raw_14bit(0),
           zero_offset_deg(0.0f), is_lut_active(false),
@@ -84,6 +88,15 @@ public:
         cs_port->BSRR = cs_set_mask;
     }
 
+    static inline void delayNanos(uint32_t ns) __attribute__((always_inline)) {
+        // At 170 MHz, 1 cycle = 5.88 ns -> (ns * 17) / 100 cycles
+        uint32_t cycles = (ns * 17) / 100;
+        uint32_t start = DWT->CYCCNT;
+        while ((DWT->CYCCNT - start) < cycles) {
+            __NOP();
+        }
+    }
+
     static inline bool parityCheck(uint16_t data) {
         // Even parity over 16 bits (count % 2 == 0)
         data ^= data >> 8;
@@ -101,7 +114,9 @@ public:
         SPI.setMISO(PIN_SPI1_MISO);
         SPI.setMOSI(PIN_SPI1_MOSI);
         SPI.begin();
-        pinMode(PIN_SPI1_MISO, INPUT_PULLUP);
+
+        // Enable pull-up directly on PB4 (MISO) without destroying AF5 configuration
+        GPIOB->PUPDR = (GPIOB->PUPDR & ~(3 << (4 * 2))) | (1 << (4 * 2));
 
         // MT6816 initial read
         readHardwareSPI();
@@ -114,6 +129,14 @@ public:
     // Hardware SPI Single-Read Engine (Executed strictly ONCE per 50 us tick)
     // ------------------------------------------------------------------------
     inline void readHardwareSPI() __attribute__((always_inline)) {
+        // If sensor is disconnected, throttle to 10 Hz (every 2,000 ticks) so it doesn't pollute shared SPI bus
+        if (!is_connected) {
+            if (++slow_poll_counter < 2000) {
+                return;
+            }
+            slow_poll_counter = 0;
+        }
+
         SPI.beginTransaction(spi_settings);
 
         for (int retry = 0; retry < 2; retry++) {
@@ -121,14 +144,18 @@ public:
 
             // 1. Read High Byte (Register 0x03)
             csLow();
+            delayNanos(250); // t_CSS setup time (>= 150 ns)
             uint16_t rx_h = SPI.transfer16(0x8300);
+            delayNanos(250); // t_CSH hold time (>= 150 ns)
             csHigh();
 
-            delayMicroseconds(1); // CS deassertion hold time (exact match with ESP32 read4WireHW)
+            delayNanos(250); // t_CS_HIGH deassertion hold time (>= 150 ns)
 
             // 2. Read Low Byte (Register 0x04)
             csLow();
+            delayNanos(250); // t_CSS setup time (>= 150 ns)
             uint16_t rx_l = SPI.transfer16(0x8400);
+            delayNanos(250); // t_CSH hold time (>= 150 ns) - ensures bit 0 (parity) is captured before CS rises!
             csHigh();
 
             uint8_t h = rx_h & 0xFF;
@@ -149,17 +176,25 @@ public:
 
             if (parity_ok) {
                 last_raw_14bit = raw14;
+                consecutive_parity_errors = 0;
                 last_parity_ok = true;
+                is_connected = true;
                 if (retry > 0) {
                     parity_retries++;
                 }
                 break;
             } else {
                 if (retry == 0) {
-                    delayMicroseconds(1);
+                    delayNanos(250);
                 } else {
                     parity_errors++;
-                    last_parity_ok = false;
+                    consecutive_parity_errors++;
+                    if (consecutive_parity_errors >= 4) {
+                        last_parity_ok = false;
+                        if (consecutive_parity_errors >= 200 && no_mag) {
+                            is_connected = false; // Mark disconnected to avoid floating line noise
+                        }
+                    }
                 }
             }
         }
@@ -170,8 +205,12 @@ public:
     // ------------------------------------------------------------------------
     // Calibrated Angle Calculation (Sub-microsecond, Zero SPI reads)
     // ------------------------------------------------------------------------
+    inline float getRawMechanicalAngle() const {
+        return ((float)last_raw_14bit / 16384.0f) * _2PI;
+    }
+
     inline float getCalibratedAngleRad() const {
-        float raw_rad = ((float)last_raw_14bit / 16384.0f) * _2PI;
+        float raw_rad = getRawMechanicalAngle();
 
         if (!is_lut_active) {
             return raw_rad;
