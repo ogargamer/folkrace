@@ -55,6 +55,25 @@ class DualMotorDashboardApp(tk.Tk):
         self.cmd_history_idx = -1
         self.log_paused = False
 
+        # Calibration state & LUT caches (Matching ESP32 Suite)
+        self.lut_data = {1: [0.0] * 128, 2: [0.0] * 128}
+        self.calib_zero = {1: 0.0, 2: 0.0}
+        self.calib_grade = {1: "NOT CALIBRATED", 2: "NOT CALIBRATED"}
+        self._receiving_lut = None
+
+        if os.path.exists(LUT_JSON_PATH):
+            try:
+                with open(LUT_JSON_PATH, "r") as jf:
+                    saved = json.load(jf)
+                    for mid in [1, 2]:
+                        k = f"motor{mid}"
+                        if k in saved and "lut_errors" in saved[k] and len(saved[k]["lut_errors"]) == 128:
+                            self.lut_data[mid] = saved[k]["lut_errors"]
+                            self.calib_zero[mid] = saved[k].get("zero_electric_angle", 0.0)
+                            self.calib_grade[mid] = saved[k].get("grade", "SAVED")
+            except Exception:
+                pass
+
         self._init_styles()
         self._build_ui()
 
@@ -419,9 +438,24 @@ class DualMotorDashboardApp(tk.Tk):
         )
         rst_btn.pack(side=tk.RIGHT, padx=4)
 
-        # 5. Stepped 128-Point LUT Calibration Card
-        lut_sec = tk.LabelFrame(frame, text=f"128-POINT STEPPED LUT CALIBRATION (M{motor_id})", bg=COLOR_CARD, fg=COLOR_TEXT_MUTED, font=("Segoe UI", 8, "bold"))
+        # 5. Master Stepped 128-Point LUT & 11-Pole Calibration Card (Matching ESP32 Suite)
+        lut_sec = tk.LabelFrame(frame, text=f"MASTER AUTO-CALIBRATION: 128-PT LUT + 11-POLE ZERO (M{motor_id})", bg=COLOR_CARD, fg=COLOR_TEXT_MUTED, font=("Segoe UI", 8, "bold"))
         lut_sec.pack(fill=tk.X, padx=8, pady=4)
+
+        cal_hdr_row = tk.Frame(lut_sec, bg=COLOR_CARD)
+        cal_hdr_row.pack(fill=tk.X, padx=4, pady=(2, 2))
+
+        tk.Label(cal_hdr_row, text="Align V:", font=("Segoe UI", 8), bg=COLOR_CARD, fg=COLOR_TEXT_MUTED).pack(side=tk.LEFT)
+        cal_volt_ent = tk.Entry(cal_hdr_row, width=5, font=("Consolas", 8), bg=COLOR_CARD_SECONDARY, fg=COLOR_TEXT, bd=1, relief=tk.SOLID, insertbackground=COLOR_ACCENT_CYAN)
+        cal_volt_ent.insert(0, "4.0")
+        cal_volt_ent.pack(side=tk.LEFT, padx=(2, 8))
+
+        grade_lbl = tk.Label(cal_hdr_row, text=f"GRADE: {self.calib_grade.get(motor_id, 'NOT CALIBRATED')}", font=("Consolas", 8, "bold"), bg=COLOR_CARD_SECONDARY, fg=COLOR_TEXT_MUTED, padx=6)
+        grade_lbl.pack(side=tk.LEFT, padx=2)
+        if motor_id == 1:
+            self.m1_calib_grade_lbl = grade_lbl
+        else:
+            self.m2_calib_grade_lbl = grade_lbl
 
         lut_bar = ttk.Progressbar(lut_sec, orient=tk.HORIZONTAL, length=100, mode='determinate')
         lut_bar.pack(fill=tk.X, padx=6, pady=4)
@@ -430,41 +464,68 @@ class DualMotorDashboardApp(tk.Tk):
         else:
             self.m2_lut_progress = lut_bar
 
-        lut_btn_row = tk.Frame(lut_sec, bg=COLOR_CARD)
-        lut_btn_row.pack(fill=tk.X, padx=4, pady=(2, 6))
+        lut_btn_row1 = tk.Frame(lut_sec, bg=COLOR_CARD)
+        lut_btn_row1.pack(fill=tk.X, padx=4, pady=(2, 2))
 
         tk.Button(
-            lut_btn_row,
-            text=f"Start M{motor_id} Calib",
-            command=lambda: self.serial_engine.send_command(f"CALIB {motor_id}"),
-            bg="#E65100",
-            fg="#FFFFFF",
+            lut_btn_row1,
+            text=f"🚀 Master Calib M{motor_id}",
+            command=lambda: self.serial_engine.send_command(f"CALIB {motor_id} {cal_volt_ent.get().strip()}"),
+            bg="#00E676",
+            fg="#000000",
             bd=0,
             padx=8,
-            pady=2,
+            pady=3,
             font=("Segoe UI", 8, "bold")
         ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
 
         tk.Button(
-            lut_btn_row,
-            text="⚡ Upload Saved LUT",
+            lut_btn_row1,
+            text=f"⚡ 11-Pole Align",
+            command=lambda: self.serial_engine.send_command(f"C{motor_id} {cal_volt_ent.get().strip()}"),
+            bg="#00838F",
+            fg="#FFFFFF",
+            bd=0,
+            padx=6,
+            pady=3,
+            font=("Segoe UI", 8)
+        ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+
+        lut_btn_row2 = tk.Frame(lut_sec, bg=COLOR_CARD)
+        lut_btn_row2.pack(fill=tk.X, padx=4, pady=(2, 6))
+
+        tk.Button(
+            lut_btn_row2,
+            text="📥 Upload Saved LUT",
             command=lambda: self._upload_saved_lut(motor_id),
             bg=COLOR_CARD_SECONDARY,
             fg=COLOR_ACCENT_CYAN,
             bd=0,
-            padx=8,
+            padx=6,
             pady=2,
             font=("Segoe UI", 8)
         ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
 
         tk.Button(
-            lut_btn_row,
-            text="💾 Save to JSON",
-            command=lambda: self._save_lut_profile(motor_id),
+            lut_btn_row2,
+            text="📤 Dump LUT",
+            command=lambda: self.serial_engine.send_command(f"DUMP_LUT {motor_id}"),
             bg=COLOR_CARD_SECONDARY,
             fg=COLOR_TEXT_MUTED,
             bd=0,
-            padx=8,
+            padx=6,
+            pady=2,
+            font=("Segoe UI", 8)
+        ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+
+        tk.Button(
+            lut_btn_row2,
+            text="💾 Save to JSON",
+            command=lambda: self._save_lut_profile(motor_id),
+            bg=COLOR_CARD_SECONDARY,
+            fg=COLOR_ACCENT_AMBER,
+            bd=0,
+            padx=6,
             pady=2,
             font=("Segoe UI", 8)
         ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
@@ -569,8 +630,52 @@ class DualMotorDashboardApp(tk.Tk):
             messagebox.showerror("Upload Error", str(ex))
 
     def _save_lut_profile(self, motor_id):
-        # Stub for saving profile
-        messagebox.showinfo("Saved", f"Profile template active in {LUT_JSON_PATH}")
+        try:
+            data = {}
+            if os.path.exists(LUT_JSON_PATH):
+                with open(LUT_JSON_PATH, "r") as f:
+                    try:
+                        data = json.load(f)
+                    except Exception:
+                        data = {}
+            key = f"motor{motor_id}"
+            data[key] = {
+                "name": f"Motor {motor_id} ({'Left' if motor_id == 1 else 'Right'} Channel)",
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "points": 128,
+                "zero_electric_angle": self.calib_zero.get(motor_id, 0.0),
+                "grade": self.calib_grade.get(motor_id, "CERTIFIED"),
+                "lut_errors": [round(float(x), 6) for x in self.lut_data.get(motor_id, [0.0]*128)]
+            }
+            with open(LUT_JSON_PATH, "w") as f:
+                json.dump(data, f, indent=2)
+            messagebox.showinfo("Saved", f"Profile for Motor {motor_id} successfully saved to {LUT_JSON_PATH}")
+            self._log_console(f"[SYS] Saved 128-point LUT profile for Motor {motor_id} into {LUT_JSON_PATH}\n")
+        except Exception as ex:
+            messagebox.showerror("Save Error", str(ex))
+
+    def _save_lut_profile_silent(self, motor_id):
+        try:
+            data = {}
+            if os.path.exists(LUT_JSON_PATH):
+                with open(LUT_JSON_PATH, "r") as f:
+                    try:
+                        data = json.load(f)
+                    except Exception:
+                        data = {}
+            key = f"motor{motor_id}"
+            data[key] = {
+                "name": f"Motor {motor_id} ({'Left' if motor_id == 1 else 'Right'} Channel)",
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "points": 128,
+                "zero_electric_angle": self.calib_zero.get(motor_id, 0.0),
+                "grade": self.calib_grade.get(motor_id, "CERTIFIED"),
+                "lut_errors": [round(float(x), 6) for x in self.lut_data.get(motor_id, [0.0]*128)]
+            }
+            with open(LUT_JSON_PATH, "w") as f:
+                json.dump(data, f, indent=2)
+        except Exception:
+            pass
 
     # -------------------------------------------------------------------------
     # Telemetry & Console Callbacks
@@ -582,12 +687,64 @@ class DualMotorDashboardApp(tk.Tk):
     def _on_serial_log(self, text):
         if not self.log_paused:
             self._log_console(text)
-        if "[CALIB_FAILED]" in text:
+
+        # Parse LUT dump stream
+        if "[LUT_DATA_START]:M" in text:
+            m_id = 1 if "M1" in text else 2
+            self._receiving_lut = m_id
+            self.lut_data[m_id] = [0.0] * 128
+        elif "[LUT_DATA_END]:M" in text:
+            m_id = 1 if "M1" in text else 2
+            self._receiving_lut = None
+            self._save_lut_profile_silent(m_id)
+            self._log_console(f"[SYS] Captured & auto-saved 128-pt LUT for Motor {m_id} to JSON.\n")
+        elif self._receiving_lut is not None and text.strip().startswith("LUT "):
+            try:
+                parts = text.strip().split()
+                if len(parts) >= 4:
+                    m_id = int(parts[1])
+                    line_idx = int(parts[2])
+                    csv_vals = [float(v) for v in parts[3].split(",") if v.strip()]
+                    if len(csv_vals) == 16 and 0 <= line_idx < 8:
+                        self.lut_data[m_id][line_idx * 16 : (line_idx + 1) * 16] = csv_vals
+            except Exception:
+                pass
+
+        # Parse calibration done notification
+        if "[CALIB_DONE]:" in text:
+            parts = text.strip().split(":")
+            m_id = 1
+            grade = "CERTIFIED"
+            zero_a = 0.0
+            for p in parts:
+                if p.startswith("M") and len(p) == 2 and p[1].isdigit():
+                    m_id = int(p[1])
+                elif p.startswith("GRADE="):
+                    grade = p.replace("GRADE=", "")
+                elif p.startswith("ZERO="):
+                    try:
+                        zero_a = float(p.replace("ZERO=", ""))
+                    except Exception:
+                        pass
+            self.calib_grade[m_id] = grade
+            self.calib_zero[m_id] = zero_a
+            lbl = getattr(self, f"m{m_id}_calib_grade_lbl", None)
+            if lbl:
+                if "GRADE A" in grade or "GRADE B" in grade:
+                    col = COLOR_ACCENT_GREEN
+                elif "GRADE C" in grade or "GRADE D" in grade:
+                    col = COLOR_ACCENT_AMBER
+                else:
+                    col = COLOR_ACCENT_RED
+                lbl.configure(text=f"GRADE: {grade} (Zero: {zero_a:.4f})", fg=col)
+            self.sys_status_lbl.configure(text=f"🎉 M{m_id} CALIBRATION CERTIFIED: {grade} | Zero: {zero_a:.4f} rad ({zero_a*57.29578:.1f}°)", fg=COLOR_ACCENT_GREEN)
+
+        elif "[CALIB_FAILED]" in text:
             reason = text.split("[CALIB_FAILED]:")[-1].strip()
             self.sys_status_lbl.configure(text=f"❌ CALIBRATION FAILED: {reason}", fg=COLOR_ACCENT_RED)
         elif "[LUT_READY]" in text:
             m_id = text.split("[LUT_READY]:")[-1].strip()
-            self.sys_status_lbl.configure(text=f"✅ {m_id} CALIBRATION SUCCESS (LUT ACTIVE)", fg=COLOR_ACCENT_GREEN)
+            self.sys_status_lbl.configure(text=f"✅ {m_id} LUT ACTIVE & VERIFIED", fg=COLOR_ACCENT_GREEN)
 
     def _log_console(self, text):
         self.console_text.insert(tk.END, text)
