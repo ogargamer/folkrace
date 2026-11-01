@@ -70,6 +70,15 @@ class DualMotorDashboardApp(tk.Tk):
         self._init_styles()
         self._build_ui()
 
+        # Load initial config from motor_config_gm3506.json if present
+        if os.path.exists(MOTOR_CONFIG_JSON_PATH):
+            try:
+                with open(MOTOR_CONFIG_JSON_PATH, "r") as f:
+                    init_cfg = json.load(f)
+                self._update_gui_from_config(init_cfg)
+            except Exception:
+                pass
+
         # Keyboard Shortcuts
         self.bind("<Escape>", lambda e: self.global_estop())
 
@@ -959,8 +968,9 @@ class DualMotorDashboardApp(tk.Tk):
             if ok:
                 self.connect_btn.configure(text="DISCONNECT", bg=COLOR_ACCENT_RED)
                 self.sys_status_lbl.configure(text=f"● CONNECTED ({port} @ 921600)", fg=COLOR_ACCENT_GREEN)
-                # Query status on connect
+                # Query status and active config on connect
                 self.after(300, lambda: self.serial_engine.send_command("s"))
+                self.after(500, lambda: self.serial_engine.send_command("export"))
             else:
                 messagebox.showerror("Connection Error", msg)
         else:
@@ -1002,8 +1012,20 @@ class DualMotorDashboardApp(tk.Tk):
         try:
             cur = float(self.zero_ent.get())
         except ValueError:
+            cur = self.serial_engine.state.get("m1_zero_angle", 0.0)
+
+        if cur == 0.0 and self.serial_engine.state.get("m1_zero_angle", 0.0) != 0.0:
             cur = self.serial_engine.state["m1_zero_angle"]
+        elif cur == 0.0 and os.path.exists(MOTOR_CONFIG_JSON_PATH):
+            try:
+                with open(MOTOR_CONFIG_JSON_PATH, "r") as f:
+                    cur = float(json.load(f).get("zero_electric_angle", 0.0))
+            except Exception:
+                pass
+
         new_z = (cur + delta_rad) % 6.2831853
+        if new_z < 0:
+            new_z += 6.2831853
         self.zero_ent.delete(0, tk.END)
         self.zero_ent.insert(0, f"{new_z:.4f}")
         self.serial_engine.send_command(f"O1 {new_z:.4f}")

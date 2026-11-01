@@ -1719,22 +1719,49 @@ void processCommand(const char *cmd) {
         return;
     }
 
+    // Direct relative zero nudge via standalone +<delta> or -<delta>
+    if (cmd[0] == '+' || (cmd[0] == '-' && (cmd[1] == '.' || (cmd[1] >= '0' && cmd[1] <= '9')))) {
+        float delta = atof(cmd);
+        motor1.zero_electric_angle = normalizeAngleRad(m1_base_zero_angle + delta);
+        m1_base_zero_angle = motor1.zero_electric_angle;
+        m1_calibrated = true;
+        Serial.printf(">>> M1 Zero Electric Angle Nudged: %.4f rad (%.1f deg) [delta: %+.4f]\n",
+                      motor1.zero_electric_angle, motor1.zero_electric_angle * 57.2957795f, delta);
+        return;
+    }
+
     if (strncasecmp(cmd, "ZERO1", 5) == 0 || strncasecmp(cmd, "O1", 2) == 0) {
         const char *p = (strncasecmp(cmd, "ZERO1", 5) == 0) ? (cmd + 5) : (cmd + 2);
+        while (*p == ' ') p++;
+        bool is_rel = (*p == '+' || *p == '-');
         float val = atof(p);
-        motor1.zero_electric_angle = val;
-        m1_base_zero_angle = val;
+        if (is_rel) {
+            motor1.zero_electric_angle = normalizeAngleRad(m1_base_zero_angle + val);
+        } else {
+            motor1.zero_electric_angle = normalizeAngleRad(val);
+        }
+        m1_base_zero_angle = motor1.zero_electric_angle;
         m1_calibrated = true;
-        Serial.printf(">>> M1 Zero Electric Angle Override: %.4f rad (%.1f deg)\n", val, val * 57.2957795f);
+        Serial.printf(">>> M1 Zero Electric Angle %s: %.4f rad (%.1f deg)\n",
+                      is_rel ? "Nudged to" : "Override",
+                      motor1.zero_electric_angle, motor1.zero_electric_angle * 57.2957795f);
         return;
     }
     if (strncasecmp(cmd, "ZERO2", 5) == 0 || strncasecmp(cmd, "O2", 2) == 0) {
         const char *p = (strncasecmp(cmd, "ZERO2", 5) == 0) ? (cmd + 5) : (cmd + 2);
+        while (*p == ' ') p++;
+        bool is_rel = (*p == '+' || *p == '-');
         float val = atof(p);
-        motor2.zero_electric_angle = val;
-        m2_base_zero_angle = val;
+        if (is_rel) {
+            motor2.zero_electric_angle = normalizeAngleRad(m2_base_zero_angle + val);
+        } else {
+            motor2.zero_electric_angle = normalizeAngleRad(val);
+        }
+        m2_base_zero_angle = motor2.zero_electric_angle;
         m2_calibrated = true;
-        Serial.printf(">>> M2 Zero Electric Angle Override: %.4f rad (%.1f deg)\n", val, val * 57.2957795f);
+        Serial.printf(">>> M2 Zero Electric Angle %s: %.4f rad (%.1f deg)\n",
+                      is_rel ? "Nudged to" : "Override",
+                      motor2.zero_electric_angle, motor2.zero_electric_angle * 57.2957795f);
         return;
     }
 
