@@ -10,19 +10,14 @@
 // MT6816 HIGH-PERFORMANCE 14-BIT MAGNETIC ANGLE SENSOR DRIVER
 // ============================================================================
 // Single-Read Hardware SPI Caching for 20.0 kHz Real-Time SimpleFOC Commutation.
-// - Supports dedicated or shared SPI bus instances (SPI1, SPI2, etc.).
-// - Fast atomic Port BSRR pin register toggling for CS assertion (< 6 ns).
+// - Timed single-read per tick: loopFOC() touches ZERO SPI bus cycles.
+// - Direct Port A/B BSRR atomic register toggling for CS assertion (< 6 ns).
 // - 128-point piecewise linear interpolation LUT for sub-0.05 deg linearity.
 // ============================================================================
 
 class MT6816Sensor : public Sensor {
 public:
     int cs_pin;
-    SPIClass *spi_bus;
-    int sck_pin;
-    int miso_pin;
-    int mosi_pin;
-
     GPIO_TypeDef *cs_port;
     uint32_t cs_set_mask;
     uint32_t cs_reset_mask;
@@ -48,9 +43,8 @@ public:
 
     SPISettings spi_settings;
 
-    MT6816Sensor(int pin = PIN_M1_CS, SPIClass *bus = &SPI, int sck = PIN_SPI1_SCK, int miso = PIN_SPI1_MISO, int mosi = PIN_SPI1_MOSI)
-        : cs_pin(pin), spi_bus(bus), sck_pin(sck), miso_pin(miso), mosi_pin(mosi),
-          cs_port(GPIOB), cs_set_mask(1 << 2), cs_reset_mask((1 << 2) << 16),
+    MT6816Sensor(int pin = PIN_M1_CS)
+        : cs_pin(pin), cs_port(GPIOB), cs_set_mask(1 << 2), cs_reset_mask((1 << 2) << 16),
           total_reads(0), parity_errors(0), parity_retries(0), mag_faults(0),
           consecutive_parity_errors(0), is_connected(true), slow_poll_counter(0),
           last_no_mag(false), last_parity_ok(true),
@@ -67,8 +61,22 @@ public:
         pinMode(cs_pin, OUTPUT);
         digitalWrite(cs_pin, HIGH);
 
-        cs_port = digitalPinToPort(pin);
-        cs_set_mask = digitalPinToBitMask(pin);
+        if (pin == PB2) {
+            cs_port = GPIOB;
+            cs_set_mask = (1 << 2);
+        } else if (pin == PB3) {
+            cs_port = GPIOB;
+            cs_set_mask = (1 << 3);
+        } else if (pin == PA2) {
+            cs_port = GPIOA;
+            cs_set_mask = (1 << 2);
+        } else if (pin == PA3) {
+            cs_port = GPIOA;
+            cs_set_mask = (1 << 3);
+        } else {
+            cs_port = GPIOB;
+            cs_set_mask = (1 << 3);
+        }
         cs_reset_mask = cs_set_mask << 16;
     }
 
@@ -101,18 +109,14 @@ public:
     void init() override {
         setupCSPin(cs_pin);
 
-        if (spi_bus != nullptr) {
-            spi_bus->setSCLK(sck_pin);
-            spi_bus->setMISO(miso_pin);
-            spi_bus->setMOSI(mosi_pin);
-            spi_bus->begin();
-        }
+        // Configure shared SPI1 peripheral (matching ESP32 implementation)
+        SPI.setSCLK(PIN_SPI1_SCK);
+        SPI.setMISO(PIN_SPI1_MISO);
+        SPI.setMOSI(PIN_SPI1_MOSI);
+        SPI.begin();
 
-        // Enable pull-up directly on MISO pin to prevent floating line when CS is high
-        GPIO_TypeDef *miso_port = digitalPinToPort(miso_pin);
-        PinName pn = digitalPinToPinName(miso_pin);
-        uint32_t pin_num = STM_PIN(pn);
-        miso_port->PUPDR = (miso_port->PUPDR & ~(3 << (pin_num * 2))) | (1 << (pin_num * 2));
+        // Enable pull-up directly on PB4 (MISO) without destroying AF5 configuration
+        GPIOB->PUPDR = (GPIOB->PUPDR & ~(3 << (4 * 2))) | (1 << (4 * 2));
 
         // MT6816 initial read
         readHardwareSPI();
@@ -122,155 +126,82 @@ public:
     }
 
     // ------------------------------------------------------------------------
-    // Hardware SPI Burst-Read Engine (Executed strictly ONCE per 50 us tick)
+    // Hardware SPI Single-Read Engine (Executed strictly ONCE per 50 us tick)
     // ------------------------------------------------------------------------
-    // One CS assertion per sample: 0x83,0x00,0x84,0x00 clocked back-to-back so
-    // the angle high/low bytes come from the same MT6816 sample (no tearing).
-    // The Arduino core configures the SPI peripheral for 8-bit frames, so the
-    // burst is performed with byte-wide DR accesses.
-    SPI_TypeDef *spi_reg = nullptr;
-
-    static inline void spiFlush(SPI_TypeDef *s) __attribute__((always_inline)) {
-        while (s->SR & SPI_SR_RXNE) { (void)*(volatile uint8_t *)&s->DR; }
-    }
-    static inline void spiPut(SPI_TypeDef *s, uint8_t b) __attribute__((always_inline)) {
-        *(volatile uint8_t *)&s->DR = b;
-    }
-    static inline uint8_t spiGet(SPI_TypeDef *s) __attribute__((always_inline)) {
-        while (!(s->SR & SPI_SR_RXNE)) {}
-        return *(volatile uint8_t *)&s->DR;
-    }
-
-    bool shouldPoll() {
-        // Disconnected sensors are throttled to 10 Hz (every 2,000 ticks)
+    inline void readHardwareSPI() __attribute__((always_inline)) {
+        // If sensor is disconnected, throttle to 10 Hz (every 2,000 ticks) so it doesn't pollute shared SPI bus
         if (!is_connected) {
-            if (++slow_poll_counter < 2000) return false;
+            if (++slow_poll_counter < 2000) {
+                return;
+            }
             slow_poll_counter = 0;
         }
-        return true;
-    }
 
-    // Validates one sample. Returns true when the sample is accepted (or final failure).
-    inline bool processSample(uint8_t h, uint8_t l, int retry) __attribute__((always_inline)) {
-        uint16_t angle_data = ((uint16_t)h << 8) | l;
-        uint16_t raw14 = ((uint16_t)h << 6) | ((l & 0xFC) >> 2);
-        bool no_mag = (l & 0x02) != 0;
-        // Reject floating/shorted MISO (0xFFFF / 0x0000 both pass even parity)
-        bool parity_ok = (angle_data != 0xFFFF && angle_data != 0x0000) && parityCheck(angle_data);
+        SPI.beginTransaction(spi_settings);
 
-        total_reads++;
-        last_raw_h = h;
-        last_raw_l = l;
-        last_no_mag = no_mag;
-        if (no_mag) mag_faults++;
+        for (int retry = 0; retry < 2; retry++) {
+            total_reads++;
 
-        if (parity_ok) {
-            last_raw_14bit = raw14;
-            consecutive_parity_errors = 0;
-            last_parity_ok = true;
-            is_connected = true;
-            if (retry > 0) parity_retries++;
-            return true;
-        }
-        if (retry == 0) return false;
+            // 1. Read High Byte (Register 0x03)
+            csLow();
+            delayNanos(250); // t_CSS setup time (>= 150 ns)
+            uint16_t rx_h = SPI.transfer16(0x8300);
+            delayNanos(250); // t_CSH hold time (>= 150 ns)
+            csHigh();
 
-        parity_errors++;
-        consecutive_parity_errors++;
-        if (consecutive_parity_errors >= 4) {
-            last_parity_ok = false;
-            if (consecutive_parity_errors >= 200 && no_mag) {
-                is_connected = false; // Mark disconnected to avoid floating line noise
+            delayNanos(250); // t_CS_HIGH deassertion hold time (>= 150 ns)
+
+            // 2. Read Low Byte (Register 0x04)
+            csLow();
+            delayNanos(250); // t_CSS setup time (>= 150 ns)
+            uint16_t rx_l = SPI.transfer16(0x8400);
+            delayNanos(250); // t_CSH hold time (>= 150 ns) - ensures bit 0 (parity) is captured before CS rises!
+            csHigh();
+
+            uint8_t h = rx_h & 0xFF;
+            uint8_t l = rx_l & 0xFF;
+
+            uint16_t angle_data = ((uint16_t)h << 8) | l;
+            uint16_t raw14 = ((uint16_t)h << 6) | ((l & 0xFC) >> 2);
+            bool no_mag = (l & 0x02) != 0;
+            bool parity_ok = parityCheck(angle_data);
+
+            last_raw_h = h;
+            last_raw_l = l;
+            last_no_mag = no_mag;
+
+            if (no_mag) {
+                mag_faults++;
+            }
+
+            if (parity_ok) {
+                last_raw_14bit = raw14;
+                consecutive_parity_errors = 0;
+                last_parity_ok = true;
+                is_connected = true;
+                if (retry > 0) {
+                    parity_retries++;
+                }
+                break;
+            } else {
+                if (retry == 0) {
+                    delayNanos(250);
+                } else {
+                    parity_errors++;
+                    consecutive_parity_errors++;
+                    if (consecutive_parity_errors >= 4) {
+                        last_parity_ok = false;
+                        if (consecutive_parity_errors >= 200 && no_mag) {
+                            is_connected = false; // Mark disconnected to avoid floating line noise
+                        }
+                    }
+                }
             }
         }
-        return true;
+
+        SPI.endTransaction();
     }
 
-    // Single-sensor 32-bit burst (CS held low for the whole frame, BSY-safe release)
-    inline void burstRead(uint8_t &h, uint8_t &l) __attribute__((always_inline)) {
-        SPI_TypeDef *s = spi_reg;
-        csLow();
-        delayNanos(100); // t_CSS setup time
-        spiFlush(s);
-        spiPut(s, 0x83); spiGet(s);
-        spiPut(s, 0x00); h = spiGet(s);
-        spiPut(s, 0x84); spiGet(s);
-        spiPut(s, 0x00); l = spiGet(s);
-        while (s->SR & SPI_SR_BSY) {}  // last clock edge fully done before CS rises
-        delayNanos(100); // t_CSH hold time
-        csHigh();
-    }
-
-    inline void readHardwareSPI() __attribute__((always_inline)) {
-        if (shouldPoll()) readPolled();
-    }
-
-    // Interleaved read of two sensors on independent SPI peripherals (e.g. SPI1 + SPI2).
-    // Both shift registers clock simultaneously, halving SPI dead time in the ISR.
-    static inline void readDualParallel(MT6816Sensor &a, MT6816Sensor &b) {
-        bool pa = a.shouldPoll();
-        bool pb = b.shouldPoll();
-        if (!(pa && pb) || a.spi_reg == b.spi_reg) {
-            // Fall back to independent reads (reset throttle counters already consumed above)
-            if (pa) a.readPolled();
-            if (pb) b.readPolled();
-            return;
-        }
-
-        a.spi_bus->beginTransaction(a.spi_settings);
-        b.spi_bus->beginTransaction(b.spi_settings);
-        if (a.spi_reg == nullptr) a.spi_reg = a.spi_bus->getHandle()->Instance;
-        if (b.spi_reg == nullptr) b.spi_reg = b.spi_bus->getHandle()->Instance;
-        SPI_TypeDef *sa = a.spi_reg;
-        SPI_TypeDef *sb = b.spi_reg;
-
-        a.csLow();
-        b.csLow();
-        delayNanos(100); // t_CSS setup time
-        spiFlush(sa);
-        spiFlush(sb);
-
-        static const uint8_t tx[4] = {0x83, 0x00, 0x84, 0x00};
-        uint8_t ra[4], rb[4];
-        for (int i = 0; i < 4; i++) {
-            spiPut(sa, tx[i]);
-            spiPut(sb, tx[i]);
-            ra[i] = spiGet(sa);
-            rb[i] = spiGet(sb);
-        }
-        while ((sa->SR & SPI_SR_BSY) || (sb->SR & SPI_SR_BSY)) {}
-        delayNanos(100); // t_CSH hold time
-        a.csHigh();
-        b.csHigh();
-
-        a.spi_bus->endTransaction();
-        b.spi_bus->endTransaction();
-
-        // Failed samples get one sequential retry (rare)
-        if (!a.processSample(ra[1], ra[3], 0)) a.retryOnce();
-        if (!b.processSample(rb[1], rb[3], 0)) b.retryOnce();
-    }
-
-    // Full single-sensor read without throttle check
-    void readPolled() {
-        spi_bus->beginTransaction(spi_settings);
-        if (spi_reg == nullptr) spi_reg = spi_bus->getHandle()->Instance;
-        for (int retry = 0; retry < 2; retry++) {
-            uint8_t h, l;
-            burstRead(h, l);
-            if (processSample(h, l, retry)) break;
-            delayNanos(150);
-        }
-        spi_bus->endTransaction();
-    }
-
-    void retryOnce() {
-        delayNanos(150);
-        spi_bus->beginTransaction(spi_settings);
-        uint8_t h, l;
-        burstRead(h, l);
-        processSample(h, l, 1);
-        spi_bus->endTransaction();
-    }
     // ------------------------------------------------------------------------
     // Calibrated Angle Calculation (Sub-microsecond, Zero SPI reads)
     // ------------------------------------------------------------------------
@@ -279,19 +210,15 @@ public:
     }
 
     inline float getCalibratedAngleRad() const {
-        return calibratedAngleFromRaw14(last_raw_14bit);
-    }
-
-    inline float calibratedAngleFromRaw14(uint16_t raw14) const {
-        float raw_rad = ((float)raw14 / 16384.0f) * _2PI;
+        float raw_rad = getRawMechanicalAngle();
 
         if (!is_lut_active) {
             return raw_rad;
         }
 
         // 128-point Piecewise Linear Interpolation
-        int seg = (raw14 >> 7) & 0x7F;       // 0 .. 127
-        float frac = (float)(raw14 & 0x7F) / 128.0f;
+        int seg = (last_raw_14bit >> 7) & 0x7F;       // 0 .. 127
+        float frac = (float)(last_raw_14bit & 0x7F) / 128.0f;
         int next_seg = (seg + 1) & 0x7F;
 
         float err = lut_errors[seg] * (1.0f - frac) + lut_errors[next_seg] * frac;
@@ -310,14 +237,14 @@ public:
     }
 
     float getSingleTurnDeg() const {
-        float deg = getCalibratedAngleRad() * (360.0f / _2PI) - zero_offset_deg;
+        float deg = ((float)last_raw_14bit / 16384.0f) * 360.0f - zero_offset_deg;
         while (deg < 0.0f) deg += 360.0f;
         while (deg >= 360.0f) deg -= 360.0f;
         return deg;
     }
 
     void zeroCurrentPosition() {
-        zero_offset_deg = getCalibratedAngleRad() * (360.0f / _2PI);
+        zero_offset_deg = ((float)last_raw_14bit / 16384.0f) * 360.0f;
         this->full_rotations = 0;
     }
 

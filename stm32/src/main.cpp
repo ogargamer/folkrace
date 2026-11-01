@@ -39,10 +39,8 @@ static_assert(sizeof(TelemetryPacket) == 26, "TelemetryPacket must be exactly 26
 // ----------------------------------------------------------------------------
 // Global Peripherals & Motor Instances
 // ----------------------------------------------------------------------------
-SPIClass spi2_bus(PIN_SPI2_MOSI, PIN_SPI2_MISO, PIN_SPI2_SCK);
-
-MT6816Sensor encoder1(PIN_M1_CS, &SPI, PIN_SPI1_SCK, PIN_SPI1_MISO, PIN_SPI1_MOSI);
-MT6816Sensor encoder2(PIN_M2_CS, &spi2_bus, PIN_SPI2_SCK, PIN_SPI2_MISO, PIN_SPI2_MOSI);
+MT6816Sensor encoder1(PIN_M1_CS);
+MT6816Sensor encoder2(PIN_M2_CS);
 
 BLDCDriver3PWM driver1(M1_PWM_A, M1_PWM_B, M1_PWM_C, M1_EN);
 BLDCDriver3PWM driver2(M2_PWM_A, M2_PWM_B, M2_PWM_C, M2_EN);
@@ -98,29 +96,35 @@ void focTimerISR() {
     foc_tick_count++;
 
     // 1. Single-Read SPI Caching: Poll both MT6816 sensors strictly ONCE per tick
-    MT6816Sensor::readDualParallel(encoder1, encoder2);
+    encoder1.readHardwareSPI();
+    encoder2.readHardwareSPI();
 
     // 2. Motor 1 Commutation Loop
-    if (m1_enabled && !m1_calib_active) {
-        motor1.loopFOC(); // Calls encoder1.update() -> cached angle, ZERO SPI overhead!
-    } else if (!m1_calib_active) {
-        encoder1.update(); // Keep velocity/multi-turn tracking alive at 20 kHz while disabled
+    if (m1_enabled) {
+        if (!m1_calib_active) {
+            motor1.loopFOC(); // Calls encoder1.update() -> cached angle, ZERO SPI overhead!
+        }
     }
 
     // 3. Motor 2 Commutation Loop
-    if (m2_enabled && !m2_calib_active) {
-        motor2.loopFOC(); // Calls encoder2.update() -> cached angle, ZERO SPI overhead!
-    } else if (!m2_calib_active) {
-        encoder2.update();
+    if (m2_enabled) {
+        if (!m2_calib_active) {
+            motor2.loopFOC(); // Calls encoder2.update() -> cached angle, ZERO SPI overhead!
+        }
     }
 
     // 4. Downsampled Velocity Motion Control (Every 10th tick = 2.0 kHz / 500 us)
     if ((foc_tick_count % MOTION_DOWNSAMPLE_RATIO) == 0) {
         if (m1_enabled && !m1_calib_active) {
             motor1.move(m1_target_rpm * 0.104719755f);
+        } else if (!m1_enabled) {
+            encoder1.update();
         }
+
         if (m2_enabled && !m2_calib_active) {
             motor2.move(m2_target_rpm * 0.104719755f);
+        } else if (!m2_enabled) {
+            encoder2.update();
         }
     }
 
@@ -141,7 +145,6 @@ void focTimerISR() {
 // ----------------------------------------------------------------------------
 void initMotorFOC(int motor_id) {
     if (motor_id == 1) {
-        m1_calib_active = true; // Block ISR from loopFOC()/move() while initFOC() runs
         driver1.enable();
         if (M1_DEFAULT_ZERO_ELECTRIC_ANGLE != 0.0f) {
             motor1.zero_electric_angle = M1_DEFAULT_ZERO_ELECTRIC_ANGLE;
@@ -164,10 +167,7 @@ void initMotorFOC(int motor_id) {
                 Serial.println(">>> M1 ALIGN FAILED!");
             }
         }
-        motor1.PID_velocity.reset();
-        m1_calib_active = false;
     } else if (motor_id == 2) {
-        m2_calib_active = true; // Block ISR from loopFOC()/move() while initFOC() runs
         driver2.enable();
         if (M2_DEFAULT_ZERO_ELECTRIC_ANGLE != 0.0f) {
             motor2.zero_electric_angle = M2_DEFAULT_ZERO_ELECTRIC_ANGLE;
@@ -190,8 +190,6 @@ void initMotorFOC(int motor_id) {
                 Serial.println(">>> M2 ALIGN FAILED!");
             }
         }
-        motor2.PID_velocity.reset();
-        m2_calib_active = false;
     }
 }
 
@@ -451,8 +449,8 @@ void runSteppedCalibration(int motor_id) {
             float step_delta = wrapAngleRad(fwd_measured[i] - fwd_measured[i - 1]);
             if ((float)dir_sign * step_delta <= 0.003f) {
                 consecutive_stalls++;
-                if (consecutive_stalls >= 8) {
-                    Serial.println("\n❌ FORWARD SWEEP FAILED: ROTOR STALLED (No movement over 8 steps)!");
+                if (consecutive_stalls >= 4) {
+                    Serial.println("\n❌ FORWARD SWEEP FAILED: ROTOR STALLED (No movement over 4 steps)!");
                     Serial.printf ("   Step: %d / %d | Last Step Delta: %+.4f rad\n", i, TOTAL_STEPS, step_delta);
                     motor.setPhaseVoltage(0.0f, 0.0f, 0.0f);
                     if (!prev_enabled) driver.disable();
@@ -540,8 +538,8 @@ void runSteppedCalibration(int motor_id) {
             float step_delta = wrapAngleRad(rev_measured[i] - rev_measured[i + 1]);
             if ((float)dir_sign * step_delta >= -0.003f) {
                 consecutive_stalls++;
-                if (consecutive_stalls >= 8) {
-                    Serial.println("\n❌ REVERSE SWEEP FAILED: ROTOR STALLED (No movement over 8 steps)!");
+                if (consecutive_stalls >= 4) {
+                    Serial.println("\n❌ REVERSE SWEEP FAILED: ROTOR STALLED (No movement over 4 steps)!");
                     Serial.printf ("   Step: %d / %d | Last Step Delta: %+.4f rad\n", i, TOTAL_STEPS, step_delta);
                     motor.setPhaseVoltage(0.0f, 0.0f, 0.0f);
                     if (!prev_enabled) driver.disable();
@@ -594,7 +592,7 @@ void runSteppedCalibration(int motor_id) {
         float med = ((a >= b && a <= c) || (a <= b && a >= c)) ? a :
                     ((b >= a && b <= c) || (b <= a && b >= c)) ? b : c;
 
-        float filtered_err = (fabsf(b - med) > 0.005f) ? med : b;
+        float filtered_err = (fabsf(b - med) > 0.08f) ? med : b;
         filtered_errors[i] = filtered_err;
 
         if (filtered_err > max_err) max_err = filtered_err;
@@ -661,31 +659,12 @@ void runSteppedCalibration(int motor_id) {
         return;
     }
 
-    // Remove DC offset so LUT activation does not shift the mechanical/electrical zero
-    float mean_err = 0.0f;
-    for (int i = 0; i < TOTAL_STEPS; i++) mean_err += filtered_errors[i];
-    mean_err /= (float)TOTAL_STEPS;
-    for (int i = 0; i < TOTAL_STEPS; i++) filtered_errors[i] -= mean_err;
-
-    // Interpolate zero-mean circular error table onto the 128 raw encoder segments
+    // Interpolate circular error table onto the 128 raw encoder segments
     for (int s = 0; s < TOTAL_STEPS; s++) {
         float seg_angle = (float)s * step_mech_rad;
         encoder.lut_errors[s] = interpolateLUTAtAngle(seg_angle, mid_angles, filtered_errors, TOTAL_STEPS);
     }
     encoder.is_lut_active = true;
-
-    // Recompute SimpleFOC electrical zero from the sweep start pose (field at 3PI/2, rotor at
-    // start_mid raw) using the now-active LUT, and set motor_ready via initFOC (no sweep, since
-    // zero & direction are preset). ISR stays blocked by calib_active until we finish.
-    {
-        uint16_t start_raw14 = (uint16_t)(start_mid / _2PI * 16384.0f) & 0x3FFF;
-        float start_cal = encoder.calibratedAngleFromRaw14(start_raw14);
-        motor.sensor_direction = sensor_dir;
-        motor.zero_electric_angle = normalizeAngleRad((float)dir_sign * (float)MOTOR_POLE_PAIRS * start_cal);
-        motor.initFOC();
-        if (motor_id == 1) { m1_calibrated = true; motor1.PID_velocity.reset(); }
-        else               { m2_calibrated = true; motor2.PID_velocity.reset(); }
-    }
 
     live_calib_progress = 100;
     sendBinaryTelemetry();
@@ -842,7 +821,6 @@ void processCommand(const char *cmd) {
     }
 
     if (strcmp(cmd, "E1") == 0) {
-        motor1.PID_velocity.reset();
         m1_enabled = true;
         if (!m1_calibrated) initMotorFOC(1);
         else driver1.enable();
@@ -850,7 +828,6 @@ void processCommand(const char *cmd) {
         return;
     }
     if (strcmp(cmd, "E2") == 0) {
-        motor2.PID_velocity.reset();
         m2_enabled = true;
         if (!m2_calibrated) initMotorFOC(2);
         else driver2.enable();
@@ -858,8 +835,6 @@ void processCommand(const char *cmd) {
         return;
     }
     if (strcmp(cmd, "E") == 0 || strcmp(cmd, "e") == 0) {
-        motor1.PID_velocity.reset();
-        motor2.PID_velocity.reset();
         m1_enabled = true;
         m2_enabled = true;
         if (!m1_calibrated) initMotorFOC(1);
@@ -938,7 +913,7 @@ void processCommand(const char *cmd) {
 
     if (strcmp(cmd, "ENC") == 0 || strcmp(cmd, "enc") == 0 || strcmp(cmd, "ENC4") == 0 || strcmp(cmd, "enc4") == 0) {
         Serial.println("\n--- [MT6816 ENCODER LIVE DIAGNOSTICS] ---");
-        Serial.print("Encoder 1 (PA15/SPI1 - M1): Raw14=");
+        Serial.print("Encoder 3 (PB2 - M1/RL): Raw14=");
         Serial.print(encoder1.last_raw_14bit);
         Serial.print(" | Angle=");
         Serial.print(encoder1.getSingleTurnDeg(), 2);
@@ -953,7 +928,7 @@ void processCommand(const char *cmd) {
         Serial.print(" | ParityErrs=");
         Serial.println(encoder1.parity_errors);
 
-        Serial.print("Encoder 2 (PB11/SPI2 - M2): Raw14=");
+        Serial.print("Encoder 4 (PB3 - M2/RR): Raw14=");
         Serial.print(encoder2.last_raw_14bit);
         Serial.print(" | Angle=");
         Serial.print(encoder2.getSingleTurnDeg(), 2);
@@ -1254,14 +1229,12 @@ void setup() {
     if (M1_DEFAULT_ZERO_ELECTRIC_ANGLE != 0.0f) {
         motor1.zero_electric_angle = M1_DEFAULT_ZERO_ELECTRIC_ANGLE;
         motor1.sensor_direction = Direction::CW;
-        motor1.initFOC(); // Pre-filled zero/direction -> skips sweep, sets motor_ready
         m1_calibrated = true;
     }
 
     if (M2_DEFAULT_ZERO_ELECTRIC_ANGLE != 0.0f) {
         motor2.zero_electric_angle = M2_DEFAULT_ZERO_ELECTRIC_ANGLE;
         motor2.sensor_direction = Direction::CW;
-        motor2.initFOC(); // Pre-filled zero/direction -> skips sweep, sets motor_ready
         m2_calibrated = true;
     }
 
