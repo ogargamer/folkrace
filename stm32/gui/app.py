@@ -572,6 +572,7 @@ class DualMotorDashboardApp(tk.Tk):
         self.maxrpm_ent = self._make_tune_field(t_row2, "Max RPM:", "2000", width=6, cmd_prefix="MAXRPM1 ")
         self.lag_ent = self._make_tune_field(t_row2, "Lag(µs):", "35.0", width=5, cmd_prefix="LAG1 ")
         self.kv_ent = self._make_tune_field(t_row2, "KV:", "130.0", width=5, cmd_prefix="KV1 ")
+        self.dwt_ent = self._make_tune_field(t_row2, "DWT(ms):", "2.0", width=5, cmd_prefix="DWT1 ")
         self.zero_ent = self._make_tune_field(t_row2, "Zero(rad):", "0.0000", width=7, cmd_prefix="ZERO1 ")
 
         tk.Button(t_row2, text="-0.02", command=lambda: self._nudge_zero(-0.02), bg=COLOR_CARD_SECONDARY, fg=COLOR_TEXT, bd=0, padx=5, font=("Consolas", 8)).pack(side=tk.LEFT, padx=1)
@@ -1018,6 +1019,7 @@ class DualMotorDashboardApp(tk.Tk):
             maxrpm = float(self.maxrpm_ent.get())
             lag = float(self.lag_ent.get())
             kv = float(self.kv_ent.get())
+            dwt = float(self.dwt_ent.get())
 
             self.serial_engine.send_command(f"P1 {p}")
             self.serial_engine.send_command(f"I1 {i}")
@@ -1028,6 +1030,7 @@ class DualMotorDashboardApp(tk.Tk):
             self.serial_engine.send_command(f"MAXRPM1 {maxrpm}")
             self.serial_engine.send_command(f"LAG1 {lag}")
             self.serial_engine.send_command(f"KV1 {kv}")
+            self.serial_engine.send_command(f"DWT1 {dwt}")
         except ValueError:
             messagebox.showerror("Format Error", "All tuning parameters must be valid numbers.")
 
@@ -1042,6 +1045,7 @@ class DualMotorDashboardApp(tk.Tk):
         self.maxrpm_ent.delete(0, tk.END); self.maxrpm_ent.insert(0, "2000")
         self.lag_ent.delete(0, tk.END); self.lag_ent.insert(0, "35.0")
         self.kv_ent.delete(0, tk.END); self.kv_ent.insert(0, "130.0")
+        self.dwt_ent.delete(0, tk.END); self.dwt_ent.insert(0, "2.0")
 
     # =========================================================================
     # JSON Config & 128-Point LUT Export / Import
@@ -1059,14 +1063,15 @@ class DualMotorDashboardApp(tk.Tk):
                 self.i_ent.delete(0, tk.END); self.i_ent.insert(0, f"{float(cfg['pid_i']):.4f}")
             if "pid_d" in cfg and hasattr(self, "d_ent"):
                 self.d_ent.delete(0, tk.END); self.d_ent.insert(0, f"{float(cfg['pid_d']):.4f}")
-            if "lpf_tf" in cfg and hasattr(self, "lpf_ent"):
-                self.lpf_ent.delete(0, tk.END); self.lpf_ent.insert(0, f"{float(cfg['lpf_tf']):.4f}")
             if "lpf_tf" in cfg:
                 if hasattr(self, "tf_ent"):
                     self.tf_ent.delete(0, tk.END); self.tf_ent.insert(0, f"{float(cfg['lpf_tf']):.4f}")
                 elif hasattr(self, "lpf_ent"):
                     self.lpf_ent.delete(0, tk.END); self.lpf_ent.insert(0, f"{float(cfg['lpf_tf']):.4f}")
             if "motor_kv_rating" in cfg and hasattr(self, "kv_ent"):
+                self.kv_ent.delete(0, tk.END); self.kv_ent.insert(0, f"{float(cfg['motor_kv_rating']):.1f}")
+            if "dwt_window_ms" in cfg and hasattr(self, "dwt_ent"):
+                self.dwt_ent.delete(0, tk.END); self.dwt_ent.insert(0, f"{float(cfg['dwt_window_ms']):.1f}")
                 self.kv_ent.delete(0, tk.END); self.kv_ent.insert(0, f"{float(cfg['motor_kv_rating']):.1f}")
             if "sensor_lag_comp_us" in cfg and hasattr(self, "lag_ent"):
                 self.lag_ent.delete(0, tk.END); self.lag_ent.insert(0, f"{float(cfg['sensor_lag_comp_us']):.1f}")
@@ -1169,7 +1174,7 @@ class DualMotorDashboardApp(tk.Tk):
                 time.sleep(0.01)
 
             # 3. Transmit tuning PID and filter parameters if present
-            for k, cmd in [("pid_p", "P1"), ("pid_i", "I1"), ("pid_d", "D1"), ("lpf_tf", "LPF1"), ("motor_kv_rating", "KV1")]:
+            for k, cmd in [("pid_p", "P1"), ("pid_i", "I1"), ("pid_d", "D1"), ("lpf_tf", "LPF1"), ("motor_kv_rating", "KV1"), ("dwt_window_ms", "DWT1")]:
                 if k in data:
                     self.serial_engine.send_command(f"{cmd} {float(data[k])}")
                     time.sleep(0.01)

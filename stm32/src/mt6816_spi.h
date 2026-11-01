@@ -242,14 +242,25 @@ public:
     }
 
     // ------------------------------------------------------------------------
-    // 2.0 ms DWT Velocity Window Tracker
+    // DWT Velocity Window Tracker (Tunable 0.2 .. 6.0 ms)
     // ------------------------------------------------------------------------
-    // At 20.0 kHz ISR tick rate, 40 samples = exactly 2.0 ms (340,000 cycles @ 170 MHz)
-    static constexpr uint8_t VEL_HIST_LEN = 64; // Power-of-2 ring buffer
+    static constexpr uint8_t VEL_HIST_LEN = 128; // Power-of-2 ring buffer (up to 6.4 ms @ 20 kHz)
     float hist_angle[VEL_HIST_LEN] = {0};
     uint32_t hist_dwt[VEL_HIST_LEN] = {0};
     uint8_t hist_head = 0;
     uint8_t hist_count = 0;
+    uint8_t window_samples = 40; // 40 samples = 2.0 ms default @ 20 kHz
+    float window_ms = 2.0f;
+
+    void setDWTWindowMs(float ms) {
+        if (ms < 0.2f) ms = 0.2f;
+        if (ms > 6.0f) ms = 6.0f;
+        window_ms = ms;
+        uint8_t samples = (uint8_t)(ms * 20.0f + 0.5f);
+        if (samples < 2) samples = 2;
+        if (samples > (VEL_HIST_LEN - 2)) samples = VEL_HIST_LEN - 2;
+        window_samples = samples;
+    }
 
     void clearVelocityBuffer() {
         hist_head = 0;
@@ -261,7 +272,7 @@ public:
         // Base SimpleFOC update (tracks multi-turn wraps and sets angle_prev to calibrated angle for FOC)
         Sensor::update();
 
-        // Push current RAW mechanical angle and DWT timestamp into 2ms ring buffer.
+        // Push current RAW mechanical angle and DWT timestamp into ring buffer.
         // Using raw 14-bit mechanical angle eliminates 128-point piecewise-linear derivative discontinuities
         // (eliminating audible 2.56 kHz whine) while Sensor::update() retains calibrated LUT angle for FOC commutation!
         uint32_t now = DWT->CYCCNT;
@@ -278,8 +289,8 @@ public:
             return 0.0f;
         }
 
-        // Target: 2.0 ms window (40 samples @ 20 kHz = 2.0 ms)
-        uint8_t span = (hist_count >= 40) ? 40 : hist_count;
+        uint8_t target_span = window_samples;
+        uint8_t span = (hist_count >= target_span) ? target_span : hist_count;
         uint8_t oldest = (hist_head - span) & (VEL_HIST_LEN - 1);
         uint8_t newest = (hist_head - 1) & (VEL_HIST_LEN - 1);
 

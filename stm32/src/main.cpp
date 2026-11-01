@@ -126,9 +126,9 @@ void focTimerISR() {
     // 2. Motor 1 Commutation Loop (with Smooth Filtered Sensor Lag Compensation)
     if (m1_enabled && !m1_calib_active) {
         if (m1_lag_comp_us > 0.0f && m1_base_zero_angle != 0.0f) {
-            // Low-pass filter velocity for phase advance (~20 ms time constant @ 20 kHz: alpha = 0.0025f)
-            // Breaks the closed-loop torque-commutation feedback ripple
-            m1_lag_filt_vel += 0.0025f * (motor1.shaft_velocity - m1_lag_filt_vel);
+            // Crisp 2.0 ms low-pass filter on lag compensation velocity (alpha = 0.024f @ 20 kHz)
+            // Eliminates torque-commutation feedback ripple with no sluggish transient lag
+            m1_lag_filt_vel += 0.024f * (motor1.shaft_velocity - m1_lag_filt_vel);
             if (fabsf(m1_lag_filt_vel) > 3.0f) {
                 float lead_rad = m1_lag_filt_vel * (float)MOTOR_POLE_PAIRS * (m1_lag_comp_us * 1e-6f);
                 motor1.zero_electric_angle = normalizeAngleRad(m1_base_zero_angle - lead_rad);
@@ -142,7 +142,7 @@ void focTimerISR() {
     // 3. Motor 2 Commutation Loop (with Smooth Filtered Sensor Lag Compensation)
     if (m2_enabled && !m2_calib_active) {
         if (m2_lag_comp_us > 0.0f && m2_base_zero_angle != 0.0f) {
-            m2_lag_filt_vel += 0.0025f * (motor2.shaft_velocity - m2_lag_filt_vel);
+            m2_lag_filt_vel += 0.024f * (motor2.shaft_velocity - m2_lag_filt_vel);
             if (fabsf(m2_lag_filt_vel) > 3.0f) {
                 float lead_rad = m2_lag_filt_vel * (float)MOTOR_POLE_PAIRS * (m2_lag_comp_us * 1e-6f);
                 motor2.zero_electric_angle = normalizeAngleRad(m2_base_zero_angle - lead_rad);
@@ -305,6 +305,7 @@ struct PersistentFOCConfig {
     float    m1_pid_d;
     float    m1_lpf_tf;
     float    m1_velocity_limit;
+    float    m1_dwt_ms;
     bool     m1_lut_active;
     float    m1_lut_errors[128];
 
@@ -317,6 +318,7 @@ struct PersistentFOCConfig {
     float    m2_pid_d;
     float    m2_lpf_tf;
     float    m2_velocity_limit;
+    float    m2_dwt_ms;
     bool     m2_lut_active;
     float    m2_lut_errors[128];
 
@@ -347,6 +349,7 @@ void saveConfigToFlash() {
     cfg.m1_pid_d = motor1.PID_velocity.D;
     cfg.m1_lpf_tf = motor1.LPF_velocity.Tf;
     cfg.m1_velocity_limit = motor1.velocity_limit;
+    cfg.m1_dwt_ms = encoder1.window_ms;
     cfg.m1_lut_active = encoder1.is_lut_active;
     for (int i = 0; i < 128; i++) {
         cfg.m1_lut_errors[i] = encoder1.lut_errors[i];
@@ -361,6 +364,7 @@ void saveConfigToFlash() {
     cfg.m2_pid_d = motor2.PID_velocity.D;
     cfg.m2_lpf_tf = motor2.LPF_velocity.Tf;
     cfg.m2_velocity_limit = motor2.velocity_limit;
+    cfg.m2_dwt_ms = encoder2.window_ms;
     cfg.m2_lut_active = encoder2.is_lut_active;
     for (int i = 0; i < 128; i++) {
         cfg.m2_lut_errors[i] = encoder2.lut_errors[i];
@@ -403,6 +407,7 @@ bool loadConfigFromFlash() {
     motor1.PID_velocity.D = cfg.m1_pid_d;
     if (cfg.m1_lpf_tf > 0.0f) motor1.LPF_velocity.Tf = cfg.m1_lpf_tf;
     if (cfg.m1_velocity_limit > 0.0f) motor1.velocity_limit = cfg.m1_velocity_limit;
+    if (cfg.m1_dwt_ms >= 0.2f && cfg.m1_dwt_ms <= 6.0f) encoder1.setDWTWindowMs(cfg.m1_dwt_ms);
     encoder1.is_lut_active = cfg.m1_lut_active;
     for (int i = 0; i < 128; i++) {
         encoder1.lut_errors[i] = cfg.m1_lut_errors[i];
@@ -419,6 +424,7 @@ bool loadConfigFromFlash() {
     motor2.PID_velocity.D = cfg.m2_pid_d;
     if (cfg.m2_lpf_tf > 0.0f) motor2.LPF_velocity.Tf = cfg.m2_lpf_tf;
     if (cfg.m2_velocity_limit > 0.0f) motor2.velocity_limit = cfg.m2_velocity_limit;
+    if (cfg.m2_dwt_ms >= 0.2f && cfg.m2_dwt_ms <= 6.0f) encoder2.setDWTWindowMs(cfg.m2_dwt_ms);
     encoder2.is_lut_active = cfg.m2_lut_active;
     for (int i = 0; i < 128; i++) {
         encoder2.lut_errors[i] = cfg.m2_lut_errors[i];
@@ -444,6 +450,7 @@ void dumpConfigJSON() {
     Serial.printf("  \"pid_i\": %.4f,\n", motor1.PID_velocity.I);
     Serial.printf("  \"pid_d\": %.4f,\n", motor1.PID_velocity.D);
     Serial.printf("  \"lpf_tf\": %.4f,\n", motor1.LPF_velocity.Tf);
+    Serial.printf("  \"dwt_window_ms\": %.2f,\n", encoder1.window_ms);
     Serial.printf("  \"m2_zero_electric_angle\": %.6f,\n", motor2.zero_electric_angle);
     Serial.printf("  \"m2_sensor_direction\": %d,\n", (motor2.sensor_direction == Direction::CW) ? 1 : -1);
     Serial.printf("  \"lut_128\": [");
@@ -1680,19 +1687,35 @@ void processCommand(const char *cmd) {
         if (val >= 0.0f) { m2_lag_comp_us = val; Serial.printf(">>> M2 Sensor Lag Comp: %.1f us\n", val); }
         return;
     }
-    if (false) {
-        float val = atof(cmd + 4);
-        if (val >= 0.0f) { m1_lag_comp_us = val; Serial.printf(">>> M1 Sensor Lag Comp: %.1f us\n", val); }
-        return;
-    }
-    if (strncasecmp(cmd, "LAG2", 4) == 0) {
-        float val = atof(cmd + 4);
-        if (val >= 0.0f) { m2_lag_comp_us = val; Serial.printf(">>> M2 Sensor Lag Comp: %.1f us\n", val); }
-        return;
-    }
     if (strncasecmp(cmd, "LAG", 3) == 0) {
         float val = atof(cmd + 3);
         if (val >= 0.0f) { m1_lag_comp_us = val; m2_lag_comp_us = val; Serial.printf(">>> Both Motors Sensor Lag Comp: %.1f us\n", val); }
+        return;
+    }
+
+    if (strncasecmp(cmd, "DWT1", 4) == 0) {
+        float val = atof(cmd + 4);
+        if (val > 0.0f) {
+            encoder1.setDWTWindowMs(val);
+            Serial.printf(">>> M1 DWT Velocity Window: %.2f ms (%d samples)\n", encoder1.window_ms, encoder1.window_samples);
+        }
+        return;
+    }
+    if (strncasecmp(cmd, "DWT2", 4) == 0) {
+        float val = atof(cmd + 4);
+        if (val > 0.0f) {
+            encoder2.setDWTWindowMs(val);
+            Serial.printf(">>> M2 DWT Velocity Window: %.2f ms (%d samples)\n", encoder2.window_ms, encoder2.window_samples);
+        }
+        return;
+    }
+    if (strncasecmp(cmd, "DWT", 3) == 0) {
+        float val = atof(cmd + 3);
+        if (val > 0.0f) {
+            encoder1.setDWTWindowMs(val);
+            encoder2.setDWTWindowMs(val);
+            Serial.printf(">>> Both Motors DWT Velocity Window: %.2f ms (%d samples)\n", val, encoder1.window_samples);
+        }
         return;
     }
 
