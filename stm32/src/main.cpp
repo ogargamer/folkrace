@@ -1379,6 +1379,109 @@ void processCommand(const char *cmd) {
         return;
     }
 
+    if (strncasecmp(cmd, "RAMP1", 5) == 0) {
+        float val = atof(cmd + 5);
+        if (val > 0.0f) { motor1.PID_velocity.output_ramp = val; Serial.printf(">>> M1 Voltage Ramp: %.1f V/s\n", val); }
+        return;
+    }
+    if (strncasecmp(cmd, "RAMP2", 5) == 0) {
+        float val = atof(cmd + 5);
+        if (val > 0.0f) { motor2.PID_velocity.output_ramp = val; Serial.printf(">>> M2 Voltage Ramp: %.1f V/s\n", val); }
+        return;
+    }
+
+    if (strncasecmp(cmd, "MAXRPM1", 7) == 0) {
+        float val = atof(cmd + 7);
+        if (val > 0.0f) { motor1.velocity_limit = val * 0.104719755f; Serial.printf(">>> M1 Max Speed: %.1f RPM\n", val); }
+        return;
+    }
+    if (strncasecmp(cmd, "MAXRPM2", 7) == 0) {
+        float val = atof(cmd + 7);
+        if (val > 0.0f) { motor2.velocity_limit = val * 0.104719755f; Serial.printf(">>> M2 Max Speed: %.1f RPM\n", val); }
+        return;
+    }
+
+    if (strncasecmp(cmd, "KV1", 3) == 0) {
+        float val = atof(cmd + 3);
+        if (val > 0.0f) { motor1.KV_rating = val; Serial.printf(">>> M1 KV: %.1f\n", val); }
+        return;
+    }
+    if (strncasecmp(cmd, "KV2", 3) == 0) {
+        float val = atof(cmd + 3);
+        if (val > 0.0f) { motor2.KV_rating = val; Serial.printf(">>> M2 KV: %.1f\n", val); }
+        return;
+    }
+
+    if (strncasecmp(cmd, "ZERO1", 5) == 0 || strncasecmp(cmd, "O1", 2) == 0) {
+        const char *p = (strncasecmp(cmd, "ZERO1", 5) == 0) ? (cmd + 5) : (cmd + 2);
+        float val = atof(p);
+        motor1.zero_electric_angle = val;
+        m1_calibrated = true;
+        Serial.printf(">>> M1 Zero Electric Angle Override: %.4f rad (%.1f deg)\n", val, val * 57.2957795f);
+        return;
+    }
+    if (strncasecmp(cmd, "ZERO2", 5) == 0 || strncasecmp(cmd, "O2", 2) == 0) {
+        const char *p = (strncasecmp(cmd, "ZERO2", 5) == 0) ? (cmd + 5) : (cmd + 2);
+        float val = atof(p);
+        motor2.zero_electric_angle = val;
+        m2_calibrated = true;
+        Serial.printf(">>> M2 Zero Electric Angle Override: %.4f rad (%.1f deg)\n", val, val * 57.2957795f);
+        return;
+    }
+
+    if (strncasecmp(cmd, "A1", 2) == 0) {
+        float val = atof(cmd + 2);
+        if (val > 0.0f) { motor1.voltage_sensor_align = val; Serial.printf(">>> M1 Align Voltage: %.2f V\n", val); }
+        return;
+    }
+    if (strncasecmp(cmd, "A2", 2) == 0) {
+        float val = atof(cmd + 2);
+        if (val > 0.0f) { motor2.voltage_sensor_align = val; Serial.printf(">>> M2 Align Voltage: %.2f V\n", val); }
+        return;
+    }
+
+    if ((cmd[0] == 'v' || cmd[0] == 'V') && (cmd[1] == '+' || cmd[1] == '-' || (cmd[1] >= '0' && cmd[1] <= '9'))) {
+        float val = atof(cmd + 1);
+        driver1.enable();
+        motor1.setPhaseVoltage(fabsf(val), 0.0f, (val >= 0.0f) ? 0.0f : _PI);
+        Serial.printf(">>> Open-Loop Voltage Test: %+.2f V\n", val);
+        return;
+    }
+
+    if (strcasecmp(cmd, "s") == 0 || strcasecmp(cmd, "STATUS") == 0) {
+        printHelp();
+        return;
+    }
+
+    if (strncasecmp(cmd, "SET_MODE", 8) == 0) {
+        int mode = atoi(cmd + 8);
+        encoder1.is_lut_active = (mode == 1);
+        encoder2.is_lut_active = (mode == 1);
+        Serial.printf(">>> Calibration Mode: %s\n", (mode == 1) ? "128-Point LUT Active" : "Raw Angle");
+        return;
+    }
+    if (strncasecmp(cmd, "M1", 2) == 0 && (cmd[2] == ' ' || cmd[2] == '\0')) {
+        int mode = atoi(cmd + 2);
+        encoder1.is_lut_active = (mode == 1);
+        Serial.printf(">>> M1 LUT Mode: %s\n", (mode == 1) ? "128-Point LUT Active" : "Raw Angle");
+        return;
+    }
+    if (strncasecmp(cmd, "M2", 2) == 0 && (cmd[2] == ' ' || cmd[2] == '\0')) {
+        int mode = atoi(cmd + 2);
+        encoder2.is_lut_active = (mode == 1);
+        Serial.printf(">>> M2 LUT Mode: %s\n", (mode == 1) ? "128-Point LUT Active" : "Raw Angle");
+        return;
+    }
+
+    if (strcasecmp(cmd, "u") == 0 || strcasecmp(cmd, "u1") == 0) {
+        dumpLUT(1);
+        return;
+    }
+    if (strcasecmp(cmd, "u2") == 0) {
+        dumpLUT(2);
+        return;
+    }
+
     Serial.print("ERR: Unrecognized command: ");
     Serial.println(cmd);
 }
@@ -1497,6 +1600,12 @@ void sendBinaryTelemetry() {
 // Arduino Setup: Autonomous Standalone Initialization (< 150 ms)
 // ----------------------------------------------------------------------------
 void setup() {
+    // 0. Immediately clamp Driver Enable pins LOW to prevent current surge on startup
+    pinMode(M1_EN, OUTPUT);
+    digitalWrite(M1_EN, LOW);
+    pinMode(M2_EN, OUTPUT);
+    digitalWrite(M2_EN, LOW);
+
     // 1. Standalone DWT Unlock (Essential for standalone battery/bench operation without ST-Link)
     CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
     DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;

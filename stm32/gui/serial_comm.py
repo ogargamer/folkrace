@@ -2,28 +2,32 @@
 serial_comm.py
 ==============
 Thread-safe serial reader and command engine for STM32G474 20 kHz Dual FOC Controller.
-Demuxes 26-byte binary telemetry frames (b"\\xAA\\x55" + XOR checksum) and UTF-8 ASCII log lines.
+Demuxes 26-byte binary telemetry frames (b"\\xAA\\x55" + XOR checksum) and UTF-8 ASCII log lines,
+tracks rolling velocity oscilloscope history, and captures JSON configuration exports.
 """
 
 import struct
 import threading
 import queue
 import time
+import collections
 import serial
 import serial.tools.list_ports
 
 # 26-Byte Binary Telemetry Packet Format:
 # < (little-endian), 2s (header), H (uint16), 3h (int16), B (uint8), H, 3h, B, H, 4B
 PACKET_FMT = "<2sHhhhBHhhhBHBBBB"
-PACKET_SIZE = struct.calcsize(PACKET_FMT) # Exactly 26 bytes
+PACKET_SIZE = struct.calcsize(PACKET_FMT)  # Exactly 26 bytes
 SYNC_HEADER = b"\xAA\x55"
 
+
 class STM32DualSerial:
-    def __init__(self, port="COM3", baud=921600, on_telemetry=None, on_log=None):
+    def __init__(self, port="COM3", baud=921600, on_telemetry=None, on_log=None, on_config_json=None):
         self.port = port
         self.baud = baud
         self.on_telemetry = on_telemetry
         self.on_log = on_log
+        self.on_config_json = on_config_json
 
         self.ser = None
         self.running = False
@@ -31,7 +35,20 @@ class STM32DualSerial:
         self.cmd_queue = queue.Queue()
         self.lock = threading.Lock()
 
-        # Telemetry State Dict
+        # Rolling history for real-time Velocity Tracking Oscilloscope (last 240 points)
+        self.max_history = 240
+        self.history_time = collections.deque(maxlen=self.max_history)
+        self.history_target_rpm = collections.deque(maxlen=self.max_history)
+        self.history_actual_rpm = collections.deque(maxlen=self.max_history)
+        self.history_uq = collections.deque(maxlen=self.max_history)
+        self._last_hist_push = 0.0
+
+        # JSON Config Export Capture State
+        self._capturing_json = False
+        self._json_lines = []
+        self.last_exported_json = None
+
+        # Telemetry & Calibration State Dict
         self.state = {
             "m1_raw_angle": 0,
             "m1_actual_rpm": 0.0,
@@ -43,6 +60,11 @@ class STM32DualSerial:
             "m1_parity_ok": True,
             "m1_stalled": False,
             "m1_calib": False,
+            "m1_zero_angle": 0.0,
+            "m1_direction": "CW",
+            "m1_lag_comp_us": 35.0,
+            "m1_calib_grade": "NOT CALIBRATED",
+            "m1_calib_stage": "Idle",
 
             "m2_raw_angle": 0,
             "m2_actual_rpm": 0.0,
@@ -123,8 +145,24 @@ class STM32DualSerial:
             cmd_str += "\n"
         self.cmd_queue.put(cmd_str)
 
+    def send_emergency_stop(self):
+        """Immediately flush pending commands and send hardware emergency stop burst."""
+        try:
+            while not self.cmd_queue.empty():
+                self.cmd_queue.get_nowait()
+        except Exception:
+            pass
+        if self.ser and self.ser.is_open:
+            try:
+                self.ser.write(b"\n\nx\nx\nSTOP\n")
+                self.ser.flush()
+            except Exception:
+                pass
+        self.send_command("STOP")
+
     def _io_worker(self):
         buf = bytearray()
+        ascii_accum = ""
         while self.running and self.ser and self.ser.is_open:
             # 1. Handle outgoing commands
             try:
@@ -153,21 +191,18 @@ class STM32DualSerial:
                             line_bytes = buf[:line_end + 1]
                             buf = buf[line_end + 1:]
                             text = line_bytes.decode("utf-8", errors="replace")
-                            if self.on_log:
-                                self.on_log(text)
+                            ascii_accum = self._process_ascii_chunk(ascii_accum + text)
                         elif len(buf) > 512:
                             text = buf[:256].decode("utf-8", errors="replace")
                             buf = buf[256:]
-                            if self.on_log:
-                                self.on_log(text)
+                            ascii_accum = self._process_ascii_chunk(ascii_accum + text)
                         break
                     elif idx > 0:
                         # Log text preceding the sync header
                         prefix = buf[:idx]
                         buf = buf[idx:]
                         text = prefix.decode("utf-8", errors="replace")
-                        if self.on_log:
-                            self.on_log(text)
+                        ascii_accum = self._process_ascii_chunk(ascii_accum + text)
 
                     if len(buf) < PACKET_SIZE:
                         break
@@ -190,27 +225,112 @@ class STM32DualSerial:
                     self.on_log(f"[RX ERR] {ex}\n")
                 time.sleep(0.01)
 
+    def _process_ascii_chunk(self, text_buf):
+        if self.on_log:
+            # Extract complete lines for state parsing while forwarding raw text to log
+            pass
+        while "\n" in text_buf:
+            line, text_buf = text_buf.split("\n", 1)
+            full_line = line + "\n"
+            self._parse_ascii_line(line.strip())
+            if self.on_log:
+                self.on_log(full_line)
+        return text_buf
+
+    def _parse_ascii_line(self, s):
+        if not s:
+            return
+
+        # 1. JSON Config Export Capture
+        if s == "[CONFIG_START]":
+            self._capturing_json = True
+            self._json_lines = []
+            return
+        elif s == "[CONFIG_END]":
+            if self._capturing_json:
+                self._capturing_json = False
+                json_str = "\n".join(self._json_lines)
+                self.last_exported_json = json_str
+                if self.on_config_json:
+                    self.on_config_json(json_str)
+            return
+        elif self._capturing_json:
+            self._json_lines.append(s)
+            return
+
+        # 2. Calibration Stage & Result Parsing
+        with self.lock:
+            if "Forward Sweep:" in s or "Reverse Sweep:" in s or "Coil cool-down:" in s:
+                self.state["m1_calib_stage"] = s
+            elif "STEP 1: Locking Rotor" in s or "STEP 2: Continuous 360" in s:
+                self.state["m1_calib_stage"] = s
+            elif "128-Point LUT ACTIVE" in s:
+                self.state["m1_lut_active"] = True
+                self.state["m1_calib_stage"] = s
+            elif "LUT REJECTED" in s:
+                self.state["m1_lut_active"] = False
+                self.state["m1_calib_grade"] = "LUT REJECTED"
+                self.state["m1_calib_stage"] = s
+            elif "motor.zero_electric_angle =" in s:
+                try:
+                    val_str = s.split("=")[1].replace(";", "").strip()
+                    self.state["m1_zero_angle"] = float(val_str)
+                except Exception:
+                    pass
+            elif "motor.sensor_direction = Direction::" in s:
+                if "CCW" in s:
+                    self.state["m1_direction"] = "CCW"
+                elif "CW" in s:
+                    self.state["m1_direction"] = "CW"
+            elif "GRADE A" in s:
+                self.state["m1_calib_grade"] = "GRADE A (EXCELLENT)"
+            elif "GRADE B" in s:
+                self.state["m1_calib_grade"] = "GRADE B (GOOD)"
+            elif "GRADE C" in s:
+                self.state["m1_calib_grade"] = "GRADE C (FAIR)"
+            elif "GRADE D" in s:
+                self.state["m1_calib_grade"] = "GRADE D (NOISY)"
+            elif "GRADE E" in s:
+                self.state["m1_calib_grade"] = "GRADE E (POOR)"
+            elif "Optimal Lag Trim =" in s:
+                try:
+                    part = s.split("Optimal Lag Trim =")[1].split("us")[0].strip()
+                    self.state["m1_lag_comp_us"] = float(part)
+                except Exception:
+                    pass
+            elif "Flash Config Loaded:" in s:
+                try:
+                    if "Zero=" in s:
+                        z_part = s.split("Zero=")[1].split("rad")[0].strip()
+                        self.state["m1_zero_angle"] = float(z_part)
+                    if "LUT=ACTIVE" in s:
+                        self.state["m1_lut_active"] = True
+                        self.state["m1_calib_grade"] = "FLASH LUT ACTIVE"
+                except Exception:
+                    pass
+
     def _handle_telemetry_payload(self, p):
         # Format: (header, m1_raw, m1_act_rpm, m1_tgt_rpm, m1_uq_mv, m1_status,
         #          m2_raw, m2_act_rpm, m2_tgt_rpm, m2_uq_mv, m2_status,
         #          foc_khz_x10, isr_lat_us, spikes_count, calib_prog, chk)
-        m1_raw      = p[1]
-        m1_act_rpm  = p[2] / 10.0
-        m1_tgt_rpm  = p[3] / 10.0
-        m1_uq_v     = p[4] / 1000.0
-        s1          = p[5]
+        m1_raw     = p[1]
+        m1_act_rpm = p[2] / 10.0
+        m1_tgt_rpm = p[3] / 10.0
+        m1_uq_v    = p[4] / 1000.0
+        s1         = p[5]
 
-        m2_raw      = p[6]
-        m2_act_rpm  = p[7] / 10.0
-        m2_tgt_rpm  = p[8] / 10.0
-        m2_uq_v     = p[9] / 1000.0
-        s2          = p[10]
+        m2_raw     = p[6]
+        m2_act_rpm = p[7] / 10.0
+        m2_tgt_rpm = p[8] / 10.0
+        m2_uq_v    = p[9] / 1000.0
+        s2         = p[10]
 
-        foc_khz     = p[11] / 10.0
-        isr_lat_us  = p[12]
-        spikes      = p[13]
-        calib_prog  = p[14]
+        foc_khz    = p[11] / 10.0
+        isr_lat_us = p[12]
+        spikes     = p[13]
+        calib_prog = p[14]
 
+        now = time.time()
         with self.lock:
             self.state["m1_raw_angle"]   = m1_raw
             self.state["m1_actual_rpm"]  = m1_act_rpm
@@ -234,11 +354,19 @@ class STM32DualSerial:
             self.state["m2_stalled"]     = bool(s2 & (1 << 4))
             self.state["m2_calib"]       = bool(s2 & (1 << 5))
 
-            self.state["foc_khz"]        = foc_khz
-            self.state["isr_lat_us"]     = isr_lat_us
-            self.state["spikes_count"]   = spikes
-            self.state["calib_progress"] = calib_prog
-            self.state["last_packet_time"] = time.time()
+            self.state["foc_khz"]          = foc_khz
+            self.state["isr_lat_us"]       = isr_lat_us
+            self.state["spikes_count"]     = spikes
+            self.state["calib_progress"]   = calib_prog
+            self.state["last_packet_time"] = now
+
+            # Push to velocity oscilloscope history at ~25 Hz (every 40 ms)
+            if now - self._last_hist_push >= 0.038:
+                self._last_hist_push = now
+                self.history_time.append(now)
+                self.history_target_rpm.append(m1_tgt_rpm)
+                self.history_actual_rpm.append(m1_act_rpm)
+                self.history_uq.append(m1_uq_v)
 
         if self.on_telemetry:
             self.on_telemetry(self.state)
