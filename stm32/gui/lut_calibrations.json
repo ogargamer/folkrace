@@ -131,8 +131,8 @@
       0.0
     ],
     "pole_zeros": [],
-    "zero_electric_angle": 3.675879,
-    "sensor_direction": 1,
+    "zero_electric_angle": 3.6133,
+    "sensor_direction": -1,
     "sensor_lag_comp_us": 35.0
   },
   "motor2": {

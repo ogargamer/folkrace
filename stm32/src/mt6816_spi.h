@@ -51,6 +51,7 @@ public:
           last_raw_h(0), last_raw_l(0), last_raw_14bit(0),
           zero_offset_deg(0.0f), is_lut_active(false),
           spi_settings(SPI_SPEED_HZ, MSBFIRST, SPI_MODE3) {
+        setupCSPin(pin);
         for (int i = 0; i < 128; i++) {
             lut_errors[i] = 0.0f;
         }
@@ -126,6 +127,7 @@ public:
 
         // Initialize SimpleFOC Sensor base class
         this->Sensor::init();
+        clearVelocityBuffer();
     }
 
     // ------------------------------------------------------------------------
@@ -147,18 +149,18 @@ public:
 
             // 1. Read High Byte (Register 0x03)
             csLow();
-            delayNanos(250); // t_CSS setup time (>= 150 ns)
+            delayNanos(180); // t_CSS setup time (>= 150 ns)
             uint16_t rx_h = SPI.transfer16(0x8300);
-            delayNanos(250); // t_CSH hold time (>= 150 ns)
+            delayNanos(180); // t_CSH hold time (>= 150 ns)
             csHigh();
 
-            delayNanos(250); // t_CS_HIGH deassertion hold time (>= 150 ns)
+            delayNanos(180); // t_CS_HIGH deassertion hold time (>= 150 ns)
 
             // 2. Read Low Byte (Register 0x04)
             csLow();
-            delayNanos(250); // t_CSS setup time (>= 150 ns)
+            delayNanos(180); // t_CSS setup time (>= 150 ns)
             uint16_t rx_l = SPI.transfer16(0x8400);
-            delayNanos(250); // t_CSH hold time (>= 150 ns) - ensures bit 0 (parity) is captured before CS rises!
+            delayNanos(180); // t_CSH hold time (>= 150 ns) - ensures bit 0 (parity) is captured before CS rises!
             csHigh();
 
             uint8_t h = rx_h & 0xFF;
@@ -188,7 +190,7 @@ public:
                 break;
             } else {
                 if (retry == 0) {
-                    delayNanos(250);
+                    delayNanos(180);
                 } else {
                     parity_errors++;
                     consecutive_parity_errors++;
@@ -239,6 +241,63 @@ public:
         return getCalibratedAngleRad();
     }
 
+    // ------------------------------------------------------------------------
+    // 2.0 ms DWT Velocity Window Tracker
+    // ------------------------------------------------------------------------
+    // At 20.0 kHz ISR tick rate, 40 samples = exactly 2.0 ms (340,000 cycles @ 170 MHz)
+    static constexpr uint8_t VEL_HIST_LEN = 64; // Power-of-2 ring buffer
+    float hist_angle[VEL_HIST_LEN] = {0};
+    uint32_t hist_dwt[VEL_HIST_LEN] = {0};
+    uint8_t hist_head = 0;
+    uint8_t hist_count = 0;
+
+    void clearVelocityBuffer() {
+        hist_head = 0;
+        hist_count = 0;
+        this->velocity = 0.0f;
+    }
+
+    void update() override {
+        // Base SimpleFOC update (tracks multi-turn wraps and sets angle_prev)
+        Sensor::update();
+
+        // Push current calibrated angle and DWT timestamp into 2ms ring buffer
+        uint32_t now = DWT->CYCCNT;
+        hist_angle[hist_head] = this->angle_prev;
+        hist_dwt[hist_head] = now;
+        hist_head = (hist_head + 1) & (VEL_HIST_LEN - 1);
+        if (hist_count < VEL_HIST_LEN) {
+            hist_count++;
+        }
+    }
+
+    float getVelocity() override {
+        if (hist_count < 2) {
+            return 0.0f;
+        }
+
+        // Target: 2.0 ms window (40 samples @ 20 kHz = 2.0 ms)
+        uint8_t span = (hist_count >= 40) ? 40 : hist_count;
+        uint8_t oldest = (hist_head - span) & (VEL_HIST_LEN - 1);
+        uint8_t newest = (hist_head - 1) & (VEL_HIST_LEN - 1);
+
+        uint32_t dt_cycles = hist_dwt[newest] - hist_dwt[oldest];
+        if (dt_cycles == 0) {
+            return this->velocity;
+        }
+
+        // Exact cycle-level duration in seconds (170 MHz = 170,000,000 cycles/sec)
+        float dt = (float)dt_cycles * (1.0f / 170000000.0f);
+        float d_angle = hist_angle[newest] - hist_angle[oldest];
+
+        // Unwrap shortest angular path across [-PI, +PI]
+        while (d_angle > (float)_PI) d_angle -= (float)_2PI;
+        while (d_angle < -(float)_PI) d_angle += (float)_2PI;
+
+        this->velocity = d_angle / dt;
+        return this->velocity;
+    }
+
     float getSingleTurnDeg() const {
         float deg = ((float)last_raw_14bit / 16384.0f) * 360.0f - zero_offset_deg;
         while (deg < 0.0f) deg += 360.0f;
@@ -249,6 +308,7 @@ public:
     void zeroCurrentPosition() {
         zero_offset_deg = ((float)last_raw_14bit / 16384.0f) * 360.0f;
         this->full_rotations = 0;
+        clearVelocityBuffer();
     }
 
     void setLUTLine(uint8_t line_idx, const float* values, uint8_t count) {

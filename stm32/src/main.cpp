@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <SPI.h>
+#include <EEPROM.h>
 #include <SimpleFOC.h>
 #include "config_pins.h"
 #include "mt6816_spi.h"
@@ -9,7 +10,7 @@
 // ============================================================================
 // Hardware: STM32G474CBT6 (170 MHz Cortex-M4F, HW FPU)
 // Timers: TIM1 (M1 PWM 25kHz), TIM8 (M2 PWM 25kHz), TIM6 (20 kHz Control ISR)
-// Sensors: Dual MT6816 14-Bit Magnetic Encoders on Shared SPI1 @ 10.6 MHz
+// Sensors: Dual MT6816 14-Bit Magnetic Encoders on Shared SPI1 @ 5.31 MHz
 // Telemetry: Exact 26-Byte Binary Telemetry Frame @ 25 Hz + ASCII Console
 // ============================================================================
 
@@ -276,12 +277,154 @@ void dumpLUT(int motor_id) {
 // ----------------------------------------------------------------------------
 // JSON Configuration Exporter (Capturable by Python GUI)
 // ----------------------------------------------------------------------------
+// ----------------------------------------------------------------------------
+// Persistent Flash Storage (STM32 Internal Emulated EEPROM)
+// ----------------------------------------------------------------------------
+#define FOC_CONFIG_MAGIC 0x44415749UL // "DAWI"
+
+struct PersistentFOCConfig {
+    uint32_t magic;
+    float    m1_zero_angle;
+    int8_t   m1_direction;
+    float    m1_lag_comp_us;
+    float    m1_kv_rating;
+    float    m1_pid_p;
+    float    m1_pid_i;
+    float    m1_pid_d;
+    float    m1_lpf_tf;
+    float    m1_velocity_limit;
+    bool     m1_lut_active;
+    float    m1_lut_errors[128];
+
+    float    m2_zero_angle;
+    int8_t   m2_direction;
+    float    m2_lag_comp_us;
+    float    m2_kv_rating;
+    float    m2_pid_p;
+    float    m2_pid_i;
+    float    m2_pid_d;
+    float    m2_lpf_tf;
+    float    m2_velocity_limit;
+    bool     m2_lut_active;
+    float    m2_lut_errors[128];
+
+    uint32_t checksum;
+};
+
+static uint32_t computeConfigChecksum(const PersistentFOCConfig &cfg) {
+    uint32_t chk = 0x55AA55AAUL;
+    const uint8_t *p = (const uint8_t *)&cfg;
+    size_t len = offsetof(PersistentFOCConfig, checksum);
+    for (size_t i = 0; i < len; i++) {
+        chk = (chk << 1) ^ p[i];
+    }
+    return chk;
+}
+
+void saveConfigToFlash() {
+    PersistentFOCConfig cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.magic = FOC_CONFIG_MAGIC;
+
+    cfg.m1_zero_angle = motor1.zero_electric_angle;
+    cfg.m1_direction = (motor1.sensor_direction == Direction::CW) ? 1 : -1;
+    cfg.m1_lag_comp_us = m1_lag_comp_us;
+    cfg.m1_kv_rating = motor1.KV_rating;
+    cfg.m1_pid_p = motor1.PID_velocity.P;
+    cfg.m1_pid_i = motor1.PID_velocity.I;
+    cfg.m1_pid_d = motor1.PID_velocity.D;
+    cfg.m1_lpf_tf = motor1.LPF_velocity.Tf;
+    cfg.m1_velocity_limit = motor1.velocity_limit;
+    cfg.m1_lut_active = encoder1.is_lut_active;
+    for (int i = 0; i < 128; i++) {
+        cfg.m1_lut_errors[i] = encoder1.lut_errors[i];
+    }
+
+    cfg.m2_zero_angle = motor2.zero_electric_angle;
+    cfg.m2_direction = (motor2.sensor_direction == Direction::CW) ? 1 : -1;
+    cfg.m2_lag_comp_us = m2_lag_comp_us;
+    cfg.m2_kv_rating = motor2.KV_rating;
+    cfg.m2_pid_p = motor2.PID_velocity.P;
+    cfg.m2_pid_i = motor2.PID_velocity.I;
+    cfg.m2_pid_d = motor2.PID_velocity.D;
+    cfg.m2_lpf_tf = motor2.LPF_velocity.Tf;
+    cfg.m2_velocity_limit = motor2.velocity_limit;
+    cfg.m2_lut_active = encoder2.is_lut_active;
+    for (int i = 0; i < 128; i++) {
+        cfg.m2_lut_errors[i] = encoder2.lut_errors[i];
+    }
+
+    cfg.checksum = computeConfigChecksum(cfg);
+
+    eeprom_buffer_fill();
+    const uint8_t *ptr = (const uint8_t *)&cfg;
+    for (size_t i = 0; i < sizeof(PersistentFOCConfig); i++) {
+        eeprom_buffered_write_byte(i, ptr[i]);
+    }
+    eeprom_buffer_flush();
+    Serial.println(">>> [FLASH] Motor Configuration & 128-pt LUT saved to STM32 Flash!");
+}
+
+bool loadConfigFromFlash() {
+    eeprom_buffer_fill();
+    PersistentFOCConfig cfg;
+    uint8_t *ptr = (uint8_t *)&cfg;
+    for (size_t i = 0; i < sizeof(PersistentFOCConfig); i++) {
+        ptr[i] = eeprom_buffered_read_byte(i);
+    }
+    if (cfg.magic != FOC_CONFIG_MAGIC) {
+        Serial.println(">>> [FLASH] No saved calibration profile in flash.");
+        return false;
+    }
+    if (computeConfigChecksum(cfg) != cfg.checksum) {
+        Serial.println(">>> [FLASH] Checksum mismatch in saved profile!");
+        return false;
+    }
+
+    motor1.zero_electric_angle = cfg.m1_zero_angle;
+    m1_base_zero_angle = cfg.m1_zero_angle;
+    motor1.sensor_direction = (cfg.m1_direction == 1) ? Direction::CW : Direction::CCW;
+    m1_lag_comp_us = cfg.m1_lag_comp_us;
+    if (cfg.m1_kv_rating > 10.0f) motor1.KV_rating = cfg.m1_kv_rating;
+    if (cfg.m1_pid_p > 0.0f) motor1.PID_velocity.P = cfg.m1_pid_p;
+    if (cfg.m1_pid_i > 0.0f) motor1.PID_velocity.I = cfg.m1_pid_i;
+    motor1.PID_velocity.D = cfg.m1_pid_d;
+    if (cfg.m1_lpf_tf > 0.0f) motor1.LPF_velocity.Tf = cfg.m1_lpf_tf;
+    if (cfg.m1_velocity_limit > 0.0f) motor1.velocity_limit = cfg.m1_velocity_limit;
+    encoder1.is_lut_active = cfg.m1_lut_active;
+    for (int i = 0; i < 128; i++) {
+        encoder1.lut_errors[i] = cfg.m1_lut_errors[i];
+    }
+    m1_calibrated = (cfg.m1_zero_angle != 0.0f);
+
+    motor2.zero_electric_angle = cfg.m2_zero_angle;
+    m2_base_zero_angle = cfg.m2_zero_angle;
+    motor2.sensor_direction = (cfg.m2_direction == 1) ? Direction::CW : Direction::CCW;
+    m2_lag_comp_us = cfg.m2_lag_comp_us;
+    if (cfg.m2_kv_rating > 10.0f) motor2.KV_rating = cfg.m2_kv_rating;
+    if (cfg.m2_pid_p > 0.0f) motor2.PID_velocity.P = cfg.m2_pid_p;
+    if (cfg.m2_pid_i > 0.0f) motor2.PID_velocity.I = cfg.m2_pid_i;
+    motor2.PID_velocity.D = cfg.m2_pid_d;
+    if (cfg.m2_lpf_tf > 0.0f) motor2.LPF_velocity.Tf = cfg.m2_lpf_tf;
+    if (cfg.m2_velocity_limit > 0.0f) motor2.velocity_limit = cfg.m2_velocity_limit;
+    encoder2.is_lut_active = cfg.m2_lut_active;
+    for (int i = 0; i < 128; i++) {
+        encoder2.lut_errors[i] = cfg.m2_lut_errors[i];
+    }
+    m2_calibrated = (cfg.m2_zero_angle != 0.0f);
+
+    Serial.println(">>> [FLASH] Successfully loaded configuration & LUT from STM32 Flash!");
+    return true;
+}
+
+// ----------------------------------------------------------------------------
+// JSON Configuration Exporter (Capturable by Python GUI)
+// ----------------------------------------------------------------------------
 void dumpConfigJSON() {
     Serial.println("\n[CONFIG_START]");
     Serial.printf("{\n");
     Serial.printf("  \"zero_electric_angle\": %.6f,\n", motor1.zero_electric_angle);
     Serial.printf("  \"sensor_direction\": %d,\n", (motor1.sensor_direction == Direction::CW) ? 1 : -1);
-    Serial.printf("  \"sensor_lag_comp_us\": 35.0,\n");
     Serial.printf("  \"sensor_lag_comp_us\": %.1f,\n", m1_lag_comp_us);
     Serial.printf("  \"motor_kv_rating\": %.2f,\n", motor1.KV_rating);
     Serial.printf("  \"is_lut_calibrated\": %s,\n", encoder1.is_lut_active ? "true" : "false");
@@ -290,7 +433,12 @@ void dumpConfigJSON() {
     Serial.printf("  \"pid_d\": %.4f,\n", motor1.PID_velocity.D);
     Serial.printf("  \"lpf_tf\": %.4f,\n", motor1.LPF_velocity.Tf);
     Serial.printf("  \"m2_zero_electric_angle\": %.6f,\n", motor2.zero_electric_angle);
-    Serial.printf("  \"m2_sensor_direction\": %d\n", (motor2.sensor_direction == Direction::CW) ? 1 : -1);
+    Serial.printf("  \"m2_sensor_direction\": %d,\n", (motor2.sensor_direction == Direction::CW) ? 1 : -1);
+    Serial.printf("  \"lut_128\": [");
+    for (int i = 0; i < 128; i++) {
+        Serial.printf("%.6f%s", encoder1.lut_errors[i], (i == 127) ? "" : ", ");
+    }
+    Serial.printf("]\n");
     Serial.printf("}\n");
     Serial.println("[CONFIG_END]\n");
 }
@@ -1129,6 +1277,11 @@ void resetDefaults(int motor_id) {
         motor1.PID_velocity.D = 0.000f;
         motor1.PID_velocity.output_ramp = 200.0f;
         motor1.LPF_velocity.Tf = 0.003f;
+        motor1.PID_velocity.P = 0.15f;
+        motor1.PID_velocity.I = 1.50f;
+        motor1.PID_velocity.D = 0.00000f;
+        motor1.PID_velocity.output_ramp = 100.0f;
+        motor1.LPF_velocity.Tf = 0.0005f;
         m1_lag_comp_us = 35.0f;
         m1_target_rpm = 0.0f;
     }
@@ -1142,6 +1295,11 @@ void resetDefaults(int motor_id) {
         motor2.PID_velocity.D = 0.000f;
         motor2.PID_velocity.output_ramp = 200.0f;
         motor2.LPF_velocity.Tf = 0.003f;
+        motor2.PID_velocity.P = 0.15f;
+        motor2.PID_velocity.I = 1.50f;
+        motor2.PID_velocity.D = 0.00000f;
+        motor2.PID_velocity.output_ramp = 100.0f;
+        motor2.LPF_velocity.Tf = 0.0005f;
         m2_lag_comp_us = 35.0f;
         m2_target_rpm = 0.0f;
     }
@@ -1159,7 +1317,7 @@ void printHelp() {
     Serial.print  ("  Motor 2 State    : "); Serial.println(m2_enabled ? "ENABLED" : "DISABLED");
     Serial.print  ("  FOC Timer        : TIM6 Hardware Timer @ 20.0 kHz (50.0 us tick, Priority 2)\n");
     Serial.print  ("  Motion Control   : Downsampled 2.0 kHz (500 us tick, downsample = 10)\n");
-    Serial.print  ("  Shared Bus       : SPI1 @ 10.6 MHz (PA5/6/7) | CS1=PA2, CS2=PA3\n");
+    Serial.print  ("  Shared Bus       : SPI1 @ 5.31 MHz (PB3/4/5) | CS1=PA15, CS2=PB11\n");
     Serial.print  ("  PWM Inverters    : TIM1 (M1: PA8/9/10, PB3) | TIM8 (M2: PB6/8/9, PB0) @ 25 kHz\n");
     Serial.print  ("  Stall Watchdog   : "); Serial.println(stall_watchdog_enabled ? "ACTIVE (Target >= 5 RPM & Actual == 0)" : "DISABLED");
     Serial.println("--------------------------------------------------------------------------------");
@@ -1504,7 +1662,19 @@ void processCommand(const char *cmd) {
         return;
     }
 
-    if (strncasecmp(cmd, "LAG1", 4) == 0) {
+    if (strncasecmp(cmd, "LAG1", 4) == 0 || strncasecmp(cmd, "L1", 2) == 0) {
+        const char *p = (strncasecmp(cmd, "LAG1", 4) == 0) ? (cmd + 4) : (cmd + 2);
+        float val = atof(p);
+        if (val >= 0.0f) { m1_lag_comp_us = val; Serial.printf(">>> M1 Sensor Lag Comp: %.1f us\n", val); }
+        return;
+    }
+    if (strncasecmp(cmd, "LAG2", 4) == 0 || strncasecmp(cmd, "L2", 2) == 0) {
+        const char *p = (strncasecmp(cmd, "LAG2", 4) == 0) ? (cmd + 4) : (cmd + 2);
+        float val = atof(p);
+        if (val >= 0.0f) { m2_lag_comp_us = val; Serial.printf(">>> M2 Sensor Lag Comp: %.1f us\n", val); }
+        return;
+    }
+    if (false) {
         float val = atof(cmd + 4);
         if (val >= 0.0f) { m1_lag_comp_us = val; Serial.printf(">>> M1 Sensor Lag Comp: %.1f us\n", val); }
         return;
@@ -1593,9 +1763,16 @@ void processCommand(const char *cmd) {
     }
 
     if (strcasecmp(cmd, "SAVE") == 0 || strcasecmp(cmd, "save") == 0) {
-        Serial.println(">>> Configuration & Calibration parameters saved to RAM.");
+        saveConfigToFlash();
         dumpConfigJSON();
         Serial.println("[CONFIG_SAVED]:OK");
+        return;
+    }
+
+    if (strcasecmp(cmd, "LOAD") == 0 || strcasecmp(cmd, "load") == 0) {
+        bool ok = loadConfigFromFlash();
+        dumpConfigJSON();
+        Serial.println(ok ? "[CONFIG_LOADED]:OK" : "[CONFIG_LOADED]:FAIL");
         return;
     }
 
@@ -1740,10 +1917,11 @@ void setup() {
     // 3. Serial Port Initialization (921600 Baud for Ultra High Speed Telemetry)
     Serial.begin(921600);
 
-    // 4. Initialize MT6816 Encoder 1 on SPI1
+    // 4. Initialize MT6816 Encoders on shared SPI1
     pinMode(PIN_M2_CS, OUTPUT);
     digitalWrite(PIN_M2_CS, HIGH); // Ensure Encoder 2 CS is deselected
     encoder1.init();
+    encoder2.setupCSPin(PIN_M2_CS);
 
     // 5. Configure Drivers (TIM1 & TIM8 @ 25 kHz Center-Aligned SpaceVectorPWM)
     driver1.voltage_power_supply = MOTOR_SUPPLY_VOLTAGE;
@@ -1769,8 +1947,13 @@ void setup() {
     motor1.PID_velocity.I = 1.20f;
     motor1.PID_velocity.D = 0.000f;
     motor1.PID_velocity.output_ramp = 200.0f;
+    motor1.PID_velocity.P = 0.15f;
+    motor1.PID_velocity.I = 1.50f;
+    motor1.PID_velocity.D = 0.00000f;
+    motor1.PID_velocity.output_ramp = 100.0f;
     motor1.PID_velocity.limit = motor1.voltage_limit;
     motor1.LPF_velocity.Tf = 0.003f;
+    motor1.LPF_velocity.Tf = 0.0005f;
     motor1.init();
     driver1.disable();
 
@@ -1786,22 +1969,31 @@ void setup() {
     motor2.PID_velocity.I = 1.20f;
     motor2.PID_velocity.D = 0.000f;
     motor2.PID_velocity.output_ramp = 200.0f;
+    motor2.PID_velocity.P = 0.15f;
+    motor2.PID_velocity.I = 1.50f;
+    motor2.PID_velocity.D = 0.00000f;
+    motor2.PID_velocity.output_ramp = 100.0f;
     motor2.PID_velocity.limit = motor2.voltage_limit;
     motor2.LPF_velocity.Tf = 0.003f;
+    motor2.LPF_velocity.Tf = 0.0005f;
     motor2.init();
     driver2.disable();
 
-    // 7. Silent Pre-Loaded Alignment Check (Bypasses Startup Rotation Jerk)
-    if (M1_DEFAULT_ZERO_ELECTRIC_ANGLE != 0.0f) {
-        motor1.zero_electric_angle = M1_DEFAULT_ZERO_ELECTRIC_ANGLE;
-        motor1.sensor_direction = Direction::CW;
-        m1_calibrated = true;
-    }
+    // 7. Silent Pre-Loaded Alignment Check (Auto-load from Flash if saved, else fallback to constants)
+    if (loadConfigFromFlash()) {
+        Serial.println(">>> [STARTUP] Calibration & LUT profile loaded from Flash.");
+    } else {
+        if (M1_DEFAULT_ZERO_ELECTRIC_ANGLE != 0.0f) {
+            motor1.zero_electric_angle = M1_DEFAULT_ZERO_ELECTRIC_ANGLE;
+            motor1.sensor_direction = Direction::CW;
+            m1_calibrated = true;
+        }
 
-    if (M2_DEFAULT_ZERO_ELECTRIC_ANGLE != 0.0f) {
-        motor2.zero_electric_angle = M2_DEFAULT_ZERO_ELECTRIC_ANGLE;
-        motor2.sensor_direction = Direction::CW;
-        m2_calibrated = true;
+        if (M2_DEFAULT_ZERO_ELECTRIC_ANGLE != 0.0f) {
+            motor2.zero_electric_angle = M2_DEFAULT_ZERO_ELECTRIC_ANGLE;
+            motor2.sensor_direction = Direction::CW;
+            m2_calibrated = true;
+        }
     }
 
     // 8. Configure & Start TIM6 Hardware Timer Interrupt @ 20.0 kHz (Priority 2)

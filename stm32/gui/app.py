@@ -143,6 +143,19 @@ class DualMotorDashboardApp(tk.Tk):
         )
         self.connect_btn.pack(side=tk.LEFT, padx=6)
 
+        tk.Button(
+            conn_frame,
+            text="⚡ DFU Mode",
+            command=lambda: self.serial_engine.send_command("DFU"),
+            bg="#37474F",
+            fg="#ECEFF1",
+            activebackground="#455A64",
+            font=("Segoe UI", 8),
+            bd=0,
+            padx=8,
+            pady=3
+        ).pack(side=tk.LEFT, padx=4)
+
         self.sys_status_lbl = tk.Label(
             top_bar,
             text="● STANDBY (DISCONNECTED)",
@@ -477,11 +490,11 @@ class DualMotorDashboardApp(tk.Tk):
         slider_row = tk.Frame(spd_sec, bg=COLOR_CARD)
         slider_row.pack(fill=tk.X, padx=6, pady=2)
 
-        tk.Label(slider_row, text="Speed Slider (-1000..+1000 RPM):", bg=COLOR_CARD, fg=COLOR_TEXT_MUTED, font=("Segoe UI", 8, "bold")).pack(side=tk.LEFT)
+        tk.Label(slider_row, text="Speed Slider (-1800..+1800 RPM):", bg=COLOR_CARD, fg=COLOR_TEXT_MUTED, font=("Segoe UI", 8, "bold")).pack(side=tk.LEFT)
         self.coupled_slider = tk.Scale(
             slider_row,
-            from_=-1000,
-            to=1000,
+            from_=-1800,
+            to=1800,
             orient=tk.HORIZONTAL,
             bg=COLOR_CARD,
             fg=COLOR_TEXT,
@@ -495,7 +508,7 @@ class DualMotorDashboardApp(tk.Tk):
         # Speed Presets Row 1 (Forward + Stop + Reverse)
         preset_row = tk.Frame(spd_sec, bg=COLOR_CARD)
         preset_row.pack(fill=tk.X, padx=4, pady=2)
-        for spd in [-800, -400, -200, -100, -50, 0, 50, 100, 200, 400, 800, 1000]:
+        for spd in [-1800, -1200, -800, -400, -200, -100, 0, 100, 200, 400, 800, 1200, 1800]:
             bg_c = "#B71C1C" if spd == 0 else COLOR_CARD_SECONDARY
             fg_c = "#FFFFFF" if spd == 0 else (COLOR_ACCENT_CYAN if spd > 0 else COLOR_TEXT_MUTED)
             tk.Button(
@@ -547,19 +560,17 @@ class DualMotorDashboardApp(tk.Tk):
 
         t_row1 = tk.Frame(tune_sec, bg=COLOR_CARD)
         t_row1.pack(fill=tk.X, padx=4, pady=2)
-        self.p_ent = self._make_tune_field(t_row1, "P:", "0.120", width=6, cmd_prefix="P1 ")
-        self.i_ent = self._make_tune_field(t_row1, "I:", "1.200", width=6, cmd_prefix="I1 ")
+        self.p_ent = self._make_tune_field(t_row1, "P:", "0.150", width=6, cmd_prefix="P1 ")
+        self.i_ent = self._make_tune_field(t_row1, "I:", "1.500", width=6, cmd_prefix="I1 ")
         self.d_ent = self._make_tune_field(t_row1, "D:", "0.0000", width=6, cmd_prefix="D1 ")
-        self.tf_ent = self._make_tune_field(t_row1, "LPF Tf(s):", "0.003", width=6, cmd_prefix="F1 ")
-        self.vramp_ent = self._make_tune_field(t_row1, "V-Ramp(V/s):", "200.0", width=6, cmd_prefix="RAMP1 ")
-        self.vlim_ent = self._make_tune_field(t_row1, "V-Lim(V):", "6.93", width=5, cmd_prefix="V1 ")
+        self.tf_ent = self._make_tune_field(t_row1, "LPF Tf(s):", "0.0005", width=6, cmd_prefix="F1 ")
+        self.vramp_ent = self._make_tune_field(t_row1, "V-Ramp(V/s):", "100.0", width=6, cmd_prefix="RAMP1 ")
         self.vlim_ent = self._make_tune_field(t_row1, "V-Lim(V):", "12.00", width=5, cmd_prefix="V1 ")
 
         t_row2 = tk.Frame(tune_sec, bg=COLOR_CARD)
         t_row2.pack(fill=tk.X, padx=4, pady=2)
-        self.maxrpm_ent = self._make_tune_field(t_row2, "Max RPM:", "1000", width=6, cmd_prefix="MAXRPM1 ")
+        self.maxrpm_ent = self._make_tune_field(t_row2, "Max RPM:", "2000", width=6, cmd_prefix="MAXRPM1 ")
         self.lag_ent = self._make_tune_field(t_row2, "Lag(µs):", "35.0", width=5, cmd_prefix="LAG1 ")
-        self.kv_ent = self._make_tune_field(t_row2, "KV:", "140.0", width=5, cmd_prefix="KV1 ")
         self.kv_ent = self._make_tune_field(t_row2, "KV:", "130.0", width=5, cmd_prefix="KV1 ")
         self.zero_ent = self._make_tune_field(t_row2, "Zero(rad):", "0.0000", width=7, cmd_prefix="ZERO1 ")
 
@@ -694,7 +705,7 @@ class DualMotorDashboardApp(tk.Tk):
 
         volt_row = tk.Frame(metrics_box, bg=COLOR_CARD_SECONDARY)
         volt_row.pack(fill=tk.X, padx=8, pady=2)
-        self.m2_uq_lbl = tk.Label(volt_row, text="Bus: 2.65 MHz", font=("Consolas", 8), bg=COLOR_CARD_SECONDARY, fg=COLOR_TEXT)
+        self.m2_uq_lbl = tk.Label(volt_row, text="Bus: 5.31 MHz", font=("Consolas", 8), bg=COLOR_CARD_SECONDARY, fg=COLOR_TEXT)
         self.m2_uq_lbl.pack(side=tk.LEFT, padx=(0, 8))
         self.m2_raw_lbl = tk.Label(volt_row, text="Raw: 0", font=("Consolas", 8), bg=COLOR_CARD_SECONDARY, fg=COLOR_TEXT_MUTED)
         self.m2_raw_lbl.pack(side=tk.LEFT)
@@ -743,7 +754,7 @@ class DualMotorDashboardApp(tk.Tk):
             "Motor 1 Driver (TIM2 @ 25 kHz Sine PWM):\n"
             "  • Phase A/B/C : PA0 / PA1 / PA2\n"
             "  • Driver EN   : PB1 (Gate Driver Enable)\n\n"
-            "MT6816 Dual Magnetic Encoders (SPI1 @ 2.65 MHz):\n"
+            "MT6816 Dual Magnetic Encoders (SPI1 @ 5.31 MHz):\n"
             "  • SCK / MOSI  : PA5 / PA7\n"
             "  • MISO (AF5)  : PB4 (Internal Pull-Up)\n"
             "  • CS1 / CS2   : PB2 (Motor 1) / PB3 (Enc 2)\n\n"
@@ -893,6 +904,8 @@ class DualMotorDashboardApp(tk.Tk):
 
             # Step 4: Save to STM32 Flash & Export JSON to Disk
             self._set_calib_ui("Step 4/4: Saving LUT & 11-Pole Zeros to STM32 Flash & JSON...", "SAVING...", COLOR_ACCENT_GREEN)
+            # Step 3: Save to STM32 Flash & Export JSON to Disk
+            self._set_calib_ui("Step 3/3: Saving LUT & 11-Pole Zeros to STM32 Flash & JSON...", "SAVING...", COLOR_ACCENT_GREEN)
             self.serial_engine.send_command("SAVE")
             time.sleep(0.25)
             self._export_config_to_json(silent=True)
@@ -970,7 +983,7 @@ class DualMotorDashboardApp(tk.Tk):
 
     def _nudge_motor_speed(self, delta_rpm):
         cur = self.serial_engine.state["m1_target_rpm"]
-        new_spd = max(-1000.0, min(1000.0, cur + delta_rpm))
+        new_spd = max(-1800.0, min(1800.0, cur + delta_rpm))
         self.coupled_slider.set(int(round(new_spd)))
         self.serial_engine.send_command(f"T1 {new_spd:.1f}")
 
@@ -1020,16 +1033,14 @@ class DualMotorDashboardApp(tk.Tk):
 
     def _reset_12v_defaults(self):
         self.serial_engine.send_command("R1")
-        self.p_ent.delete(0, tk.END); self.p_ent.insert(0, "0.120")
-        self.i_ent.delete(0, tk.END); self.i_ent.insert(0, "1.200")
+        self.p_ent.delete(0, tk.END); self.p_ent.insert(0, "0.150")
+        self.i_ent.delete(0, tk.END); self.i_ent.insert(0, "1.500")
         self.d_ent.delete(0, tk.END); self.d_ent.insert(0, "0.0000")
-        self.tf_ent.delete(0, tk.END); self.tf_ent.insert(0, "0.003")
-        self.vramp_ent.delete(0, tk.END); self.vramp_ent.insert(0, "200.0")
-        self.vlim_ent.delete(0, tk.END); self.vlim_ent.insert(0, "6.93")
+        self.tf_ent.delete(0, tk.END); self.tf_ent.insert(0, "0.0005")
+        self.vramp_ent.delete(0, tk.END); self.vramp_ent.insert(0, "100.0")
         self.vlim_ent.delete(0, tk.END); self.vlim_ent.insert(0, "12.00")
-        self.maxrpm_ent.delete(0, tk.END); self.maxrpm_ent.insert(0, "1000")
+        self.maxrpm_ent.delete(0, tk.END); self.maxrpm_ent.insert(0, "2000")
         self.lag_ent.delete(0, tk.END); self.lag_ent.insert(0, "35.0")
-        self.kv_ent.delete(0, tk.END); self.kv_ent.insert(0, "140.0")
         self.kv_ent.delete(0, tk.END); self.kv_ent.insert(0, "130.0")
 
     # =========================================================================
@@ -1039,6 +1050,30 @@ class DualMotorDashboardApp(tk.Tk):
         self._pending_json_save_path = MOTOR_CONFIG_JSON_PATH
         self._silent_json_export = silent
         self.serial_engine.send_command("export")
+
+    def _update_gui_from_config(self, cfg):
+        try:
+            if "pid_p" in cfg and hasattr(self, "p_ent"):
+                self.p_ent.delete(0, tk.END); self.p_ent.insert(0, f"{float(cfg['pid_p']):.4f}")
+            if "pid_i" in cfg and hasattr(self, "i_ent"):
+                self.i_ent.delete(0, tk.END); self.i_ent.insert(0, f"{float(cfg['pid_i']):.4f}")
+            if "pid_d" in cfg and hasattr(self, "d_ent"):
+                self.d_ent.delete(0, tk.END); self.d_ent.insert(0, f"{float(cfg['pid_d']):.4f}")
+            if "lpf_tf" in cfg and hasattr(self, "lpf_ent"):
+                self.lpf_ent.delete(0, tk.END); self.lpf_ent.insert(0, f"{float(cfg['lpf_tf']):.4f}")
+            if "lpf_tf" in cfg:
+                if hasattr(self, "tf_ent"):
+                    self.tf_ent.delete(0, tk.END); self.tf_ent.insert(0, f"{float(cfg['lpf_tf']):.4f}")
+                elif hasattr(self, "lpf_ent"):
+                    self.lpf_ent.delete(0, tk.END); self.lpf_ent.insert(0, f"{float(cfg['lpf_tf']):.4f}")
+            if "motor_kv_rating" in cfg and hasattr(self, "kv_ent"):
+                self.kv_ent.delete(0, tk.END); self.kv_ent.insert(0, f"{float(cfg['motor_kv_rating']):.1f}")
+            if "sensor_lag_comp_us" in cfg and hasattr(self, "lag_ent"):
+                self.lag_ent.delete(0, tk.END); self.lag_ent.insert(0, f"{float(cfg['sensor_lag_comp_us']):.1f}")
+            if "zero_electric_angle" in cfg and hasattr(self, "zero_ent"):
+                self.zero_ent.delete(0, tk.END); self.zero_ent.insert(0, f"{float(cfg['zero_electric_angle']):.4f}")
+        except Exception:
+            pass
 
     def _on_config_json_received(self, json_str):
         try:
@@ -1060,14 +1095,15 @@ class DualMotorDashboardApp(tk.Tk):
                 "lut_errors": cfg.get("lut_128", [0.0] * 128),
                 "pole_zeros": cfg.get("pole_zeros", []),
                 "zero_electric_angle": cfg.get("zero_electric_angle", 0.0),
-                "sensor_direction": cfg.get("sensor_direction", "CW"),
+                "sensor_direction": cfg.get("sensor_direction", 1),
                 "sensor_lag_comp_us": cfg.get("sensor_lag_comp_us", 35.0)
             }
             with open(LUT_JSON_PATH, "w") as f:
                 json.dump(lut_data, f, indent=2)
 
+            self.after(0, lambda: self._update_gui_from_config(cfg))
             self.after(0, lambda: self._log_console(
-                f"[SYS] Saved calibrated LUT + 11-pole config to {os.path.basename(MOTOR_CONFIG_JSON_PATH)} & lut_calibrations.json\n"
+                f"[SYS] Config received: Zero={cfg.get('zero_electric_angle', 0.0):.4f} rad | Saved to {os.path.basename(MOTOR_CONFIG_JSON_PATH)}\n"
             ))
             if not getattr(self, "_silent_json_export", False):
                 self.after(0, lambda: messagebox.showinfo(
@@ -1075,7 +1111,7 @@ class DualMotorDashboardApp(tk.Tk):
                     f"Saved full STM32 calibration & tuning profile to:\n• {MOTOR_CONFIG_JSON_PATH}\n• {LUT_JSON_PATH}"
                 ))
         except Exception as ex:
-            self.after(0, lambda: self._log_console(f"[JSON ERR] Failed to save exported JSON: {ex}\n"))
+            self.after(0, lambda: self._log_console(f"[JSON ERR] Failed to parse exported JSON: {ex}\n"))
 
     def _upload_config_from_json(self):
         # Prefer motor_config_gm3506.json if present, or let user pick
@@ -1093,46 +1129,59 @@ class DualMotorDashboardApp(tk.Tk):
             with open(path, "r") as f:
                 data = json.load(f)
 
+            errs = None
+            pole_zeros = []
+            zero_ang = None
+            lag_us = None
+
             # Support both motor_config_gm3506.json format and lut_calibrations.json format
             if "lut_128" in data:
                 errs = data["lut_128"]
                 pole_zeros = data.get("pole_zeros", [])
                 zero_ang = data.get("zero_electric_angle", None)
                 lag_us = data.get("sensor_lag_comp_us", None)
-            elif "motor1" in data and "lut_errors" in data["motor1"]:
+            elif "motor1" in data and isinstance(data["motor1"], dict):
                 m1 = data["motor1"]
-                errs = m1["lut_errors"]
+                errs = m1.get("lut_errors", None)
                 pole_zeros = m1.get("pole_zeros", [])
                 zero_ang = m1.get("zero_electric_angle", None)
                 lag_us = m1.get("sensor_lag_comp_us", None)
             else:
-                messagebox.showerror("Invalid Format", "JSON file does not contain 'lut_128' or 'motor1.lut_errors'.")
-                return
+                zero_ang = data.get("zero_electric_angle", None)
+                lag_us = data.get("sensor_lag_comp_us", None)
 
-            if len(errs) != 128:
-                messagebox.showerror("Size Error", f"Expected 128 LUT points, got {len(errs)}")
-                return
+            # 1. Transmit 8 lines of 16 comma-separated LUT floats if LUT exists
+            if errs is not None and len(errs) == 128:
+                for line_idx in range(8):
+                    chunk = errs[line_idx * 16 : (line_idx + 1) * 16]
+                    csv_str = ",".join(f"{x:.6f}" for x in chunk)
+                    self.serial_engine.send_command(f"LUT 1 {line_idx} {csv_str}")
+                    time.sleep(0.02)
+                self.serial_engine.send_command("LUT_MODE 1 1")
+                time.sleep(0.02)
 
-            # 1. Transmit 8 lines of 16 comma-separated LUT floats
-            for line_idx in range(8):
-                chunk = errs[line_idx * 16 : (line_idx + 1) * 16]
-                csv_str = ",".join(f"{x:.6f}" for x in chunk)
-                self.serial_engine.send_command(f"LUT 1 {line_idx} {csv_str}")
-                time.sleep(0.015)
-
-            # 2. Transmit 11-pole zeros if present
-            if len(pole_zeros) == 11:
-                pz_csv = ",".join(f"{x:.5f}" for x in pole_zeros)
-                self.serial_engine.send_command(f"POLE_ZEROS 1 {pz_csv}")
-                time.sleep(0.015)
-
-            # 3. Transmit zero electric angle & lag comp if present
+            # 2. Transmit zero electric angle & lag comp if present
             if zero_ang is not None:
                 self.serial_engine.send_command(f"O1 {float(zero_ang):.4f}")
+                time.sleep(0.01)
             if lag_us is not None:
-                self.serial_engine.send_command(f"L1 {float(lag_us):.1f}")
+                self.serial_engine.send_command(f"LAG1 {float(lag_us):.1f}")
+                time.sleep(0.01)
 
-            self._log_console(f"[SYS] Uploaded calibration profile from {os.path.basename(path)}\n")
+            # 3. Transmit tuning PID and filter parameters if present
+            for k, cmd in [("pid_p", "P1"), ("pid_i", "I1"), ("pid_d", "D1"), ("lpf_tf", "LPF1"), ("motor_kv_rating", "KV1")]:
+                if k in data:
+                    self.serial_engine.send_command(f"{cmd} {float(data[k])}")
+                    time.sleep(0.01)
+
+            # 4. Save to Flash so it persists across reboots
+            self.serial_engine.send_command("SAVE")
+
+            # 5. Update GUI fields
+            self._update_gui_from_config(data)
+
+            self._log_console(f"[SYS] Uploaded & applied profile from {os.path.basename(path)}\n")
+            messagebox.showinfo("Upload Complete", f"Profile uploaded and saved to STM32 Flash from:\n{os.path.basename(path)}")
         except Exception as ex:
             messagebox.showerror("Upload Error", str(ex))
 

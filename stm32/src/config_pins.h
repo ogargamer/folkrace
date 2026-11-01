@@ -111,7 +111,7 @@
 #define MOTOR_VOLTAGE_LIMIT         12.00f    // 12.00V Full Inverter Headroom
 #define MOTOR_ALIGN_VOLTAGE         3.0f      // FOC Electrical Alignment Voltage
 #define MOTOR_KV_RATING             130.0f    // GM3506 Back-EMF Feed-Forward
-#define MOTOR_VELOCITY_LIMIT        (1000.0f * 0.104719755f) // 1000 RPM = 104.72 rad/s
+#define MOTOR_VELOCITY_LIMIT        (2000.0f * 0.104719755f) // 2000 RPM = 209.44 rad/s headroom for 1800 RPM
 
 // Stepped 128-Point Calibration Constants (Matching ESP32 Suite)
 #define CALIB_ALIGN_VOLTAGE         4.00f     // Stepped calibration movement voltage (V)
@@ -129,7 +129,7 @@
 #define FOC_COMMUTATION_HZ          20000     // 20.0 kHz Hard Real-Time Commutation (50.0 us)
 #define MOTION_DOWNSAMPLE_RATIO     10        // Velocity PID downsampled to 2.0 kHz (500 us)
 #define TELEMETRY_RATE_HZ           25        // 25 Hz Binary Telemetry Stream (40 ms)
-#define SPI_SPEED_HZ                2656250   // 2.656 MHz (170 MHz / 64 prescaler) for high EMI noise immunity
+#define SPI_SPEED_HZ                5312500   // 5.3125 MHz (170 MHz / 32 prescaler) for high-speed low-latency reads
 
 // Pre-Loaded Zero Electrical Angles (Standalone Autonomous Startup Jerk Free)
 #ifndef M1_DEFAULT_ZERO_ELECTRIC_ANGLE

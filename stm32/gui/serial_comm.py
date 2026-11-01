@@ -182,20 +182,22 @@ class STM32DualSerial:
                 buf.extend(chunk)
 
                 # Process buffer: scan for binary telemetry or ASCII log lines
-                while len(buf) >= PACKET_SIZE:
+                while buf:
                     idx = buf.find(SYNC_HEADER)
                     if idx == -1:
-                        # No sync header found; decode non-binary bytes as ASCII log lines
+                        # No sync header found; decode all complete lines as ASCII
                         line_end = buf.find(b"\n")
                         if line_end != -1:
                             line_bytes = buf[:line_end + 1]
                             buf = buf[line_end + 1:]
                             text = line_bytes.decode("utf-8", errors="replace")
                             ascii_accum = self._process_ascii_chunk(ascii_accum + text)
+                            continue
                         elif len(buf) > 512:
                             text = buf[:256].decode("utf-8", errors="replace")
                             buf = buf[256:]
                             ascii_accum = self._process_ascii_chunk(ascii_accum + text)
+                            continue
                         break
                     elif idx > 0:
                         # Log text preceding the sync header
@@ -203,6 +205,7 @@ class STM32DualSerial:
                         buf = buf[idx:]
                         text = prefix.decode("utf-8", errors="replace")
                         ascii_accum = self._process_ascii_chunk(ascii_accum + text)
+                        continue
 
                     if len(buf) < PACKET_SIZE:
                         break
