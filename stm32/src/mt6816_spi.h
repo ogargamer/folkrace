@@ -258,12 +258,14 @@ public:
     }
 
     void update() override {
-        // Base SimpleFOC update (tracks multi-turn wraps and sets angle_prev)
+        // Base SimpleFOC update (tracks multi-turn wraps and sets angle_prev to calibrated angle for FOC)
         Sensor::update();
 
-        // Push current calibrated angle and DWT timestamp into 2ms ring buffer
+        // Push current RAW mechanical angle and DWT timestamp into 2ms ring buffer.
+        // Using raw 14-bit mechanical angle eliminates 128-point piecewise-linear derivative discontinuities
+        // (eliminating audible 2.56 kHz whine) while Sensor::update() retains calibrated LUT angle for FOC commutation!
         uint32_t now = DWT->CYCCNT;
-        hist_angle[hist_head] = this->angle_prev;
+        hist_angle[hist_head] = getRawMechanicalAngle();
         hist_dwt[hist_head] = now;
         hist_head = (hist_head + 1) & (VEL_HIST_LEN - 1);
         if (hist_count < VEL_HIST_LEN) {

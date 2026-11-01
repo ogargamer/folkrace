@@ -66,6 +66,8 @@ volatile float m1_base_zero_angle = 0.0f;
 volatile float m2_base_zero_angle = 0.0f;
 volatile float m1_lag_comp_us = 35.0f;
 volatile float m2_lag_comp_us = 35.0f;
+static float m1_lag_filt_vel = 0.0f;
+static float m2_lag_filt_vel = 0.0f;
 
 volatile bool m1_calib_active = false;
 volatile bool m2_calib_active = false;
@@ -121,22 +123,32 @@ void focTimerISR() {
         encoder2.update();
     }
 
-    // 2. Motor 1 Commutation Loop
-    // 2. Motor 1 Commutation Loop (with Dynamic Sensor Lag Compensation)
+    // 2. Motor 1 Commutation Loop (with Smooth Filtered Sensor Lag Compensation)
     if (m1_enabled && !m1_calib_active) {
         if (m1_lag_comp_us > 0.0f && m1_base_zero_angle != 0.0f) {
-            float lead_rad = motor1.shaft_velocity * (float)MOTOR_POLE_PAIRS * (m1_lag_comp_us * 1e-6f);
-            motor1.zero_electric_angle = normalizeAngleRad(m1_base_zero_angle - lead_rad);
+            // Low-pass filter velocity for phase advance (~20 ms time constant @ 20 kHz: alpha = 0.0025f)
+            // Breaks the closed-loop torque-commutation feedback ripple
+            m1_lag_filt_vel += 0.0025f * (motor1.shaft_velocity - m1_lag_filt_vel);
+            if (fabsf(m1_lag_filt_vel) > 3.0f) {
+                float lead_rad = m1_lag_filt_vel * (float)MOTOR_POLE_PAIRS * (m1_lag_comp_us * 1e-6f);
+                motor1.zero_electric_angle = normalizeAngleRad(m1_base_zero_angle - lead_rad);
+            } else {
+                motor1.zero_electric_angle = m1_base_zero_angle;
+            }
         }
         motor1.loopFOC();
     }
 
-    // 3. Motor 2 Commutation Loop
-    // 3. Motor 2 Commutation Loop (with Dynamic Sensor Lag Compensation)
+    // 3. Motor 2 Commutation Loop (with Smooth Filtered Sensor Lag Compensation)
     if (m2_enabled && !m2_calib_active) {
         if (m2_lag_comp_us > 0.0f && m2_base_zero_angle != 0.0f) {
-            float lead_rad = motor2.shaft_velocity * (float)MOTOR_POLE_PAIRS * (m2_lag_comp_us * 1e-6f);
-            motor2.zero_electric_angle = normalizeAngleRad(m2_base_zero_angle - lead_rad);
+            m2_lag_filt_vel += 0.0025f * (motor2.shaft_velocity - m2_lag_filt_vel);
+            if (fabsf(m2_lag_filt_vel) > 3.0f) {
+                float lead_rad = m2_lag_filt_vel * (float)MOTOR_POLE_PAIRS * (m2_lag_comp_us * 1e-6f);
+                motor2.zero_electric_angle = normalizeAngleRad(m2_base_zero_angle - lead_rad);
+            } else {
+                motor2.zero_electric_angle = m2_base_zero_angle;
+            }
         }
         motor2.loopFOC();
     }
@@ -1272,17 +1284,14 @@ void resetDefaults(int motor_id) {
         motor1.PID_velocity.limit = motor1.voltage_limit;
         motor1.velocity_limit = MOTOR_VELOCITY_LIMIT;
         motor1.KV_rating = MOTOR_KV_RATING;
-        motor1.PID_velocity.P = 0.12f;
-        motor1.PID_velocity.I = 1.20f;
-        motor1.PID_velocity.D = 0.000f;
-        motor1.PID_velocity.output_ramp = 200.0f;
-        motor1.LPF_velocity.Tf = 0.003f;
         motor1.PID_velocity.P = 0.15f;
         motor1.PID_velocity.I = 1.50f;
         motor1.PID_velocity.D = 0.00000f;
         motor1.PID_velocity.output_ramp = 100.0f;
+        motor1.PID_velocity.Ts = 0.0005f;
         motor1.LPF_velocity.Tf = 0.0005f;
         m1_lag_comp_us = 35.0f;
+        m1_lag_filt_vel = 0.0f;
         m1_target_rpm = 0.0f;
     }
     if (motor_id == 2 || motor_id == 0) {
@@ -1290,17 +1299,14 @@ void resetDefaults(int motor_id) {
         motor2.PID_velocity.limit = motor2.voltage_limit;
         motor2.velocity_limit = MOTOR_VELOCITY_LIMIT;
         motor2.KV_rating = MOTOR_KV_RATING;
-        motor2.PID_velocity.P = 0.12f;
-        motor2.PID_velocity.I = 1.20f;
-        motor2.PID_velocity.D = 0.000f;
-        motor2.PID_velocity.output_ramp = 200.0f;
-        motor2.LPF_velocity.Tf = 0.003f;
         motor2.PID_velocity.P = 0.15f;
         motor2.PID_velocity.I = 1.50f;
         motor2.PID_velocity.D = 0.00000f;
         motor2.PID_velocity.output_ramp = 100.0f;
+        motor2.PID_velocity.Ts = 0.0005f;
         motor2.LPF_velocity.Tf = 0.0005f;
         m2_lag_comp_us = 35.0f;
+        m2_lag_filt_vel = 0.0f;
         m2_target_rpm = 0.0f;
     }
     Serial.println(">>> [RESET] Restored GM3506 12V Optimized Defaults (SpaceVectorPWM).");
@@ -1943,16 +1949,12 @@ void setup() {
     motor1.KV_rating = MOTOR_KV_RATING;
     motor1.voltage_sensor_align = MOTOR_ALIGN_VOLTAGE;
     motor1.controller = MotionControlType::velocity;
-    motor1.PID_velocity.P = 0.12f;
-    motor1.PID_velocity.I = 1.20f;
-    motor1.PID_velocity.D = 0.000f;
-    motor1.PID_velocity.output_ramp = 200.0f;
     motor1.PID_velocity.P = 0.15f;
     motor1.PID_velocity.I = 1.50f;
     motor1.PID_velocity.D = 0.00000f;
     motor1.PID_velocity.output_ramp = 100.0f;
+    motor1.PID_velocity.Ts = 0.0005f;
     motor1.PID_velocity.limit = motor1.voltage_limit;
-    motor1.LPF_velocity.Tf = 0.003f;
     motor1.LPF_velocity.Tf = 0.0005f;
     motor1.init();
     driver1.disable();
@@ -1965,16 +1967,12 @@ void setup() {
     motor2.KV_rating = MOTOR_KV_RATING;
     motor2.voltage_sensor_align = MOTOR_ALIGN_VOLTAGE;
     motor2.controller = MotionControlType::velocity;
-    motor2.PID_velocity.P = 0.12f;
-    motor2.PID_velocity.I = 1.20f;
-    motor2.PID_velocity.D = 0.000f;
-    motor2.PID_velocity.output_ramp = 200.0f;
     motor2.PID_velocity.P = 0.15f;
     motor2.PID_velocity.I = 1.50f;
     motor2.PID_velocity.D = 0.00000f;
     motor2.PID_velocity.output_ramp = 100.0f;
+    motor2.PID_velocity.Ts = 0.0005f;
     motor2.PID_velocity.limit = motor2.voltage_limit;
-    motor2.LPF_velocity.Tf = 0.003f;
     motor2.LPF_velocity.Tf = 0.0005f;
     motor2.init();
     driver2.disable();
