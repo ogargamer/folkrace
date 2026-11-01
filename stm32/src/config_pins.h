@@ -108,15 +108,15 @@
 // ----------------------------------------------------------------------------
 #define MOTOR_POLE_PAIRS            11        // 24N22P Gimbal Motor
 #define MOTOR_SUPPLY_VOLTAGE        12.0f     // 12V DC Supply
-#define MOTOR_VOLTAGE_LIMIT         (12.0f / 1.7320508f) // 6.93V SpaceVectorPWM Linear Headroom
+#define MOTOR_VOLTAGE_LIMIT         12.00f    // 12.00V Full Inverter Headroom
 #define MOTOR_ALIGN_VOLTAGE         3.0f      // FOC Electrical Alignment Voltage
 #define MOTOR_KV_RATING             130.0f    // GM3506 Back-EMF Feed-Forward
-#define MOTOR_VELOCITY_LIMIT        150.0f    // 150 rad/s = 1432 RPM
+#define MOTOR_VELOCITY_LIMIT        (1000.0f * 0.104719755f) // 1000 RPM = 104.72 rad/s
 
 // Stepped 128-Point Calibration Constants (Matching ESP32 Suite)
 #define CALIB_ALIGN_VOLTAGE         4.00f     // Stepped calibration movement voltage (V)
-#define CALIB_HOLD_VOLTAGE          2.40f     // Thermal relief hold voltage during sample (V)
-#define CALIB_BOOST_VOLTAGE         4.20f     // Automatic torque boost voltage on stall/stiction (V)
+#define CALIB_HOLD_VOLTAGE          3.20f     // Adequate holding voltage during sample to overcome cogging (V)
+#define CALIB_BOOST_VOLTAGE         4.50f     // Automatic torque boost voltage on stall/stiction (V)
 #define CALIB_TOTAL_STEPS           128       // 128-point LUT resolution
 #define CALIB_SWEEP_DAMP_SETTLE_MS  65        // Settle before oversampling (ms)
 #define CALIB_SWEEP_OVERSAMPLE_COUNT 96       // Samples per step for noise rejection

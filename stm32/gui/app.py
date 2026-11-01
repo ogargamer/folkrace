@@ -553,12 +553,14 @@ class DualMotorDashboardApp(tk.Tk):
         self.tf_ent = self._make_tune_field(t_row1, "LPF Tf(s):", "0.003", width=6, cmd_prefix="F1 ")
         self.vramp_ent = self._make_tune_field(t_row1, "V-Ramp(V/s):", "200.0", width=6, cmd_prefix="RAMP1 ")
         self.vlim_ent = self._make_tune_field(t_row1, "V-Lim(V):", "6.93", width=5, cmd_prefix="V1 ")
+        self.vlim_ent = self._make_tune_field(t_row1, "V-Lim(V):", "12.00", width=5, cmd_prefix="V1 ")
 
         t_row2 = tk.Frame(tune_sec, bg=COLOR_CARD)
         t_row2.pack(fill=tk.X, padx=4, pady=2)
         self.maxrpm_ent = self._make_tune_field(t_row2, "Max RPM:", "1000", width=6, cmd_prefix="MAXRPM1 ")
         self.lag_ent = self._make_tune_field(t_row2, "Lag(µs):", "35.0", width=5, cmd_prefix="LAG1 ")
         self.kv_ent = self._make_tune_field(t_row2, "KV:", "140.0", width=5, cmd_prefix="KV1 ")
+        self.kv_ent = self._make_tune_field(t_row2, "KV:", "130.0", width=5, cmd_prefix="KV1 ")
         self.zero_ent = self._make_tune_field(t_row2, "Zero(rad):", "0.0000", width=7, cmd_prefix="ZERO1 ")
 
         tk.Button(t_row2, text="-0.02", command=lambda: self._nudge_zero(-0.02), bg=COLOR_CARD_SECONDARY, fg=COLOR_TEXT, bd=0, padx=5, font=("Consolas", 8)).pack(side=tk.LEFT, padx=1)
@@ -880,6 +882,15 @@ class DualMotorDashboardApp(tk.Tk):
                 time.sleep(0.4)
                 self._log_console(f"[VERIFY] Closed-loop spin check: CW={cw_rpm:.1f} RPM, CCW={ccw_rpm:.1f} RPM\n")
 
+                if cw_rpm < 40.0 or ccw_rpm < 40.0:
+                    self._set_calib_ui(
+                        f"❌ Verification Spin Failed: CW={cw_rpm:.1f} RPM, CCW={ccw_rpm:.1f} RPM (Target 120 RPM). Motor Stalled!",
+                        "SPIN FAILED",
+                        COLOR_ACCENT_RED
+                    )
+                    self._log_console(f"❌ [VERIFY FAILED] Motor failed to reach 120 RPM in closed loop (CW={cw_rpm:.1f}, CCW={ccw_rpm:.1f}). Check wiring/driver/power.\n")
+                    return
+
             # Step 4: Save to STM32 Flash & Export JSON to Disk
             self._set_calib_ui("Step 4/4: Saving LUT & 11-Pole Zeros to STM32 Flash & JSON...", "SAVING...", COLOR_ACCENT_GREEN)
             self.serial_engine.send_command("SAVE")
@@ -1015,9 +1026,11 @@ class DualMotorDashboardApp(tk.Tk):
         self.tf_ent.delete(0, tk.END); self.tf_ent.insert(0, "0.003")
         self.vramp_ent.delete(0, tk.END); self.vramp_ent.insert(0, "200.0")
         self.vlim_ent.delete(0, tk.END); self.vlim_ent.insert(0, "6.93")
+        self.vlim_ent.delete(0, tk.END); self.vlim_ent.insert(0, "12.00")
         self.maxrpm_ent.delete(0, tk.END); self.maxrpm_ent.insert(0, "1000")
         self.lag_ent.delete(0, tk.END); self.lag_ent.insert(0, "35.0")
         self.kv_ent.delete(0, tk.END); self.kv_ent.insert(0, "140.0")
+        self.kv_ent.delete(0, tk.END); self.kv_ent.insert(0, "130.0")
 
     # =========================================================================
     # JSON Config & 128-Point LUT Export / Import

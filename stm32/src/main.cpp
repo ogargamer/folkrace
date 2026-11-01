@@ -61,6 +61,11 @@ volatile bool m2_calibrated = false;
 volatile float m1_target_rpm = 0.0f;
 volatile float m2_target_rpm = 0.0f;
 
+volatile float m1_base_zero_angle = 0.0f;
+volatile float m2_base_zero_angle = 0.0f;
+volatile float m1_lag_comp_us = 35.0f;
+volatile float m2_lag_comp_us = 35.0f;
+
 volatile bool m1_calib_active = false;
 volatile bool m2_calib_active = false;
 volatile uint8_t live_calib_progress = 0; // 0..100%
@@ -88,6 +93,18 @@ bool show_telemetry = true;
 char rx_line[256];
 uint16_t rx_idx = 0;
 
+// Angle Normalization Helpers
+static inline float normalizeAngleRad(float angle) {
+    float a = fmodf(angle, _2PI);
+    return (a >= 0.0f) ? a : (a + _2PI);
+}
+
+static inline float wrapAngleRad(float angle) {
+    while (angle > _PI) angle -= _2PI;
+    while (angle < -_PI) angle += _2PI;
+    return angle;
+}
+
 // ----------------------------------------------------------------------------
 // Hard Real-Time 20.0 kHz Hardware Timer ISR (TIM6, NVIC Priority 2)
 // ----------------------------------------------------------------------------
@@ -95,24 +112,32 @@ void focTimerISR() {
     uint32_t start_cycles = DWT->CYCCNT;
     foc_tick_count++;
 
-    // 1. Single-Read SPI Caching: Poll MT6816 sensor strictly ONCE per tick
+    // 1. Single-Read SPI Caching & SimpleFOC Sensor State Update
     encoder1.readHardwareSPI();
+    encoder1.update(); // CRITICAL: Updates angle tracking, timestamp, and multi-turn unwrapping on every 20 kHz tick!
     if (m2_enabled || m2_calib_active) {
         encoder2.readHardwareSPI();
+        encoder2.update();
     }
 
     // 2. Motor 1 Commutation Loop
+    // 2. Motor 1 Commutation Loop (with Dynamic Sensor Lag Compensation)
     if (m1_enabled && !m1_calib_active) {
-        motor1.loopFOC(); // Calls encoder1.update() -> cached angle, ZERO SPI overhead!
-    } else if (!m1_calib_active) {
-        encoder1.update(); // Keep velocity/multi-turn tracking alive at 20 kHz while disabled
+        if (m1_lag_comp_us > 0.0f && m1_base_zero_angle != 0.0f) {
+            float lead_rad = motor1.shaft_velocity * (float)MOTOR_POLE_PAIRS * (m1_lag_comp_us * 1e-6f);
+            motor1.zero_electric_angle = normalizeAngleRad(m1_base_zero_angle - lead_rad);
+        }
+        motor1.loopFOC();
     }
 
     // 3. Motor 2 Commutation Loop
+    // 3. Motor 2 Commutation Loop (with Dynamic Sensor Lag Compensation)
     if (m2_enabled && !m2_calib_active) {
-        motor2.loopFOC(); // Calls encoder2.update() -> cached angle, ZERO SPI overhead!
-    } else if (!m2_calib_active) {
-        encoder2.update();
+        if (m2_lag_comp_us > 0.0f && m2_base_zero_angle != 0.0f) {
+            float lead_rad = motor2.shaft_velocity * (float)MOTOR_POLE_PAIRS * (m2_lag_comp_us * 1e-6f);
+            motor2.zero_electric_angle = normalizeAngleRad(m2_base_zero_angle - lead_rad);
+        }
+        motor2.loopFOC();
     }
 
     // 4. Downsampled Velocity Motion Control (Every 10th tick = 2.0 kHz / 500 us)
@@ -195,17 +220,6 @@ void initMotorFOC(int motor_id) {
 // ----------------------------------------------------------------------------
 void sendBinaryTelemetry(); // Forward declaration for real-time telemetry streaming
 
-static inline float normalizeAngleRad(float angle) {
-    float a = fmodf(angle, _2PI);
-    return (a >= 0.0f) ? a : (a + _2PI);
-}
-
-static inline float wrapAngleRad(float angle) {
-    while (angle > _PI) angle -= _2PI;
-    while (angle < -_PI) angle += _2PI;
-    return angle;
-}
-
 static inline bool checkCalibrationAbort() {
     if (Serial.available()) {
         char c = (char)Serial.peek();
@@ -257,6 +271,28 @@ void dumpLUT(int motor_id) {
         Serial.println();
     }
     Serial.printf("[LUT_DATA_END]:M%d\n", motor_id);
+}
+
+// ----------------------------------------------------------------------------
+// JSON Configuration Exporter (Capturable by Python GUI)
+// ----------------------------------------------------------------------------
+void dumpConfigJSON() {
+    Serial.println("\n[CONFIG_START]");
+    Serial.printf("{\n");
+    Serial.printf("  \"zero_electric_angle\": %.6f,\n", motor1.zero_electric_angle);
+    Serial.printf("  \"sensor_direction\": %d,\n", (motor1.sensor_direction == Direction::CW) ? 1 : -1);
+    Serial.printf("  \"sensor_lag_comp_us\": 35.0,\n");
+    Serial.printf("  \"sensor_lag_comp_us\": %.1f,\n", m1_lag_comp_us);
+    Serial.printf("  \"motor_kv_rating\": %.2f,\n", motor1.KV_rating);
+    Serial.printf("  \"is_lut_calibrated\": %s,\n", encoder1.is_lut_active ? "true" : "false");
+    Serial.printf("  \"pid_p\": %.4f,\n", motor1.PID_velocity.P);
+    Serial.printf("  \"pid_i\": %.4f,\n", motor1.PID_velocity.I);
+    Serial.printf("  \"pid_d\": %.4f,\n", motor1.PID_velocity.D);
+    Serial.printf("  \"lpf_tf\": %.4f,\n", motor1.LPF_velocity.Tf);
+    Serial.printf("  \"m2_zero_electric_angle\": %.6f,\n", motor2.zero_electric_angle);
+    Serial.printf("  \"m2_sensor_direction\": %d\n", (motor2.sensor_direction == Direction::CW) ? 1 : -1);
+    Serial.printf("}\n");
+    Serial.println("[CONFIG_END]\n");
 }
 
 // ----------------------------------------------------------------------------
@@ -625,7 +661,7 @@ bool runSteppedLUTSweepSinglePass(int motor_id, float align_voltage) {
 // Multi-Pole Comprehensive Electrical Zero Alignment (Matching ESP32 Suite)
 // ----------------------------------------------------------------------------
 bool runComprehensiveElectricalAlignment(int motor_id, float align_voltage) {
-    float hold_voltage = fminf(align_voltage, CALIB_HOLD_VOLTAGE);
+    float hold_voltage = fminf(align_voltage * 0.85f, 3.40f);
     Serial.println("\n================================================================================");
     Serial.println(">>> STARTING COMPREHENSIVE MULTI-POINT ELECTRICAL ZERO CALIBRATION <<<");
     Serial.println("================================================================================");
@@ -696,16 +732,18 @@ bool runComprehensiveElectricalAlignment(int motor_id, float align_voltage) {
                   moved_rad * 57.2957795f);
     motor.sensor_direction = sensor_dir;
 
-    // 2. Multi-Pole Full 360° Bidirectional Sweep (CW 360° + CCW 360° Round-Trip)
+    // 2. Multi-Pole Full 360° Bidirectional Sweep with Real-Time Progression Tracking
     Serial.println("\n2. Scanning All 11 Electrical Poles (Full 360° Forward CW + Reverse CCW Round-Trip):");
-    Serial.println("Pole # | Mech Angle | Forward (CW)  | Reverse (CCW) | True Zero | Hysteresis | Status");
-    Serial.println("-------+------------+---------------+---------------+-----------+------------+-------");
 
     const int num_poles = MOTOR_POLE_PAIRS;
     static float fwd_zeros[MOTOR_POLE_PAIRS];
     static float rev_zeros[MOTOR_POLE_PAIRS];
+    static float fwd_mechs[MOTOR_POLE_PAIRS];
+    static float rev_mechs[MOTOR_POLE_PAIRS];
     static float pole_zeros[MOTOR_POLE_PAIRS];
     bool all_poles_ok = true;
+    bool stall_detected = false;
+    int stall_count = 0;
 
     // PASS 1: FORWARD (CW) 360° SWEEP (Poles 0 -> 10)
     for (int p = 0; p < num_poles; p++) {
@@ -717,28 +755,28 @@ bool runComprehensiveElectricalAlignment(int motor_id, float align_voltage) {
 
         float target_el = _3PI_2 + (float)p * _2PI;
         if (p > 0) {
-            const int INTERP_STEPS = 100;
+            const int INTERP_STEPS = 120;
             float prev_el = _3PI_2 + (float)(p - 1) * _2PI;
             for (int s = 1; s <= INTERP_STEPS; s++) {
                 float el = prev_el + (target_el - prev_el) * ((float)s / (float)INTERP_STEPS);
                 motor.setPhaseVoltage(align_voltage, 0.0f, el);
-                delayMicroseconds(2000);
+                delayMicroseconds(2500);
             }
         } else {
             motor.setPhaseVoltage(align_voltage, 0.0f, target_el);
             delay(300);
         }
 
-        // Decaying micro-dither (12 steps)
-        for (int d = 12; d >= 1; d--) {
-            float dither = 0.10f * ((float)d / 12.0f);
+        // Decaying micro-dither (8 steps)
+        for (int d = 8; d >= 1; d--) {
+            float dither = 0.08f * ((float)d / 8.0f);
             motor.setPhaseVoltage(align_voltage, 0.0f, target_el + dither);
             delayMicroseconds(800);
             motor.setPhaseVoltage(align_voltage, 0.0f, target_el - dither);
             delayMicroseconds(800);
         }
         motor.setPhaseVoltage(hold_voltage, 0.0f, target_el);
-        delay(80);
+        delay(120);
 
         float mech = 0.0f;
         for (int s = 0; s < CALIB_ALIGN_OVERSAMPLE_COUNT; s++) {
@@ -746,7 +784,20 @@ bool runComprehensiveElectricalAlignment(int motor_id, float align_voltage) {
             delayMicroseconds(200);
         }
         mech /= (float)CALIB_ALIGN_OVERSAMPLE_COUNT;
+        fwd_mechs[p] = mech;
         fwd_zeros[p] = normalizeAngleRad((float)((int)sensor_dir * num_poles) * mech);
+
+        float step_deg = 0.0f;
+        if (p > 0) {
+            step_deg = wrapAngleRad(fwd_mechs[p] - fwd_mechs[p - 1]) * (sensor_dir == Direction::CW ? 1.0f : -1.0f) * 57.2957795f;
+            if (step_deg < 12.0f) {
+                stall_detected = true;
+                stall_count++;
+            }
+        }
+        Serial.printf("   [Pass 1 CW]  Pole #%2d/11 @ target el %4.0f° | mech %5.1f° (Δ=%+5.1f°) %s\n",
+                      p + 1, (float)p * 360.0f, fwd_mechs[p] * 57.2957795f, step_deg,
+                      (p > 0 && step_deg < 12.0f) ? "❌ STALL!" : "OK");
     }
 
     // PASS 2: REVERSE (CCW) 360° RETURN SWEEP (Poles 10 -> 0)
@@ -759,28 +810,28 @@ bool runComprehensiveElectricalAlignment(int motor_id, float align_voltage) {
 
         float target_el = _3PI_2 + (float)p * _2PI;
         if (p < num_poles - 1) {
-            const int INTERP_STEPS = 100;
+            const int INTERP_STEPS = 120;
             float prev_el = _3PI_2 + (float)(p + 1) * _2PI;
             for (int s = 1; s <= INTERP_STEPS; s++) {
                 float el = prev_el + (target_el - prev_el) * ((float)s / (float)INTERP_STEPS);
                 motor.setPhaseVoltage(align_voltage, 0.0f, el);
-                delayMicroseconds(2000);
+                delayMicroseconds(2500);
             }
         } else {
             motor.setPhaseVoltage(align_voltage, 0.0f, target_el);
             delay(150);
         }
 
-        // Decaying micro-dither (12 steps)
-        for (int d = 12; d >= 1; d--) {
-            float dither = 0.10f * ((float)d / 12.0f);
+        // Decaying micro-dither (8 steps)
+        for (int d = 8; d >= 1; d--) {
+            float dither = 0.08f * ((float)d / 8.0f);
             motor.setPhaseVoltage(align_voltage, 0.0f, target_el + dither);
             delayMicroseconds(800);
             motor.setPhaseVoltage(align_voltage, 0.0f, target_el - dither);
             delayMicroseconds(800);
         }
         motor.setPhaseVoltage(hold_voltage, 0.0f, target_el);
-        delay(80);
+        delay(120);
 
         float mech = 0.0f;
         for (int s = 0; s < CALIB_ALIGN_OVERSAMPLE_COUNT; s++) {
@@ -788,10 +839,34 @@ bool runComprehensiveElectricalAlignment(int motor_id, float align_voltage) {
             delayMicroseconds(200);
         }
         mech /= (float)CALIB_ALIGN_OVERSAMPLE_COUNT;
+        rev_mechs[p] = mech;
         rev_zeros[p] = normalizeAngleRad((float)((int)sensor_dir * num_poles) * mech);
+
+        float rev_step_deg = 0.0f;
+        if (p < num_poles - 1) {
+            rev_step_deg = wrapAngleRad(rev_mechs[p] - rev_mechs[p + 1]) * (sensor_dir == Direction::CW ? -1.0f : 1.0f) * 57.2957795f;
+            if (rev_step_deg < 12.0f) {
+                stall_detected = true;
+                stall_count++;
+            }
+        }
+        Serial.printf("   [Pass 2 CCW] Pole #%2d/11 @ target el %4.0f° | mech %5.1f° (Δ=%+5.1f°) %s\n",
+                      p + 1, (float)p * 360.0f, rev_mechs[p] * 57.2957795f, rev_step_deg,
+                      (p < num_poles - 1 && rev_step_deg < 12.0f) ? "❌ STALL!" : "OK");
     }
 
+    // Cumulative Motion Check
+    float total_fwd_travel_deg = 0.0f;
+    for (int p = 1; p < num_poles; p++) {
+        total_fwd_travel_deg += wrapAngleRad(fwd_mechs[p] - fwd_mechs[p - 1]) * (sensor_dir == Direction::CW ? 1.0f : -1.0f) * 57.2957795f;
+    }
+    bool rotation_ok = (total_fwd_travel_deg >= 250.0f) && (stall_count == 0);
+
     // Synthesis, Error Decomposition & Diagnostics
+    Serial.println("\n--------------------------------------------------------------------------------");
+    Serial.println("Pole # | Mech Angle | Forward (CW)  | Reverse (CCW) | True Zero | Hysteresis | Status");
+    Serial.println("-------+------------+---------------+---------------+-----------+------------+-------");
+
     float max_hyst_deg = 0.0f;
     float sum_hyst_deg = 0.0f;
     float sum_sin = 0.0f, sum_cos = 0.0f;
@@ -817,7 +892,10 @@ bool runComprehensiveElectricalAlignment(int motor_id, float align_voltage) {
         if (hyst_deg > max_hyst_deg) max_hyst_deg = hyst_deg;
         sum_hyst_deg += hyst_deg;
 
-        bool pole_pass = (hyst_deg <= 10.0f);
+        bool pole_pass = (hyst_deg <= 8.0f);
+        if (stall_detected && hyst_deg < 0.02f) {
+            pole_pass = false; // Identical readings during a stall indicate zero motion!
+        }
         if (!pole_pass) all_poles_ok = false;
 
         float pole_mech_target = ((float)p / (float)num_poles) * 360.0f;
@@ -855,19 +933,27 @@ bool runComprehensiveElectricalAlignment(int motor_id, float align_voltage) {
     Serial.printf ("  Pole-to-Pole Dispersion     : ±%.2f deg elec (±%.4f rad)\n", std_dev_deg, std_dev_rad);
     Serial.printf ("  Worst-Case Torque Output    : %.2f%% of theoretical Kt\n", torque_eff_pct);
     Serial.printf ("  Parasitic d-Axis Leakage    : %.2f%% (Current lost to heat)\n", d_axis_leak_pct);
+    Serial.printf ("  Cumulative 360° Progression : %.1f deg mech (%s)\n", total_fwd_travel_deg, rotation_ok ? "VERIFIED FULL ROTATION" : "INCOMPLETE / STALLED");
     Serial.print  ("  Alignment Quality Score     : ");
 
     const char* grade_str = "GRADE E";
-    if (std_dev_deg > 10.0f || max_hyst_deg > 10.0f) {
-        Serial.println("❌ GRADE F (REJECTED — Unusable for FOC)");
+
+    // HARD MOTION GATE: If the rotor stalled or failed step progression, REJECT
+    if (stall_detected || !rotation_ok || total_fwd_travel_deg < 250.0f || std_dev_deg > 10.0f || max_hyst_deg > 10.0f) {
+        grade_str = "GRADE F";
+        Serial.println("❌ GRADE F (REJECTED — Rotor Stall / Motion Check Failed)");
         Serial.println("  -----------------------------------------------------------------------------");
+        if (stall_detected || !rotation_ok) {
+            Serial.printf ("  ⚠️ ROOT CAUSE: Rotor step stall detected (%d poles stalled; total travel %.1f° of expected ~327°).\n",
+                           stall_count, total_fwd_travel_deg);
+            Serial.println("     FIX: Increase alignment voltage ('C1 4.5') to overcome cogging detents,");
+            Serial.println("          verify 12V bench power supply is ON, and check motor bearing freespin.");
+        }
         if (max_hyst_deg > 10.0f) {
             Serial.printf("  ⚠️ ROOT CAUSE: Bearing stiction or detent pull (Hysteresis Peak: %.1f deg).\n", max_hyst_deg);
-            Serial.println("     FIX: Increase alignment voltage ('CALIB 4.2') to overcome cogging.");
         }
         if (std_dev_deg > 10.0f) {
             Serial.printf("  ⚠️ ROOT CAUSE: Severe magnet runout or uncalibrated LUT (StdDev: %.1f deg).\n", std_dev_deg);
-            Serial.println("     FIX: Re-run dual-pass LUT calibration first before electrical zero.");
         }
         Serial.println("================================================================================\n");
         motor.setPhaseVoltage(0.0f, 0.0f, 0.0f);
@@ -904,8 +990,10 @@ bool runComprehensiveElectricalAlignment(int motor_id, float align_voltage) {
     motor.zero_electric_angle = mean_zero_angle;
     motor.sensor_direction = sensor_dir;
     if (motor_id == 1) {
+        m1_base_zero_angle = mean_zero_angle;
         m1_calibrated = true;
     } else {
+        m2_base_zero_angle = mean_zero_angle;
         m2_calibrated = true;
     }
 
@@ -1035,22 +1123,26 @@ void resetDefaults(int motor_id) {
         motor1.voltage_limit = MOTOR_VOLTAGE_LIMIT;
         motor1.PID_velocity.limit = motor1.voltage_limit;
         motor1.velocity_limit = MOTOR_VELOCITY_LIMIT;
+        motor1.KV_rating = MOTOR_KV_RATING;
         motor1.PID_velocity.P = 0.12f;
         motor1.PID_velocity.I = 1.20f;
-        motor1.PID_velocity.D = 0.001f;
-        motor1.PID_velocity.output_ramp = 1000.0f;
-        motor1.LPF_velocity.Tf = 0.015f;
+        motor1.PID_velocity.D = 0.000f;
+        motor1.PID_velocity.output_ramp = 200.0f;
+        motor1.LPF_velocity.Tf = 0.003f;
+        m1_lag_comp_us = 35.0f;
         m1_target_rpm = 0.0f;
     }
     if (motor_id == 2 || motor_id == 0) {
         motor2.voltage_limit = MOTOR_VOLTAGE_LIMIT;
         motor2.PID_velocity.limit = motor2.voltage_limit;
         motor2.velocity_limit = MOTOR_VELOCITY_LIMIT;
+        motor2.KV_rating = MOTOR_KV_RATING;
         motor2.PID_velocity.P = 0.12f;
         motor2.PID_velocity.I = 1.20f;
-        motor2.PID_velocity.D = 0.001f;
-        motor2.PID_velocity.output_ramp = 1000.0f;
-        motor2.LPF_velocity.Tf = 0.015f;
+        motor2.PID_velocity.D = 0.000f;
+        motor2.PID_velocity.output_ramp = 200.0f;
+        motor2.LPF_velocity.Tf = 0.003f;
+        m2_lag_comp_us = 35.0f;
         m2_target_rpm = 0.0f;
     }
     Serial.println(">>> [RESET] Restored GM3506 12V Optimized Defaults (SpaceVectorPWM).");
@@ -1412,10 +1504,27 @@ void processCommand(const char *cmd) {
         return;
     }
 
+    if (strncasecmp(cmd, "LAG1", 4) == 0) {
+        float val = atof(cmd + 4);
+        if (val >= 0.0f) { m1_lag_comp_us = val; Serial.printf(">>> M1 Sensor Lag Comp: %.1f us\n", val); }
+        return;
+    }
+    if (strncasecmp(cmd, "LAG2", 4) == 0) {
+        float val = atof(cmd + 4);
+        if (val >= 0.0f) { m2_lag_comp_us = val; Serial.printf(">>> M2 Sensor Lag Comp: %.1f us\n", val); }
+        return;
+    }
+    if (strncasecmp(cmd, "LAG", 3) == 0) {
+        float val = atof(cmd + 3);
+        if (val >= 0.0f) { m1_lag_comp_us = val; m2_lag_comp_us = val; Serial.printf(">>> Both Motors Sensor Lag Comp: %.1f us\n", val); }
+        return;
+    }
+
     if (strncasecmp(cmd, "ZERO1", 5) == 0 || strncasecmp(cmd, "O1", 2) == 0) {
         const char *p = (strncasecmp(cmd, "ZERO1", 5) == 0) ? (cmd + 5) : (cmd + 2);
         float val = atof(p);
         motor1.zero_electric_angle = val;
+        m1_base_zero_angle = val;
         m1_calibrated = true;
         Serial.printf(">>> M1 Zero Electric Angle Override: %.4f rad (%.1f deg)\n", val, val * 57.2957795f);
         return;
@@ -1424,6 +1533,7 @@ void processCommand(const char *cmd) {
         const char *p = (strncasecmp(cmd, "ZERO2", 5) == 0) ? (cmd + 5) : (cmd + 2);
         float val = atof(p);
         motor2.zero_electric_angle = val;
+        m2_base_zero_angle = val;
         m2_calibrated = true;
         Serial.printf(">>> M2 Zero Electric Angle Override: %.4f rad (%.1f deg)\n", val, val * 57.2957795f);
         return;
@@ -1479,6 +1589,18 @@ void processCommand(const char *cmd) {
     }
     if (strcasecmp(cmd, "u2") == 0) {
         dumpLUT(2);
+        return;
+    }
+
+    if (strcasecmp(cmd, "SAVE") == 0 || strcasecmp(cmd, "save") == 0) {
+        Serial.println(">>> Configuration & Calibration parameters saved to RAM.");
+        dumpConfigJSON();
+        Serial.println("[CONFIG_SAVED]:OK");
+        return;
+    }
+
+    if (strcasecmp(cmd, "EXPORT") == 0 || strcasecmp(cmd, "export") == 0) {
+        dumpConfigJSON();
         return;
     }
 
@@ -1645,10 +1767,10 @@ void setup() {
     motor1.controller = MotionControlType::velocity;
     motor1.PID_velocity.P = 0.12f;
     motor1.PID_velocity.I = 1.20f;
-    motor1.PID_velocity.D = 0.001f;
-    motor1.PID_velocity.output_ramp = 1000.0f;
+    motor1.PID_velocity.D = 0.000f;
+    motor1.PID_velocity.output_ramp = 200.0f;
     motor1.PID_velocity.limit = motor1.voltage_limit;
-    motor1.LPF_velocity.Tf = 0.015f;
+    motor1.LPF_velocity.Tf = 0.003f;
     motor1.init();
     driver1.disable();
 
@@ -1662,10 +1784,10 @@ void setup() {
     motor2.controller = MotionControlType::velocity;
     motor2.PID_velocity.P = 0.12f;
     motor2.PID_velocity.I = 1.20f;
-    motor2.PID_velocity.D = 0.001f;
-    motor2.PID_velocity.output_ramp = 1000.0f;
+    motor2.PID_velocity.D = 0.000f;
+    motor2.PID_velocity.output_ramp = 200.0f;
     motor2.PID_velocity.limit = motor2.voltage_limit;
-    motor2.LPF_velocity.Tf = 0.015f;
+    motor2.LPF_velocity.Tf = 0.003f;
     motor2.init();
     driver2.disable();
 
