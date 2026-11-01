@@ -95,9 +95,9 @@ void focTimerISR() {
     uint32_t start_cycles = DWT->CYCCNT;
     foc_tick_count++;
 
-    // 1. Single-Read SPI Caching: Poll both MT6816 sensors strictly ONCE per tick
+    // 1. Single-Read SPI Caching: Poll MT6816 sensor strictly ONCE per tick
     encoder1.readHardwareSPI();
-    encoder2.readHardwareSPI();
+    // encoder2.readHardwareSPI(); // Disabled for single-encoder SPI1 bench test
 
     // 2. Motor 1 Commutation Loop
     if (m1_enabled) {
@@ -1175,9 +1175,10 @@ void setup() {
     // 3. Serial Port Initialization (921600 Baud for Ultra High Speed Telemetry)
     Serial.begin(921600);
 
-    // 4. Initialize MT6816 Dual Encoders on Shared SPI1 @ 10.6 MHz
+    // 4. Initialize MT6816 Encoder 1 on SPI1
+    pinMode(PIN_M2_CS, OUTPUT);
+    digitalWrite(PIN_M2_CS, HIGH); // Ensure Encoder 2 CS is deselected
     encoder1.init();
-    encoder2.init();
 
     // 5. Configure Drivers (TIM1 & TIM8 @ 25 kHz Center-Aligned SpaceVectorPWM)
     driver1.voltage_power_supply = MOTOR_SUPPLY_VOLTAGE;

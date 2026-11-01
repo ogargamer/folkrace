@@ -61,7 +61,10 @@ public:
         pinMode(cs_pin, OUTPUT);
         digitalWrite(cs_pin, HIGH);
 
-        if (pin == PB2) {
+        if (pin == PA15) {
+            cs_port = GPIOA;
+            cs_set_mask = (1 << 15);
+        } else if (pin == PB2) {
             cs_port = GPIOB;
             cs_set_mask = (1 << 2);
         } else if (pin == PB3) {
@@ -74,8 +77,8 @@ public:
             cs_port = GPIOA;
             cs_set_mask = (1 << 3);
         } else {
-            cs_port = GPIOB;
-            cs_set_mask = (1 << 3);
+            cs_port = digitalPinToPort(pin);
+            cs_set_mask = digitalPinToBitMask(pin);
         }
         cs_reset_mask = cs_set_mask << 16;
     }

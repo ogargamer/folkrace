@@ -14,24 +14,24 @@
 // Shared SPI1 Bus (MT6816 Dual Magnetic Angle Encoders)
 // ----------------------------------------------------------------------------
 #ifndef PIN_SPI1_SCK
-#define PIN_SPI1_SCK    PA5   // Clock (Row 7, Right Outer)
+#define PIN_SPI1_SCK    PB3   // Clock (ENC1 SCK)
 #endif
 
 #ifndef PIN_SPI1_MISO
-#define PIN_SPI1_MISO   PB4   // Master In (Row 6, Left Outer) - AF5
+#define PIN_SPI1_MISO   PB4   // Master In (ENC1 MISO) - AF5
 #endif
 
 #ifndef PIN_SPI1_MOSI
-#define PIN_SPI1_MOSI   PA7   // Master Out (Row 6, Right Outer)
+#define PIN_SPI1_MOSI   PB5   // Master Out (ENC1 MOSI)
 #endif
 
-// Dedicated Chip Select Lines (Atomic BSRR Port B toggles)
+// Dedicated Chip Select Lines
 #ifndef PIN_M1_CS
-#define PIN_M1_CS       PB2   // Encoder 3 CS (Row 4, Right Outer)
+#define PIN_M1_CS       PA15  // Encoder 1 CS (SPI1)
 #endif
 
 #ifndef PIN_M2_CS
-#define PIN_M2_CS       PB3   // Encoder 4 CS (Row 6, Left Inner)
+#define PIN_M2_CS       PB11  // Encoder 2 CS (SPI2 - held HIGH/deselected)
 #endif
 
 // ----------------------------------------------------------------------------
