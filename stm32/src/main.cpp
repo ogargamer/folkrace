@@ -9,8 +9,8 @@
 // DA WINNA — 20.0 kHz HARD REAL-TIME DUAL-MOTOR SIMPLEFOC ENGINE (STM32G474)
 // ============================================================================
 // Hardware: STM32G474CBT6 (170 MHz Cortex-M4F, HW FPU)
-// Timers: TIM1 (M1 PWM 25kHz), TIM8 (M2 PWM 25kHz), TIM6 (20 kHz Control ISR)
-// Sensors: Dual MT6816 14-Bit Magnetic Encoders on Shared SPI1 @ 5.31 MHz
+// Timers: TIM2 (M1 PWM 25kHz), TIM3 (M2 PWM 25kHz), TIM6 (20 kHz Control ISR)
+// Sensors: Dual MT6816 14-Bit Encoders on Independent SPI1 & SPI2 @ 5.31 MHz
 // Telemetry: Exact 26-Byte Binary Telemetry Frame @ 25 Hz + ASCII Console
 // ============================================================================
 
@@ -40,8 +40,11 @@ static_assert(sizeof(TelemetryPacket) == 26, "TelemetryPacket must be exactly 26
 // ----------------------------------------------------------------------------
 // Global Peripherals & Motor Instances
 // ----------------------------------------------------------------------------
-MT6816Sensor encoder1(PIN_M1_CS);
-MT6816Sensor encoder2(PIN_M2_CS);
+// Dedicated hardware SPI2 instance: constructor order is (MOSI, MISO, SCK)
+SPIClass SPI_2(PIN_SPI2_MOSI, PIN_SPI2_MISO, PIN_SPI2_SCK);
+
+MT6816Sensor encoder1(PIN_M1_CS, &SPI, PIN_SPI1_SCK, PIN_SPI1_MISO, PIN_SPI1_MOSI);
+MT6816Sensor encoder2(PIN_M2_CS, &SPI_2, PIN_SPI2_SCK, PIN_SPI2_MISO, PIN_SPI2_MOSI);
 
 BLDCDriver3PWM driver1(M1_PWM_A, M1_PWM_B, M1_PWM_C, M1_EN);
 BLDCDriver3PWM driver2(M2_PWM_A, M2_PWM_B, M2_PWM_C, M2_EN);
@@ -115,13 +118,11 @@ void focTimerISR() {
     uint32_t start_cycles = DWT->CYCCNT;
     foc_tick_count++;
 
-    // 1. Single-Read SPI Caching & SimpleFOC Sensor State Update
+    // 1. Single-Read Hardware SPI Caching & SimpleFOC Sensor State Update
     encoder1.readHardwareSPI();
     encoder1.update(); // CRITICAL: Updates angle tracking, timestamp, and multi-turn unwrapping on every 20 kHz tick!
-    if (m2_enabled || m2_calib_active) {
-        encoder2.readHardwareSPI();
-        encoder2.update();
-    }
+    encoder2.readHardwareSPI();
+    encoder2.update();
 
     // 2. Motor 1 Commutation Loop (with Smooth Filtered Sensor Lag Compensation)
     if (m1_enabled && !m1_calib_active) {
@@ -1329,9 +1330,9 @@ void printHelp() {
     Serial.print  ("  Motor 1 State    : "); Serial.println(m1_enabled ? "ENABLED" : "DISABLED");
     Serial.print  ("  Motor 2 State    : "); Serial.println(m2_enabled ? "ENABLED" : "DISABLED");
     Serial.print  ("  FOC Timer        : TIM6 Hardware Timer @ 20.0 kHz (50.0 us tick, Priority 2)\n");
-    Serial.print  ("  Motion Control   : Downsampled 2.0 kHz (500 us tick, downsample = 10)\n");
-    Serial.print  ("  Shared Bus       : SPI1 @ 5.31 MHz (PB3/4/5) | CS1=PA15, CS2=PB11\n");
-    Serial.print  ("  PWM Inverters    : TIM1 (M1: PA8/9/10, PB3) | TIM8 (M2: PB6/8/9, PB0) @ 25 kHz\n");
+    Serial.print  ("  Motion Control   : Downsampled 4.0 kHz (250 us tick, downsample = 5)\n");
+    Serial.print  ("  SPI Buses        : SPI1 (PB3/4/5, CS=PA15) | SPI2 (PB13/14/15, CS=PB11) @ 5.31 MHz\n");
+    Serial.print  ("  PWM Inverters    : TIM2 (M1: PA5/1/2) | TIM3 (M2: PA6/4, PB0) @ 25 kHz\n");
     Serial.print  ("  Stall Watchdog   : "); Serial.println(stall_watchdog_enabled ? "ACTIVE (Target >= 5 RPM & Actual == 0)" : "DISABLED");
     Serial.println("--------------------------------------------------------------------------------");
     Serial.println("Commands:");
@@ -1510,7 +1511,7 @@ void processCommand(const char *cmd) {
 
     if (strcmp(cmd, "ENC") == 0 || strcmp(cmd, "enc") == 0 || strcmp(cmd, "ENC4") == 0 || strcmp(cmd, "enc4") == 0) {
         Serial.println("\n--- [MT6816 ENCODER LIVE DIAGNOSTICS] ---");
-        Serial.print("Encoder 3 (PB2 - M1/RL): Raw14=");
+        Serial.print("Encoder 3 (PA15/SPI1 - M1): Raw14=");
         Serial.print(encoder1.last_raw_14bit);
         Serial.print(" | Angle=");
         Serial.print(encoder1.getSingleTurnDeg(), 2);
@@ -1525,7 +1526,7 @@ void processCommand(const char *cmd) {
         Serial.print(" | ParityErrs=");
         Serial.println(encoder1.parity_errors);
 
-        Serial.print("Encoder 4 (PB3 - M2/RR): Raw14=");
+        Serial.print("Encoder 4 (PB11/SPI2 - M2): Raw14=");
         Serial.print(encoder2.last_raw_14bit);
         Serial.print(" | Angle=");
         Serial.print(encoder2.getSingleTurnDeg(), 2);
@@ -1978,13 +1979,11 @@ void setup() {
     // 3. Serial Port Initialization (921600 Baud for Ultra High Speed Telemetry)
     Serial.begin(921600);
 
-    // 4. Initialize MT6816 Encoders on shared SPI1
-    pinMode(PIN_M2_CS, OUTPUT);
-    digitalWrite(PIN_M2_CS, HIGH); // Ensure Encoder 2 CS is deselected
+    // 4. Initialize MT6816 Encoders on Independent Hardware SPI Buses (SPI1 & SPI2)
     encoder1.init();
-    encoder2.setupCSPin(PIN_M2_CS);
+    encoder2.init();
 
-    // 5. Configure Drivers (TIM1 & TIM8 @ 25 kHz Center-Aligned SpaceVectorPWM)
+    // 5. Configure Drivers (TIM2 & TIM3 @ 25 kHz Center-Aligned SpaceVectorPWM)
     driver1.voltage_power_supply = MOTOR_SUPPLY_VOLTAGE;
     driver1.voltage_limit = MOTOR_SUPPLY_VOLTAGE;
     driver1.pwm_frequency = 25000;

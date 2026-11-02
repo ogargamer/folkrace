@@ -42,9 +42,14 @@ public:
     bool is_lut_active;
 
     SPISettings spi_settings;
+    SPIClass *spi_bus;
+    int sck_pin;
+    int miso_pin;
+    int mosi_pin;
 
-    MT6816Sensor(int pin = PIN_M1_CS)
-        : cs_pin(pin), cs_port(GPIOB), cs_set_mask(1 << 2), cs_reset_mask((1 << 2) << 16),
+    MT6816Sensor(int pin = PIN_M1_CS, SPIClass *bus = &SPI, int sck = PIN_SPI1_SCK, int miso = PIN_SPI1_MISO, int mosi = PIN_SPI1_MOSI)
+        : cs_pin(pin), spi_bus(bus), sck_pin(sck), miso_pin(miso), mosi_pin(mosi),
+          cs_port(GPIOB), cs_set_mask(1 << 2), cs_reset_mask((1 << 2) << 16),
           total_reads(0), parity_errors(0), parity_retries(0), mag_faults(0),
           consecutive_parity_errors(0), is_connected(true), slow_poll_counter(0),
           last_no_mag(false), last_parity_ok(true),
@@ -55,6 +60,13 @@ public:
         for (int i = 0; i < 128; i++) {
             lut_errors[i] = 0.0f;
         }
+    }
+
+    void setSPIBus(SPIClass *bus, int sck, int miso, int mosi) {
+        spi_bus = bus;
+        sck_pin = sck;
+        miso_pin = miso;
+        mosi_pin = mosi;
     }
 
     void setupCSPin(int pin) {
@@ -71,6 +83,9 @@ public:
         } else if (pin == PB3) {
             cs_port = GPIOB;
             cs_set_mask = (1 << 3);
+        } else if (pin == PB11) {
+            cs_port = GPIOB;
+            cs_set_mask = (1 << 11);
         } else if (pin == PA2) {
             cs_port = GPIOA;
             cs_set_mask = (1 << 2);
@@ -113,14 +128,20 @@ public:
     void init() override {
         setupCSPin(cs_pin);
 
-        // Configure shared SPI1 peripheral (matching ESP32 implementation)
-        SPI.setSCLK(PIN_SPI1_SCK);
-        SPI.setMISO(PIN_SPI1_MISO);
-        SPI.setMOSI(PIN_SPI1_MOSI);
-        SPI.begin();
+        // Configure hardware SPI peripheral
+        if (spi_bus != nullptr) {
+            spi_bus->setSCLK(sck_pin);
+            spi_bus->setMISO(miso_pin);
+            spi_bus->setMOSI(mosi_pin);
+            spi_bus->begin();
 
-        // Enable pull-up directly on PB4 (MISO) without destroying AF5 configuration
-        GPIOB->PUPDR = (GPIOB->PUPDR & ~(3 << (4 * 2))) | (1 << (4 * 2));
+            // Enable pull-up directly on MISO without destroying AF5 configuration
+            if (miso_pin == PB4) {
+                GPIOB->PUPDR = (GPIOB->PUPDR & ~(3UL << (4 * 2))) | (1UL << (4 * 2));
+            } else if (miso_pin == PB14) {
+                GPIOB->PUPDR = (GPIOB->PUPDR & ~(3UL << (14 * 2))) | (1UL << (14 * 2));
+            }
+        }
 
         // MT6816 initial read
         readHardwareSPI();
@@ -134,7 +155,9 @@ public:
     // Hardware SPI Single-Read Engine (Executed strictly ONCE per 50 us tick)
     // ------------------------------------------------------------------------
     inline void readHardwareSPI() __attribute__((always_inline)) {
-        // If sensor is disconnected, throttle to 10 Hz (every 2,000 ticks) so it doesn't pollute shared SPI bus
+        if (!spi_bus) return;
+
+        // If sensor is disconnected, throttle to 10 Hz (every 2,000 ticks) so it doesn't poll constantly
         if (!is_connected) {
             if (++slow_poll_counter < 2000) {
                 return;
@@ -142,7 +165,7 @@ public:
             slow_poll_counter = 0;
         }
 
-        SPI.beginTransaction(spi_settings);
+        spi_bus->beginTransaction(spi_settings);
 
         for (int retry = 0; retry < 2; retry++) {
             total_reads++;
@@ -150,7 +173,7 @@ public:
             // 1. Read High Byte (Register 0x03)
             csLow();
             delayNanos(180); // t_CSS setup time (>= 150 ns)
-            uint16_t rx_h = SPI.transfer16(0x8300);
+            uint16_t rx_h = spi_bus->transfer16(0x8300);
             delayNanos(180); // t_CSH hold time (>= 150 ns)
             csHigh();
 
@@ -159,7 +182,7 @@ public:
             // 2. Read Low Byte (Register 0x04)
             csLow();
             delayNanos(180); // t_CSS setup time (>= 150 ns)
-            uint16_t rx_l = SPI.transfer16(0x8400);
+            uint16_t rx_l = spi_bus->transfer16(0x8400);
             delayNanos(180); // t_CSH hold time (>= 150 ns) - ensures bit 0 (parity) is captured before CS rises!
             csHigh();
 
@@ -204,7 +227,7 @@ public:
             }
         }
 
-        SPI.endTransaction();
+        spi_bus->endTransaction();
     }
 
     // ------------------------------------------------------------------------

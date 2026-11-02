@@ -35,18 +35,26 @@
 #endif
 
 // ----------------------------------------------------------------------------
-// SPI2 Bus (MT6816 Encoder 2)
+// SPI2 Bus (MT6816 Encoder 2 - Independent Hardware SPI2 on AF5)
+// ----------------------------------------------------------------------------
+// CRITICAL PIN MAPPING (STM32G474 AF5):
+//   PB13 = SPI2_SCK  (Clock Output to MT6816 CLK)
+//   PB14 = SPI2_MISO (Data Input from MT6816 DO)
+//   PB15 = SPI2_MOSI (Data Output to MT6816 DI)
+//   PB11 = Software Chip Select (CSN)
+// STM32duino constructor argument order is: SPIClass(MOSI, MISO, SCK)
+//   SPIClass SPI_2(PIN_SPI2_MOSI, PIN_SPI2_MISO, PIN_SPI2_SCK);
 // ----------------------------------------------------------------------------
 #ifndef PIN_SPI2_SCK
-#define PIN_SPI2_SCK    PB13  // ENC2_SCK (SPI2 Clock)
+#define PIN_SPI2_SCK    PB13  // ENC2_SCK (SPI2 Clock, AF5)
 #endif
 
 #ifndef PIN_SPI2_MISO
-#define PIN_SPI2_MISO   PB14  // ENC2_MISO (SPI2 MISO)
+#define PIN_SPI2_MISO   PB14  // ENC2_MISO (SPI2 MISO, AF5)
 #endif
 
 #ifndef PIN_SPI2_MOSI
-#define PIN_SPI2_MOSI   PB15  // ENC2_MOSI (SPI2 MOSI)
+#define PIN_SPI2_MOSI   PB15  // ENC2_MOSI (SPI2 MOSI, AF5)
 #endif
 
 #ifndef PIN_M2_CS
