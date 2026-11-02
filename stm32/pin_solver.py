@@ -2,7 +2,7 @@
 """
 pin_solver.py
 =============
-Master STM32G474 Pinout & Peripheral Assignment Solver for "DA WINNA" Quad-BLDC Controller.
+Master STM32G474 Pinout & Peripheral Assignment Solver for FOLKRACE Dual/Quad-BLDC Controller.
 
 Features:
   1. 4-Motor PWM Inverter Control (12 PWM pins: 3 channels/timer across TIM1..5, TIM8)
@@ -367,7 +367,7 @@ def print_solution_report(title, timers, uart, asgn):
 
 def run_solver():
     print("=" * 82)
-    print("  DA WINNA -- MASTER STM32G474 DUAL-SPI PINOUT SOLVER (NO LED)")
+    print("  FOLKRACE -- MASTER STM32G474 DUAL-SPI PINOUT SOLVER (NO LED)")
     print("  4x Motors (12 PWM) + 1x UART + Dual SPI (6 pins) + 4x Thermistors (ADC) + CS + EN")
     print(f"  Thermistor owner: {MOTOR_THERMISTOR_OWNER} ({MOTOR_THERMISTOR_COUNT} direct ADC channels)")
     print("=" * 82)

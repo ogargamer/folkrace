@@ -186,7 +186,7 @@ class WebotsCartographerBridgeNode(Node):
         import subprocess
         try:
             subprocess.run("pkill -9 -f cartographer_node; pkill -9 -f cartographer_occupancy_grid_node; rm -rf /dev/shm/*", shell=True)
-            cfg_dir = "/mnt/c/Users/nurmi/Documents/Da Winna/webots/robotics/ros2_cartographer/config"
+            cfg_dir = "/mnt/c/Users/nurmi/Documents/Folkrace/webots/robotics/ros2_cartographer/config"
             subprocess.Popen(f"nohup ros2 run cartographer_ros cartographer_node -configuration_directory '{cfg_dir}' -configuration_basename folkrace_2d.lua --remap scan:=/scan --remap imu:=/imu > /tmp/carto_live.log 2>&1 &", shell=True)
             subprocess.Popen("nohup ros2 run cartographer_ros cartographer_occupancy_grid_node -resolution 0.02 -publish_period_sec 0.066 > /tmp/grid_live.log 2>&1 &", shell=True)
         except Exception as e:

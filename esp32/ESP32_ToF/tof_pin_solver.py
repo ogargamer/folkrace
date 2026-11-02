@@ -3,7 +3,7 @@
 tof_pin_solver.py
 =================
 Automated Mathematical Pinout Solver & Peripheral Feasibility Analyzer for
-the Dedicated "DA WINNA" ESP32-S3 Dual-SPI Quad VL53L8CX ToF Perception Hub.
+the Dedicated "FOLKRACE" ESP32-S3 Dual-SPI Quad VL53L8CX ToF Perception Hub.
 
 Mathematical Objectives:
   1. Formal Set-Theoretic Proof:
@@ -262,7 +262,7 @@ def calculate_timing_and_bandwidth():
 
 def print_pinout_table():
     print("\n" + "=" * 82)
-    print("  DA WINNA — DUAL-SPI QUAD VL53L8CX PINOUT ASSIGNMENT TABLE")
+    print("  FOLKRACE — DUAL-SPI QUAD VL53L8CX PINOUT ASSIGNMENT TABLE")
     print("  Target: ESP32-S3-DevKitC-1 (N16R8) Dedicated ToF Perception Hub")
     print("=" * 82)
     print(f"  {'Signal Identifier':<18} | {'GPIO':<7} | {'Direction':<9} | {'Bus / Subsystem':<15} | {'Role & Hardware Capability':<26}")

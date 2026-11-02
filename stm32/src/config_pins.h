@@ -4,7 +4,7 @@
 #include <Arduino.h>
 
 // ============================================================================
-// DA WINNA — HARDWARE PINOUT & SYSTEM CONFIGURATION (STM32G474 LQFP48)
+// FOLKRACE — HARDWARE PINOUT & SYSTEM CONFIGURATION (STM32G474 LQFP48)
 // ============================================================================
 // Hardware Pinout matching exact pin solver / hardware assignments:
 // M1: TIM2 (PA5, PA1, PA2), M1_EN: PA3

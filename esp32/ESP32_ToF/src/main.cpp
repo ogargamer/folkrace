@@ -799,7 +799,7 @@ void setup() {
     delay(200);
 
     Serial.println(F("\n================================================================="));
-    Serial.println(F("   DA WINNA ΓÇö DUAL VL53L8CX TOF SENSOR HUB (HSPI BUS)           "));
+    Serial.println(F("   FOLKRACE ΓÇö DUAL VL53L8CX TOF SENSOR HUB (HSPI BUS)           "));
     Serial.println(F("   Shared SPI: SCK=39, MOSI=40                                   "));
     Serial.printf ("   ToF 1: CS=%d, INT=%d, LPN=%d, MISO=%d                         \n", TOF1_CS_PIN, TOF1_INT_PIN, TOF1_LPN_PIN, TOF1_MISO_PIN);
     Serial.printf ("   ToF 2: CS=%d, INT=%d, LPN=%d, MISO=%d                         \n", TOF2_CS_PIN, TOF2_INT_PIN, TOF2_LPN_PIN, TOF2_MISO_PIN);

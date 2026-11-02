@@ -1,6 +1,6 @@
 /*
  * =========================================================================================
- * DA WINNA — ESP32-S3 HIGH-RATE (333 Hz) DIGITAL SERVO FIRMWARE
+ * FOLKRACE — ESP32-S3 HIGH-RATE (333 Hz) DIGITAL SERVO FIRMWARE
  * =========================================================================================
  * Target: ESP32-S3 (ESP32-S3-WROOM-1 / DevKitC-1 N8R8 / N16R8)
  *
@@ -14,7 +14,7 @@
  *   - Control System:   PWM (LEDC Peripheral, 14-bit resolution = 0.183 µs/tick)
  *
  * RECOMMENDED PWM PIN FOR ESP32-S3:
- *   - BEST PIN: GPIO 21 (Matches "DA WINNA" master SERVO_FRONT_PWM allocation).
+ *   - BEST PIN: GPIO 21 (Matches "FOLKRACE" master SERVO_FRONT_PWM allocation).
  *     Why: Free of internal Octal PSRAM/Flash (GPIO 26-37), no strapping roles,
  *          full push-pull drive (unlike input-only GPIO 46), glitch-free boot,
  *          and physically routed to the outer header.
@@ -42,7 +42,7 @@
 // -----------------------------------------------------------------------------
 // Pin and Hardware Configuration
 // -----------------------------------------------------------------------------
-#define SERVO_PIN         21        // Recommended PWM pin for ESP32-S3 (DA WINNA SERVO_FRONT_PWM)
+#define SERVO_PIN         21        // Recommended PWM pin for ESP32-S3 (FOLKRACE SERVO_FRONT_PWM)
 #define PWM_FREQ_HZ       333       // 333 Hz refresh rate (3.0 ms cycle)
 #define PWM_CHANNEL       0         // LEDC channel (0-7 on ESP32-S3)
 #define PWM_RESOLUTION    14        // 14-bit (0-16383), ~0.183 us per count

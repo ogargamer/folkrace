@@ -1,4 +1,4 @@
-# DA WINNA Launcher Suite
+# Folkrace Launcher Suite
 
 This directory contains consolidated, one-click launchers for simulation, genetic algorithm optimization, physical microcontroller hardware diagnostics (ESP32 & STM32), and Raspberry Pi 5 robotics deployment.
 

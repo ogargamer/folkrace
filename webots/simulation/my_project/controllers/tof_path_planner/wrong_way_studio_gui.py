@@ -289,7 +289,7 @@ class WrongWayRadarCanvas(QtWidgets.QWidget):
 class WrongWayStudioGUI(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Da Winna - Anti-Wrong-Way Watchdog & 180 Auto-Correction Studio")
+        self.setWindowTitle("Folkrace - Anti-Wrong-Way Watchdog & 180 Auto-Correction Studio")
 
         # Position cleanly on the right half of a 2560x1600 monitor
         self._position_for_right_screen_half()

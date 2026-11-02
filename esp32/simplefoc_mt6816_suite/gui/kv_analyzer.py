@@ -79,7 +79,7 @@ class KVAnalyzer:
 
         try:
             with open(file_path, "w", encoding="utf-8") as f:
-                f.write("# DA WINNA — CLOSED-LOOP MOTOR KV TEST REPORT\n")
+                f.write("# FOLKRACE — CLOSED-LOOP MOTOR KV TEST REPORT\n")
                 f.write(f"# Date: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
                 f.write("# Motor: GM3506 (11 Pole Pairs) @ 12V SpaceVectorPWM\n")
                 f.write("# Sensor: MT6816/MT6818 14-Bit SPI Magnetic Encoder\n")

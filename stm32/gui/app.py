@@ -2,10 +2,10 @@
 """
 app.py
 ======
-DA WINNA — STM32G474 Motor 1 & MT6816 Dual Encoders 20.0 kHz SimpleFOC Live GUI
-Inspired by the proven ESP32 SimpleFOC Suite:
+FOLKRACE — STM32G474 Dual Motor MT6816 20.0 kHz SimpleFOC Live GUI
+Inspired by the proven SimpleFOC Suite:
   • 1-Click Master Auto-Calibrator (Stepped 128-Point Dual-Pass LUT + 11-Pole Electrical Zero Alignment)
-  • Overall Speed Control with 1.0 ms DWT Velocity Window, 11-Pole Zero Interpolation & Lag Compensation
+  • Overall Speed Control with 2.0 ms DWT Velocity Window, 11-Pole Zero Interpolation & Lag Compensation
   • Live Real-Time PID / LPF / Voltage Ramp / Lag / Zero / KV Tuning + Flash & JSON Persistence
   • Real-Time Velocity Tracking Oscilloscope & Dual 14-Bit Angle Compass Dials
 """
@@ -44,7 +44,7 @@ MOTOR_CONFIG_JSON_PATH = os.path.abspath(os.path.join(CURRENT_DIR, "..", "motor_
 class DualMotorDashboardApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("🏎️ DA WINNA — STM32G474 MASTER LUT CALIBRATION & SPEED CONTROL SUITE (20.0 kHz FOC)")
+        self.title("🏎️ FOLKRACE — STM32G474 MASTER LUT CALIBRATION & SPEED CONTROL SUITE (20.0 kHz FOC)")
         self.geometry("1420x930")
         self.minsize(1240, 840)
         self.configure(bg=COLOR_BG)
@@ -109,7 +109,7 @@ class DualMotorDashboardApp(tk.Tk):
 
         title_lbl = tk.Label(
             top_bar,
-            text="🏎️ DA WINNA | STM32G474 MASTER LUT CALIBRATION & SPEED CONTROL",
+            text="🏎️ FOLKRACE | STM32G474 MASTER LUT CALIBRATION & SPEED CONTROL",
             font=("Segoe UI", 11, "bold"),
             bg=COLOR_CARD,
             fg=COLOR_ACCENT_CYAN
@@ -1075,6 +1075,7 @@ class DualMotorDashboardApp(tk.Tk):
     def _export_config_to_json(self, silent=False):
         self._pending_json_save_path = MOTOR_CONFIG_JSON_PATH
         self._silent_json_export = silent
+        self._explicit_export_requested = True
         self.serial_engine.send_command("export")
 
     def _update_gui_from_config(self, cfg):
@@ -1103,7 +1104,6 @@ class DualMotorDashboardApp(tk.Tk):
                 self.kv_ent.delete(0, tk.END); self.kv_ent.insert(0, f"{float(cfg['motor_kv_rating']):.1f}")
             if "dwt_window_ms" in cfg and hasattr(self, "dwt_ent"):
                 self.dwt_ent.delete(0, tk.END); self.dwt_ent.insert(0, f"{float(cfg['dwt_window_ms']):.1f}")
-                self.kv_ent.delete(0, tk.END); self.kv_ent.insert(0, f"{float(cfg['motor_kv_rating']):.1f}")
             if "sensor_lag_comp_us" in cfg and hasattr(self, "lag_ent"):
                 self.lag_ent.delete(0, tk.END); self.lag_ent.insert(0, f"{float(cfg['sensor_lag_comp_us']):.1f}")
             if "zero_electric_angle" in cfg and hasattr(self, "zero_ent"):
@@ -1114,43 +1114,52 @@ class DualMotorDashboardApp(tk.Tk):
     def _on_config_json_received(self, json_str):
         try:
             cfg = json.loads(json_str)
-            # 1. Save full ESP32-compatible motor_config_gm3506.json
-            with open(MOTOR_CONFIG_JSON_PATH, "w") as f:
-                json.dump(cfg, f, indent=2)
+            z1 = float(cfg.get("zero_electric_angle", -12345.0))
+            is_valid = (z1 != -12345.0 and z1 != 0.0) or getattr(self, "_explicit_export_requested", False)
+            self._explicit_export_requested = False
 
-            # 2. Also update STM32/gui/lut_calibrations.json for backwards compatibility
-            lut_data = {}
-            if os.path.exists(LUT_JSON_PATH):
-                try:
-                    with open(LUT_JSON_PATH, "r") as f:
-                        lut_data = json.load(f)
-                except Exception:
-                    lut_data = {}
+            if is_valid:
+                # 1. Save full motor_config_gm3506.json
+                with open(MOTOR_CONFIG_JSON_PATH, "w") as f:
+                    json.dump(cfg, f, indent=2)
 
-            lut_data["motor1"] = {
-                "lut_errors": cfg.get("lut_128", [0.0] * 128),
-                "pole_zeros": cfg.get("pole_zeros", []),
-                "zero_electric_angle": cfg.get("zero_electric_angle", 0.0),
-                "sensor_direction": cfg.get("sensor_direction", 1),
-                "sensor_lag_comp_us": cfg.get("sensor_lag_comp_us", 35.0)
-            }
-            with open(LUT_JSON_PATH, "w") as f:
-                json.dump(lut_data, f, indent=2)
+                # 2. Also update STM32/gui/lut_calibrations.json for backwards compatibility
+                lut_data = {}
+                if os.path.exists(LUT_JSON_PATH):
+                    try:
+                        with open(LUT_JSON_PATH, "r") as f:
+                            lut_data = json.load(f)
+                    except Exception:
+                        lut_data = {}
+
+                lut_data["motor1"] = {
+                    "lut_errors": cfg.get("lut_128", [0.0] * 128),
+                    "pole_zeros": cfg.get("pole_zeros", []),
+                    "zero_electric_angle": cfg.get("zero_electric_angle", 0.0),
+                    "sensor_direction": cfg.get("sensor_direction", 1),
+                    "sensor_lag_comp_us": cfg.get("sensor_lag_comp_us", 35.0)
+                }
+                with open(LUT_JSON_PATH, "w") as f:
+                    json.dump(lut_data, f, indent=2)
 
             self.after(0, lambda: self._update_gui_from_config(cfg))
-            self.after(0, lambda: self._log_console(
-                f"[SYS] Config received: Zero={cfg.get('zero_electric_angle', 0.0):.4f} rad | Saved to {os.path.basename(MOTOR_CONFIG_JSON_PATH)}\n"
-            ))
-            if not getattr(self, "_silent_json_export", False):
-                self.after(0, lambda: messagebox.showinfo(
-                    "Config Exported",
-                    f"Saved full STM32 calibration & tuning profile to:\n• {MOTOR_CONFIG_JSON_PATH}\n• {LUT_JSON_PATH}"
+            if is_valid:
+                self.after(0, lambda: self._log_console(
+                    f"[SYS] Config received: Zero={cfg.get('zero_electric_angle', 0.0):.4f} rad | Saved to {os.path.basename(MOTOR_CONFIG_JSON_PATH)}\n"
+                ))
+                if not getattr(self, "_silent_json_export", False):
+                    self.after(0, lambda: messagebox.showinfo(
+                        "Config Exported",
+                        f"Saved full STM32 calibration & tuning profile to:\n• {MOTOR_CONFIG_JSON_PATH}\n• {LUT_JSON_PATH}"
+                    ))
+            else:
+                self.after(0, lambda: self._log_console(
+                    f"[SYS] Live config received: Zero={z1:.4f} rad (Uncalibrated; existing config on disk preserved)\n"
                 ))
         except Exception as ex:
             self.after(0, lambda: self._log_console(f"[JSON ERR] Failed to parse exported JSON: {ex}\n"))
 
     def _upload_config_from_json(self):
-        # Prefer motor_config_gm3506.json if present, or let user pick
         default_file = MOTOR_CONFIG_JSON_PATH if os.path.exists(MOTOR_CONFIG_JSON_PATH) else LUT_JSON_PATH
         path = filedialog.askopenfilename(
             title="Select Calibration JSON File",
@@ -1165,58 +1174,82 @@ class DualMotorDashboardApp(tk.Tk):
             with open(path, "r") as f:
                 data = json.load(f)
 
-            errs = None
-            pole_zeros = []
-            zero_ang = None
-            lag_us = None
-
             # Support both motor_config_gm3506.json format and lut_calibrations.json format
-            if "lut_128" in data:
-                errs = data["lut_128"]
-                pole_zeros = data.get("pole_zeros", [])
-                zero_ang = data.get("zero_electric_angle", None)
-                lag_us = data.get("sensor_lag_comp_us", None)
-            elif "motor1" in data and isinstance(data["motor1"], dict):
-                m1 = data["motor1"]
-                errs = m1.get("lut_errors", None)
-                pole_zeros = m1.get("pole_zeros", [])
-                zero_ang = m1.get("zero_electric_angle", None)
-                lag_us = m1.get("sensor_lag_comp_us", None)
-            else:
-                zero_ang = data.get("zero_electric_angle", None)
-                lag_us = data.get("sensor_lag_comp_us", None)
+            m1_cfg = data.get("motor1", data) if ("motor1" in data and isinstance(data["motor1"], dict)) else data
+            m2_cfg = data.get("motor2", None)
 
-            # 1. Transmit 8 lines of 16 comma-separated LUT floats if LUT exists
-            if errs is not None and len(errs) == 128:
+            # 1. Upload Motor 1 LUT
+            m1_lut = m1_cfg.get("lut_128", m1_cfg.get("lut_errors", None))
+            if m1_lut is not None and len(m1_lut) == 128:
+                self._log_console("[SYS] Uploading 128-point LUT curve for Motor 1...\n")
                 for line_idx in range(8):
-                    chunk = errs[line_idx * 16 : (line_idx + 1) * 16]
-                    csv_str = ",".join(f"{x:.6f}" for x in chunk)
+                    chunk = m1_lut[line_idx * 16 : (line_idx + 1) * 16]
+                    csv_str = ",".join(f"{float(x):.6f}" for x in chunk)
                     self.serial_engine.send_command(f"LUT 1 {line_idx} {csv_str}")
-                    time.sleep(0.02)
+                    time.sleep(0.04)
                 self.serial_engine.send_command("LUT_MODE 1 1")
+                time.sleep(0.03)
+
+            # 2. Upload Motor 1 Zero & Direction
+            m1_zero = m1_cfg.get("zero_electric_angle", None)
+            if m1_zero is not None and float(m1_zero) != -12345.0:
+                self.serial_engine.send_command(f"O1 {float(m1_zero):.4f}")
                 time.sleep(0.02)
 
-            # 2. Transmit zero electric angle & lag comp if present
-            if zero_ang is not None:
-                self.serial_engine.send_command(f"O1 {float(zero_ang):.4f}")
-                time.sleep(0.01)
-            if lag_us is not None:
-                self.serial_engine.send_command(f"LAG1 {float(lag_us):.1f}")
-                time.sleep(0.01)
+            m1_dir = m1_cfg.get("sensor_direction", None)
+            if m1_dir is not None:
+                self.serial_engine.send_command(f"DIR1 {int(m1_dir)}")
+                time.sleep(0.02)
 
-            # 3. Transmit tuning PID and filter parameters if present
-            for k, cmd in [("pid_p", "P1"), ("pid_i", "I1"), ("pid_d", "D1"), ("lpf_tf", "LPF1"), ("motor_kv_rating", "KV1"), ("dwt_window_ms", "DWT1")]:
-                if k in data:
-                    self.serial_engine.send_command(f"{cmd} {float(data[k])}")
-                    time.sleep(0.01)
+            m1_lag = m1_cfg.get("sensor_lag_comp_us", None)
+            if m1_lag is not None:
+                self.serial_engine.send_command(f"LAG1 {float(m1_lag):.1f}")
+                time.sleep(0.02)
 
-            # 4. Save to Flash so it persists across reboots
+            # 3. Upload Motor 1 PID, filter, KV, and DWT
+            for k, cmd in [("pid_p", "P1"), ("pid_i", "I1"), ("pid_d", "D1"), ("lpf_tf", "F1"), ("motor_kv_rating", "KV1"), ("dwt_window_ms", "DWT1")]:
+                if k in m1_cfg:
+                    self.serial_engine.send_command(f"{cmd} {float(m1_cfg[k])}")
+                    time.sleep(0.02)
+
+            # 4. Upload Motor 2 if present
+            m2_zero = data.get("m2_zero_electric_angle", None)
+            if m2_cfg and "zero_electric_angle" in m2_cfg:
+                m2_zero = m2_cfg.get("zero_electric_angle")
+            if m2_zero is not None and float(m2_zero) != -12345.0:
+                self.serial_engine.send_command(f"O2 {float(m2_zero):.4f}")
+                time.sleep(0.02)
+
+            m2_dir = data.get("m2_sensor_direction", None)
+            if m2_cfg and "sensor_direction" in m2_cfg:
+                m2_dir = m2_cfg.get("sensor_direction")
+            if m2_dir is not None:
+                self.serial_engine.send_command(f"DIR2 {int(m2_dir)}")
+                time.sleep(0.02)
+
+            m2_lut = None
+            if m2_cfg and "lut_errors" in m2_cfg:
+                m2_lut = m2_cfg["lut_errors"]
+            elif "m2_lut_128" in data:
+                m2_lut = data["m2_lut_128"]
+            if m2_lut is not None and len(m2_lut) == 128:
+                self._log_console("[SYS] Uploading 128-point LUT curve for Motor 2...\n")
+                for line_idx in range(8):
+                    chunk = m2_lut[line_idx * 16 : (line_idx + 1) * 16]
+                    csv_str = ",".join(f"{float(x):.6f}" for x in chunk)
+                    self.serial_engine.send_command(f"LUT 2 {line_idx} {csv_str}")
+                    time.sleep(0.04)
+                self.serial_engine.send_command("LUT_MODE 2 1")
+                time.sleep(0.03)
+
+            # 5. Persist to STM32 Flash
             self.serial_engine.send_command("SAVE")
+            time.sleep(0.1)
 
-            # 5. Update GUI fields
-            self._update_gui_from_config(data)
+            # 6. Update GUI fields
+            self._update_gui_from_config(m1_cfg)
 
-            self._log_console(f"[SYS] Uploaded & applied profile from {os.path.basename(path)}\n")
+            self._log_console(f"[SYS] Uploaded & applied profile from {os.path.basename(path)} and saved to Flash!\n")
             messagebox.showinfo("Upload Complete", f"Profile uploaded and saved to STM32 Flash from:\n{os.path.basename(path)}")
         except Exception as ex:
             messagebox.showerror("Upload Error", str(ex))

@@ -2,7 +2,7 @@
 """
 pin_solver.py
 =============
-Master ESP32-S3 (N16R8 Octal Flash/PSRAM) Pinout & Peripheral Assignment Solver for "DA WINNA" Sensor Hub.
+Master ESP32-S3 (N16R8 Octal Flash/PSRAM) Pinout & Peripheral Assignment Solver for "FOLKRACE" Sensor Hub.
 
 IMPORTANT ESP32-S3 Silicon Facts:
   - Valid GPIOs: 0-21 and 26-48 only. GPIO 22-25 DO NOT EXIST on ESP32-S3.
@@ -213,7 +213,7 @@ def solve_esp32_pinout():
 def print_report():
     allocations, used = solve_esp32_pinout()
     print("=" * 82)
-    print("  DA WINNA -- MASTER ESP32-S3 PINOUT SOLVER (N16R8 DUAL-SPI SENSOR HUB)")
+    print("  FOLKRACE -- MASTER ESP32-S3 PINOUT SOLVER (N16R8 DUAL-SPI SENSOR HUB)")
     print("  5x ToF (SPI2) + BNO08x IMU (SPI3) + 2x Servos + Pi4 UART2 + DRDY")
     print("=" * 82)
     print(f"  {'Subsystem / Signal':<22} | {'ESP32 GPIO':<12} | {'Description / Target Interface':<42}")

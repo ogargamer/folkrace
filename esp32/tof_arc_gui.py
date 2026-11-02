@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ===============================================================================
-DA WINNA — DUAL VL53L8CX 8-ZONE 90° TOP-DOWN 2D RADAR GUI
+FOLKRACE — DUAL VL53L8CX 8-ZONE 90° TOP-DOWN 2D RADAR GUI
 ===============================================================================
 Fused 8-Zone Top-Down 2D Field-of-View (FoV) Visualizer:
   - Fuses two parallel VL53L8CX sensors (one physically rotated 180°):
@@ -632,7 +632,7 @@ class ToFArcRadarApp(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("DA WINNA — VL53L8CX 8-Zone 90° Radar Telemetry Suite")
+        self.setWindowTitle("FOLKRACE — VL53L8CX 8-Zone 90° Radar Telemetry Suite")
         self.resize(1080, 750)
         self.setMinimumSize(860, 620)
         self.setStyleSheet("background-color: #0b0f19; color: #f1f5f9; font-family: 'Segoe UI', sans-serif;")

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-DA WINNA — MT6816 / MT6818 SPI Encoder & Closed-Loop KV Test Suite GUI (GM3506 @ 12V)
+FOLKRACE — MT6816 / MT6818 SPI Encoder & Closed-Loop KV Test Suite GUI (GM3506 @ 12V)
 Modular Entry-Point Runner.
 """
 

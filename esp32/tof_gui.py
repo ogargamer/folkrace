@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ===============================================================================
-DA WINNA — VL53L8CX MULTIZONE TIME-OF-FLIGHT CONTROL & TELEMETRY SUITE
+FOLKRACE — VL53L8CX MULTIZONE TIME-OF-FLIGHT CONTROL & TELEMETRY SUITE
 ===============================================================================
 Features:
   - Smart Fallback Multi-Target Detection (Target #1 with Target #2 Fallback)
@@ -858,7 +858,7 @@ class TelemetryStripChart(QWidget):
 class VL53L8CXDashboard(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("DA WINNA — VL53L8CX Multizone Time-of-Flight Live Engine & Tuning Suite")
+        self.setWindowTitle("FOLKRACE — VL53L8CX Multizone Time-of-Flight Live Engine & Tuning Suite")
 
         screen = QApplication.primaryScreen()
         if screen:

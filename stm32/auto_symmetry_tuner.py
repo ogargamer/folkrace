@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-DA WINNA — Automated Closed-Loop Phase Angle Equalizer & Symmetry Tuner (GM3506 @ 12V)
+FOLKRACE — Automated Closed-Loop Phase Angle Equalizer & Symmetry Tuner (GM3506 @ 12V)
 ======================================================================================
 Protocol:
   1. Sets gentle alignment voltage (2.5V @ ~0.35A).

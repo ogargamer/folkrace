@@ -1,4 +1,4 @@
-# Genetic Algorithm (GA) Development Reference Guide for Da Winna MPPI
+# Genetic Algorithm (GA) Development Reference Guide for Folkrace MPPI
 
 This document serves as the authoritative architectural specification and codebase reference for any AI agent developing the automated Genetic Algorithm (GA / CMA-ES / Differential Evolution) to optimize the autonomous 4WD Folkrace racing vehicle.
 

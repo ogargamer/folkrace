@@ -24,7 +24,7 @@ class MT6818DashboardGUI:
     def __init__(self, root, reader):
         self.root = root
         self.reader = reader
-        self.root.title("DA WINNA — MT6816 / MT6818 SimpleFOC & Closed-Loop KV Test Suite (GM3506 @ 12V)")
+        self.root.title("FOLKRACE — MT6816 / MT6818 SimpleFOC & Closed-Loop KV Test Suite (GM3506 @ 12V)")
         self.root.geometry("1280x920")
         self.root.minsize(1140, 780)
         self.root.configure(bg="#12161E")
@@ -93,7 +93,7 @@ class MT6818DashboardGUI:
         header_frame = ttk.Frame(self.root, padding="15 10 15 8")
         header_frame.pack(fill="x")
 
-        ttk.Label(header_frame, text="🏎️ DA WINNA — MT6816 SPI ENCODER & MOTOR 1 BENCH (GM3506 @ 12V)", style="Header.TLabel").pack(side="left")
+        ttk.Label(header_frame, text="🏎️ FOLKRACE — MT6816 SPI ENCODER & MOTOR 1 BENCH (GM3506 @ 12V)", style="Header.TLabel").pack(side="left")
 
         self.conn_label = tk.Label(header_frame, text="DISCONNECTED", font=("Segoe UI", 10, "bold"), fg="#FF5252", bg="#12161E")
         self.conn_label.pack(side="right", padx=8)

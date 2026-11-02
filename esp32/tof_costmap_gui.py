@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ===============================================================================
-DA WINNA — 4X TOF 2D COSTMAP & DUAL-TARGET RADAR GUI
+FOLKRACE — 4X TOF 2D COSTMAP & DUAL-TARGET RADAR GUI
 ===============================================================================
 Live 2D Costmap Generator and Multi-Target Visualizer for 4x VL53L8CX Time-of-Flight
 sensors connected to an ESP32-S3 over high-speed UART (921,600 / 2,000,000 Baud).
@@ -1380,7 +1380,7 @@ class QuadSensorHUD(QGroupBox):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("DA WINNA — 4X TOF 2D COSTMAP (WEBOTS GRID)")
+        self.setWindowTitle("FOLKRACE — 4X TOF 2D COSTMAP (WEBOTS GRID)")
         self.resize(1380, 860)
         self.setMinimumSize(1040, 680)
 
@@ -1475,7 +1475,7 @@ class MainWindow(QMainWindow):
         lay.setSpacing(10)
 
         # Title badge
-        title_lbl = QLabel("🏎️ DA WINNA 4X TOF COSTMAP")
+        title_lbl = QLabel("🏎️ FOLKRACE 4X TOF COSTMAP")
         title_lbl.setStyleSheet("font-size: 13px; font-weight: bold; color: #00ffcc;")
         lay.addWidget(title_lbl)
 

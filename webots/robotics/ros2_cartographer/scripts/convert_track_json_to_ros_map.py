@@ -149,5 +149,5 @@ free_thresh: 0.25
 
 if __name__ == "__main__":
     src_json = sys.argv[1] if len(sys.argv) > 1 else r"C:\Users\nurmi\Downloads\track_layout_1787771901940.json"
-    out_dir = sys.argv[2] if len(sys.argv) > 2 else r"c:\Users\nurmi\Documents\Da Winna\maps"
+    out_dir = sys.argv[2] if len(sys.argv) > 2 else r"c:\Users\nurmi\Documents\Folkrace\maps"
     generate_occupancy_grid(src_json, out_dir, resolution=0.02)

@@ -4,7 +4,7 @@
 #include <Arduino.h>
 
 // =============================================================================
-// DA WINNA — DUAL-SPI QUAD VL53L8CX HARDWARE PIN CONFIGURATION
+// FOLKRACE — DUAL-SPI QUAD VL53L8CX HARDWARE PIN CONFIGURATION
 // Target Board: ESP32-S3-DevKitC-1 (N16R8 Octal PSRAM/Flash)
 //
 // Topology:

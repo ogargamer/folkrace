@@ -1,4 +1,4 @@
-# DA WINNA — Master Hardware Wiring & Interconnect Architecture
+# FOLKRACE — Master Hardware Wiring & Interconnect Architecture
 
 A unified, multi-instance color-coded connection scheme and physical pinout blueprint mapping all hardware, electrical, and protocol interconnects across **Raspberry Pi 5**, **ESP32-S3 Master / Sensor Hub**, **STM32G474 Quad-BLDC Controller**, and the sensor/actuator arrays.
 

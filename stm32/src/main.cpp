@@ -1,12 +1,11 @@
 #include <Arduino.h>
 #include <SPI.h>
-#include <EEPROM.h>
 #include <SimpleFOC.h>
 #include "config_pins.h"
 #include "mt6816_spi.h"
 
 // ============================================================================
-// DA WINNA — 20.0 kHz HARD REAL-TIME DUAL-MOTOR SIMPLEFOC ENGINE (STM32G474)
+// FOLKRACE — 20.0 kHz HARD REAL-TIME DUAL-MOTOR SIMPLEFOC ENGINE (STM32G474)
 // ============================================================================
 // Hardware: STM32G474CBT6 (170 MHz Cortex-M4F, HW FPU)
 // Timers: TIM2 (M1 PWM 25kHz), TIM3 (M2 PWM 25kHz), TIM6 (20 kHz Control ISR)
@@ -291,11 +290,11 @@ void dumpLUT(int motor_id) {
 // JSON Configuration Exporter (Capturable by Python GUI)
 // ----------------------------------------------------------------------------
 // ----------------------------------------------------------------------------
-// Persistent Flash Storage (STM32 Internal Emulated EEPROM)
+// Persistent Flash Storage (Direct STM32 Hardware Flash Page Management)
 // ----------------------------------------------------------------------------
-#define FOC_CONFIG_MAGIC 0x44415749UL // "DAWI"
+#define FOC_CONFIG_MAGIC 0x464F4331UL // "FOC1"
 
-struct PersistentFOCConfig {
+struct __attribute__((aligned(8))) PersistentFOCConfig {
     uint32_t magic;
     float    m1_zero_angle;
     int8_t   m1_direction;
@@ -326,6 +325,15 @@ struct PersistentFOCConfig {
     uint32_t checksum;
 };
 
+static uint32_t getFlashConfigPageAddress(uint32_t *out_page_idx = nullptr) {
+    uint16_t flash_kb = *(const uint16_t *)0x1FFF75E0UL; // Electronic signature register
+    if (flash_kb < 128 || flash_kb > 1024) flash_kb = 128;
+    uint32_t total_pages = flash_kb / 2; // 2KB per page on STM32G4
+    uint32_t target_page = total_pages - 1;
+    if (out_page_idx) *out_page_idx = target_page;
+    return 0x08000000UL + (target_page * 2048UL);
+}
+
 static uint32_t computeConfigChecksum(const PersistentFOCConfig &cfg) {
     uint32_t chk = 0x55AA55AAUL;
     const uint8_t *p = (const uint8_t *)&cfg;
@@ -336,7 +344,10 @@ static uint32_t computeConfigChecksum(const PersistentFOCConfig &cfg) {
     return chk;
 }
 
-void saveConfigToFlash() {
+bool saveConfigToFlash() {
+    uint32_t page_idx = 63;
+    uint32_t page_addr = getFlashConfigPageAddress(&page_idx);
+
     PersistentFOCConfig cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.magic = FOC_CONFIG_MAGIC;
@@ -373,66 +384,117 @@ void saveConfigToFlash() {
 
     cfg.checksum = computeConfigChecksum(cfg);
 
-    eeprom_buffer_fill();
-    const uint8_t *ptr = (const uint8_t *)&cfg;
-    for (size_t i = 0; i < sizeof(PersistentFOCConfig); i++) {
-        eeprom_buffered_write_byte(i, ptr[i]);
+    // Disable motor PWM and pause 20kHz FOC interrupt during flash write
+    driver1.disable();
+    driver2.disable();
+    m1_enabled = false;
+    m2_enabled = false;
+
+    if (foc_timer) foc_timer->pause();
+    __disable_irq();
+
+    HAL_StatusTypeDef status;
+    FLASH_EraseInitTypeDef EraseInitStruct;
+    uint32_t pageError = 0;
+
+    HAL_FLASH_Unlock();
+    __HAL_FLASH_CLEAR_FLAG(FLASH_FLAG_ALL_ERRORS);
+
+    EraseInitStruct.TypeErase = FLASH_TYPEERASE_PAGES;
+    EraseInitStruct.Banks = FLASH_BANK_1;
+    EraseInitStruct.Page = page_idx;
+    EraseInitStruct.NbPages = 1;
+
+    status = HAL_FLASHEx_Erase(&EraseInitStruct, &pageError);
+    if (status != HAL_OK) {
+        HAL_FLASH_Lock();
+        __enable_irq();
+        if (foc_timer) foc_timer->resume();
+        Serial.printf(">>> [FLASH_ERR] Page erase failed on page %lu (status %d, err %08lX)\n",
+                      page_idx, (int)status, HAL_FLASH_GetError());
+        return false;
     }
-    eeprom_buffer_flush();
-    Serial.println(">>> [FLASH] Motor Configuration & 128-pt LUT saved to STM32 Flash!");
+
+    // Program in 64-bit double words
+    size_t total_bytes = (sizeof(PersistentFOCConfig) + 7) & ~7;
+    const uint64_t *src = (const uint64_t *)&cfg;
+    for (size_t offset = 0; offset < total_bytes; offset += 8) {
+        uint64_t dword = *src++;
+        status = HAL_FLASH_Program(FLASH_TYPEPROGRAM_DOUBLEWORD, page_addr + offset, dword);
+        if (status != HAL_OK) {
+            HAL_FLASH_Lock();
+            __enable_irq();
+            if (foc_timer) foc_timer->resume();
+            Serial.printf(">>> [FLASH_ERR] Program failed at offset %u (status %d, err %08lX)\n",
+                          (unsigned int)offset, (int)status, HAL_FLASH_GetError());
+            return false;
+        }
+    }
+
+    HAL_FLASH_Lock();
+    __enable_irq();
+    if (foc_timer) foc_timer->resume();
+
+    // Verify written data
+    if (memcmp((const void *)page_addr, &cfg, sizeof(PersistentFOCConfig)) != 0) {
+        Serial.println(">>> [FLASH_ERR] Post-write verification mismatch!");
+        return false;
+    }
+
+    Serial.printf(">>> [FLASH] Motor Configuration & 128-pt LUT saved to STM32 Flash (Page %lu @ 0x%08lX)!\n", page_idx, page_addr);
+    return true;
 }
 
 bool loadConfigFromFlash() {
-    eeprom_buffer_fill();
-    PersistentFOCConfig cfg;
-    uint8_t *ptr = (uint8_t *)&cfg;
-    for (size_t i = 0; i < sizeof(PersistentFOCConfig); i++) {
-        ptr[i] = eeprom_buffered_read_byte(i);
-    }
-    if (cfg.magic != FOC_CONFIG_MAGIC) {
-        Serial.println(">>> [FLASH] No saved calibration profile in flash.");
+    uint32_t page_idx = 63;
+    uint32_t page_addr = getFlashConfigPageAddress(&page_idx);
+    const PersistentFOCConfig *ptr = (const PersistentFOCConfig *)page_addr;
+
+    if (ptr->magic != FOC_CONFIG_MAGIC) {
+        Serial.printf(">>> [FLASH] No saved profile found in flash (magic: 0x%08lX, expected: 0x%08lX).\n",
+                      ptr->magic, FOC_CONFIG_MAGIC);
         return false;
     }
-    if (computeConfigChecksum(cfg) != cfg.checksum) {
+    if (computeConfigChecksum(*ptr) != ptr->checksum) {
         Serial.println(">>> [FLASH] Checksum mismatch in saved profile!");
         return false;
     }
 
-    motor1.zero_electric_angle = cfg.m1_zero_angle;
-    m1_base_zero_angle = cfg.m1_zero_angle;
-    motor1.sensor_direction = (cfg.m1_direction == 1) ? Direction::CW : Direction::CCW;
-    m1_lag_comp_us = cfg.m1_lag_comp_us;
-    if (cfg.m1_kv_rating > 10.0f) motor1.KV_rating = cfg.m1_kv_rating;
-    if (cfg.m1_pid_p > 0.0f) motor1.PID_velocity.P = cfg.m1_pid_p;
-    if (cfg.m1_pid_i > 0.0f) motor1.PID_velocity.I = cfg.m1_pid_i;
-    motor1.PID_velocity.D = cfg.m1_pid_d;
-    if (cfg.m1_lpf_tf > 0.0f) motor1.LPF_velocity.Tf = cfg.m1_lpf_tf;
-    if (cfg.m1_velocity_limit > 0.0f) motor1.velocity_limit = cfg.m1_velocity_limit;
-    if (cfg.m1_dwt_ms >= 0.2f && cfg.m1_dwt_ms <= 6.0f) encoder1.setDWTWindowMs(cfg.m1_dwt_ms);
-    encoder1.is_lut_active = cfg.m1_lut_active;
+    motor1.zero_electric_angle = ptr->m1_zero_angle;
+    m1_base_zero_angle = ptr->m1_zero_angle;
+    motor1.sensor_direction = (ptr->m1_direction == 1) ? Direction::CW : Direction::CCW;
+    m1_lag_comp_us = ptr->m1_lag_comp_us;
+    if (ptr->m1_kv_rating > 10.0f) motor1.KV_rating = ptr->m1_kv_rating;
+    if (ptr->m1_pid_p > 0.0f) motor1.PID_velocity.P = ptr->m1_pid_p;
+    if (ptr->m1_pid_i > 0.0f) motor1.PID_velocity.I = ptr->m1_pid_i;
+    motor1.PID_velocity.D = ptr->m1_pid_d;
+    if (ptr->m1_lpf_tf > 0.0f) motor1.LPF_velocity.Tf = ptr->m1_lpf_tf;
+    if (ptr->m1_velocity_limit > 0.0f) motor1.velocity_limit = ptr->m1_velocity_limit;
+    if (ptr->m1_dwt_ms >= 0.2f && ptr->m1_dwt_ms <= 6.0f) encoder1.setDWTWindowMs(ptr->m1_dwt_ms);
+    encoder1.is_lut_active = ptr->m1_lut_active;
     for (int i = 0; i < 128; i++) {
-        encoder1.lut_errors[i] = cfg.m1_lut_errors[i];
+        encoder1.lut_errors[i] = ptr->m1_lut_errors[i];
     }
-    m1_calibrated = (cfg.m1_zero_angle != 0.0f);
+    m1_calibrated = (ptr->m1_zero_angle != -12345.0f && ptr->m1_zero_angle != 0.0f);
 
-    motor2.zero_electric_angle = cfg.m2_zero_angle;
-    m2_base_zero_angle = cfg.m2_zero_angle;
-    motor2.sensor_direction = (cfg.m2_direction == 1) ? Direction::CW : Direction::CCW;
-    m2_lag_comp_us = cfg.m2_lag_comp_us;
-    if (cfg.m2_kv_rating > 10.0f) motor2.KV_rating = cfg.m2_kv_rating;
-    if (cfg.m2_pid_p > 0.0f) motor2.PID_velocity.P = cfg.m2_pid_p;
-    if (cfg.m2_pid_i > 0.0f) motor2.PID_velocity.I = cfg.m2_pid_i;
-    motor2.PID_velocity.D = cfg.m2_pid_d;
-    if (cfg.m2_lpf_tf > 0.0f) motor2.LPF_velocity.Tf = cfg.m2_lpf_tf;
-    if (cfg.m2_velocity_limit > 0.0f) motor2.velocity_limit = cfg.m2_velocity_limit;
-    if (cfg.m2_dwt_ms >= 0.2f && cfg.m2_dwt_ms <= 6.0f) encoder2.setDWTWindowMs(cfg.m2_dwt_ms);
-    encoder2.is_lut_active = cfg.m2_lut_active;
+    motor2.zero_electric_angle = ptr->m2_zero_angle;
+    m2_base_zero_angle = ptr->m2_zero_angle;
+    motor2.sensor_direction = (ptr->m2_direction == 1) ? Direction::CW : Direction::CCW;
+    m2_lag_comp_us = ptr->m2_lag_comp_us;
+    if (ptr->m2_kv_rating > 10.0f) motor2.KV_rating = ptr->m2_kv_rating;
+    if (ptr->m2_pid_p > 0.0f) motor2.PID_velocity.P = ptr->m2_pid_p;
+    if (ptr->m2_pid_i > 0.0f) motor2.PID_velocity.I = ptr->m2_pid_i;
+    motor2.PID_velocity.D = ptr->m2_pid_d;
+    if (ptr->m2_lpf_tf > 0.0f) motor2.LPF_velocity.Tf = ptr->m2_lpf_tf;
+    if (ptr->m2_velocity_limit > 0.0f) motor2.velocity_limit = ptr->m2_velocity_limit;
+    if (ptr->m2_dwt_ms >= 0.2f && ptr->m2_dwt_ms <= 6.0f) encoder2.setDWTWindowMs(ptr->m2_dwt_ms);
+    encoder2.is_lut_active = ptr->m2_lut_active;
     for (int i = 0; i < 128; i++) {
-        encoder2.lut_errors[i] = cfg.m2_lut_errors[i];
+        encoder2.lut_errors[i] = ptr->m2_lut_errors[i];
     }
-    m2_calibrated = (cfg.m2_zero_angle != 0.0f);
+    m2_calibrated = (ptr->m2_zero_angle != -12345.0f && ptr->m2_zero_angle != 0.0f);
 
-    Serial.println(">>> [FLASH] Successfully loaded configuration & LUT from STM32 Flash!");
+    Serial.printf(">>> [FLASH] Successfully loaded configuration & LUT from STM32 Flash (Page %lu @ 0x%08lX)!\n", page_idx, page_addr);
     return true;
 }
 
@@ -1245,41 +1307,58 @@ void runMasterCalibrationSequence(int motor_id, float align_voltage) {
 }
 
 // ----------------------------------------------------------------------------
-// 8-Line LUT Upload Parser (sscanf)
+// 8-Line LUT Upload Parser (Safe Float Tokenizer - No _scanf_float dependency)
 // ----------------------------------------------------------------------------
 void parseLUTUpload(const char *cmd) {
-    int m_id = 1;
-    int line_idx = 0;
-    float vals[16];
-
     // Format: LUT <motor_id> <line_idx> <f0,f1,...,f15>
-    int read_count = sscanf(cmd, "LUT %d %d %f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f",
-                            &m_id, &line_idx,
-                            &vals[0], &vals[1], &vals[2], &vals[3],
-                            &vals[4], &vals[5], &vals[6], &vals[7],
-                            &vals[8], &vals[9], &vals[10], &vals[11],
-                            &vals[12], &vals[13], &vals[14], &vals[15]);
+    const char *p = cmd;
+    while (*p && (*p == ' ' || *p == '\t')) p++;
+    if (strncasecmp(p, "LUT", 3) != 0) return;
+    p += 3;
+    while (*p && (*p == ' ' || *p == '\t')) p++;
+    int m_id = atoi(p);
+    while (*p && *p != ' ' && *p != '\t') p++;
+    while (*p && (*p == ' ' || *p == '\t')) p++;
+    int line_idx = atoi(p);
+    while (*p && *p != ' ' && *p != '\t') p++;
+    while (*p && (*p == ' ' || *p == '\t')) p++;
 
-    if (read_count == 18 && line_idx >= 0 && line_idx < 8) {
+    if (line_idx < 0 || line_idx >= 8 || (m_id != 1 && m_id != 2)) {
+        Serial.printf("ERR: Invalid LUT motor (%d) or line index (%d)\n", m_id, line_idx);
+        return;
+    }
+
+    float vals[16];
+    int count = 0;
+    while (*p && count < 16) {
+        vals[count++] = (float)atof(p);
+        const char *comma = strchr(p, ',');
+        if (!comma) break;
+        p = comma + 1;
+    }
+
+    if (count == 16) {
         if (m_id == 1) {
             encoder1.setLUTLine(line_idx, vals, 16);
             if (line_idx == 7) {
+                encoder1.is_lut_active = true;
                 Serial.println("[LUT_READY]:M1");
+                Serial.println(">>> [LUT] M1 128-point LUT successfully uploaded & activated!");
             } else {
-                Serial.print("[LUT_ACK]:M1:");
-                Serial.println(line_idx);
+                Serial.printf("[LUT_ACK]:M1:%d\n", line_idx);
             }
         } else if (m_id == 2) {
             encoder2.setLUTLine(line_idx, vals, 16);
             if (line_idx == 7) {
+                encoder2.is_lut_active = true;
                 Serial.println("[LUT_READY]:M2");
+                Serial.println(">>> [LUT] M2 128-point LUT successfully uploaded & activated!");
             } else {
-                Serial.print("[LUT_ACK]:M2:");
-                Serial.println(line_idx);
+                Serial.printf("[LUT_ACK]:M2:%d\n", line_idx);
             }
         }
     } else {
-        Serial.println("ERR: Invalid LUT format. Expected 'LUT <m_id> <line_idx> <16 csv floats>'");
+        Serial.printf("ERR: Expected 16 comma-separated floats for line %d, got %d\n", line_idx, count);
     }
 }
 
@@ -1325,7 +1404,7 @@ void resetDefaults(int motor_id) {
 // ----------------------------------------------------------------------------
 void printHelp() {
     Serial.println("\n================================================================================");
-    Serial.println("  🏎️  DA WINNA — STM32G474 DUAL-MOTOR 20.0 kHz SIMPLEFOC ENGINE (GM3506)");
+    Serial.println("  🏎️  FOLKRACE — STM32G474 DUAL-MOTOR 20.0 kHz SIMPLEFOC ENGINE (GM3506)");
     Serial.println("================================================================================");
     Serial.print  ("  Motor 1 State    : "); Serial.println(m1_enabled ? "ENABLED" : "DISABLED");
     Serial.print  ("  Motor 2 State    : "); Serial.println(m2_enabled ? "ENABLED" : "DISABLED");
@@ -1367,18 +1446,27 @@ void printHelp() {
 void processCommand(const char *cmd) {
     if (strlen(cmd) == 0) return;
 
-    // Check LUT upload
-    if (strncmp(cmd, "LUT", 3) == 0) {
-        parseLUTUpload(cmd);
+    // Check LUT toggle mode (e.g. 'LUT_MODE 1 1', 'LUT_MODE 2 0')
+    if (strncasecmp(cmd, "LUT_MODE", 8) == 0) {
+        int m = 1, en = 1;
+        sscanf(cmd + 8, "%d %d", &m, &en);
+        if (m == 1) encoder1.is_lut_active = (en != 0);
+        else if (m == 2) encoder2.is_lut_active = (en != 0);
+        Serial.printf(">>> M%d LUT Mode: %s\n", m, (en != 0) ? "128-Point LUT Active" : "Raw Angle");
         return;
     }
 
     // Check LUT dump command
-    if (strncmp(cmd, "DUMP_LUT", 8) == 0 || strncmp(cmd, "dump_lut", 8) == 0 ||
-        strncmp(cmd, "LUT_DUMP", 8) == 0 || strncmp(cmd, "lut_dump", 8) == 0) {
+    if (strncasecmp(cmd, "DUMP_LUT", 8) == 0 || strncasecmp(cmd, "LUT_DUMP", 8) == 0) {
         int m = 1;
-        sscanf(cmd, "%*s %d", &m);
+        sscanf(cmd + 8, "%d", &m);
         dumpLUT(m);
+        return;
+    }
+
+    // Check LUT line upload (e.g. 'LUT 1 0 0.001,...')
+    if (strncasecmp(cmd, "LUT ", 4) == 0) {
+        parseLUTUpload(cmd);
         return;
     }
 
@@ -1621,19 +1709,34 @@ void processCommand(const char *cmd) {
         return;
     }
 
-    if (strncmp(cmd, "F1", 2) == 0) {
-        float val = atof(cmd + 2);
+    if (strncasecmp(cmd, "LPF1", 4) == 0 || strncmp(cmd, "F1", 2) == 0) {
+        const char *p = (strncasecmp(cmd, "LPF1", 4) == 0) ? (cmd + 4) : (cmd + 2);
+        float val = atof(p);
         // Accept milliseconds (e.g. 0.5, 1.0, 2) or raw seconds (< 0.05) or microseconds (>= 50)
         if (val >= 50.0f) val *= 1e-6f;
         else if (val >= 0.05f) val *= 0.001f;
         if (val > 0.0f) { motor1.LPF_velocity.Tf = val; Serial.printf(">>> M1 LPF Tf: %.2f ms (%.6f s)\n", val * 1000.0f, val); }
         return;
     }
-    if (strncmp(cmd, "F2", 2) == 0) {
-        float val = atof(cmd + 2);
+    if (strncasecmp(cmd, "LPF2", 4) == 0 || strncmp(cmd, "F2", 2) == 0) {
+        const char *p = (strncasecmp(cmd, "LPF2", 4) == 0) ? (cmd + 4) : (cmd + 2);
+        float val = atof(p);
         if (val >= 50.0f) val *= 1e-6f;
         else if (val >= 0.05f) val *= 0.001f;
         if (val > 0.0f) { motor2.LPF_velocity.Tf = val; Serial.printf(">>> M2 LPF Tf: %.2f ms (%.6f s)\n", val * 1000.0f, val); }
+        return;
+    }
+
+    if (strncasecmp(cmd, "DIR1", 4) == 0) {
+        int d = atoi(cmd + 4);
+        motor1.sensor_direction = (d >= 0) ? Direction::CW : Direction::CCW;
+        Serial.printf(">>> M1 Sensor Direction: %s\n", motor1.sensor_direction == Direction::CW ? "CW (+1)" : "CCW (-1)");
+        return;
+    }
+    if (strncasecmp(cmd, "DIR2", 4) == 0) {
+        int d = atoi(cmd + 4);
+        motor2.sensor_direction = (d >= 0) ? Direction::CW : Direction::CCW;
+        Serial.printf(">>> M2 Sensor Direction: %s\n", motor2.sensor_direction == Direction::CW ? "CW (+1)" : "CCW (-1)");
         return;
     }
 
@@ -1825,9 +1928,9 @@ void processCommand(const char *cmd) {
     }
 
     if (strcasecmp(cmd, "SAVE") == 0 || strcasecmp(cmd, "save") == 0) {
-        saveConfigToFlash();
+        bool ok = saveConfigToFlash();
         dumpConfigJSON();
-        Serial.println("[CONFIG_SAVED]:OK");
+        Serial.println(ok ? "[CONFIG_SAVED]:OK" : "[CONFIG_SAVED]:FAIL");
         return;
     }
 

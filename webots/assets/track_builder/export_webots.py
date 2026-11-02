@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ================================================================================
-   DA WINNA - TRACK BUILDER JSON TO WEBOTS WORLD EXPORTER (.wbt)
+   FOLKRACE - TRACK BUILDER JSON TO WEBOTS WORLD EXPORTER (.wbt)
 ================================================================================
 Converts track layout JSON from Modular Track Studio into a fully playable,
 watertight Webots 3D Simulation World with ENU Standard Coordinates (Z is Up).
@@ -198,10 +198,10 @@ def convert_json_to_webots_wbt(json_path, output_wbt_path=None, wall_height=0.30
         '',
         'WorldInfo {',
         '  info [',
-        '    "Da Winna Modular Race Track Studio World",',
+        '    "Folkrace Modular Race Track Studio World",',
         '    "Coordinate System: ENU (East-North-Up Standard, Z is Elevation)"',
         '  ]',
-        '  title "Da Winna Track World"',
+        '  title "Folkrace Track World"',
         '  basicTimeStep 10',
         '  FPS 60',
         '  coordinateSystem "ENU"',

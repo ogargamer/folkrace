@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ===============================================================================
-DA WINNA — HIGH-RATE 333Hz DIGITAL SERVO TEST BENCH & GUI
+FOLKRACE — HIGH-RATE 333Hz DIGITAL SERVO TEST BENCH & GUI
 ===============================================================================
 Target Hardware: ESP32D N4 (ESP32-D0WD / ESP32-WROOM-32D)
 Servo Specifications:
@@ -294,7 +294,7 @@ class ServoArcWidget(QWidget):
 class ServoBenchGUI(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("DA WINNA — ESP32D N4 High-Rate 333Hz Digital Servo Test Bench")
+        self.setWindowTitle("FOLKRACE — ESP32D N4 High-Rate 333Hz Digital Servo Test Bench")
         self.resize(1100, 780)
         self.setMinimumSize(950, 680)
 

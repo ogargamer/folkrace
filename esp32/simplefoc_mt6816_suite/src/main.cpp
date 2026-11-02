@@ -1,5 +1,5 @@
 // ============================================================================
-// DA WINNA — ESP32-S3 MT6816 SPI ENCODER & SIMPLEFOC SUITE (GM3506 @ 12V)
+// FOLKRACE — ESP32-S3 MT6816 SPI ENCODER & SIMPLEFOC SUITE (GM3506 @ 12V)
 // 11-POLE CONTINUOUS ZERO VECTOR + 2-HARMONIC FOURIER + DYNAMIC SPEED LAG TRIM
 // + NVS FLASH SAVE / LOAD PROFILE PERSISTENCE
 // ============================================================================
@@ -3796,7 +3796,7 @@ void executeCommand(String cmd) {
   case 'H':
   case '?': {
     Serial.println("\n==================================================");
-    Serial.println("  DA WINNA — ESP32-S3 MOTOR TEST BENCH COMMANDS   ");
+    Serial.println("  FOLKRACE — ESP32-S3 MOTOR TEST BENCH COMMANDS   ");
     Serial.println("==================================================");
     Serial.println("  CALIB_DYN     : 🚀 Continuous Spatial-Binned Harmonic Calibration");
     Serial.println("  CALIB_LUT     : 🔬 Stepped 128-Point Dual-Pass LUT Calibration");
@@ -3878,7 +3878,7 @@ void setup() {
   delay(500);
 
   Serial.println("\n==================================================");
-  Serial.println("  DA WINNA — ESP32-S3 MOTOR 1 TEST BENCH     ");
+  Serial.println("  FOLKRACE — ESP32-S3 MOTOR 1 TEST BENCH     ");
   Serial.println("==================================================");
   Serial.println("  Hardware: ESP32-S3 (240MHz) | Driver: GPIO 15,16,17,2 | "
                  "Sensor: MT6816 SPI (GPIO 12,11,13,10)");

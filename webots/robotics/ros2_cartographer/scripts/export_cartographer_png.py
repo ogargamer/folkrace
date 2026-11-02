@@ -91,7 +91,7 @@ free_thresh: 0.25
                 f_yaml.write(yaml_content)
 
             # Also update canonical map in maps/cyan_champion_clean_static/
-            clean_dir = "/mnt/c/Users/nurmi/Documents/Da Winna/maps/cyan_champion_clean_static"
+            clean_dir = "/mnt/c/Users/nurmi/Documents/Folkrace/maps/cyan_champion_clean_static"
             try:
                 os.makedirs(clean_dir, exist_ok=True)
                 with open(os.path.join(clean_dir, "cartographer_2d_slam_static_map.pgm"), "wb") as f_clean:
@@ -109,7 +109,7 @@ free_thresh: 0.25
 
 def main():
     rclpy.init()
-    out_path = sys.argv[1] if len(sys.argv) > 1 else "/mnt/c/Users/nurmi/Documents/Da Winna/maps/cyan_champion_clean_static/cartographer_2d_slam_static_result.png"
+    out_path = sys.argv[1] if len(sys.argv) > 1 else "/mnt/c/Users/nurmi/Documents/Folkrace/maps/cyan_champion_clean_static/cartographer_2d_slam_static_result.png"
     node = MapSaverPNG(out_path)
     
     print("[MAP RENDERER] Waiting for live /map from Cartographer (up to 25s)...")
