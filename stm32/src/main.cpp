@@ -1382,6 +1382,7 @@ void resetDefaults(int motor_id) {
         m1_lag_comp_us = 35.0f;
         m1_lag_filt_vel = 0.0f;
         m1_target_rpm = 0.0f;
+        encoder1.resetErrors();
     }
     if (motor_id == 2 || motor_id == 0) {
         motor2.voltage_limit = MOTOR_VOLTAGE_LIMIT;
@@ -1397,8 +1398,10 @@ void resetDefaults(int motor_id) {
         m2_lag_comp_us = 35.0f;
         m2_lag_filt_vel = 0.0f;
         m2_target_rpm = 0.0f;
+        encoder2.resetErrors();
     }
-    Serial.println(">>> [RESET] Restored GM3506 12V Optimized Defaults (SpaceVectorPWM).");
+    isr_jitter_spikes = 0;
+    Serial.println(">>> [RESET] Restored GM3506 12V Optimized Defaults & Cleared Parity Errors.");
 }
 
 // ----------------------------------------------------------------------------
@@ -1572,9 +1575,23 @@ void processCommand(const char *cmd) {
         return;
     }
 
-    if (strcmp(cmd, "R1") == 0) { resetDefaults(1); return; }
-    if (strcmp(cmd, "R2") == 0) { resetDefaults(2); return; }
-    if (strcmp(cmd, "R") == 0 || strcmp(cmd, "r") == 0) { resetDefaults(0); return; }
+    if (strcasecmp(cmd, "R1") == 0 || strcasecmp(cmd, "RESET 1") == 0 || strcasecmp(cmd, "RESET1") == 0) { resetDefaults(1); return; }
+    if (strcasecmp(cmd, "R2") == 0 || strcasecmp(cmd, "RESET 2") == 0 || strcasecmp(cmd, "RESET2") == 0) { resetDefaults(2); return; }
+    if (strcasecmp(cmd, "R") == 0 || strcasecmp(cmd, "RESET") == 0 || strcasecmp(cmd, "CLR") == 0 || strcasecmp(cmd, "CLEAR") == 0) { resetDefaults(0); return; }
+    if (strcasecmp(cmd, "RESET_ERRORS") == 0 || strcasecmp(cmd, "CLEAR_ERRORS") == 0 || strcasecmp(cmd, "ENC_RESET") == 0) {
+        encoder1.resetErrors();
+        encoder2.resetErrors();
+        isr_jitter_spikes = 0;
+        Serial.println(">>> [RESET] Cleared all encoder parity and SPI fault counters.");
+        return;
+    }
+    if (strcasecmp(cmd, "REBOOT") == 0 || strcasecmp(cmd, "SYSRESET") == 0) {
+        Serial.println(">>> 🔄 [SYSTEM] Rebooting STM32 MCU...");
+        Serial.flush();
+        delay(50);
+        NVIC_SystemReset();
+        return;
+    }
 
     if (strcmp(cmd, "Z1") == 0) { encoder1.zeroCurrentPosition(); Serial.println(">>> M1: Tared."); return; }
     if (strcmp(cmd, "Z2") == 0) { encoder2.zeroCurrentPosition(); Serial.println(">>> M2: Tared."); return; }
@@ -1635,23 +1652,13 @@ void processCommand(const char *cmd) {
     }
 
     if (strcmp(cmd, "DFU") == 0 || strcmp(cmd, "dfu") == 0 || strcmp(cmd, "BOOT") == 0) {
-        Serial.println(">>> 🔄 JUMPING TO STM32 SYSTEM DFU BOOTLOADER...");
+        Serial.println(">>> 🔄 REBOOTING INTO STM32 SYSTEM DFU BOOTLOADER...");
         Serial.flush();
         delay(50);
-        __disable_irq();
-        SysTick->CTRL = 0;
-        SysTick->LOAD = 0;
-        SysTick->VAL = 0;
-        for (int i = 0; i < 8; i++) {
-            NVIC->ICER[i] = 0xFFFFFFFF;
-            NVIC->ICPR[i] = 0xFFFFFFFF;
-        }
-        const uint32_t boot_addr = 0x1FFF0000;
-        uint32_t jump_addr = *(__IO uint32_t *)(boot_addr + 4);
-        void (*boot_jump)(void) = (void (*)(void))jump_addr;
-        __set_MSP(*(__IO uint32_t *)boot_addr);
-        boot_jump();
-        while (1);
+        __HAL_RCC_PWR_CLK_ENABLE();
+        HAL_PWR_EnableBkUpAccess();
+        TAMP->BKP0R = 0xDEADBEEF;
+        NVIC_SystemReset();
     }
 
     if (strcmp(cmd, "H") == 0 || strcmp(cmd, "h") == 0 || strcmp(cmd, "?") == 0) {
@@ -1887,11 +1894,28 @@ void processCommand(const char *cmd) {
         return;
     }
 
-    if ((cmd[0] == 'v' || cmd[0] == 'V') && (cmd[1] == '+' || cmd[1] == '-' || (cmd[1] >= '0' && cmd[1] <= '9'))) {
-        float val = atof(cmd + 1);
+    // Open-loop voltage commands: 'v1 <volts>', 'v2 <volts>', or 'v <volts>' (both)
+    if (strncasecmp(cmd, "v1 ", 3) == 0 || strncasecmp(cmd, "v1", 2) == 0) {
+        float val = atof(cmd + 2);
         driver1.enable();
         motor1.setPhaseVoltage(fabsf(val), 0.0f, (val >= 0.0f) ? 0.0f : _PI);
-        Serial.printf(">>> Open-Loop Voltage Test: %+.2f V\n", val);
+        Serial.printf(">>> M1 Open-Loop Voltage: %+.2f V\n", val);
+        return;
+    }
+    if (strncasecmp(cmd, "v2 ", 3) == 0 || strncasecmp(cmd, "v2", 2) == 0) {
+        float val = atof(cmd + 2);
+        driver2.enable();
+        motor2.setPhaseVoltage(fabsf(val), 0.0f, (val >= 0.0f) ? 0.0f : _PI);
+        Serial.printf(">>> M2 Open-Loop Voltage: %+.2f V\n", val);
+        return;
+    }
+    if ((cmd[0] == 'v' || cmd[0] == 'V') && (cmd[1] == ' ' || cmd[1] == '+' || cmd[1] == '-' || (cmd[1] >= '0' && cmd[1] <= '9'))) {
+        float val = atof(cmd + 1);
+        driver1.enable();
+        driver2.enable();
+        motor1.setPhaseVoltage(fabsf(val), 0.0f, (val >= 0.0f) ? 0.0f : _PI);
+        motor2.setPhaseVoltage(fabsf(val), 0.0f, (val >= 0.0f) ? 0.0f : _PI);
+        Serial.printf(">>> Both Motors Open-Loop Voltage: %+.2f V\n", val);
         return;
     }
 
@@ -2066,6 +2090,20 @@ void sendBinaryTelemetry() {
 // Arduino Setup: Autonomous Standalone Initialization (< 150 ms)
 // ----------------------------------------------------------------------------
 void setup() {
+    // Check DFU Magic Flag in RTC/TAMP Backup Register 0
+    __HAL_RCC_PWR_CLK_ENABLE();
+    HAL_PWR_EnableBkUpAccess();
+    if (TAMP->BKP0R == 0xDEADBEEF) {
+        TAMP->BKP0R = 0; // Clear flag
+        __HAL_RCC_SYSCFG_CLK_ENABLE();
+        __HAL_SYSCFG_REMAPMEMORY_SYSTEMFLASH();
+        const uint32_t boot_addr = 0x1FFF0000;
+        __set_MSP(*(__IO uint32_t *)boot_addr);
+        void (*boot_jump)(void) = (void (*)(void))(*(__IO uint32_t *)(boot_addr + 4));
+        boot_jump();
+        while (1) {}
+    }
+
     // 0. Immediately clamp Driver Enable pins LOW to prevent current surge on startup
     pinMode(M1_EN, OUTPUT);
     digitalWrite(M1_EN, LOW);
@@ -2077,9 +2115,9 @@ void setup() {
     DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
     DWT->CYCCNT = 0;
 
-    // 2. Status LED setup
+    // 2. Status LED setup (Disabled: LOW = OFF)
     pinMode(STATUS_LED, OUTPUT);
-    digitalWrite(STATUS_LED, HIGH);
+    digitalWrite(STATUS_LED, LOW);
 
     // 3. Serial Port Initialization (921600 Baud for Ultra High Speed Telemetry)
     Serial.begin(921600);
@@ -2087,6 +2125,8 @@ void setup() {
     // 4. Initialize MT6816 Encoders on Independent Hardware SPI Buses (SPI1 & SPI2)
     encoder1.init();
     encoder2.init();
+    encoder1.resetErrors();
+    encoder2.resetErrors();
 
     // 5. Configure Drivers (TIM2 & TIM3 @ 25 kHz Center-Aligned SpaceVectorPWM)
     driver1.voltage_power_supply = MOTOR_SUPPLY_VOLTAGE;
@@ -2194,10 +2234,6 @@ void loop() {
         sendBinaryTelemetry();
     }
 
-    // 4. Heartbeat LED Toggle (500 ms)
-    if (now - last_led_time >= 500) {
-        last_led_time = now;
-        led_state = !led_state;
-        digitalWrite(STATUS_LED, led_state ? LOW : HIGH);
-    }
+    // 4. Status LED (Disabled on PA8: LOW = OFF)
+    digitalWrite(STATUS_LED, LOW);
 }

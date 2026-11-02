@@ -249,7 +249,8 @@ def display_results():
 
     # Diagnostics & Reserved System
     print("\n  [DIAGNOSTICS & RESERVED SYSTEM FUNCTIONS]")
-    print(f"  {'STATUS_LED':<16} | {'PC13':<6} | {'GPIO Output':<18} | {'Onboard User Status LED':<32}")
+    print(f"  {'USER_BTN':<16} | {'PC13':<6} | {'GPIO Input':<18} | {'Onboard User Key Button':<32}")
+    print(f"  {'STATUS_LED':<16} | {'PA8':<6} | {'GPIO Output':<18} | {'Onboard User Status LED':<32}")
     print(f"  {'DIAG_PWM':<16} | {'PA0':<6} | {'TIM2_CH1 (AF1)':<18} | {'Ground Truth Verification':<32}")
     print(f"  {'USB_DM':<16} | {'PA11':<6} | {'Native USB':<18} | {'Preserved for USB CDC Serial':<32}")
     print(f"  {'USB_DP':<16} | {'PA12':<6} | {'Native USB':<18} | {'Preserved for USB CDC Serial':<32}")

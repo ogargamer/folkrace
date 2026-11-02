@@ -91,7 +91,8 @@ flowchart TD
 | **PB13** | Encoder 2 SCK | SPI2_SCK | MT6816 #2 SPI Clock (AF5) |
 | **PB14** | Encoder 2 MISO | SPI2_MISO | MT6816 #2 SPI Data In (AF5) |
 | **PB15** | Encoder 2 MOSI | SPI2_MOSI | MT6816 #2 SPI Data Out (AF5) |
-| **PC13** | User LED | GPIO Out | Active-Low onboard status indicator |
+| **PA8** | User LED | GPIO Out | Active-Low onboard status indicator |
+| **PC13** | User Button | GPIO In | Onboard user push button (KEY) |
 
 ---
 

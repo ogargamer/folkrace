@@ -32,12 +32,15 @@ def trigger_dfu(port=None):
     print(f"[INFO] Found STM32 on {port}. Sending DFU command...")
     try:
         ser = serial.Serial(port, baudrate=921600, timeout=1.0)
-        ser.write(b"DFU\n")
+        ser.dtr = True
+        ser.rts = True
+        time.sleep(0.05)
+        ser.write(b"\n\nDFU\n")
         ser.flush()
-        time.sleep(0.15)
+        time.sleep(0.2)
         ser.close()
         print(f"[OK] DFU trigger sent. Device on {port} is rebooting to ST System DFU Bootloader...")
-        time.sleep(1.5)
+        time.sleep(3.0)
         return True
     except Exception as e:
         print(f"[WARN] Error sending DFU command to {port}: {e}")

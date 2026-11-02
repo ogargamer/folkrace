@@ -123,6 +123,8 @@ class STM32DualSerial:
                 pass
             self.running = True
             self.state["connected"] = True
+            self.state["m1_parity_ok"] = True
+            self.state["m2_parity_ok"] = True
             self.thread = threading.Thread(target=self._io_worker, daemon=True)
             self.thread.start()
             if self.on_log:
@@ -130,6 +132,8 @@ class STM32DualSerial:
             return True, "Connected"
         except Exception as ex:
             self.state["connected"] = False
+            self.state["m1_parity_ok"] = True
+            self.state["m2_parity_ok"] = True
             return False, str(ex)
 
     def disconnect(self):
@@ -146,6 +150,8 @@ class STM32DualSerial:
             self.ser = None
 
         self.state["connected"] = False
+        self.state["m1_parity_ok"] = True
+        self.state["m2_parity_ok"] = True
         if self.on_log:
             self.on_log(f"[SYS] Disconnected from {self.port}\n")
 
@@ -329,6 +335,10 @@ class STM32DualSerial:
                         self.state["m1_calib_grade"] = "FLASH LUT ACTIVE"
                 except Exception:
                     pass
+            elif "[RESET]" in s or "[STARTUP]" in s or "FOLKRACE" in s or "Cleared Parity Errors" in s:
+                self.state["m1_parity_ok"] = True
+                self.state["m2_parity_ok"] = True
+                self.state["spikes_count"] = 0
 
     def _handle_telemetry_payload(self, p):
         # Format: (header, m1_raw, m1_act_rpm, m1_tgt_rpm, m1_uq_mv, m1_status,

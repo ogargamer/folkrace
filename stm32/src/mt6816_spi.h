@@ -126,8 +126,19 @@ public:
         return (data & 1) == 0;
     }
 
+    void resetErrors() {
+        parity_errors = 0;
+        parity_retries = 0;
+        mag_faults = 0;
+        consecutive_parity_errors = 0;
+        last_parity_ok = true;
+        is_connected = true;
+        slow_poll_counter = 0;
+    }
+
     void init() override {
         setupCSPin(cs_pin);
+        resetErrors();
 
         // Configure hardware SPI peripheral
         if (spi_bus != nullptr) {
@@ -146,6 +157,9 @@ public:
 
         // MT6816 initial read
         readHardwareSPI();
+
+        // Clear any glitch/noise gathered during power-on initialization
+        resetErrors();
 
         // Initialize SimpleFOC Sensor base class
         this->Sensor::init();

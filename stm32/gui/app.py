@@ -1162,9 +1162,12 @@ class DualMotorDashboardApp(tk.Tk):
     def _reset_12v_defaults(self):
         m = self.active_motor
         self.serial_engine.send_command(f"R{m}")
+        with self.serial_engine.lock:
+            self.serial_engine.state[f"m{m}_parity_ok"] = True
         self.motor_configs[m] = dict(DEFAULT_MOTOR_CONFIG)
         self._load_gui_from_motor_config(m)
         self._log_console(f"[SYS] Reset Motor {m} to default 12V parameters.\n")
+        self._log_console(f"[SYS] Reset Motor {m} to default 12V parameters & cleared parity errors.\n")
 
     # =========================================================================
     # CALIBRATION SUB-ACTIONS

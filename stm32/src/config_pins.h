@@ -84,15 +84,15 @@
 // Motor 2 / TIM3 @ 25 kHz Center-Aligned PWM
 // ----------------------------------------------------------------------------
 #ifndef M2_PWM_A
-#define M2_PWM_A PB0 // M2_PWM1 (TIM3 Phase A)
+#define M2_PWM_A PB0 // M2_PWM1 (TIM3 Phase A / CH1)
 #endif
 
 #ifndef M2_PWM_B
-#define M2_PWM_B PA4 // M2_PWM2 (TIM3 Phase B)
+#define M2_PWM_B PA4 // M2_PWM2 (TIM3 Phase B / CH2)
 #endif
 
 #ifndef M2_PWM_C
-#define M2_PWM_C PA6 // M2_PWM3 (TIM3 Phase C)
+#define M2_PWM_C PA6 // M2_PWM3 (TIM3 Phase C / CH3)
 #endif
 
 #ifndef M2_EN
@@ -103,7 +103,11 @@
 // Onboard Status LED & Diagnostics
 // ----------------------------------------------------------------------------
 #ifndef STATUS_LED
-#define STATUS_LED PC13 // Onboard User LED
+#define STATUS_LED PA8 // Onboard User LED
+#endif
+
+#ifndef USER_BUTTON
+#define USER_BUTTON PC13 // Onboard User Button (KEY)
 #endif
 
 // Ground Truth MT6816 PWM Diagnostics
