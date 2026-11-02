@@ -127,7 +127,7 @@
 
 // Real-Time Control Loop Frequencies
 #define FOC_COMMUTATION_HZ          20000     // 20.0 kHz Hard Real-Time Commutation (50.0 us)
-#define MOTION_DOWNSAMPLE_RATIO     10        // Velocity PID downsampled to 2.0 kHz (500 us)
+#define MOTION_DOWNSAMPLE_RATIO     5         // Velocity PID downsampled to 4.0 kHz (250 us) [20 kHz / 5]
 #define TELEMETRY_RATE_HZ           25        // 25 Hz Binary Telemetry Stream (40 ms)
 #define SPI_SPEED_HZ                5312500   // 5.3125 MHz (170 MHz / 32 prescaler) for high-speed low-latency reads
 

@@ -153,7 +153,7 @@ void focTimerISR() {
         motor2.loopFOC();
     }
 
-    // 4. Downsampled Velocity Motion Control (Every 10th tick = 2.0 kHz / 500 us)
+    // 4. Downsampled Velocity Motion Control (Every 5th tick = 4.0 kHz / 250 us)
     if ((foc_tick_count % MOTION_DOWNSAMPLE_RATIO) == 0) {
         if (m1_enabled && !m1_calib_active) {
             motor1.move(m1_target_rpm * 0.104719755f);
@@ -449,7 +449,7 @@ void dumpConfigJSON() {
     Serial.printf("  \"pid_p\": %.4f,\n", motor1.PID_velocity.P);
     Serial.printf("  \"pid_i\": %.4f,\n", motor1.PID_velocity.I);
     Serial.printf("  \"pid_d\": %.4f,\n", motor1.PID_velocity.D);
-    Serial.printf("  \"lpf_tf\": %.4f,\n", motor1.LPF_velocity.Tf);
+    Serial.printf("  \"lpf_tf\": %.6f,\n", motor1.LPF_velocity.Tf);
     Serial.printf("  \"dwt_window_ms\": %.2f,\n", encoder1.window_ms);
     Serial.printf("  \"m2_zero_electric_angle\": %.6f,\n", motor2.zero_electric_angle);
     Serial.printf("  \"m2_sensor_direction\": %d,\n", (motor2.sensor_direction == Direction::CW) ? 1 : -1);
@@ -1295,7 +1295,7 @@ void resetDefaults(int motor_id) {
         motor1.PID_velocity.I = 1.50f;
         motor1.PID_velocity.D = 0.00000f;
         motor1.PID_velocity.output_ramp = 100.0f;
-        motor1.PID_velocity.Ts = 0.0005f;
+        motor1.PID_velocity.Ts = 0.00025f;
         motor1.LPF_velocity.Tf = 0.0005f;
         m1_lag_comp_us = 35.0f;
         m1_lag_filt_vel = 0.0f;
@@ -1310,7 +1310,7 @@ void resetDefaults(int motor_id) {
         motor2.PID_velocity.I = 1.50f;
         motor2.PID_velocity.D = 0.00000f;
         motor2.PID_velocity.output_ramp = 100.0f;
-        motor2.PID_velocity.Ts = 0.0005f;
+        motor2.PID_velocity.Ts = 0.00025f;
         motor2.LPF_velocity.Tf = 0.0005f;
         m2_lag_comp_us = 35.0f;
         m2_lag_filt_vel = 0.0f;
@@ -1349,7 +1349,7 @@ void printHelp() {
     Serial.println("  P1/P2 <val>      : Set Velocity P Gain");
     Serial.println("  I1/I2 <val>      : Set Velocity I Gain");
     Serial.println("  D1/D2 <val>      : Set Velocity D Gain");
-    Serial.println("  F1/F2 <val>      : Set Velocity LPF Tf in seconds");
+    Serial.println("  F1/F2 <val>      : Set Velocity LPF Tf (ms if >=0.05, s if <0.05)");
     Serial.println("  V1/V2 <val>      : Set Voltage Limit in Volts");
     Serial.println("  R1 / R2 / R      : Reset to GM3506 Defaults");
     Serial.println("  Z1 / Z2 / Z      : Zero / Tare Current Encoder Angle");
@@ -1622,12 +1622,17 @@ void processCommand(const char *cmd) {
 
     if (strncmp(cmd, "F1", 2) == 0) {
         float val = atof(cmd + 2);
-        if (val > 0.0f) { motor1.LPF_velocity.Tf = val; Serial.print(">>> M1 LPF Tf: "); Serial.println(val, 4); }
+        // Accept milliseconds (e.g. 0.5, 1.0, 2) or raw seconds (< 0.05) or microseconds (>= 50)
+        if (val >= 50.0f) val *= 1e-6f;
+        else if (val >= 0.05f) val *= 0.001f;
+        if (val > 0.0f) { motor1.LPF_velocity.Tf = val; Serial.printf(">>> M1 LPF Tf: %.2f ms (%.6f s)\n", val * 1000.0f, val); }
         return;
     }
     if (strncmp(cmd, "F2", 2) == 0) {
         float val = atof(cmd + 2);
-        if (val > 0.0f) { motor2.LPF_velocity.Tf = val; Serial.print(">>> M2 LPF Tf: "); Serial.println(val, 4); }
+        if (val >= 50.0f) val *= 1e-6f;
+        else if (val >= 0.05f) val *= 0.001f;
+        if (val > 0.0f) { motor2.LPF_velocity.Tf = val; Serial.printf(">>> M2 LPF Tf: %.2f ms (%.6f s)\n", val * 1000.0f, val); }
         return;
     }
 
@@ -2003,7 +2008,7 @@ void setup() {
     motor1.PID_velocity.I = 1.50f;
     motor1.PID_velocity.D = 0.00000f;
     motor1.PID_velocity.output_ramp = 100.0f;
-    motor1.PID_velocity.Ts = 0.0005f;
+    motor1.PID_velocity.Ts = 0.00025f;
     motor1.PID_velocity.limit = motor1.voltage_limit;
     motor1.LPF_velocity.Tf = 0.0005f;
     motor1.init();
@@ -2021,7 +2026,7 @@ void setup() {
     motor2.PID_velocity.I = 1.50f;
     motor2.PID_velocity.D = 0.00000f;
     motor2.PID_velocity.output_ramp = 100.0f;
-    motor2.PID_velocity.Ts = 0.0005f;
+    motor2.PID_velocity.Ts = 0.00025f;
     motor2.PID_velocity.limit = motor2.voltage_limit;
     motor2.LPF_velocity.Tf = 0.0005f;
     motor2.init();

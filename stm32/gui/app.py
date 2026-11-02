@@ -572,7 +572,7 @@ class DualMotorDashboardApp(tk.Tk):
         self.p_ent = self._make_tune_field(t_row1, "P:", "0.150", width=6, cmd_prefix="P1 ")
         self.i_ent = self._make_tune_field(t_row1, "I:", "1.500", width=6, cmd_prefix="I1 ")
         self.d_ent = self._make_tune_field(t_row1, "D:", "0.0000", width=6, cmd_prefix="D1 ")
-        self.tf_ent = self._make_tune_field(t_row1, "LPF Tf(s):", "0.0005", width=6, cmd_prefix="F1 ")
+        self.tf_ent = self._make_tune_field(t_row1, "LPF(ms):", "0.5", width=6, cmd_prefix="F1 ")
         self.vramp_ent = self._make_tune_field(t_row1, "V-Ramp(V/s):", "100.0", width=6, cmd_prefix="RAMP1 ")
         self.vlim_ent = self._make_tune_field(t_row1, "V-Lim(V):", "12.00", width=5, cmd_prefix="V1 ")
 
@@ -584,8 +584,8 @@ class DualMotorDashboardApp(tk.Tk):
         self.dwt_ent = self._make_tune_field(t_row2, "DWT(ms):", "2.0", width=5, cmd_prefix="DWT1 ")
         self.zero_ent = self._make_tune_field(t_row2, "Zero(rad):", "0.0000", width=7, cmd_prefix="ZERO1 ")
 
-        tk.Button(t_row2, text="-0.02", command=lambda: self._nudge_zero(-0.02), bg=COLOR_CARD_SECONDARY, fg=COLOR_TEXT, bd=0, padx=5, font=("Consolas", 8)).pack(side=tk.LEFT, padx=1)
-        tk.Button(t_row2, text="+0.02", command=lambda: self._nudge_zero(+0.02), bg=COLOR_CARD_SECONDARY, fg=COLOR_TEXT, bd=0, padx=5, font=("Consolas", 8)).pack(side=tk.LEFT, padx=1)
+        tk.Button(t_row2, text="-0.002", command=lambda: self._nudge_zero(-0.002), bg=COLOR_CARD_SECONDARY, fg=COLOR_TEXT, bd=0, padx=5, font=("Consolas", 8)).pack(side=tk.LEFT, padx=1)
+        tk.Button(t_row2, text="+0.002", command=lambda: self._nudge_zero(+0.002), bg=COLOR_CARD_SECONDARY, fg=COLOR_TEXT, bd=0, padx=5, font=("Consolas", 8)).pack(side=tk.LEFT, padx=1)
 
         tk.Button(
             t_row2,
@@ -1061,7 +1061,7 @@ class DualMotorDashboardApp(tk.Tk):
         self.p_ent.delete(0, tk.END); self.p_ent.insert(0, "0.150")
         self.i_ent.delete(0, tk.END); self.i_ent.insert(0, "1.500")
         self.d_ent.delete(0, tk.END); self.d_ent.insert(0, "0.0000")
-        self.tf_ent.delete(0, tk.END); self.tf_ent.insert(0, "0.0005")
+        self.tf_ent.delete(0, tk.END); self.tf_ent.insert(0, "0.5")
         self.vramp_ent.delete(0, tk.END); self.vramp_ent.insert(0, "100.0")
         self.vlim_ent.delete(0, tk.END); self.vlim_ent.insert(0, "12.00")
         self.maxrpm_ent.delete(0, tk.END); self.maxrpm_ent.insert(0, "2000")
@@ -1086,10 +1086,19 @@ class DualMotorDashboardApp(tk.Tk):
             if "pid_d" in cfg and hasattr(self, "d_ent"):
                 self.d_ent.delete(0, tk.END); self.d_ent.insert(0, f"{float(cfg['pid_d']):.4f}")
             if "lpf_tf" in cfg:
+                raw_tf = float(cfg['lpf_tf'])
+                # If raw_tf is in seconds (e.g. 0.0005) or in us (>= 20.0), convert to ms
+                if raw_tf >= 20.0:
+                    tf_ms = raw_tf * 0.001
+                elif raw_tf < 0.02:
+                    tf_ms = raw_tf * 1000.0
+                else:
+                    tf_ms = raw_tf
+                tf_disp = f"{tf_ms:.3f}".rstrip('0').rstrip('.')
                 if hasattr(self, "tf_ent"):
-                    self.tf_ent.delete(0, tk.END); self.tf_ent.insert(0, f"{float(cfg['lpf_tf']):.4f}")
+                    self.tf_ent.delete(0, tk.END); self.tf_ent.insert(0, tf_disp)
                 elif hasattr(self, "lpf_ent"):
-                    self.lpf_ent.delete(0, tk.END); self.lpf_ent.insert(0, f"{float(cfg['lpf_tf']):.4f}")
+                    self.lpf_ent.delete(0, tk.END); self.lpf_ent.insert(0, tf_disp)
             if "motor_kv_rating" in cfg and hasattr(self, "kv_ent"):
                 self.kv_ent.delete(0, tk.END); self.kv_ent.insert(0, f"{float(cfg['motor_kv_rating']):.1f}")
             if "dwt_window_ms" in cfg and hasattr(self, "dwt_ent"):
