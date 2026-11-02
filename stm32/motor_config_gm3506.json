@@ -1,5 +1,5 @@
 {
-  "zero_electric_angle": 3.6133,
+  "zero_electric_angle": -12345.0,
   "sensor_direction": -1,
   "sensor_lag_comp_us": 35.0,
   "motor_kv_rating": 130.0,
@@ -8,6 +8,7 @@
   "pid_i": 1.5,
   "pid_d": 0.0,
   "lpf_tf": 0.0005,
+  "dwt_window_ms": 2.0,
   "m2_zero_electric_angle": -12345.0,
   "m2_sensor_direction": -1,
   "lut_128": [
@@ -139,6 +140,5 @@
     0.0,
     0.0,
     0.0
-  ],
-  "dwt_window_ms": 2.0
+  ]
 }

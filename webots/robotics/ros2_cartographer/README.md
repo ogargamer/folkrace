@@ -1,6 +1,9 @@
-# ROS 2 & Google Cartographer SLAM for Folkrace RC Robot
+# ROS 2 & Google Cartographer SLAM (Experimental / Simulation Mapping)
 
-This package provides a clean, production-ready integration between Webots simulation / Pi 5 hardware, ROS 2 Humble, and Google Cartographer 2D SLAM.
+> [!NOTE]
+> **Hardware Context**: This module serves as an experimental simulation reference for 2D SLAM and offline track map generation. The physical Folkrace racing vehicle operates with **zero LiDAR**, relying exclusively on a solid-state quad VL53L8CX Time-of-Flight array and Curvilinear SL-MPC.
+
+This package provides an integration between Webots simulation, ROS 2 Humble, and Google Cartographer 2D SLAM.
 
 ---
 

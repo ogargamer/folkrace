@@ -41,6 +41,9 @@ class STM32DualSerial:
         self.history_target_rpm = collections.deque(maxlen=self.max_history)
         self.history_actual_rpm = collections.deque(maxlen=self.max_history)
         self.history_uq = collections.deque(maxlen=self.max_history)
+        self.history_m2_target_rpm = collections.deque(maxlen=self.max_history)
+        self.history_m2_actual_rpm = collections.deque(maxlen=self.max_history)
+        self.history_m2_uq = collections.deque(maxlen=self.max_history)
         self._last_hist_push = 0.0
 
         # JSON Config Export Capture State
@@ -76,7 +79,13 @@ class STM32DualSerial:
             "m2_parity_ok": True,
             "m2_stalled": False,
             "m2_calib": False,
+            "m2_zero_angle": 0.0,
+            "m2_direction": "CW",
+            "m2_lag_comp_us": 35.0,
+            "m2_calib_grade": "NOT CALIBRATED",
+            "m2_calib_stage": "Idle",
 
+            "calib_motor": 1,
             "foc_khz": 20.0,
             "isr_lat_us": 0,
             "spikes_count": 0,
@@ -263,42 +272,51 @@ class STM32DualSerial:
 
         # 2. Calibration Stage & Result Parsing
         with self.lock:
+            # Detect active calibrating motor from banner
+            if "Target Motor       : GM3506 (11 Pole Pairs on STM32G474 M" in s:
+                self.state["calib_motor"] = 2 if "M2)" in s else 1
+
+            cal_m = self.state.get("calib_motor", 1)
+            stage_key = f"m{cal_m}_calib_stage"
+            grade_key = f"m{cal_m}_calib_grade"
+            lut_key = f"m{cal_m}_lut_active"
+            zero_key = f"m{cal_m}_zero_angle"
+            dir_key = f"m{cal_m}_direction"
+            lag_key = f"m{cal_m}_lag_comp_us"
+
             if "Forward Sweep:" in s or "Reverse Sweep:" in s or "Coil cool-down:" in s:
-                self.state["m1_calib_stage"] = s
+                self.state[stage_key] = s
             elif "STEP 1: Locking Rotor" in s or "STEP 2: Continuous 360" in s:
-                self.state["m1_calib_stage"] = s
+                self.state[stage_key] = s
             elif "128-Point LUT ACTIVE" in s:
-                self.state["m1_lut_active"] = True
-                self.state["m1_calib_stage"] = s
+                self.state[lut_key] = True
+                self.state[stage_key] = s
             elif "LUT REJECTED" in s:
-                self.state["m1_lut_active"] = False
-                self.state["m1_calib_grade"] = "LUT REJECTED"
-                self.state["m1_calib_stage"] = s
+                self.state[lut_key] = False
+                self.state[grade_key] = "LUT REJECTED"
+                self.state[stage_key] = s
             elif "motor.zero_electric_angle =" in s:
                 try:
                     val_str = s.split("=")[1].replace(";", "").strip()
-                    self.state["m1_zero_angle"] = float(val_str)
+                    self.state[zero_key] = float(val_str)
                 except Exception:
                     pass
             elif "motor.sensor_direction = Direction::" in s:
-                if "CCW" in s:
-                    self.state["m1_direction"] = "CCW"
-                elif "CW" in s:
-                    self.state["m1_direction"] = "CW"
+                self.state[dir_key] = "CCW" if "CCW" in s else "CW"
             elif "GRADE A" in s:
-                self.state["m1_calib_grade"] = "GRADE A (EXCELLENT)"
+                self.state[grade_key] = "GRADE A (EXCELLENT)"
             elif "GRADE B" in s:
-                self.state["m1_calib_grade"] = "GRADE B (GOOD)"
+                self.state[grade_key] = "GRADE B (GOOD)"
             elif "GRADE C" in s:
-                self.state["m1_calib_grade"] = "GRADE C (FAIR)"
+                self.state[grade_key] = "GRADE C (FAIR)"
             elif "GRADE D" in s:
-                self.state["m1_calib_grade"] = "GRADE D (NOISY)"
+                self.state[grade_key] = "GRADE D (NOISY)"
             elif "GRADE E" in s:
-                self.state["m1_calib_grade"] = "GRADE E (POOR)"
+                self.state[grade_key] = "GRADE E (POOR)"
             elif "Optimal Lag Trim =" in s:
                 try:
                     part = s.split("Optimal Lag Trim =")[1].split("us")[0].strip()
-                    self.state["m1_lag_comp_us"] = float(part)
+                    self.state[lag_key] = float(part)
                 except Exception:
                     pass
             elif "Flash Config Loaded:" in s:
@@ -369,6 +387,10 @@ class STM32DualSerial:
                 self.history_time.append(now)
                 self.history_target_rpm.append(m1_tgt_rpm)
                 self.history_actual_rpm.append(m1_act_rpm)
+                self.history_uq.append(m1_uq_v)
+                self.history_m2_target_rpm.append(m2_tgt_rpm)
+                self.history_m2_actual_rpm.append(m2_act_rpm)
+                self.history_m2_uq.append(m2_uq_v)
                 self.history_uq.append(m1_uq_v)
 
         if self.on_telemetry:

@@ -130,15 +130,11 @@
       0.0,
       0.0
     ],
-    "pole_zeros": [],
-    "zero_electric_angle": 3.6133,
+    "zero_electric_angle": -12345.0,
     "sensor_direction": -1,
     "sensor_lag_comp_us": 35.0
   },
   "motor2": {
-    "name": "Motor 2 (Right Channel)",
-    "timestamp": "2026-10-27T20:00:00Z",
-    "points": 128,
     "lut_errors": [
       0.0,
       0.0,
@@ -268,6 +264,9 @@
       0.0,
       0.0,
       0.0
-    ]
+    ],
+    "zero_electric_angle": -12345.0,
+    "sensor_direction": -1,
+    "sensor_lag_comp_us": 35.0
   }
 }

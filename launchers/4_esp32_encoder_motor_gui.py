@@ -16,8 +16,8 @@ import sys
 import subprocess
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-ESP32_SUITE = os.path.join(ROOT_DIR, "esp32", "simplefoc_mt6816_suite", "test_mt6818_ui.py")
-WORK_DIR = os.path.join(ROOT_DIR, "esp32", "simplefoc_mt6816_suite")
+ESP32_SUITE = os.path.join(ROOT_DIR, "ESP32", "ESP32_Main", "simplefoc_mt6816_suite", "test_mt6818_ui.py")
+WORK_DIR = os.path.join(ROOT_DIR, "ESP32", "ESP32_Main", "simplefoc_mt6816_suite")
 
 if __name__ == "__main__":
     if not os.path.exists(ESP32_SUITE):

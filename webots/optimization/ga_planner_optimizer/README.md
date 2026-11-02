@@ -32,7 +32,7 @@ python plot_ga_results.py
 
 ## 2. Configuration & Parameter Tuning: `ga_planner_config.py`
 
-All GA hyperparameters, worker allocations, evaluation horizons, and path planner gene tables are centralized in [ga_planner_config.py](file:///c:/Users/nurmi/Documents/Da%20Winna/webots/optimization/ga_planner_optimizer/ga_planner_config.py).
+All GA hyperparameters, worker allocations, evaluation horizons, and path planner gene tables are centralized in [ga_planner_config.py](file:///c:/Users/nurmi/Documents/Folkrace/webots/optimization/ga_planner_optimizer/ga_planner_config.py).
 
 ### Core GA Hyperparameters
 - `NUM_CPU_CORES`: Number of parallel Webots instances running across CPU cores (default: auto-detect physical/logical cores).

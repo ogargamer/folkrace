@@ -20,7 +20,7 @@ import sys
 import subprocess
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-ESP32_DIR = os.path.join(ROOT_DIR, "esp32")
+ESP32_DIR = os.path.join(ROOT_DIR, "ESP32", "ESP32_ToF")
 TOF_ARC_GUI_SCRIPT = os.path.join(ESP32_DIR, "tof_arc_gui.py")
 
 if __name__ == "__main__":

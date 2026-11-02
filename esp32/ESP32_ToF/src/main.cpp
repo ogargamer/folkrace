@@ -8,25 +8,14 @@
 #include "vl53l8cx_plugin_motion_indicator.h"
 #include "vl53l8cx_plugin_xtalk.h"
 
+#include "tof_pinout.h"
+
 // =========================================================================
-// HARDWARE PIN DEFINITIONS (DUAL TOF ON SHARED HSPI BUS)
+// HARDWARE PIN DEFINITIONS (MAPPED FROM TOF_PINOUT.H)
 // =========================================================================
 
-// --- Shared SPI Bus Lines ---
-#define TOF_SHARED_SCK_PIN   12
-#define TOF_SHARED_MOSI_PIN  11
-
-// --- ToF 1 (CS=7, INT=5, LPN=6, MISO=13) ---
-#define TOF1_CS_PIN          7
-#define TOF1_INT_PIN         5
-#define TOF1_LPN_PIN         6
-#define TOF1_MISO_PIN        13
-
-// --- ToF 2 (CS=9, INT=14, LPN=8, MISO=4) ---
-#define TOF2_CS_PIN          9
-#define TOF2_INT_PIN         14
-#define TOF2_LPN_PIN         8
-#define TOF2_MISO_PIN        4
+// --- Shared SPI Bus Lines (Channel 1) ---
+// Shared SPI Bus from tof_pinout.h (TOF_SHARED_SCK_PIN, TOF_SHARED_MOSI_PIN)
 
 // ST-certified SPI clock frequency (1 MHz for rock-solid breadboard init, 2 MHz for ranging)
 #define SPI_INIT_SPEED_HZ    1000000
@@ -800,7 +789,9 @@ void setup() {
 
     Serial.println(F("\n================================================================="));
     Serial.println(F("   FOLKRACE ΓÇö DUAL VL53L8CX TOF SENSOR HUB (HSPI BUS)           "));
-    Serial.println(F("   Shared SPI: SCK=39, MOSI=40                                   "));
+    Serial.println(F("\n================================================================="));
+    Serial.println(F("   FOLKRACE -- QUAD VL53L8CX TOF SENSOR HUB (SPI2 / FSPI BUS)   "));
+    Serial.printf ("   Shared SPI2: SCK=%d, MOSI=%d, MISO=%d                         \n", TOF_SHARED_SCK_PIN, TOF_SHARED_MOSI_PIN, TOF1_MISO_PIN);
     Serial.printf ("   ToF 1: CS=%d, INT=%d, LPN=%d, MISO=%d                         \n", TOF1_CS_PIN, TOF1_INT_PIN, TOF1_LPN_PIN, TOF1_MISO_PIN);
     Serial.printf ("   ToF 2: CS=%d, INT=%d, LPN=%d, MISO=%d                         \n", TOF2_CS_PIN, TOF2_INT_PIN, TOF2_LPN_PIN, TOF2_MISO_PIN);
     Serial.println(F("================================================================="));
