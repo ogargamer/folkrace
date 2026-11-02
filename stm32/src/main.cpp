@@ -100,8 +100,9 @@ uint16_t rx_idx = 0;
 
 // Angle Normalization Helpers
 static inline float normalizeAngleRad(float angle) {
-    float a = fmodf(angle, _2PI);
-    return (a >= 0.0f) ? a : (a + _2PI);
+    while (angle < 0.0f) angle += _2PI;
+    while (angle >= _2PI) angle -= _2PI;
+    return angle;
 }
 
 static inline float wrapAngleRad(float angle) {
@@ -153,11 +154,12 @@ void focTimerISR() {
         motor2.loopFOC();
     }
 
-    // 4. Downsampled Velocity Motion Control (Every 5th tick = 4.0 kHz / 250 us)
+    // 4. Downsampled Velocity Motion Control (Staggered to prevent dual-PID latency spike)
     if ((foc_tick_count % MOTION_DOWNSAMPLE_RATIO) == 0) {
         if (m1_enabled && !m1_calib_active) {
             motor1.move(m1_target_rpm * 0.104719755f);
         }
+    } else if ((foc_tick_count % MOTION_DOWNSAMPLE_RATIO) == 2) {
         if (m2_enabled && !m2_calib_active) {
             motor2.move(m2_target_rpm * 0.104719755f);
         }
@@ -169,8 +171,8 @@ void focTimerISR() {
     if (elapsed > isr_peak_cycles) {
         isr_peak_cycles = elapsed;
     }
-    // 25.0 us @ 170 MHz = 4,250 cycles
-    if (elapsed > 4250) {
+    // Jitter spike warning threshold: > 38.0 us @ 170 MHz = 6,460 cycles (50.0 us total tick budget)
+    if (elapsed > 6460) {
         isr_jitter_spikes++;
     }
 }

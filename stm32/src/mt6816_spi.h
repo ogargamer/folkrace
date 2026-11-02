@@ -35,6 +35,7 @@ public:
     volatile uint8_t last_raw_h;
     volatile uint8_t last_raw_l;
     volatile uint16_t last_raw_14bit;
+    uint32_t last_update_tick;
     float zero_offset_deg;
 
     // 128-Point Stepped Piecewise Linear Interpolation LUT
@@ -53,7 +54,7 @@ public:
           total_reads(0), parity_errors(0), parity_retries(0), mag_faults(0),
           consecutive_parity_errors(0), is_connected(true), slow_poll_counter(0),
           last_no_mag(false), last_parity_ok(true),
-          last_raw_h(0), last_raw_l(0), last_raw_14bit(0),
+          last_raw_h(0), last_raw_l(0), last_raw_14bit(0), last_update_tick(0xFFFFFFFF),
           zero_offset_deg(0.0f), is_lut_active(false),
           spi_settings(SPI_SPEED_HZ, MSBFIRST, SPI_MODE3) {
         setupCSPin(pin);
@@ -167,62 +168,52 @@ public:
 
         spi_bus->beginTransaction(spi_settings);
 
-        for (int retry = 0; retry < 2; retry++) {
-            total_reads++;
+        total_reads++;
 
-            // 1. Read High Byte (Register 0x03)
-            csLow();
-            delayNanos(180); // t_CSS setup time (>= 150 ns)
-            uint16_t rx_h = spi_bus->transfer16(0x8300);
-            delayNanos(180); // t_CSH hold time (>= 150 ns)
-            csHigh();
+        // 1. Read High Byte (Register 0x03)
+        csLow();
+        delayNanos(180); // t_CSS setup time (>= 150 ns)
+        uint16_t rx_h = spi_bus->transfer16(0x8300);
+        delayNanos(180); // t_CSH hold time (>= 150 ns)
+        csHigh();
 
-            delayNanos(180); // t_CS_HIGH deassertion hold time (>= 150 ns)
+        delayNanos(180); // t_CS_HIGH deassertion hold time (>= 150 ns)
 
-            // 2. Read Low Byte (Register 0x04)
-            csLow();
-            delayNanos(180); // t_CSS setup time (>= 150 ns)
-            uint16_t rx_l = spi_bus->transfer16(0x8400);
-            delayNanos(180); // t_CSH hold time (>= 150 ns) - ensures bit 0 (parity) is captured before CS rises!
-            csHigh();
+        // 2. Read Low Byte (Register 0x04)
+        csLow();
+        delayNanos(180); // t_CSS setup time (>= 150 ns)
+        uint16_t rx_l = spi_bus->transfer16(0x8400);
+        delayNanos(180); // t_CSH hold time (>= 150 ns)
+        csHigh();
 
-            uint8_t h = rx_h & 0xFF;
-            uint8_t l = rx_l & 0xFF;
+        uint8_t h = rx_h & 0xFF;
+        uint8_t l = rx_l & 0xFF;
 
-            uint16_t angle_data = ((uint16_t)h << 8) | l;
-            uint16_t raw14 = ((uint16_t)h << 6) | ((l & 0xFC) >> 2);
-            bool no_mag = (l & 0x02) != 0;
-            bool parity_ok = parityCheck(angle_data);
+        uint16_t angle_data = ((uint16_t)h << 8) | l;
+        uint16_t raw14 = ((uint16_t)h << 6) | ((l & 0xFC) >> 2);
+        bool no_mag = (l & 0x02) != 0;
+        bool parity_ok = parityCheck(angle_data);
 
-            last_raw_h = h;
-            last_raw_l = l;
-            last_no_mag = no_mag;
+        last_raw_h = h;
+        last_raw_l = l;
+        last_no_mag = no_mag;
 
-            if (no_mag) {
-                mag_faults++;
-            }
+        if (no_mag) {
+            mag_faults++;
+        }
 
-            if (parity_ok) {
-                last_raw_14bit = raw14;
-                consecutive_parity_errors = 0;
-                last_parity_ok = true;
-                is_connected = true;
-                if (retry > 0) {
-                    parity_retries++;
-                }
-                break;
-            } else {
-                if (retry == 0) {
-                    delayNanos(180);
-                } else {
-                    parity_errors++;
-                    consecutive_parity_errors++;
-                    if (consecutive_parity_errors >= 4) {
-                        last_parity_ok = false;
-                        if (consecutive_parity_errors >= 200 && no_mag) {
-                            is_connected = false; // Mark disconnected to avoid floating line noise
-                        }
-                    }
+        if (parity_ok) {
+            last_raw_14bit = raw14;
+            consecutive_parity_errors = 0;
+            last_parity_ok = true;
+            is_connected = true;
+        } else {
+            parity_errors++;
+            consecutive_parity_errors++;
+            if (consecutive_parity_errors >= 4) {
+                last_parity_ok = false;
+                if (consecutive_parity_errors >= 200 && no_mag) {
+                    is_connected = false; // Mark disconnected to avoid floating line noise
                 }
             }
         }
@@ -292,8 +283,20 @@ public:
     }
 
     void update() override {
-        // Base SimpleFOC update (tracks multi-turn wraps and sets angle_prev to calibrated angle for FOC)
-        Sensor::update();
+        // Prevent duplicate updates within the same 50 us FOC tick (e.g. called in focTimerISR then in loopFOC)
+        extern volatile uint32_t foc_tick_count;
+        if (last_update_tick == foc_tick_count) {
+            return;
+        }
+        last_update_tick = foc_tick_count;
+
+        // Direct multi-turn tracking without calling _micros() (velocity uses DWT cycle counter)
+        float val = getSensorAngle();
+        float d_ang = val - angle_prev;
+        if (fabsf(d_ang) > (0.8f * _2PI)) {
+            full_rotations += (d_ang > 0.0f) ? -1 : 1;
+        }
+        angle_prev = val;
 
         // Push current RAW mechanical angle and DWT timestamp into ring buffer.
         // Using raw 14-bit mechanical angle eliminates 128-point piecewise-linear derivative discontinuities
