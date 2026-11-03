@@ -105,6 +105,10 @@ class DualMotorDashboardApp(tk.Tk):
         self._calib_last_success = False
         self._calib_last_reason = ""
 
+        # Direction reversal state: True inverts GUI controls & telemetry so physical CW is clockwise/positive
+        self.invert_dir_var = tk.BooleanVar(value=True)
+        self.serial_engine.set_direction_inverted(True)
+
         self._init_styles()
         self._build_ui()
 
@@ -572,6 +576,21 @@ class DualMotorDashboardApp(tk.Tk):
         )
         self.coupled_slider.set(0)
         self.coupled_slider.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=8)
+
+        self.inv_dir_chk = tk.Checkbutton(
+            slider_row,
+            text="🔄 Reverse Dir (CW ↔ CCW)",
+            variable=self.invert_dir_var,
+            command=self._on_invert_dir_toggle,
+            bg=COLOR_CARD,
+            fg=COLOR_ACCENT_AMBER,
+            selectcolor=COLOR_CARD_SECONDARY,
+            activebackground=COLOR_CARD,
+            activeforeground=COLOR_ACCENT_AMBER,
+            bd=0,
+            font=("Segoe UI", 8, "bold")
+        )
+        self.inv_dir_chk.pack(side=tk.RIGHT, padx=4)
 
         # Speed Presets Row 1 (Forward + Stop + Reverse)
         preset_row = tk.Frame(self.spd_sec, bg=COLOR_CARD)
@@ -1086,21 +1105,30 @@ class DualMotorDashboardApp(tk.Tk):
         other_m = 2 if self.active_motor == 1 else 1
         self.serial_engine.send_command(f"Z{other_m}")
 
+    def _on_invert_dir_toggle(self):
+        inv = self.invert_dir_var.get()
+        self.serial_engine.set_direction_inverted(inv)
+        self._log_console(f"[GUI] Motor spin direction reversal {'ENABLED' if inv else 'DISABLED'} (CW ↔ CCW)\n")
+
     def _send_direct_torque(self, v):
-        self.serial_engine.send_command(f"v{self.active_motor} {v:.1f}")
+        sign = -1.0 if self.invert_dir_var.get() else 1.0
+        self.serial_engine.send_command(f"v{self.active_motor} {v * sign:.1f}")
 
     def _set_active_motor_speed(self, spd):
+        sign = -1.0 if self.invert_dir_var.get() else 1.0
         self.coupled_slider.set(spd)
-        self.serial_engine.send_command(f"T{self.active_motor} {spd}")
+        self.serial_engine.send_command(f"T{self.active_motor} {spd * sign}")
 
     def _nudge_motor_speed(self, delta_rpm):
+        sign = -1.0 if self.invert_dir_var.get() else 1.0
         cur = self.serial_engine.state.get(f"m{self.active_motor}_target_rpm", 0.0)
         new_spd = max(-1800.0, min(1800.0, cur + delta_rpm))
         self.coupled_slider.set(int(round(new_spd)))
-        self.serial_engine.send_command(f"T{self.active_motor} {new_spd:.1f}")
+        self.serial_engine.send_command(f"T{self.active_motor} {new_spd * sign:.1f}")
 
     def _on_coupled_slider(self, val):
-        self.serial_engine.send_command(f"T{self.active_motor} {val}")
+        sign = -1.0 if self.invert_dir_var.get() else 1.0
+        self.serial_engine.send_command(f"T{self.active_motor} {float(val) * sign}")
 
     def _set_align_voltage(self):
         try:
@@ -1283,14 +1311,15 @@ class DualMotorDashboardApp(tk.Tk):
 
             # Step 3: Optional Closed-Loop Verification Spin
             if self.verify_spin_var.get():
+                sign = -1.0 if self.invert_dir_var.get() else 1.0
                 self._set_calib_ui(f"Step 3/4: Verifying Closed-Loop Spin for Motor {m} (±120 RPM)...", "VERIFYING SPIN", "#0284C7")
                 self.serial_engine.send_command(f"E{m}")
                 time.sleep(0.2)
-                self.serial_engine.send_command(f"T{m} 120")
+                self.serial_engine.send_command(f"T{m} {120.0 * sign:.1f}")
                 time.sleep(1.6)
                 cw_rpm = abs(st[f"m{m}_actual_rpm"])
 
-                self.serial_engine.send_command(f"T{m} -120")
+                self.serial_engine.send_command(f"T{m} {-120.0 * sign:.1f}")
                 time.sleep(1.8)
                 ccw_rpm = abs(st[f"m{m}_actual_rpm"])
 

@@ -37,6 +37,7 @@ class STM32DualSerial:
 
         # Rolling history for real-time Velocity Tracking Oscilloscope (last 240 points)
         self.max_history = 240
+        self.invert_direction = True  # Default True: inverts sign so physical CW is positive/clockwise
         self.history_time = collections.deque(maxlen=self.max_history)
         self.history_target_rpm = collections.deque(maxlen=self.max_history)
         self.history_actual_rpm = collections.deque(maxlen=self.max_history)
@@ -154,6 +155,10 @@ class STM32DualSerial:
         self.state["m2_parity_ok"] = True
         if self.on_log:
             self.on_log(f"[SYS] Disconnected from {self.port}\n")
+
+    def set_direction_inverted(self, inverted: bool):
+        """Set whether sign is inverted so physical CW rotation yields positive RPM/angle."""
+        self.invert_direction = bool(inverted)
 
     def send_command(self, cmd_str):
         if not cmd_str.endswith("\n"):
@@ -344,16 +349,17 @@ class STM32DualSerial:
         # Format: (header, m1_raw, m1_act_rpm, m1_tgt_rpm, m1_uq_mv, m1_status,
         #          m2_raw, m2_act_rpm, m2_tgt_rpm, m2_uq_mv, m2_status,
         #          foc_khz_x10, isr_lat_us, spikes_count, calib_prog, chk)
-        m1_raw     = p[1]
-        m1_act_rpm = p[2] / 10.0
-        m1_tgt_rpm = p[3] / 10.0
-        m1_uq_v    = p[4] / 1000.0
+        dir_mult = -1.0 if self.invert_direction else 1.0
+        m1_raw     = ((16384 - p[1]) & 0x3FFF) if self.invert_direction else p[1]
+        m1_act_rpm = (p[2] / 10.0) * dir_mult
+        m1_tgt_rpm = (p[3] / 10.0) * dir_mult
+        m1_uq_v    = (p[4] / 1000.0) * dir_mult
         s1         = p[5]
 
-        m2_raw     = p[6]
-        m2_act_rpm = p[7] / 10.0
-        m2_tgt_rpm = p[8] / 10.0
-        m2_uq_v    = p[9] / 1000.0
+        m2_raw     = ((16384 - p[6]) & 0x3FFF) if self.invert_direction else p[6]
+        m2_act_rpm = (p[7] / 10.0) * dir_mult
+        m2_tgt_rpm = (p[8] / 10.0) * dir_mult
+        m2_uq_v    = (p[9] / 1000.0) * dir_mult
         s2         = p[10]
 
         foc_khz    = p[11] / 10.0

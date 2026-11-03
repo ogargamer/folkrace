@@ -126,6 +126,12 @@
 #define MOTOR_VELOCITY_LIMIT                                                   \
   (2000.0f * 0.104719755f) // 2000 RPM = 209.44 rad/s headroom for 1800 RPM
 
+// Direction Convention Configuration
+// Set to 1 to invert raw encoder counting direction globally in firmware so physical clockwise rotation increases angle & velocity (CW = positive)
+#ifndef INVERT_ENCODER_DIRECTION
+#define INVERT_ENCODER_DIRECTION 0
+#endif
+
 // Stepped 128-Point Calibration Constants (Matching ESP32 Suite)
 #define CALIB_ALIGN_VOLTAGE 4.00f // Stepped calibration movement voltage (V)
 #define CALIB_HOLD_VOLTAGE                                                     \
@@ -150,8 +156,8 @@
   5 // Velocity PID downsampled to 4.0 kHz (250 us) [20 kHz / 5]
 #define TELEMETRY_RATE_HZ 25 // 25 Hz Binary Telemetry Stream (40 ms)
 #define SPI_SPEED_HZ                                                           \
-  5312500 // 5.3125 MHz (170 MHz / 32 prescaler) for high-speed low-latency
-          // reads
+  10625000 // 10.625 MHz (170 MHz / 16 prescaler) for high-speed low-latency
+           // reads
 
 // Pre-Loaded Zero Electrical Angles (Standalone Autonomous Startup Jerk Free)
 #ifndef M1_DEFAULT_ZERO_ELECTRIC_ANGLE

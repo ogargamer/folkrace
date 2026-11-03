@@ -217,6 +217,9 @@ public:
         }
 
         if (parity_ok) {
+#if defined(INVERT_ENCODER_DIRECTION) && (INVERT_ENCODER_DIRECTION == 1)
+            raw14 = (16384 - raw14) & 0x3FFF;
+#endif
             last_raw_14bit = raw14;
             consecutive_parity_errors = 0;
             last_parity_ok = true;

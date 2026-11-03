@@ -62,6 +62,11 @@ except ImportError:
 
 CURR_DIR = os.path.dirname(os.path.abspath(__file__))
 DLL_PATH = os.path.join(CURR_DIR, "curvilinear_sl_mpc.dll")
+for _name in ("curvilinear_sl_mpc.so", "curvilinear_sl_mpc.dll"):
+    _cand = os.path.join(CURR_DIR, _name)
+    if os.path.exists(_cand):
+        DLL_PATH = _cand
+        break
 
 CPP_AVAILABLE = False
 _lib = None

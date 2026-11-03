@@ -18,6 +18,11 @@ import numpy as np
 # Load the compiled shared library
 CURR_DIR = os.path.dirname(os.path.abspath(__file__))
 DLL_PATH = os.path.join(CURR_DIR, "smart_hybrid_costmap_front.dll")
+for _name in ("smart_hybrid_costmap_front.so", "smart_hybrid_costmap_front.dll"):
+    _cand = os.path.join(CURR_DIR, _name)
+    if os.path.exists(_cand):
+        DLL_PATH = _cand
+        break
 
 if not os.path.exists(DLL_PATH):
     raise FileNotFoundError(f"Cannot find compiled DLL at {DLL_PATH}. Run compile_dll.py first.")

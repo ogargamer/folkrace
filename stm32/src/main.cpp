@@ -1898,6 +1898,9 @@ void processCommand(const char *cmd) {
     if (strncasecmp(cmd, "v1 ", 3) == 0 || strncasecmp(cmd, "v1", 2) == 0) {
         float val = atof(cmd + 2);
         driver1.enable();
+#if defined(INVERT_ENCODER_DIRECTION) && (INVERT_ENCODER_DIRECTION == 1)
+        val = -val;
+#endif
         motor1.setPhaseVoltage(fabsf(val), 0.0f, (val >= 0.0f) ? 0.0f : _PI);
         Serial.printf(">>> M1 Open-Loop Voltage: %+.2f V\n", val);
         return;
@@ -1905,6 +1908,9 @@ void processCommand(const char *cmd) {
     if (strncasecmp(cmd, "v2 ", 3) == 0 || strncasecmp(cmd, "v2", 2) == 0) {
         float val = atof(cmd + 2);
         driver2.enable();
+#if defined(INVERT_ENCODER_DIRECTION) && (INVERT_ENCODER_DIRECTION == 1)
+        val = -val;
+#endif
         motor2.setPhaseVoltage(fabsf(val), 0.0f, (val >= 0.0f) ? 0.0f : _PI);
         Serial.printf(">>> M2 Open-Loop Voltage: %+.2f V\n", val);
         return;
@@ -1913,6 +1919,9 @@ void processCommand(const char *cmd) {
         float val = atof(cmd + 1);
         driver1.enable();
         driver2.enable();
+#if defined(INVERT_ENCODER_DIRECTION) && (INVERT_ENCODER_DIRECTION == 1)
+        val = -val;
+#endif
         motor1.setPhaseVoltage(fabsf(val), 0.0f, (val >= 0.0f) ? 0.0f : _PI);
         motor2.setPhaseVoltage(fabsf(val), 0.0f, (val >= 0.0f) ? 0.0f : _PI);
         Serial.printf(">>> Both Motors Open-Loop Voltage: %+.2f V\n", val);
