@@ -4,31 +4,64 @@
 #include <Arduino.h>
 #include "config.h"
 
-class STM32Link {
+class STM32Channel {
 public:
-    STM32Link();
+    STM32Channel();
 
-    void begin(uint32_t baud, int rxPin, int txPin);
-    void sendCommand(float m1_rpm, float m2_rpm, float m3_rpm, float m4_rpm);
+    void begin(HardwareSerial *serial, uint32_t baud, int rxPin, int txPin);
+    void sendCommand(float m1_rpm, float m2_rpm);
     bool update();
 
-    const MotorFeedbackPacket& getLatestFeedback() const { return _latest_feedback; }
-    unsigned long getLastValidPacketTime() const { return _last_valid_packet_time; }
-    uint32_t getValidPacketCount() const { return _valid_packet_count; }
-    uint32_t getChecksumErrorCount() const { return _checksum_error_count; }
+    float getM1RPM() const { return m1_actual_rpm_; }
+    float getM2RPM() const { return m2_actual_rpm_; }
+    uint32_t getValidPacketCount() const { return valid_packet_count_; }
+    uint32_t getChecksumErrorCount() const { return checksum_error_count_; }
+    bool isConnected() const;
 
 private:
-    uint8_t calculateChecksum(const uint8_t *data, size_t len);
+    HardwareSerial *serial_;
+    uint8_t rx_buffer_[32];
+    uint8_t rx_index_;
+    bool sync_found_;
 
-    HardwareSerial _serial;
-    uint8_t _rx_buffer[17];
-    int _rx_index;
-    bool _sync_found;
+    float m1_actual_rpm_;
+    float m2_actual_rpm_;
+    uint32_t last_packet_ms_;
+    uint32_t valid_packet_count_;
+    uint32_t checksum_error_count_;
+};
 
-    MotorFeedbackPacket _latest_feedback;
-    unsigned long _last_valid_packet_time;
-    uint32_t _valid_packet_count;
-    uint32_t _checksum_error_count;
+class STM32DualLink {
+public:
+    STM32DualLink();
+
+    void begin(
+        uint32_t baud = STM32_1_UART_BAUD,
+        int front_rx = STM32_1_UART_RX_PIN,
+        int front_tx = STM32_1_UART_TX_PIN,
+        int rear_rx  = STM32_2_UART_RX_PIN,
+        int rear_tx  = STM32_2_UART_TX_PIN
+    );
+
+    void sendCommands(float fl_rpm, float fr_rpm, float rl_rpm, float rr_rpm);
+    bool update();
+
+    float getFL_RPM() const { return front_.getM1RPM(); }
+    float getFR_RPM() const { return front_.getM2RPM(); }
+    float getRL_RPM() const { return rear_.getM1RPM(); }
+    float getRR_RPM() const { return rear_.getM2RPM(); }
+
+    bool isFrontConnected() const { return front_.isConnected(); }
+    bool isRearConnected() const { return rear_.isConnected(); }
+
+    const STM32Channel& getFront() const { return front_; }
+    const STM32Channel& getRear() const { return rear_; }
+
+private:
+    HardwareSerial serial_front_;
+    HardwareSerial serial_rear_;
+    STM32Channel front_;
+    STM32Channel rear_;
 };
 
 #endif // STM32_LINK_H

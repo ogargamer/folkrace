@@ -1,121 +1,458 @@
 #include <Arduino.h>
+#include <esp_timer.h>
+#include <esp_cpu.h>
 #include "config.h"
+#include "spsc_triple_buffer.h"
+#include "electronic_diff.h"
+#include "servo_controller.h"
+#include "sensor_fusion.h"
 #include "stm32_link.h"
 #include "imu_bno08x.h"
 
-// Global Link and IMU Instances
-STM32Link stm32Link;
-BNO08xIMU imu;
-HardwareSerial piSerial(2);
+// =============================================================================
+// Inter-Core Shared Memory Structures (Allocated in Internal SRAM)
+// =============================================================================
+struct SharedSensorInputs {
+    float target_v;           // Commanded forward velocity (m/s)
+    float target_steer_rad;   // Commanded center steering angle (rad)
+    float gyro_z;             // IMU body yaw rate (rad/s)
+    float accel_fwd;          // IMU forward linear acceleration (m/s^2)
+    float accel_lat;          // IMU lateral acceleration (m/s^2)
+    float roll_deg;           // IMU Euler roll
+    float pitch_deg;          // IMU Euler pitch
+    float yaw_deg;            // IMU Euler yaw
+    float fl_rpm;             // Front-Left motor actual RPM
+    float fr_rpm;             // Front-Right motor actual RPM
+    float rl_rpm;             // Rear-Left motor actual RPM
+    float rr_rpm;             // Rear-Right motor actual RPM
+    bool override_active;     // Manual override flag
+    bool fake_data_mode;      // Synthetic benchmark mode
+};
 
-// Timing Control
-unsigned long lastLoopTimeMicros = 0;
-unsigned long lastTelemetryReportMs = 0;
-unsigned long lastIMURetryMs = 0;
+struct SharedControlOutputs {
+    // Actuator Setpoints
+    float fl_target_rpm;
+    float fr_target_rpm;
+    float rl_target_rpm;
+    float rr_target_rpm;
+    float steer_rad;
+    float steer_deg;
+    float servo_pulse_us;
 
-// Target Speeds (RPM)
-float targetM1 = 0.0f;
-float targetM2 = 0.0f;
-float targetM3 = 0.0f;
-float targetM4 = 0.0f;
+    // Kinematics & States
+    float rate_limited_v;
+    float v_FL, v_FR, v_RL, v_RR;
+    float omega_cmd;
+    float scale_factor;
+    VehicleSlipState slip_state;
+    float yaw_error;
 
+    // Fused Odometry
+    float v_est;
+    float v_wheels;
+    float yaw_est;
+    float total_distance_m;
+    float slip_ratio;
+
+    // 400 Hz Real-Time Profiler Metrics
+    uint32_t cycle_count;
+    float exec_us;
+    float exec_us_min;
+    float exec_us_max;
+    float exec_us_avg;
+    float jitter_us;
+    uint32_t overrun_count;
+};
+
+// Lock-Free Triple Buffers
+static SPSCTripleBuffer<SharedSensorInputs>  s_sensorInputs;
+static SPSCTripleBuffer<SharedControlOutputs> s_controlOutputs;
+
+// Core 1 Control Task & Timer Handles
+static TaskHandle_t s_controlTaskHandle = nullptr;
+static esp_timer_handle_t s_controlTimer = nullptr;
+
+// Peripherals & Subsystems (Instantiated in SRAM)
+static ElectronicDifferential4WD s_ediff;
+static ServoController s_servo;
+static IMUEncoderFusion s_fusion;
+static STM32DualLink s_stm32Link;
+static BNO08xIMU s_imu;
+static HardwareSerial s_piSerial(PI_UART_NUM);
+
+// Global State
+static volatile bool s_fake_data_active = true; // Default to synthetic benchmark
+static volatile float s_manual_v = 0.0f;
+static volatile float s_manual_steer = 0.0f;
+static volatile bool s_manual_override = false;
+
+// =============================================================================
+// Hardware Timer ISR Callback (Fires periodically every 2500 us / 400 Hz)
+// =============================================================================
+static void IRAM_ATTR onControlTimerAlarm(void *arg) {
+    if (s_controlTaskHandle != nullptr) {
+        BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+        vTaskNotifyGiveFromISR(s_controlTaskHandle, &xHigherPriorityTaskWoken);
+        portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+    }
+}
+
+// =============================================================================
+// CORE 1: Real-Time Deterministic Control Task (400 Hz / Priority 24)
+// =============================================================================
+static void IRAM_ATTR realTimeControlTask(void *pvParameters) {
+    s_controlTaskHandle = xTaskGetCurrentTaskHandle();
+
+    // Start 400 Hz High-Resolution Hardware Timer (2500 microseconds)
+    const esp_timer_create_args_t timer_args = {
+        .callback = &onControlTimerAlarm,
+        .arg = nullptr,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "ctrl_400hz"
+    };
+    ESP_ERROR_CHECK(esp_timer_create(&timer_args, &s_controlTimer));
+    ESP_ERROR_CHECK(esp_timer_start_periodic(s_controlTimer, CONTROL_LOOP_PERIOD_US));
+
+    uint32_t cycle_counter = 0;
+    uint32_t overrun_counter = 0;
+    float min_exec_us = 99999.0f;
+    float max_exec_us = 0.0f;
+    float avg_exec_us = 0.0f;
+    int64_t last_tick_time_us = esp_timer_get_time();
+    float max_jitter_us = 0.0f;
+
+    for (;;) {
+        // Wait for deterministic hardware timer notification
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+
+        int64_t now_us = esp_timer_get_time();
+        int64_t period_us = now_us - last_tick_time_us;
+        last_tick_time_us = now_us;
+
+        float jitter = fabsf((float)period_us - (float)CONTROL_LOOP_PERIOD_US);
+        if (cycle_counter > 50 && jitter > max_jitter_us) {
+            max_jitter_us = jitter;
+        }
+
+        uint32_t t_start_cycles = esp_cpu_get_ccount();
+
+        // 1. Read latest snapshot from Core 0 via lock-free triple buffer
+        s_sensorInputs.updateRead();
+        const SharedSensorInputs &inputs = s_sensorInputs.getReadBuffer();
+
+        // Working variables
+        float target_v;
+        float target_steer;
+        float gyro_z;
+        float accel_fwd;
+        float fl_rpm, fr_rpm, rl_rpm, rr_rpm;
+
+        if (inputs.fake_data_mode) {
+            // -----------------------------------------------------------------
+            // SYNTHETIC BENCHMARK SIGNAL GENERATOR (Fake Data Mode)
+            // -----------------------------------------------------------------
+            // Dynamic velocity sweep: -1.5 m/s to +4.5 m/s
+            float t_sec = (float)cycle_counter * CONTROL_LOOP_DT_S;
+            target_v = 1.5f + 3.0f * sinf(t_sec * 0.5f);
+
+            // Dynamic steering sweep: +/- 0.45 rad (+/- 25.8 deg)
+            target_steer = 0.45f * sinf(t_sec * 1.2f);
+
+            // Realistic kinematic IMU yaw rate: omega = (v * tan(delta)) / L + noise
+            float clean_omega = (target_v * tanf(target_steer)) / VEHICLE_WHEELBASE_M;
+            gyro_z = clean_omega + 0.03f * sinf(t_sec * 10.0f);
+
+            // Synthetic forward acceleration: dv/dt + noise
+            accel_fwd = (3.0f * 0.5f * cosf(t_sec * 0.5f)) + 0.1f * sinf(t_sec * 15.0f);
+
+            // Synthetic motor feedback matching commanded velocity
+            float rad_to_rpm = 60.0f / (2.0f * 3.14159265f);
+            float sim_rpm = (target_v / VEHICLE_WHEEL_RADIUS_M) * rad_to_rpm * (-VEHICLE_MOTOR_DIR);
+            fl_rpm = sim_rpm;
+            fr_rpm = sim_rpm;
+            rl_rpm = sim_rpm;
+            rr_rpm = sim_rpm;
+        } else {
+            // Live Sensor Inputs from Core 0
+            target_v = inputs.override_active ? s_manual_v : inputs.target_v;
+            target_steer = inputs.override_active ? s_manual_steer : inputs.target_steer_rad;
+            gyro_z = inputs.gyro_z;
+            accel_fwd = inputs.accel_fwd;
+            fl_rpm = inputs.fl_rpm;
+            fr_rpm = inputs.fr_rpm;
+            rl_rpm = inputs.rl_rpm;
+            rr_rpm = inputs.rr_rpm;
+        }
+
+        // 2. Execute 4WD Electronic Differential & Ackermann Kinematics
+        ElectronicDiffOutputs diff = s_ediff.update(
+            target_v,
+            target_steer,
+            gyro_z,
+            CONTROL_LOOP_DT_S,
+            DEFAULT_ROAD_MU
+        );
+
+        // 3. Command Single Steering Servo on LEDC PWM (GPIO 21 @ 333 Hz)
+        s_servo.setPulseUs(diff.servo_pulse_us);
+
+        // 4. Execute 4-Wheel Median Odometry + IMU Complementary Sensor Fusion
+        FusionOutputs fusion = s_fusion.update(
+            fl_rpm,
+            fr_rpm,
+            rl_rpm,
+            rr_rpm,
+            gyro_z,
+            accel_fwd,
+            diff.steer_rad,
+            CONTROL_LOOP_DT_S
+        );
+
+        // 5. Measure Compute Latency (Cycles -> Microseconds @ 240 MHz)
+        uint32_t t_exec_cycles = esp_cpu_get_ccount() - t_start_cycles;
+        float exec_us = (float)t_exec_cycles * (1.0f / 240.0f);
+
+        if (exec_us > (float)CONTROL_LOOP_PERIOD_US) {
+            overrun_counter++;
+        }
+
+        if (cycle_counter > 50) {
+            if (exec_us < min_exec_us) min_exec_us = exec_us;
+            if (exec_us > max_exec_us) max_exec_us = exec_us;
+            avg_exec_us = 0.995f * avg_exec_us + 0.005f * exec_us;
+        } else {
+            avg_exec_us = exec_us;
+        }
+        cycle_counter++;
+
+        // 6. Commit outputs to Core 0 via lock-free triple buffer
+        SharedControlOutputs &out = s_controlOutputs.getWriteBuffer();
+        out.fl_target_rpm   = diff.rpm_FL;
+        out.fr_target_rpm   = diff.rpm_FR;
+        out.rl_target_rpm   = diff.rpm_RL;
+        out.rr_target_rpm   = diff.rpm_RR;
+        out.steer_rad       = diff.steer_rad;
+        out.steer_deg       = diff.steer_deg;
+        out.servo_pulse_us  = diff.servo_pulse_us;
+        out.rate_limited_v  = diff.rate_limited_v;
+        out.v_FL            = diff.v_FL;
+        out.v_FR            = diff.v_FR;
+        out.v_RL            = diff.v_RL;
+        out.v_RR            = diff.v_RR;
+        out.omega_cmd       = diff.omega_cmd;
+        out.scale_factor    = diff.scale_factor;
+        out.slip_state      = diff.slip_state;
+        out.yaw_error       = diff.yaw_error;
+
+        out.v_est           = fusion.v_est;
+        out.v_wheels        = fusion.v_wheels;
+        out.yaw_est         = fusion.yaw_est;
+        out.total_distance_m= fusion.total_distance_m;
+        out.slip_ratio      = fusion.slip_ratio;
+
+        out.cycle_count     = cycle_counter;
+        out.exec_us         = exec_us;
+        out.exec_us_min     = min_exec_us;
+        out.exec_us_max     = max_exec_us;
+        out.exec_us_avg     = avg_exec_us;
+        out.jitter_us       = jitter;
+        out.overrun_count   = overrun_counter;
+
+        s_controlOutputs.commitWrite();
+    }
+}
+
+// =============================================================================
+// CORE 0: Communications & Peripheral Task (Priority 15)
+// =============================================================================
+static void ioTask(void *pvParameters) {
+    uint32_t last_report_ms = millis();
+    uint32_t last_imu_poll_ms = millis();
+
+    for (;;) {
+        uint32_t now = millis();
+
+        // 1. Process BNO086 IMU over SPI2 (if not fake data)
+        if (!s_fake_data_active && s_imu.isInitialized()) {
+            s_imu.update();
+        }
+
+        // 2. Process Dual STM32 UARTs
+        s_stm32Link.update();
+
+        // 3. Receive latest control outputs from Core 1
+        if (s_controlOutputs.updateRead()) {
+            const SharedControlOutputs &ctrl = s_controlOutputs.getReadBuffer();
+
+            // Dispatch target RPMs to Front and Rear STM32s
+            s_stm32Link.sendCommands(
+                ctrl.fl_target_rpm,
+                ctrl.fr_target_rpm,
+                ctrl.rl_target_rpm,
+                ctrl.rr_target_rpm
+            );
+        }
+
+        // 4. Update Shared Sensor Inputs for Core 1
+        SharedSensorInputs &inputs = s_sensorInputs.getWriteBuffer();
+        inputs.fake_data_mode = s_fake_data_active;
+        inputs.override_active = s_manual_override;
+        inputs.target_v = s_manual_v;
+        inputs.target_steer_rad = s_manual_steer;
+
+        if (!s_fake_data_active && s_imu.isInitialized()) {
+            const auto &imu_data = s_imu.getData();
+            inputs.gyro_z    = imu_data.gyro_z;
+            inputs.accel_fwd = imu_data.lin_accel_x; // local body forward
+            inputs.accel_lat = imu_data.lin_accel_y;
+            inputs.roll_deg  = imu_data.roll_deg;
+            inputs.pitch_deg = imu_data.pitch_deg;
+            inputs.yaw_deg   = imu_data.yaw_deg;
+        }
+
+        inputs.fl_rpm = s_stm32Link.getFL_RPM();
+        inputs.fr_rpm = s_stm32Link.getFR_RPM();
+        inputs.rl_rpm = s_stm32Link.getRL_RPM();
+        inputs.rr_rpm = s_stm32Link.getRR_RPM();
+        s_sensorInputs.commitWrite();
+
+        // 5. User Command Shell over USB Serial
+        while (Serial.available() > 0) {
+            String line = Serial.readStringUntil('\n');
+            line.trim();
+            if (line.length() == 0) continue;
+
+            if (line.equalsIgnoreCase("BENCH") || line.equalsIgnoreCase("FAKE")) {
+                s_fake_data_active = !s_fake_data_active;
+                Serial.printf("\n>>> [MODE] Synthetic 400Hz Benchmark Mode: %s\n",
+                              s_fake_data_active ? "ENABLED (Fake Data)" : "DISABLED (Live Sensors)");
+            } else if (line.equalsIgnoreCase("STATUS") || line.equalsIgnoreCase("S")) {
+                const SharedControlOutputs &c = s_controlOutputs.getReadBuffer();
+                Serial.println(F("\n========================================================"));
+                Serial.println(F(" FOLKRACE ESP32-S3 REAL-TIME DUAL-CORE STATUS REPORT    "));
+                Serial.println(F("========================================================"));
+                Serial.printf(" Mode: %s | Core 1 Control Loop: 400.0 Hz (Period: 2500 us)\n",
+                              s_fake_data_active ? "BENCHMARK (SYNTHETIC)" : "LIVE SENSORS");
+                Serial.printf(" Compute Latency: Current: %.2f us | Min: %.2f us | Max: %.2f us | Avg: %.2f us\n",
+                              c.exec_us, c.exec_us_min, c.exec_us_max, c.exec_us_avg);
+                Serial.printf(" Core 1 CPU Utilization: %.2f%% (Headroom: %.2f%%)\n",
+                              (c.exec_us_avg / 2500.0f) * 100.0f,
+                              100.0f - (c.exec_us_avg / 2500.0f) * 100.0f);
+                Serial.printf(" Jitter: %.2f us | Deadline Overruns: %u / %u cycles\n",
+                              c.jitter_us, c.overrun_count, c.cycle_count);
+                Serial.printf(" Steering: %.2f deg (%.4f rad) | Servo PWM: %.1f us (GPIO 21)\n",
+                              c.steer_deg, c.steer_rad, c.servo_pulse_us);
+                Serial.printf(" Speed Cmd: %.2f m/s (Rate-Limited: %.2f m/s) | Scale: %.2f\n",
+                              s_manual_v, c.rate_limited_v, c.scale_factor);
+                Serial.printf(" Motor Targets (RPM): FL: %+.1f | FR: %+.1f | RL: %+.1f | RR: %+.1f\n",
+                              c.fl_target_rpm, c.fr_target_rpm, c.rl_target_rpm, c.rr_target_rpm);
+                Serial.printf(" Fused Odometry: v_est = %.2f m/s | v_wheels = %.2f m/s | Dist = %.2f m\n",
+                              c.v_est, c.v_wheels, c.total_distance_m);
+                Serial.printf(" Slip State: %s (Slip Ratio: %.2f, Yaw Error: %+.2f rad/s)\n",
+                              c.slip_state == SLIP_OVERSTEER ? "OVERSTEER" : (c.slip_state == SLIP_UNDERSTEER ? "UNDERSTEER" : "NORMAL"),
+                              c.slip_ratio, c.yaw_error);
+                Serial.printf(" STM32 Links: Front = %s | Rear = %s\n",
+                              s_stm32Link.isFrontConnected() ? "ONLINE" : "OFFLINE",
+                              s_stm32Link.isRearConnected() ? "ONLINE" : "OFFLINE");
+                Serial.println(F("========================================================\n"));
+            } else if (line.startsWith("V ") || line.startsWith("v ")) {
+                s_manual_v = line.substring(2).toFloat();
+                s_manual_override = true;
+                s_fake_data_active = false;
+                Serial.printf(">>> Manual Speed Setpoint: %.2f m/s\n", s_manual_v);
+            } else if (line.startsWith("A ") || line.startsWith("a ")) {
+                float deg = line.substring(2).toFloat();
+                s_manual_steer = deg * (3.14159265f / 180.0f);
+                s_manual_override = true;
+                s_fake_data_active = false;
+                Serial.printf(">>> Manual Steer Setpoint: %.1f deg (%.4f rad)\n", deg, s_manual_steer);
+            } else if (line.equalsIgnoreCase("RESET")) {
+                s_manual_v = 0.0f;
+                s_manual_steer = 0.0f;
+                s_manual_override = false;
+                s_ediff.reset();
+                s_fusion.reset();
+                Serial.println(F(">>> Controller & Sensor Fusion State Reset."));
+            } else {
+                Serial.println(F("Commands: STATUS | BENCH | V <m/s> | A <deg> | RESET"));
+            }
+        }
+
+        // 6. Periodic Benchmark Telemetry Stream to USB Serial (every 500 ms = 2 Hz)
+        if (now - last_report_ms >= 500) {
+            last_report_ms = now;
+            const SharedControlOutputs &c = s_controlOutputs.getReadBuffer();
+            float cpu_pct = (c.exec_us_avg / 2500.0f) * 100.0f;
+
+            Serial.printf("[400Hz BENCH] Cycles: %6u | T_exec: %5.2fus (min: %5.2f, max: %5.2f, avg: %5.2f) | CPU: %4.1f%% | Overruns: %u | v_est: %+.2fm/s | Steer: %+.1fdeg | PWM: %4.0fus\n",
+                          c.cycle_count, c.exec_us, c.exec_us_min, c.exec_us_max, c.exec_us_avg,
+                          cpu_pct, c.overrun_count, c.v_est, c.steer_deg, c.servo_pulse_us);
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(2));
+    }
+}
+
+// =============================================================================
+// Arduino Setup & Core Assignment
+// =============================================================================
 void setup() {
-    // USB Serial Debug & Control Interface (921600 Baud)
     Serial.begin(921600);
-    delay(1000);
+    delay(500);
+
     Serial.println(F("\n========================================================"));
-    Serial.println(F(" ESP32-S3 Master Controller & IMU Firmware Initialized  "));
-    Serial.println(F(" SPI BNO08x IMU Interface + 400Hz STM32 BLDC UART Link "));
-    Serial.println(F("========================================================\n"));
+    Serial.println(F("  FOLKRACE ESP32-S3 HIGH-PERFORMANCE MASTER CONTROLLER  "));
+    Serial.println(F("  Deterministic 400Hz (2500us) Math + Dual-Core RTOS    "));
+    Serial.println(F("  4WD Electronic Diff + 333Hz Servo + IMU Sensor Fusion "));
+    Serial.println(F("========================================================"));
 
-    // 1. Initialize UART1 Link to STM32 (921600 Baud, GPIO 18 RX, GPIO 17 TX)
-    stm32Link.begin(STM32_UART_BAUD, STM32_UART_RX_PIN, STM32_UART_TX_PIN);
+    // 1. Initialize Single Ackermann Steering Servo (GPIO 21 @ 333 Hz LEDC)
+    s_servo.begin();
+    Serial.println(F("[+] Ackermann Steering Servo Initialized on GPIO 21 (333 Hz)."));
 
-    // 2. Initialize High-Speed UART2 Link to Raspberry Pi 5 (921600 Baud, GPIO 21 RX, GPIO 47 TX)
-    piSerial.begin(PI_UART_BAUD, SERIAL_8N1, PI_UART_RX_PIN, PI_UART_TX_PIN);
+    // 2. Initialize Dual STM32 UART Links (UART1 Front, UART2 Rear @ 921,600 Baud)
+    s_stm32Link.begin(
+        STM32_1_UART_BAUD,
+        STM32_1_UART_RX_PIN,
+        STM32_1_UART_TX_PIN,
+        STM32_2_UART_RX_PIN,
+        STM32_2_UART_TX_PIN
+    );
+    Serial.println(F("[+] Dual STM32 FOC UART Links Initialized (UART1 & UART2 @ 921.6k)."));
 
-    // 3. Initialize GY-BNO08X IMU over SPI (CS=10, MISO=13, MOSI=11, SCK=12, INT=9, RST=-1)
-    if (imu.begin(DEFAULT_IMU_SPI_CS, DEFAULT_IMU_SPI_MISO, DEFAULT_IMU_SPI_MOSI, DEFAULT_IMU_SPI_SCK, DEFAULT_IMU_SPI_INT, DEFAULT_IMU_SPI_RST)) {
-        imu.printMenu();
+    // 3. Initialize BNO086 IMU over SPI2 (CS=10, INT=9, SCK=12, MOSI=11, MISO=13, RST=14)
+    if (s_imu.begin(IMU_SPI_CS_PIN, IMU_SPI_MISO_PIN, IMU_SPI_MOSI_PIN, IMU_SPI_SCK_PIN, IMU_INT_PIN, IMU_RST_PIN)) {
+        Serial.println(F("[+] BNO086 9-DOF IMU Connected over SPI2 Master."));
     } else {
-        Serial.println(F("[WARNING] BNO08x IMU hardware scan failed. Will auto-retry in loop..."));
+        Serial.println(F("[!] BNO086 IMU not detected. Running synthetic benchmark mode."));
     }
 
-    lastLoopTimeMicros = micros();
-    lastTelemetryReportMs = millis();
-    lastIMURetryMs = millis();
+    // 4. Pin Core 1 Task: Deterministic 400 Hz Real-Time Control & Kinematics (Priority 24)
+    xTaskCreatePinnedToCore(
+        realTimeControlTask,
+        "RealTimeControl",
+        8192,
+        nullptr,
+        24,                      // High priority (preempts background tasks)
+        &s_controlTaskHandle,
+        1                        // Core 1 (APP CPU)
+    );
+    Serial.println(F("[+] Core 1 Control Task Launched (Priority 24, 400 Hz)."));
+
+    // 5. Pin Core 0 Task: Asynchronous Communications, Sensor Polling & Telemetry (Priority 15)
+    xTaskCreatePinnedToCore(
+        ioTask,
+        "CommIO",
+        8192,
+        nullptr,
+        15,                      // Medium priority
+        nullptr,
+        0                        // Core 0 (PRO CPU)
+    );
+    Serial.println(F("[+] Core 0 I/O Task Launched (Priority 15, Asynchronous).\n"));
 }
 
 void loop() {
-    unsigned long nowMicros = micros();
-    unsigned long nowMs = millis();
-
-    // 1. Handle incoming user commands over USB Serial or Pi 5 UART2
-    if (Serial.available()) {
-        char cmd = Serial.read();
-        imu.handleSerialCommand(cmd, Serial);
-    }
-    if (piSerial.available()) {
-        char cmd = piSerial.read();
-        imu.handleSerialCommand(cmd, Serial);
-    }
-
-    // 2. Auto-retry IMU initialization every 3 seconds if not yet established
-    if (!imu.isInitialized()) {
-        if (nowMs - lastIMURetryMs >= 3000) {
-            lastIMURetryMs = nowMs;
-            if (imu.begin(DEFAULT_IMU_SPI_CS, DEFAULT_IMU_SPI_MISO, DEFAULT_IMU_SPI_MOSI, DEFAULT_IMU_SPI_SCK, DEFAULT_IMU_SPI_INT, DEFAULT_IMU_SPI_RST)) {
-                imu.printMenu();
-            }
-        }
-    } else {
-        // Poll and service GY-BNO08X IMU SHTP events
-        imu.update();
-    }
-
-    // 3. Precise 400Hz Control Loop Execution (every 2500 us)
-    if (nowMicros - lastLoopTimeMicros >= CONTROL_LOOP_PERIOD_US) {
-        lastLoopTimeMicros += CONTROL_LOOP_PERIOD_US;
-
-        // Send Motor Command Packet to STM32
-        stm32Link.sendCommand(targetM1, targetM2, targetM3, targetM4);
-    }
-
-    // 4. Continually poll and parse incoming serial feedback from STM32
-    if (stm32Link.update()) {
-        // Instant feedback received from STM32
-    }
-
-    // 5. High-Speed IMU Telemetry Stream to Raspberry Pi 5 over UART2 (every 10ms = 100Hz)
-    static unsigned long lastPiStreamUs = 0;
-    if (nowMicros - lastPiStreamUs >= 10000) { // 100 Hz Rock-Solid
-        lastPiStreamUs = nowMicros;
-        if (imu.isInitialized()) {
-            const auto& data = imu.getData();
-            // 42-byte Complete High-Precision Binary Frame: 0xAA 0x55 + 10 floats (Quat + Accel + Gyro)
-            uint8_t binBuf[42];
-            binBuf[0] = 0xAA;
-            binBuf[1] = 0x55;
-            memcpy(&binBuf[2],  &data.quat_w, 4);
-            memcpy(&binBuf[6],  &data.quat_x, 4);
-            memcpy(&binBuf[10], &data.quat_y, 4);
-            memcpy(&binBuf[14], &data.quat_z, 4);
-            memcpy(&binBuf[18], &data.accel_x, 4);
-            memcpy(&binBuf[22], &data.accel_y, 4);
-            memcpy(&binBuf[26], &data.accel_z, 4);
-            memcpy(&binBuf[30], &data.gyro_x,  4);
-            memcpy(&binBuf[34], &data.gyro_y,  4);
-            memcpy(&binBuf[38], &data.gyro_z,  4);
-            piSerial.write(binBuf, 42);
-        }
-    }
-
-    // 6. Periodic IMU & Telemetry Report to USB Serial Monitor (every 200ms = 5Hz debug stream)
-    if (nowMs - lastTelemetryReportMs >= 200) {
-        lastTelemetryReportMs = nowMs;
-
-        if (imu.isInitialized()) {
-            imu.printCurrentReadings(Serial);
-        }
-    }
+    // Main Arduino loop sleeps; tasks are handled by FreeRTOS on Core 0 and Core 1
+    vTaskDelay(pdMS_TO_TICKS(1000));
 }

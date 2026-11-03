@@ -1,83 +1,117 @@
 #include "stm32_link.h"
 
-STM32Link::STM32Link()
-    : _serial(1),
-      _rx_index(0),
-      _sync_found(false),
-      _last_valid_packet_time(0),
-      _valid_packet_count(0),
-      _checksum_error_count(0) {
-    memset(&_latest_feedback, 0, sizeof(_latest_feedback));
+STM32Channel::STM32Channel()
+    : serial_(nullptr),
+      rx_index_(0),
+      sync_found_(false),
+      m1_actual_rpm_(0.0f),
+      m2_actual_rpm_(0.0f),
+      last_packet_ms_(0),
+      valid_packet_count_(0),
+      checksum_error_count_(0) {}
+
+void STM32Channel::begin(HardwareSerial *serial, uint32_t baud, int rxPin, int txPin) {
+    serial_ = serial;
+    if (!serial_) return;
+    serial_->setRxBufferSize(512);
+    serial_->begin(baud, SERIAL_8N1, rxPin, txPin);
 }
 
-void STM32Link::begin(uint32_t baud, int rxPin, int txPin) {
-    _serial.begin(baud, SERIAL_8N1, rxPin, txPin);
-}
+void STM32Channel::sendCommand(float m1_rpm, float m2_rpm) {
+    if (!serial_) return;
 
-uint8_t STM32Link::calculateChecksum(const uint8_t *data, size_t len) {
-    uint8_t crc = 0;
-    for (size_t i = 0; i < len; i++) {
-        crc ^= data[i];
-    }
-    return crc;
-}
-
-void STM32Link::sendCommand(float m1_rpm, float m2_rpm, float m3_rpm, float m4_rpm) {
-    // Non-blocking guard: Never stall the main CPU loop if STM32 is disconnected or TX buffer full
-    if (_serial.availableForWrite() < static_cast<int>(sizeof(MotorCommandPacket) + 1)) {
+    // Non-blocking guard
+    if (serial_->availableForWrite() < (int)sizeof(STM32MotorCommandPacket)) {
         return;
     }
 
-    MotorCommandPacket packet;
-    packet.m1_target = m1_rpm;
-    packet.m2_target = m2_rpm;
-    packet.m3_target = m3_rpm;
-    packet.m4_target = m4_rpm;
-    packet.checksum = calculateChecksum(reinterpret_cast<const uint8_t*>(&packet), sizeof(packet) - 1);
+    STM32MotorCommandPacket pkt;
+    pkt.sync = COMMAND_SYNC_BYTE;
+    pkt.m1_rpm = m1_rpm;
+    pkt.m2_rpm = m2_rpm;
 
-    // Send leading sync byte 0xAA followed by packed payload & checksum (18 bytes total)
-    uint8_t sync = COMMAND_SYNC_BYTE;
-    _serial.write(&sync, 1);
-    _serial.write(reinterpret_cast<const uint8_t*>(&packet), sizeof(packet));
+    uint8_t chk = 0;
+    const uint8_t *p = (const uint8_t *)&pkt;
+    for (size_t i = 1; i < sizeof(pkt) - 1; i++) {
+        chk ^= p[i];
+    }
+    pkt.checksum = chk;
+
+    serial_->write((const uint8_t *)&pkt, sizeof(pkt));
 }
 
-bool STM32Link::update() {
-    bool newPacket = false;
-    
-    while (_serial.available() > 0) {
-        uint8_t byte = _serial.read();
+bool STM32Channel::update() {
+    if (!serial_) return false;
 
-        if (!_sync_found) {
-            if (byte == FEEDBACK_SYNC_BYTE) { // 0x55
-                _sync_found = true;
-                _rx_index = 0;
+    bool new_packet = false;
+    while (serial_->available() > 0) {
+        uint8_t b = serial_->read();
+
+        if (!sync_found_) {
+            if (b == 0xAA) {
+                rx_buffer_[0] = 0xAA;
+                rx_index_ = 1;
+            } else if (rx_index_ == 1 && b == 0x55) {
+                rx_buffer_[1] = 0x55;
+                rx_index_ = 2;
+                sync_found_ = true;
+            } else {
+                rx_index_ = 0;
             }
         } else {
-            _rx_buffer[_rx_index++] = byte;
+            rx_buffer_[rx_index_++] = b;
 
-            if (_rx_index >= static_cast<int>(sizeof(_rx_buffer))) {
-                // Buffer filled with 17 bytes: 16 payload bytes (4 floats) + 1 checksum byte
-                uint8_t expectedChecksum = _rx_buffer[16];
-                uint8_t computedChecksum = calculateChecksum(_rx_buffer, 16);
+            // 26-Byte Telemetry Frame
+            if (rx_index_ >= 26) {
+                sync_found_ = false;
+                rx_index_ = 0;
 
-                if (expectedChecksum == computedChecksum) {
-                    _latest_feedback.sync = FEEDBACK_SYNC_BYTE;
-                    memcpy(&_latest_feedback.m1_rpm, _rx_buffer, 16);
-                    _latest_feedback.checksum = expectedChecksum;
-
-                    _last_valid_packet_time = millis();
-                    _valid_packet_count++;
-                    newPacket = true;
-                } else {
-                    _checksum_error_count++;
+                // Validate XOR checksum over bytes [2 .. 24]
+                uint8_t expected_chk = rx_buffer_[25];
+                uint8_t computed_chk = 0;
+                for (int i = 2; i < 25; i++) {
+                    computed_chk ^= rx_buffer_[i];
                 }
 
-                // Reset state machine for next sync byte
-                _sync_found = false;
-                _rx_index = 0;
+                if (computed_chk == expected_chk) {
+                    const STM32TelemetryPacket *pkt = (const STM32TelemetryPacket *)rx_buffer_;
+                    m1_actual_rpm_ = (float)pkt->m1_actual_rpm * 0.1f;
+                    m2_actual_rpm_ = (float)pkt->m2_actual_rpm * 0.1f;
+                    valid_packet_count_++;
+                    last_packet_ms_ = millis();
+                    new_packet = true;
+                } else {
+                    checksum_error_count_++;
+                }
             }
         }
     }
+    return new_packet;
+}
 
-    return newPacket;
+bool STM32Channel::isConnected() const {
+    return (last_packet_ms_ > 0) && (millis() - last_packet_ms_ < 200);
+}
+
+// =============================================================================
+// STM32 Dual Link Implementation
+// =============================================================================
+STM32DualLink::STM32DualLink()
+    : serial_front_(STM32_1_UART_NUM),
+      serial_rear_(STM32_2_UART_NUM) {}
+
+void STM32DualLink::begin(uint32_t baud, int front_rx, int front_tx, int rear_rx, int rear_tx) {
+    front_.begin(&serial_front_, baud, front_rx, front_tx);
+    rear_.begin(&serial_rear_, baud, rear_rx, rear_tx);
+}
+
+void STM32DualLink::sendCommands(float fl_rpm, float fr_rpm, float rl_rpm, float rr_rpm) {
+    front_.sendCommand(fl_rpm, fr_rpm);
+    rear_.sendCommand(rl_rpm, rr_rpm);
+}
+
+bool STM32DualLink::update() {
+    bool f_ok = front_.update();
+    bool r_ok = rear_.update();
+    return f_ok || r_ok;
 }
