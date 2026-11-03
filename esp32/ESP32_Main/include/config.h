@@ -3,17 +3,43 @@
 
 #include <Arduino.h>
 
-// Baud rate for STM32 UART link
-#define STM32_UART_BAUD 921600
+// =============================================================================
+// FOLKRACE Master ESP32-S3 Hardware Pinout Configuration
+// Generated / Verified by pin_solver.py
+// =============================================================================
 
-// ESP32-S3 Hardware Serial Pins connected to STM32 (PB6 TX, PB7 RX)
-#define STM32_UART_TX_PIN 17  // ESP32 TX -> STM32 RX (PB7)
-#define STM32_UART_RX_PIN 18  // ESP32 RX <- STM32 TX (PB6)
+// --- BNO086 9-DOF IMU (SPI2 Master) ---
+#define IMU_SPI_SCK_PIN          12
+#define IMU_SPI_MOSI_PIN         11
+#define IMU_SPI_MISO_PIN         13
+#define IMU_SPI_CS_PIN           10
+#define IMU_INT_PIN              9
+#define IMU_RST_PIN              14
 
-// Pi 5 High-Speed UART2 Link (Pi 5 Pins 12 & 35 /dev/ttyAMA2)
-#define PI_UART_BAUD 921600
-#define PI_UART_TX_PIN 47  // ESP32 TX -> Pi 5 Pin 35 (GPIO 19 RX)
-#define PI_UART_RX_PIN 21  // ESP32 RX <- Pi 5 Pin 12 (GPIO 18 TX)
+// --- Ackermann Steering Servo (LEDC PWM) ---
+#define SERVO_STEER_PWM_PIN      21  // 333 Hz Digital Ackermann Steering Servo
+#define SERVO_ACKERMANN_PWM_PIN  SERVO_STEER_PWM_PIN
+
+// --- STM32 Motor Controller #1 (UART1) ---
+#define STM32_1_UART_BAUD        921600
+#define STM32_1_UART_TX_PIN      17  // ESP32 TX -> STM32 #1 RX (PB7)
+#define STM32_1_UART_RX_PIN      18  // ESP32 RX <- STM32 #1 TX (PB6)
+
+// Legacy aliases for single-link backward compatibility
+#define STM32_UART_BAUD          STM32_1_UART_BAUD
+#define STM32_UART_TX_PIN        STM32_1_UART_TX_PIN
+#define STM32_UART_RX_PIN        STM32_1_UART_RX_PIN
+
+// --- STM32 Motor Controller #2 (UART2) ---
+#define STM32_2_UART_BAUD        921600
+#define STM32_2_UART_TX_PIN      15  // ESP32 TX -> STM32 #2 RX (PB7)
+#define STM32_2_UART_RX_PIN      16  // ESP32 RX <- STM32 #2 TX (PB6)
+
+// --- Raspberry Pi 4 Telemetry Highway (UART0) ---
+#define PI_UART_BAUD             921600
+#define PI_UART_TX_PIN           43  // ESP32 TX -> Pi 4 RX (GPIO 15)
+#define PI_UART_RX_PIN           44  // ESP32 RX <- Pi 4 TX (GPIO 14)
+#define PI_DRDY_PIN              1   // Hardware Batch Ready Pulse -> Pi 4 GPIO
 
 // Control Loop Frequency (400 Hz)
 #define CONTROL_LOOP_FREQ_HZ 400
