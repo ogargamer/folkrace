@@ -245,7 +245,8 @@ AWW_EARLY_EXIT_MIN_BC_DIST_M: float = 0.15     # meters minimum distance from ro
 # 8. DRIFT & TRACTION CONTROL (REAR OPTICAL FLOW + ACTIVE FRONT STEERING)
 # ==============================================================================
 
-ENABLE_TRACTION_DRIFT_CONTROL: bool = True
+ENABLE_OPTICAL_FLOW_SENSOR: bool = False
+ENABLE_TRACTION_DRIFT_CONTROL: bool = False
 
 # 8.1 Speed Activation Gates & Hysteresis (m/s)
 # Armed at or above dynamic cornering floor V_MIN_CRUISE (~1.204 m/s)
@@ -270,7 +271,7 @@ D_BETA_LP_ALPHA: float = 0.43                  # Low-pass filter smoothing facto
 FRONT_LATERAL_RESERVE_MIN: float = 0.40        # Minimum lateral friction fraction reserved for front steering during rear coast
 
 # 8.5 Dynamic MU Scaling (Tire Kinetic Friction Reduction)
-ENABLE_DYNAMIC_MU_SCALING: bool = True
+ENABLE_DYNAMIC_MU_SCALING: bool = False
 MU_SLIDE_RATIO: float = 0.85                   # Minimum friction ratio (1.0 - 0.15 = 0.85 at max slip)
 MU_RECOVERY_RATE: float = 2.0                  # Rate at which effective MU recovers back to nominal (1/s)
 
@@ -280,31 +281,13 @@ ALPHA_SLEW_RISE_RATE: float = 2.5              # Max alpha recovery rate (units/
 
 
 # ==============================================================================
-# 9. ACTIVE ANTI-ROLLOVER MITIGATION (ARM)
+# 9. RAMP DETECTION & SPEED GOVERNOR
 # ==============================================================================
 
-ENABLE_ANTI_ROLLOVER: bool = True
-
-# 9.1 Tilt Thresholds (Degrees & Radians)
-ARM_TILT_WARN_DEG: float = 15.0                # Advisory ramp start threshold (deg): rejects small ramps/curbs
-ARM_TILT_CRIT_DEG: float = 22.0                # Critical full-intervention threshold (deg): imminent tipping point
-ARM_TILT_WARN_RAD: float = math.radians(ARM_TILT_WARN_DEG)
-ARM_TILT_CRIT_RAD: float = math.radians(ARM_TILT_CRIT_DEG)
-
-# 9.2 Active Countersteering & Roll-Rate Damping
-ARM_K_P_ROLL: float = 1.25                     # Proportional countersteer gain (rad steer per rad roll excess)
-ARM_K_D_ROLL: float = 0.08                     # Derivative damping against roll rate to prevent landing snap (rad / (rad/s))
-ARM_SETTLE_TIME_S: float = 0.080               # 80 ms touchdown latch hold time for smooth suspension settling
-
-# 9.3 Dynamic Mu-Aware Deceleration & Drive Attenuation
-ARM_DECEL_FRACTION: float = 0.85               # Fraction of available mu*g utilized for tilt deceleration
-ARM_MIN_MU_RATIO: float = 0.20                 # Minimum friction ratio floor to prevent mathematical singularity
-ARM_NOMINAL_MU: float = TIRE_MU                # Reference tire friction coefficient (unified with canonical TIRE_MU: 0.86)
-
-# 9.4 Dynamic Pre-Emptive Tilt Speed Governor (4° to 15° ARM threshold)
-ENABLE_TILT_SPEED_SCALING: bool = True          # Enable dynamic pre-emptive tilt speed scaling
-TILT_SLOWDOWN_START_DEG: float = 4.0           # Detect tilt over 4 deg and begin scaling down max speed (editable parameter)
-TILT_SLOWDOWN_END_DEG: float = ARM_TILT_WARN_DEG # Scale down max speed up to ARM threshold (15 deg, unified with ARM_TILT_WARN_DEG)
-TILT_MAX_SPEED_CAP: float = V_MAX_CRUISE       # Maximum speed limit (m/s) unified with vehicle cruising ceiling (5.0 m/s)
-TILT_MIN_SPEED_CAP: float = 2.0                # Minimum speed floor (m/s) at maximum tilt (15 deg)
-TILT_EXP_FACTOR: float = 1.3                   # Slight exponential curvature factor for dynamic scaling (k in exp(-k * u))
+ENABLE_RAMP_DETECTION: bool = True
+RAMP_SPEED_LIMIT_MPS: float = 2.0       # Cruising speed limit (m/s) when robot is on a ramp
+RAMP_ENTER_PITCH_DEG: float = 5.0       # Pitch angle (deg) threshold to trigger ramp mode
+RAMP_ENTER_TILT_DEG: float = 6.0        # Combined tilt hypot(roll, pitch) (deg) threshold
+RAMP_EXIT_PITCH_DEG: float = 3.0        # Pitch hysteresis exit floor (deg)
+RAMP_EXIT_TILT_DEG: float = 4.0         # Tilt hysteresis exit floor (deg)
+RAMP_HOLD_TIME_S: float = 0.30          # Hold latch duration (s) across ramp apex / transition
