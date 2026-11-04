@@ -31,7 +31,7 @@ static constexpr double TIRE_MU_CONST = 0.85;
 static constexpr double GRAVITY_G_CONST = 9.81;
 static constexpr double MAX_STEERING_RAD_CONST =
     0.657137; // ~37.65 deg 40% Ackermann center limit (yields 39.9 deg inside servo)
-static constexpr double MAX_SERVO_RATE_RAD_S_CONST = 15.4;
+static constexpr double MAX_SERVO_RATE_RAD_S_CONST = 16.89; // 0.062 s / 60 deg @ 8.4V (968 deg/s)
 static constexpr double MPC_WEIGHT_SLACK_EPS_CONST = 500.0;
 static constexpr double MPC_FRICTION_OCTAGON_C1_CONST = 1.2;
 static constexpr double MPC_TARGET_SPEED_MPS_CONST = 4.50;

@@ -5,7 +5,7 @@
   Single source of truth for:
     1. Physical Vehicle Dimensions, Kinematics & Actuator Limits
     2. Tire Friction & Vehicle Dynamic Traction Envelopes
-    3. Sensors, Costmap & Multi-Rate Loop Timing (8 ms Sim / 16 ms Planner)
+    3. Sensors, Costmap & Timing (60 Hz ToF & Pi Planning Loop)
     4. Gap Scouting, Aperture Sizing & Selection Weights
     5. Curvilinear Slack-Constrained SL-MPC (Native C++ / OSQP)
     6. Non-Blocking Stuck Detection & Reverse Recovery Manager
@@ -70,23 +70,27 @@ LAT_ACCEL_MAX: float = LAT_ACCEL_RATIO * A_MAX_BASE      # ~8.437 m/s^2 maximum 
 R_MIN_TURN: float = WHEELBASE / math.tan(MAX_STEERING_RAD)  # ~0.1717 m
 V_MIN_CRUISE: float = math.sqrt(LAT_ACCEL_MAX * R_MIN_TURN)  # ~1.204 m/s dynamic cornering floor
 
-# 2.4 Digital Servo Dynamic Limits (PTK 9497 MG-D at 8.4V HV)
-SERVO_MAX_SPEED_RAD_S: float = 15.4    # rad/s maximum steering servo slew rate at 8.4V (~0.068 s / 60 deg)
+# 2.4 Digital Servo Dynamic Limits (PTK 9497 MG-D at 8.4V HV: 0.062 s / 60 deg)
+SERVO_MAX_SPEED_RAD_S: float = 16.89   # rad/s maximum steering servo slew rate at 8.4V (~968 deg/s)
 
 
 # ==============================================================================
-# 3. SENSORS, COSTMAP & TIMING (Multi-Rate: 125 Hz Sim / 62.5 Hz Planner)
+# 3. SENSORS, COSTMAP & TIMING (Deterministic 60 Hz ToF & Pi Planning Loop)
 # ==============================================================================
 
-# 3.1 Timing & Frequency Decimation
+# 3.1 Timing & Frequency
+TOF_HZ: float = 60.0                   # Physical ToF ranging frequency (60.0 Hz from ESP32 ToF Hub)
+PI_LOOP_HZ: float = 60.0               # Pi 4 planning & control loop execution rate (60.0 Hz)
+DT_PI_LOOP: float = 1.0 / PI_LOOP_HZ   # Pi planning cycle duration: 0.0166667 s (16.67 ms)
+
 TIME_STEP_MS: int = 8                  # Webots basicTimeStep in ms (matches world file)
 DT: float = TIME_STEP_MS / 1000.0      # Physics & fast actuator/IMU step duration (0.008 s = 8 ms)
 SIM_HZ: float = 1000.0 / TIME_STEP_MS  # Simulation physics, 4WD motors, steering, and IMU rate (125.0 Hz)
 
-PLANNER_DECIMATION: int = 1            # Run planner every physics step (125.0 Hz closed-loop)
-TOF_TIME_STEP_MS: int = TIME_STEP_MS * PLANNER_DECIMATION  # ToF sensor sampling interval in ms (8 ms)
-DT_PLANNER: float = TOF_TIME_STEP_MS / 1000.0              # Planner cycle duration (0.008 s = 8 ms)
-PLANNER_HZ: float = 1000.0 / TOF_TIME_STEP_MS              # ToF scan processing & trajectory planning rate (125.0 Hz)
+PLANNER_DECIMATION: int = 1            # Run planner every physics step in simulation
+TOF_TIME_STEP_MS: int = TIME_STEP_MS * PLANNER_DECIMATION  # Sim ToF sampling interval in ms
+DT_PLANNER: float = DT_PI_LOOP         # Canonical planner cycle duration (0.0166667 s = 60.0 Hz)
+PLANNER_HZ: float = PI_LOOP_HZ         # ToF scan processing & trajectory planning rate (60.0 Hz)
 
 # 3.2 Realistic Hardware Latency & Lookahead Compensation
 TOF_LATENCY_STEPS: int = 2              # 2 simulation steps = 16 ms ToF integration & transport delay
@@ -178,7 +182,7 @@ ALT_APERTURE_BIAS: float = 1.553       # Multiplier on aperture width reward for
 
 # 5.1 Prediction Horizon & Timestep
 MPC_HORIZON_N: int = 30                # Prediction horizon steps (fixed at 30 in native QP sparsity table)
-MPC_DT: float = 0.017                  # seconds per horizon step (~60 Hz planning loop)
+MPC_DT: float = 1.0 / 60.0             # seconds per horizon step (exact 60.0 Hz planning loop: ~0.016667 s)
 
 # 5.2 Cost Function Weights (Quadratic & Linear OSQP Penalties, GA Champion)
 MPC_Q_PROGRESS: float = 23.108         # Weight encouraging forward arc-length progress

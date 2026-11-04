@@ -18,6 +18,11 @@ CURR_DIR = os.path.dirname(os.path.abspath(__file__))
 if CURR_DIR not in sys.path:
     sys.path.insert(0, CURR_DIR)
 
+# Fallback path to Webots tof_path_planner when running on host workstation
+PLANNER_DIR = os.path.normpath(os.path.join(CURR_DIR, "..", "webots", "simulation", "my_project", "controllers", "tof_path_planner"))
+if os.path.exists(PLANNER_DIR) and PLANNER_DIR not in sys.path:
+    sys.path.insert(0, PLANNER_DIR)
+
 from cpp_smart_hybrid_costmap import CppSmartHybridCostmap, SENSOR_NAMES
 from tof_gap_scout import ToFGapScout
 from planner_sl_mpc import CurvilinearSLMPC, CPP_AVAILABLE
@@ -55,8 +60,12 @@ def run_benchmark():
 
     dataset_path = os.path.join(CURR_DIR, "data", "tof_readings_cube_10cm.csv")
     if not os.path.exists(dataset_path):
-        print(f"[ERR] Dataset not found: {dataset_path}")
-        return
+        fallback_data = os.path.join(PLANNER_DIR, "data", "datasets", "tof_readings_cube_10cm.csv")
+        if os.path.exists(fallback_data):
+            dataset_path = fallback_data
+        else:
+            print(f"[ERR] Dataset not found: {dataset_path}")
+            return
 
     frames = load_dataset(dataset_path)
     print(f"[INFO] Loaded {len(frames)} ToF frames from {os.path.basename(dataset_path)}")

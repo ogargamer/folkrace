@@ -65,7 +65,7 @@
 #define VEHICLE_ACKERMANN_PCT    0.40f    // 40% Ackermann Geometry
 #define VEHICLE_MOTOR_DIR        -1.0f    // Webots thrust sign (-1.0 pushes forward)
 #define VEHICLE_MAX_WHEEL_SPEED  5.0f     // Top speed ceiling (m/s)
-#define VEHICLE_SERVO_MAX_RATE   15.4f    // Slew rate limit (rad/s, ~882 deg/s)
+#define VEHICLE_SERVO_MAX_RATE   16.89f   // Slew rate limit (rad/s, 0.062 s / 60 deg @ 8.4V = ~968 deg/s)
 
 // Slip Detection Parameters
 #define SLIP_GATE_SPEED_MPS      0.30f    // Minimum speed to evaluate slip (m/s)
