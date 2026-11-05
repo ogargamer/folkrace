@@ -8,6 +8,7 @@
 #include "sensor_fusion.h"
 #include "stm32_link.h"
 #include "imu_bno08x.h"
+#include "mcu_telemetry_protocol.h"
 
 // =============================================================================
 // Inter-Core Shared Memory Structures (Allocated in Internal SRAM)
@@ -378,7 +379,77 @@ static void ioTask(void *pvParameters) {
             }
         }
 
-        // 6. Periodic Benchmark Telemetry Stream to USB Serial (every 500 ms = 2 Hz)
+        // 6. Periodic Binary Telemetry Dispatch to Pi 4 @ 100 Hz (10 ms period)
+        static uint32_t s_last_pi_tx_ms = 0;
+        static uint32_t s_telem_seq = 0;
+        if (now - s_last_pi_tx_ms >= 10) {
+            s_last_pi_tx_ms = now;
+            const SharedControlOutputs &c = s_controlOutputs.getReadBuffer();
+            const SharedSensorInputs &in = s_sensorInputs.getReadBuffer();
+
+            ChassisTelemetryPacket pkt;
+            pkt.sync[0] = MCU_UART_SYNC_1;
+            pkt.sync[1] = MCU_UART_SYNC_2;
+            pkt.msg_type = MSG_ID_CHASSIS_TELEM;
+            pkt.payload_len = sizeof(pkt) - 5;
+            pkt.seq = s_telem_seq++;
+            pkt.timestamp_us = (uint32_t)esp_timer_get_time();
+
+            pkt.yaw_deg_x10 = (int16_t)(in.yaw_deg * 10.0f);
+            pkt.pitch_deg_x10 = (int16_t)(in.pitch_deg * 10.0f);
+            pkt.roll_deg_x10 = (int16_t)(in.roll_deg * 10.0f);
+            pkt.gyro_z_mrad_s = (int16_t)(in.gyro_z * 1000.0f);
+            pkt.accel_fwd_cm_s2 = (int16_t)(in.accel_fwd * 100.0f);
+            pkt.accel_lat_cm_s2 = (int16_t)(in.accel_lat * 100.0f);
+
+            pkt.steer_cmd_deg_x10 = (int16_t)(c.steer_deg * 10.0f);
+            pkt.steer_act_deg_x10 = (int16_t)(c.steer_deg * 10.0f);
+            pkt.servo_pulse_us = (uint16_t)c.servo_pulse_us;
+            pkt.v_cmd_mm_s = (int16_t)(c.rate_limited_v * 1000.0f);
+            pkt.v_est_mm_s = (int16_t)(c.v_est * 1000.0f);
+
+            pkt.fl_rpm_cmd = (int16_t)c.fl_target_rpm;
+            pkt.fr_rpm_cmd = (int16_t)c.fr_target_rpm;
+            pkt.rl_rpm_cmd = (int16_t)c.rl_target_rpm;
+            pkt.rr_rpm_cmd = (int16_t)c.rr_target_rpm;
+            pkt.fl_rpm_act = (int16_t)in.fl_rpm;
+            pkt.fr_rpm_act = (int16_t)in.fr_rpm;
+            pkt.rl_rpm_act = (int16_t)in.rl_rpm;
+            pkt.rr_rpm_act = (int16_t)in.rr_rpm;
+
+            pkt.slip_state = (uint8_t)c.slip_state;
+            pkt.slip_ratio_pct = (int8_t)(c.slip_ratio * 100.0f);
+            pkt.flags = (in.override_active ? FLAG_OVERRIDE_ACTIVE : 0) |
+                        (s_fake_data_active ? FLAG_BENCH_FAKE_DATA : 0) |
+                        (s_imu.isInitialized() ? FLAG_IMU_ONLINE : 0) |
+                        (s_stm32Link.isFrontConnected() ? FLAG_STM32_FRONT_ONLINE : 0) |
+                        (s_stm32Link.isRearConnected() ? FLAG_STM32_REAR_ONLINE : 0);
+
+            pkt.checksum = mcu_calc_checksum((const uint8_t *)&pkt, sizeof(pkt) - 1);
+            s_piSerial.write((const uint8_t *)&pkt, sizeof(pkt));
+        }
+
+        // 7. Binary Motion Command Ingestion from Pi 4
+        while (s_piSerial.available() >= (int)sizeof(MotionCommandPacket)) {
+            if (s_piSerial.peek() == PI_UART_SYNC_1) {
+                uint8_t buf[sizeof(MotionCommandPacket)];
+                s_piSerial.readBytes(buf, sizeof(buf));
+                if (buf[0] == PI_UART_SYNC_1 && buf[1] == PI_UART_SYNC_2 && buf[2] == MSG_ID_MOTION_CMD) {
+                    uint8_t chk = mcu_calc_checksum(buf, sizeof(buf) - 1);
+                    if (chk == buf[sizeof(buf) - 1]) {
+                        const MotionCommandPacket *cmd = (const MotionCommandPacket *)buf;
+                        s_manual_v = (float)cmd->target_v_mm_s / 1000.0f;
+                        s_manual_steer = (float)cmd->target_steer_mrad / 1000.0f;
+                        s_manual_override = (cmd->run_mode == 1);
+                        s_fake_data_active = false;
+                    }
+                }
+            } else {
+                s_piSerial.read(); // advance stream
+            }
+        }
+
+        // 8. Periodic Benchmark Telemetry Stream to USB Serial (every 500 ms = 2 Hz)
         if (now - last_report_ms >= 500) {
             last_report_ms = now;
             const SharedControlOutputs &c = s_controlOutputs.getReadBuffer();
@@ -419,6 +490,10 @@ void setup() {
         STM32_2_UART_TX_PIN
     );
     Serial.println(F("[+] Dual STM32 FOC UART Links Initialized (UART1 & UART2 @ 921.6k)."));
+
+    // 2b. Initialize Raspberry Pi 4 High-Speed Binary Telemetry Highway
+    s_piSerial.begin(PI_UART_BAUD, SERIAL_8N1, PI_UART_RX_PIN, PI_UART_TX_PIN);
+    Serial.println(F("[+] Raspberry Pi 4 Binary Telemetry Link Initialized (921.6k)."));
 
     // 3. Initialize BNO086 IMU over SPI2 (CS=10, INT=9, SCK=12, MOSI=11, MISO=13, RST=14)
     if (s_imu.begin(IMU_SPI_CS_PIN, IMU_SPI_MISO_PIN, IMU_SPI_MOSI_PIN, IMU_SPI_SCK_PIN, IMU_INT_PIN, IMU_RST_PIN)) {

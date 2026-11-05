@@ -26,3 +26,6 @@ temp/
 *.bak
 *.tmp
 compile_commands.json
+data/recordings/
+*.db
+*.sqlite

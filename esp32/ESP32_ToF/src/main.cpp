@@ -9,6 +9,7 @@
 #include "vl53l8cx_plugin_xtalk.h"
 
 #include "tof_pinout.h"
+#include "mcu_telemetry_protocol.h"
 
 // =========================================================================
 // HARDWARE PIN DEFINITIONS (MAPPED FROM TOF_PINOUT.H)
@@ -539,6 +540,28 @@ void send_arc_telemetry(uint8_t sensor_id) {
     Serial.write((const uint8_t *)arc_buf, pos);
 }
 
+// Zero-allocation, ultra-fast 78-byte binary packet dispatch to Pi 4 (< 1us execution)
+void send_binary_telemetry(uint8_t sensor_id, VL53L8CX_ResultsData *p_res, unsigned long f_count) {
+    ToFTelemetryPacket pkt;
+    pkt.sync[0] = MCU_UART_SYNC_1;
+    pkt.sync[1] = MCU_UART_SYNC_2;
+    pkt.msg_type = MSG_ID_TOF_TELEM;
+    pkt.sensor_id = sensor_id;
+    pkt.seq = (uint32_t)f_count;
+    pkt.timestamp_us = (uint32_t)micros();
+    pkt.silicon_temp = (int8_t)p_res->silicon_temp_degc;
+
+    for (int i = 0; i < 16; i++) {
+        int16_t d = p_res->distance_mm[i * VL53L8CX_NB_TARGET_PER_ZONE];
+        pkt.dist_mm[i] = (d > 0) ? (uint16_t)d : 4000;
+        pkt.status[i] = p_res->target_status[i * VL53L8CX_NB_TARGET_PER_ZONE];
+        pkt.spad[i] = (uint8_t)(p_res->nb_spads_enabled[i] >> 2);
+    }
+
+    pkt.checksum = mcu_calc_checksum((const uint8_t *)&pkt, sizeof(pkt) - 1);
+    Serial.write((const uint8_t *)&pkt, sizeof(pkt));
+}
+
 static char telemetry_buf[8192];
 
 static inline int append_array_u(char *buf, int pos, const char *key, const uint32_t *vals, int count) {
@@ -899,6 +922,7 @@ void loop() {
                     update_onchip_fused_radar();
                     if (stream_arc_mode) send_arc_telemetry(1);
                     if (stream_diag_matrix) send_json_telemetry(1, &Results1, frame_count1);
+                    send_binary_telemetry(1, &Results1, frame_count1);
                 }
             }
         }
@@ -921,6 +945,7 @@ void loop() {
                     update_onchip_fused_radar();
                     if (stream_arc_mode) send_arc_telemetry(2);
                     if (stream_diag_matrix) send_json_telemetry(2, &Results2, frame_count2);
+                    send_binary_telemetry(2, &Results2, frame_count2);
                 }
             }
         }

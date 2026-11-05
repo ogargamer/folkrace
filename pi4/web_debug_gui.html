@@ -1,0 +1,844 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Folkrace Pi 4 — Real-Time Tactical Debugger & Flight Studio</title>
+<style>
+  :root {
+    --bg-dark: #0b0e14;
+    --card-bg: #131720;
+    --border-color: #262c36;
+    --text-primary: #e6edf3;
+    --text-secondary: #8b949e;
+    --accent-cyan: #00e5ff;
+    --accent-gold: #ffd600;
+    --accent-green: #00e676;
+    --accent-red: #ff3d00;
+    --accent-purple: #e040fb;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background-color: var(--bg-dark);
+    color: var(--text-primary);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Consolas, monospace;
+    font-size: 13px;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  header {
+    background-color: var(--card-bg);
+    border-bottom: 1px solid var(--border-color);
+    padding: 8px 16px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    height: 48px;
+  }
+  .header-title {
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--accent-cyan);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .header-badges {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+  }
+  .badge {
+    padding: 3px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 700;
+    background: #1c212c;
+    border: 1px solid var(--border-color);
+  }
+  .badge-core { color: #58a6ff; border-color: #1f6feb; }
+  .badge-live { color: #00e676; border-color: #00c853; }
+  .badge-replay { color: #ffd600; border-color: #ffab00; }
+  .badge-slip { color: #ff1744; border-color: #d50000; }
+  
+  .main-content {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+    padding: 10px;
+    gap: 10px;
+  }
+  .canvas-panel {
+    flex: 6;
+    background-color: var(--card-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    position: relative;
+  }
+  .canvas-header {
+    padding: 6px 12px;
+    border-bottom: 1px solid var(--border-color);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 11px;
+    color: var(--text-secondary);
+  }
+  #radarCanvas {
+    flex: 1;
+    width: 100%;
+    height: 100%;
+    cursor: crosshair;
+  }
+  
+  .side-panel {
+    flex: 5;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    overflow-y: auto;
+  }
+  .card {
+    background-color: var(--card-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    padding: 10px 12px;
+  }
+  .card-title {
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--accent-cyan);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 8px;
+    display: flex;
+    justify-content: space-between;
+  }
+  .gauge-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+  .gauge-box {
+    background: #0d1117;
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    padding: 6px 8px;
+  }
+  .gauge-label {
+    font-size: 10px;
+    color: var(--text-secondary);
+  }
+  .gauge-val {
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--text-primary);
+    margin-top: 2px;
+  }
+  .val-cmd { color: var(--accent-cyan); }
+  .val-act { color: var(--accent-green); }
+  .val-warn { color: var(--accent-red); }
+  
+  .rpm-matrix {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+    margin-top: 6px;
+  }
+  .rpm-cell {
+    background: #0d1117;
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    padding: 4px 6px;
+    font-size: 11px;
+  }
+  
+  /* Scrubber & Timeline Bar */
+  .timeline-bar {
+    background-color: var(--card-bg);
+    border-top: 1px solid var(--border-color);
+    padding: 8px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .timeline-slider-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  #frameSlider {
+    flex: 1;
+    height: 8px;
+    border-radius: 4px;
+    outline: none;
+    accent-color: var(--accent-cyan);
+    cursor: pointer;
+  }
+  .timeline-controls {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .btn-group {
+    display: flex;
+    gap: 4px;
+    align-items: center;
+  }
+  button, select {
+    background-color: #1c212c;
+    border: 1px solid var(--border-color);
+    color: var(--text-primary);
+    padding: 5px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 11px;
+    font-weight: 600;
+  }
+  button:hover { background-color: #2a3242; }
+  button:active { background-color: #384358; }
+  button.active {
+    background-color: #1f6feb;
+    border-color: #58a6ff;
+  }
+  .btn-play {
+    background-color: #238636;
+    border-color: #2ea043;
+    padding: 5px 14px;
+  }
+  .btn-play:hover { background-color: #2ea043; }
+  .btn-anomaly {
+    background-color: #8b0000;
+    border-color: #ff3d00;
+    color: #fff;
+  }
+  .btn-anomaly:hover { background-color: #b71c1c; }
+  
+  .legend-row {
+    position: absolute;
+    bottom: 8px;
+    left: 8px;
+    background: rgba(11, 14, 20, 0.85);
+    padding: 4px 8px;
+    border-radius: 4px;
+    border: 1px solid var(--border-color);
+    display: flex;
+    gap: 10px;
+    font-size: 10px;
+    pointer-events: none;
+  }
+  .legend-item { display: flex; align-items: center; gap: 4px; }
+  .legend-dot { width: 8px; height: 8px; border-radius: 50%; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="header-title">
+    <span>🏎️ FOLKRACE PI 4 TACTICAL DEBUGGER</span>
+  </div>
+  <div class="header-badges">
+    <span class="badge badge-core">Core 1: Planner (Dedicated)</span>
+    <span class="badge badge-core">Core 2: Debug Server & WAL Logger</span>
+    <span id="bufferBadge" class="badge" style="color:var(--accent-cyan);border-color:var(--accent-cyan)">Buffer: 0.0 / 30m</span>
+    <span id="modeBadge" class="badge badge-live">LIVE STREAM</span>
+    <span id="cpuTempBadge" class="badge">Temp: --°C</span>
+    <span id="freqBadge" class="badge">-- Hz</span>
+  </div>
+</header>
+
+<div class="main-content">
+  <!-- 2D Canvas matching Webots GUI -->
+  <div class="canvas-panel">
+    <div class="canvas-header">
+      <span>15mm ToF Occupancy Costmap & Curvilinear SL-MPC Trajectory Viewport</span>
+      <span id="coordReadout">Cursor: X=0.00m, Y=0.00m</span>
+    </div>
+    <canvas id="radarCanvas"></canvas>
+    
+    <div class="legend-row">
+      <div class="legend-item"><div class="legend-dot" style="background:var(--accent-gold)"></div>SL-MPC Winning Trajectory</div>
+      <div class="legend-item"><div class="legend-dot" style="background:var(--accent-cyan)"></div>Candidate Lines</div>
+      <div class="legend-item"><div class="legend-dot" style="background:var(--accent-green)"></div>Scouted Gap Target</div>
+      <div class="legend-item"><div class="legend-dot" style="background:var(--accent-red)"></div>Hazard Dilation Mask</div>
+      <div class="legend-item"><div class="legend-dot" style="background:var(--accent-purple)"></div>Reverse Escape Arcs</div>
+    </div>
+  </div>
+
+  <!-- Telemetry HUD & Diagnostics -->
+  <div class="side-panel">
+    <!-- 1. Motion & Actuator HUD -->
+    <div class="card">
+      <div class="card-title">
+        <span>Kinematic Actuation (Cmd vs Actual)</span>
+        <span id="lblMode" style="color:var(--accent-green)">MODE: DRIVE</span>
+      </div>
+      <div class="gauge-grid">
+        <div class="gauge-box">
+          <div class="gauge-label">FORWARD SPEED</div>
+          <div class="gauge-val">
+            <span class="val-cmd" id="vCmd">0.00</span> / <span class="val-act" id="vReal">0.00</span> <small style="font-size:11px;color:var(--text-secondary)">m/s</small>
+          </div>
+        </div>
+        <div class="gauge-box">
+          <div class="gauge-label">SERVO STEERING ANGLE</div>
+          <div class="gauge-val">
+            <span class="val-cmd" id="steerCmd">0.0°</span> / <span class="val-act" id="steerAct">0.0°</span>
+          </div>
+        </div>
+      </div>
+      
+      <!-- 4-Wheel RPM Matrix -->
+      <div style="margin-top:8px;font-size:10px;color:var(--text-secondary);font-weight:700;">4-WHEEL ELECTRONIC DIFF RPMS</div>
+      <div class="rpm-matrix">
+        <div class="rpm-cell">FL: <span class="val-cmd" id="rpmFLCmd">0</span> / <span class="val-act" id="rpmFLAct">0</span></div>
+        <div class="rpm-cell">FR: <span class="val-cmd" id="rpmFRCmd">0</span> / <span class="val-act" id="rpmFRAct">0</span></div>
+        <div class="rpm-cell">RL: <span class="val-cmd" id="rpmRLCmd">0</span> / <span class="val-act" id="rpmRLAct">0</span></div>
+        <div class="rpm-cell">RR: <span class="val-cmd" id="rpmRRCmd">0</span> / <span class="val-act" id="rpmRRAct">0</span></div>
+      </div>
+    </div>
+
+    <!-- 2. IMU & Traction Dynamics -->
+    <div class="card">
+      <div class="card-title">IMU Attitude & Traction Stability</div>
+      <div class="gauge-grid">
+        <div class="gauge-box">
+          <div class="gauge-label">YAW / GYRO Z</div>
+          <div class="gauge-val"><span id="imuYaw">0.0°</span> <small style="font-size:11px;color:var(--text-secondary)" id="imuGyroZ">0.00 rad/s</small></div>
+        </div>
+        <div class="gauge-box">
+          <div class="gauge-label">SLIP STATE / RATIO</div>
+          <div class="gauge-val"><span id="slipStateBadge" style="color:var(--accent-green)">NORMAL</span> <small style="font-size:11px;color:var(--text-secondary)" id="slipRatio">0.00</small></div>
+        </div>
+        <div class="gauge-box">
+          <div class="gauge-label">PITCH / ROLL</div>
+          <div class="gauge-val"><span id="imuPitch">0.0°</span> / <span id="imuRoll">0.0°</span></div>
+        </div>
+        <div class="gauge-box">
+          <div class="gauge-label">ACCEL (FWD / LAT)</div>
+          <div class="gauge-val"><span id="accelFwd">0.0</span> / <span id="accelLat">0.0</span> <small style="font-size:11px;color:var(--text-secondary)">m/s²</small></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 3. SL-MPC Optimization Profiler -->
+    <div class="card">
+      <div class="card-title">Core 1 SL-MPC Profiler (Real-Time Latency)</div>
+      <div class="gauge-grid">
+        <div class="gauge-box">
+          <div class="gauge-label">TOTAL PLANNER STEP</div>
+          <div class="gauge-val"><span id="planMs" style="color:var(--accent-cyan)">0.00</span> <small style="font-size:11px;color:var(--text-secondary)">ms</small></div>
+        </div>
+        <div class="gauge-box">
+          <div class="gauge-label">OSQP ITERATIONS</div>
+          <div class="gauge-val"><span id="osqpIters">0</span></div>
+        </div>
+        <div class="gauge-box">
+          <div class="gauge-label">COSTMAP UPDATE</div>
+          <div class="gauge-val"><span id="mapMs">0.00</span> <small style="font-size:11px;color:var(--text-secondary)">ms</small></div>
+        </div>
+        <div class="gauge-box">
+          <div class="gauge-label">GAP SCOUT LATENCY</div>
+          <div class="gauge-val"><span id="scoutMs">0.00</span> <small style="font-size:11px;color:var(--text-secondary)">ms</small></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 4. Session Flight Log & Disk Quota -->
+    <div class="card">
+      <div class="card-title">SD Card Flight Black Box</div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+        <span id="sessionName">Session: active</span>
+        <button id="btnDownloadLog" title="Download SQLite database to laptop">💾 Download Log</button>
+      </div>
+      <div style="font-size:11px;color:var(--text-secondary);display:flex;flex-direction:column;gap:3px;">
+        <div>Driving Buffer: <span id="drivingTime" style="color:var(--accent-cyan);font-weight:700">0.0 min</span> / 30 min (Rolling Auto-Delete)</div>
+        <div>Stored Frames: <span id="recFrames" style="color:var(--text-primary);font-weight:700">0</span> (<span id="recSize">0.0 MB</span>) | Pruned: <span id="prunedFrames">0</span></div>
+        <div>Free SD Storage: <span id="diskFree" style="color:var(--accent-green);font-weight:700">-- GB</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Bottom Frame-by-Frame Scrubbing Controls -->
+<div class="timeline-bar">
+  <div class="timeline-slider-row">
+    <span id="lblTime" style="font-weight:700;color:var(--accent-cyan);min-width:90px;">00:00.00</span>
+    <input type="range" id="frameSlider" min="1" max="1" value="1">
+    <span id="lblFrame" style="font-weight:700;min-width:110px;text-align:right;">Frame 0 / 0</span>
+  </div>
+  
+  <div class="timeline-controls">
+    <div class="btn-group">
+      <button id="btnToggleLive" class="active">🔴 LIVE</button>
+      <button id="btnFirst">|◀ First</button>
+      <button id="btnPrev10">◀◀ -10</button>
+      <button id="btnPrev1">◀ -1</button>
+      <button id="btnPlay" class="btn-play">▶ Play</button>
+      <button id="btnNext1">+1 ▶</button>
+      <button id="btnNext10">+10 ▶▶</button>
+      <button id="btnLast">Last ▶|</button>
+    </div>
+
+    <div class="btn-group">
+      <label style="font-size:11px;color:var(--text-secondary)">Speed:</label>
+      <select id="selSpeed">
+        <option value="0.1">0.1x (Slow-Mo)</option>
+        <option value="0.25">0.25x</option>
+        <option value="0.5">0.5x</option>
+        <option value="1.0" selected>1.0x Real-Time</option>
+        <option value="2.0">2.0x Fast</option>
+      </select>
+
+      <button id="btnJumpAnomaly" class="btn-anomaly" title="Jump to next slip, emergency stop, or sudden spike">
+        ⚡ Jump to Unexpected Moment
+      </button>
+    </div>
+  </div>
+</div>
+
+<script>
+// =============================================================================
+// FOLKRACE PI 4 MISSION CONTROL CLIENT LOGIC
+// =============================================================================
+
+const canvas = document.getElementById("radarCanvas");
+const ctx = canvas.getContext("2d");
+
+let isLive = true;
+let isPlaying = false;
+let playInterval = null;
+let currentFrameId = 1;
+let totalFrames = 1;
+let currentPkt = null;
+let anomaliesList = [];
+
+// Metric bounds matching Webots GUI Viewport
+const X_MIN = -1.6;
+const X_MAX = 1.6;
+const Y_MIN = -0.85;
+const Y_MAX = 1.80;
+
+function resizeCanvas() {
+  const rect = canvas.parentElement.getBoundingClientRect();
+  canvas.width = rect.width;
+  canvas.height = rect.height - 35; // account for header
+  if (currentPkt) renderRadar(currentPkt);
+}
+window.addEventListener("resize", resizeCanvas);
+setTimeout(resizeCanvas, 50);
+
+// Coordinate conversion: Real-world meters -> Canvas Pixels
+function toPixel(x, y) {
+  const w = canvas.width;
+  const h = canvas.height;
+  const px = ((x - X_MIN) / (X_MAX - X_MIN)) * w;
+  const py = h - ((y - Y_MIN) / (Y_MAX - Y_MIN)) * h;
+  return [px, py];
+}
+
+function toMetric(px, py) {
+  const w = canvas.width;
+  const h = canvas.height;
+  const mx = X_MIN + (px / w) * (X_MAX - X_MIN);
+  const my = Y_MIN + ((h - py) / h) * (Y_MAX - Y_MIN);
+  return [mx, my];
+}
+
+canvas.addEventListener("mousemove", (e) => {
+  const rect = canvas.getBoundingClientRect();
+  const [mx, my] = toMetric(e.clientX - rect.left, e.clientY - rect.top);
+  document.getElementById("coordReadout").innerText = `Cursor: X=${mx.toFixed(2)}m, Y=${my.toFixed(2)}m`;
+});
+
+// Render Tactical 2D Radar
+function renderRadar(pkt) {
+  ctx.fillStyle = "#0b0e14";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  // 1. Draw Metric Grid & Crosshairs
+  ctx.strokeStyle = "#1c212c";
+  ctx.lineWidth = 1;
+  for (let y = -0.5; y <= 1.8; y += 0.5) {
+    const [p1x, p1y] = toPixel(X_MIN, y);
+    const [p2x, p2y] = toPixel(X_MAX, y);
+    ctx.beginPath();
+    ctx.moveTo(p1x, p1y);
+    ctx.lineTo(p2x, p2y);
+    ctx.stroke();
+    ctx.fillStyle = "#384358";
+    ctx.font = "9px Consolas";
+    ctx.fillText(`${y.toFixed(1)}m`, 6, p1y - 3);
+  }
+  for (let x = -1.5; x <= 1.5; x += 0.5) {
+    const [p1x, p1y] = toPixel(x, Y_MIN);
+    const [p2x, p2y] = toPixel(x, Y_MAX);
+    ctx.beginPath();
+    ctx.moveTo(p1x, p1y);
+    ctx.lineTo(p2x, p2y);
+    ctx.stroke();
+  }
+
+  // 2. Draw Costmap / Hazard Mask if available
+  if (pkt.grid_unpacked && pkt.grid_unpacked.length > 0) {
+    const g = pkt.grid_unpacked;
+    const rows = g.length;
+    const cols = g[0].length;
+    const b = pkt.grid_bounds || [-1.25, 1.25, 0.0, 1.9];
+    const dx = (b[1] - b[0]) / cols;
+    const dy = (b[3] - b[2]) / rows;
+
+    for (let r = 0; r < rows; r += 2) {
+      for (let c = 0; c < cols; c += 2) {
+        const val = g[r][c];
+        if (val > 0.15) {
+          const gx = b[0] + c * dx;
+          const gy = b[2] + r * dy;
+          const [px, py] = toPixel(gx, gy);
+          const [p2x, p2y] = toPixel(gx + dx*2, gy + dy*2);
+          ctx.fillStyle = val > 0.6 ? "rgba(255, 61, 0, 0.45)" : "rgba(255, 171, 0, 0.25)";
+          ctx.fillRect(px, p2y, Math.abs(p2x - px), Math.abs(p1y - py));
+        }
+      }
+    }
+  }
+
+  // 3. Draw 16-Zone ToF Cones
+  if (pkt.tof_ranges && pkt.tof_ranges.length === 16) {
+    const angles = [
+      1.1, 12.4, 23.6, 34.9, 46.1, 57.4, 68.6, 79.9,
+      -1.1, -12.4, -23.6, -34.9, -46.1, -57.4, -68.6, -79.9
+    ];
+    for (let i = 0; i < 16; i++) {
+      const r = Math.min(pkt.tof_ranges[i], 1.80);
+      const rad = (angles[i] * Math.PI) / 180;
+      // Front bumper origin ~0.092m
+      const ox = i < 8 ? -0.058 : 0.058;
+      const oy = 0.092;
+      const tx = ox + r * Math.sin(rad);
+      const ty = oy + r * Math.cos(rad);
+
+      const [p0x, p0y] = toPixel(ox, oy);
+      const [ptx, pty] = toPixel(tx, ty);
+
+      ctx.strokeStyle = r < 0.20 ? "rgba(255, 61, 0, 0.7)" : "rgba(0, 229, 255, 0.25)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(p0x, p0y);
+      ctx.lineTo(ptx, pty);
+      ctx.stroke();
+
+      // Hit point dot
+      ctx.fillStyle = r < 0.20 ? "#ff3d00" : "#00e5ff";
+      ctx.beginPath();
+      ctx.arc(ptx, pty, r < 0.20 ? 3.5 : 2, 0, 2 * Math.PI);
+      ctx.fill();
+    }
+  }
+
+  // 4. Candidate Trajectory Fan (Cyan)
+  if (pkt.candidate_lines && Array.isArray(pkt.candidate_lines)) {
+    ctx.strokeStyle = "rgba(0, 229, 255, 0.20)";
+    ctx.lineWidth = 1;
+    for (const line of pkt.candidate_lines) {
+      if (!line || line.length < 2) continue;
+      ctx.beginPath();
+      const [sx, sy] = toPixel(line[0][0], line[0][1]);
+      ctx.moveTo(sx, sy);
+      for (let i = 1; i < line.length; i++) {
+        const [lx, ly] = toPixel(line[i][0], line[i][1]);
+        ctx.lineTo(lx, ly);
+      }
+      ctx.stroke();
+    }
+  }
+
+  // 5. Curvilinear SL-MPC Winning Trajectory (Gold)
+  if (pkt.best_line && pkt.best_line.length > 1) {
+    ctx.strokeStyle = "#ffd600";
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    const [b0x, b0y] = toPixel(pkt.best_line[0][0], pkt.best_line[0][1]);
+    ctx.moveTo(b0x, b0y);
+    for (let i = 1; i < pkt.best_line.length; i++) {
+      const [bx, by] = toPixel(pkt.best_line[i][0], pkt.best_line[i][1]);
+      ctx.lineTo(bx, by);
+    }
+    ctx.stroke();
+
+    // Node waypoints
+    for (let i = 0; i < pkt.best_line.length; i += 2) {
+      const [nx, ny] = toPixel(pkt.best_line[i][0], pkt.best_line[i][1]);
+      ctx.fillStyle = "#ffd600";
+      ctx.beginPath();
+      ctx.arc(nx, ny, 3, 0, 2 * Math.PI);
+      ctx.fill();
+    }
+  }
+
+  // 6. Scouted Gap Target (Green Crosshair)
+  if (pkt.gap && pkt.gap.length >= 2) {
+    const [gx, gy] = pkt.gap;
+    const [gpx, gpy] = toPixel(gx, gy);
+    ctx.strokeStyle = "#00e676";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(gpx, gpy, 8, 0, 2 * Math.PI);
+    ctx.moveTo(gpx - 12, gpy);
+    ctx.lineTo(gpx + 12, gpy);
+    ctx.moveTo(gpx, gpy - 12);
+    ctx.lineTo(gpx, gpy + 12);
+    ctx.stroke();
+  }
+
+  // 7. Physical Chassis Footprint (Drawn to scale)
+  const steer_rad = ((pkt.steer_cmd_deg || 0) * Math.PI) / 180.0;
+  drawChassis(steer_rad);
+}
+
+function drawChassis(steer_rad) {
+  // Physical constants from core/vehicle_params.py
+  // Wheelbase: 0.1325m, Rear axle: -0.07m, Front axle: +0.0625m, Track: ~0.09m
+  const w_half = 0.045;
+  const l_fwd = 0.11;
+  const l_back = -0.09;
+
+  const [c0x, c0y] = toPixel(-w_half, l_fwd);
+  const [c1x, c1y] = toPixel(w_half, l_fwd);
+  const [c2x, c2y] = toPixel(w_half, l_back);
+  const [c3x, c3y] = toPixel(-w_half, l_back);
+
+  ctx.strokeStyle = "#58a6ff";
+  ctx.fillStyle = "rgba(88, 166, 255, 0.15)";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(c0x, c0y);
+  ctx.lineTo(c1x, c1y);
+  ctx.lineTo(c2x, c2y);
+  ctx.lineTo(c3x, c3y);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+
+  // Kingpin steerable front wheels
+  drawWheel(-0.041, 0.0625, steer_rad);
+  drawWheel(0.041, 0.0625, steer_rad);
+  // Rear fixed wheels
+  drawWheel(-0.050, -0.070, 0.0);
+  drawWheel(0.050, -0.070, 0.0);
+}
+
+function drawWheel(x, y, steer_angle) {
+  const [px, py] = toPixel(x, y);
+  ctx.save();
+  ctx.translate(px, py);
+  ctx.rotate(-steer_angle);
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(-3, -10, 6, 20);
+  ctx.restore();
+}
+
+// Update DOM Telemetry Cards
+function updateHUD(pkt) {
+  document.getElementById("vCmd").innerText = (pkt.v_cmd || 0).toFixed(2);
+  document.getElementById("vReal").innerText = (pkt.v_real || pkt.v_est || 0).toFixed(2);
+
+  document.getElementById("steerCmd").innerText = `${(pkt.steer_cmd_deg || pkt.steer_deg || 0).toFixed(1)}°`;
+  document.getElementById("steerAct").innerText = `${(pkt.steer_actual_deg || pkt.steer_deg || 0).toFixed(1)}°`;
+
+  const rpms_cmd = pkt.rpms_cmd || [0, 0, 0, 0];
+  const rpms_act = pkt.rpms_act || [0, 0, 0, 0];
+  document.getElementById("rpmFLCmd").innerText = Math.round(rpms_cmd[0] || 0);
+  document.getElementById("rpmFRCmd").innerText = Math.round(rpms_cmd[1] || 0);
+  document.getElementById("rpmRLCmd").innerText = Math.round(rpms_cmd[2] || 0);
+  document.getElementById("rpmRRCmd").innerText = Math.round(rpms_cmd[3] || 0);
+
+  document.getElementById("rpmFLAct").innerText = Math.round(rpms_act[0] || 0);
+  document.getElementById("rpmFRAct").innerText = Math.round(rpms_act[1] || 0);
+  document.getElementById("rpmRLAct").innerText = Math.round(rpms_act[2] || 0);
+  document.getElementById("rpmRRAct").innerText = Math.round(rpms_act[3] || 0);
+
+  document.getElementById("imuYaw").innerText = `${(pkt.yaw_deg || pkt.yaw_fused || 0).toFixed(1)}°`;
+  document.getElementById("imuGyroZ").innerText = `${(pkt.gyro_z || 0).toFixed(2)} rad/s`;
+  document.getElementById("imuPitch").innerText = `${(pkt.pitch_deg || 0).toFixed(1)}°`;
+  document.getElementById("imuRoll").innerText = `${(pkt.roll_deg || 0).toFixed(1)}°`;
+
+  document.getElementById("accelFwd").innerText = (pkt.accel_fwd || 0).toFixed(1);
+  document.getElementById("accelLat").innerText = (pkt.accel_lat || 0).toFixed(1);
+
+  const slipState = pkt.slip_state || "NORMAL";
+  const badge = document.getElementById("slipStateBadge");
+  badge.innerText = slipState;
+  if (slipState.includes("SPIN") || slipState.includes("OVERSTEER")) {
+    badge.style.color = "var(--accent-red)";
+  } else {
+    badge.style.color = "var(--accent-green)";
+  }
+  document.getElementById("slipRatio").innerText = (pkt.slip_ratio || 0).toFixed(2);
+
+  document.getElementById("planMs").innerText = (pkt.plan_ms || 0).toFixed(2);
+  document.getElementById("osqpIters").innerText = pkt.iters_prim || pkt.osqp_iters || 0;
+  document.getElementById("mapMs").innerText = (pkt.map_ms || 0).toFixed(2);
+  document.getElementById("scoutMs").innerText = (pkt.scout_ms || 0).toFixed(2);
+
+  document.getElementById("lblMode").innerText = `MODE: ${pkt.mode || "DRIVE"}`;
+
+  // Time / Frame labels
+  const simT = pkt.sim_time || 0;
+  const mins = Math.floor(simT / 60);
+  const secs = (simT % 60).toFixed(2).padStart(5, "0");
+  document.getElementById("lblTime").innerText = `${mins}:${secs}`;
+}
+
+// Polling / Live Streaming
+async function fetchLive() {
+  if (!isLive) return;
+  try {
+    const res = await fetch("/api/live");
+    if (res.ok) {
+      const pkt = await res.json();
+      currentPkt = pkt;
+      updateHUD(pkt);
+      renderRadar(pkt);
+
+      if (pkt._total_frames) {
+        totalFrames = pkt._total_frames;
+        document.getElementById("frameSlider").max = totalFrames;
+        document.getElementById("frameSlider").value = totalFrames;
+        document.getElementById("lblFrame").innerText = `Frame ${totalFrames} / ${totalFrames}`;
+      }
+    }
+  } catch (err) {}
+}
+setInterval(fetchLive, 33); // ~30 FPS live polling
+
+// Server Status / System Info
+async function fetchStatus() {
+  try {
+    const res = await fetch("/api/status");
+    if (res.ok) {
+      const data = await res.json();
+      document.getElementById("cpuTempBadge").innerText = `Temp: ${data.temp_c || "--"}°C`;
+      document.getElementById("bufferBadge").innerText = `Buffer: ${data.driving_minutes || 0} / ${data.max_buffer_minutes || 30}m`;
+      document.getElementById("drivingTime").innerText = `${data.driving_minutes || 0} min`;
+      document.getElementById("prunedFrames").innerText = data.pruned_frames || 0;
+      document.getElementById("recFrames").innerText = data.total_recorded || 0;
+      document.getElementById("recSize").innerText = `${data.file_size_mb || 0} MB`;
+      document.getElementById("diskFree").innerText = `${data.disk_free_gb || "--"} GB`;
+      document.getElementById("sessionName").innerText = `Session: ${data.session_id || "active"}`;
+      document.getElementById("freqBadge").innerText = `${Math.round(data.loop_hz || 60)} Hz`;
+    }
+  } catch (err) {}
+}
+setInterval(fetchStatus, 2000);
+fetchStatus();
+
+// Time-Travel / Frame-by-Frame Scrubbing
+const frameSlider = document.getElementById("frameSlider");
+frameSlider.addEventListener("input", (e) => {
+  setReplayMode();
+  loadFrame(parseInt(e.target.value));
+});
+
+function setReplayMode() {
+  isLive = false;
+  document.getElementById("btnToggleLive").classList.remove("active");
+  document.getElementById("modeBadge").innerText = "REPLAY / SCRUB";
+  document.getElementById("modeBadge").className = "badge badge-replay";
+}
+
+document.getElementById("btnToggleLive").addEventListener("click", () => {
+  isLive = true;
+  isPlaying = false;
+  clearInterval(playInterval);
+  document.getElementById("btnPlay").innerText = "▶ Play";
+  document.getElementById("btnToggleLive").classList.add("active");
+  document.getElementById("modeBadge").innerText = "LIVE STREAM";
+  document.getElementById("modeBadge").className = "badge badge-live";
+});
+
+async function loadFrame(frameId) {
+  currentFrameId = Math.max(1, Math.min(totalFrames, frameId));
+  frameSlider.value = currentFrameId;
+  document.getElementById("lblFrame").innerText = `Frame ${currentFrameId} / ${totalFrames}`;
+
+  try {
+    const res = await fetch(`/api/frame/${currentFrameId}`);
+    if (res.ok) {
+      const pkt = await res.json();
+      currentPkt = pkt;
+      updateHUD(pkt);
+      renderRadar(pkt);
+    }
+  } catch (err) {}
+}
+
+document.getElementById("btnFirst").addEventListener("click", () => { setReplayMode(); loadFrame(1); });
+document.getElementById("btnLast").addEventListener("click", () => { setReplayMode(); loadFrame(totalFrames); });
+document.getElementById("btnPrev1").addEventListener("click", () => { setReplayMode(); loadFrame(currentFrameId - 1); });
+document.getElementById("btnNext1").addEventListener("click", () => { setReplayMode(); loadFrame(currentFrameId + 1); });
+document.getElementById("btnPrev10").addEventListener("click", () => { setReplayMode(); loadFrame(currentFrameId - 10); });
+document.getElementById("btnNext10").addEventListener("click", () => { setReplayMode(); loadFrame(currentFrameId + 10); });
+
+document.getElementById("btnPlay").addEventListener("click", () => {
+  setReplayMode();
+  isPlaying = !isPlaying;
+  const btn = document.getElementById("btnPlay");
+  if (isPlaying) {
+    btn.innerText = "⏸ Pause";
+    const speed = parseFloat(document.getElementById("selSpeed").value);
+    const intervalMs = Math.round(16.6 / speed);
+    playInterval = setInterval(() => {
+      if (currentFrameId >= totalFrames) {
+        isPlaying = false;
+        clearInterval(playInterval);
+        btn.innerText = "▶ Play";
+      } else {
+        loadFrame(currentFrameId + 1);
+      }
+    }, intervalMs);
+  } else {
+    btn.innerText = "▶ Play";
+    clearInterval(playInterval);
+  }
+});
+
+// Anomaly / Unexpected Moments Jump
+async function loadAnomalies() {
+  try {
+    const res = await fetch("/api/anomalies");
+    if (res.ok) {
+      anomaliesList = await res.json();
+    }
+  } catch (err) {}
+}
+loadAnomalies();
+
+document.getElementById("btnJumpAnomaly").addEventListener("click", async () => {
+  if (anomaliesList.length === 0) {
+    await loadAnomalies();
+  }
+  if (anomaliesList.length === 0) {
+    alert("No anomalies / unexpected moments detected in this session yet!");
+    return;
+  }
+  // Find next anomaly after current frame
+  let nextAnom = anomaliesList.find(a => a.frame_id > currentFrameId);
+  if (!nextAnom) nextAnom = anomaliesList[0]; // loop back to first
+  setReplayMode();
+  loadFrame(nextAnom.frame_id);
+});
+
+// Download log database
+document.getElementById("btnDownloadLog").addEventListener("click", () => {
+  window.location.href = "/api/download";
+});
+</script>
+</body>
+</html>
+

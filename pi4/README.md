@@ -108,7 +108,30 @@ The Pi 4 communicates with the microcontrollers using its onboard hardware UART 
 
 ## 5. Software Execution & Tooling
 
-To run the planning simulation and diagnostic servers on the Pi 4 or host workstation:
+To run the dual-core path planning and debug server on the Pi 4:
+
+* **Dual-Core System Launcher (Automatic Hardware Core Pinning)**:
+  ```bash
+  python3 pi4/run_folkrace_system.py
+  ```
+  * Pins Path Planner strictly to **CPU Core 1**.
+  * Pins Debug Server & SQLite Black Box strictly to **CPU Core 2**.
+  * Starts Web Mission Control GUI at `http://robot:8080`.
+
+* **Standalone Path Planner (Core 1 Dedicated)**:
+  ```bash
+  python3 pi4/path_planner_runner.py
+  ```
+
+* **Standalone Debug Server & Black Box Recorder (Core 2 Dedicated)**:
+  ```bash
+  python3 pi4/debug_server.py
+  ```
+
+* **Host PC Studio Launcher**:
+  ```bash
+  python launchers/17_pi4_debug_studio.py
+  ```
 
 * **Webots Champion Preview & Telemetry**:
   ```bash

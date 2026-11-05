@@ -31,6 +31,7 @@ Hardware-dependent diagnostic launchers explicitly denote their target hardware 
 | **14** | **ESP32** | [`14_esp32_tof_arc_gui.py`](file:///c:/Users/nurmi/Documents/Folkrace/launchers/14_esp32_tof_arc_gui.py) | Physical ESP32 dual VL53L8CX 8-zone 90-degree top-down 2D radar visualizer with proximity blind-spot / open-space fallback. | ESP32-S3 (ToF Hub) |
 | **15** | **ESP32** | [`15_esp32_servo_gui.py`](file:///c:/Users/nurmi/Documents/Folkrace/launchers/15_esp32_servo_gui.py) | Physical ESP32 333 Hz high-rate digital steering servo test bench, center trimming, and dynamic frequency sweep GUI. | ESP32-S3 (Main) |
 | **16** | **ESP32** | [`16_esp32_4tof_costmap_gui.py`](file:///c:/Users/nurmi/Documents/Folkrace/launchers/16_esp32_4tof_costmap_gui.py) | Physical ESP32 quad VL53L8CX 2D costmap & multi-target radar GUI with guarded ray clearing and dual-target obstacle stamping. | ESP32-S3 (ToF Hub) |
+| **17** | **Pi 4** | [`17_pi4_debug_studio.py`](file:///c:/Users/nurmi/Documents/Folkrace/launchers/17_pi4_debug_studio.py) | Raspberry Pi 4 Dual-Core Debug Studio: Web Tactical Mission Control & SQLite Black Box with frame-by-frame time-travel scrubbing. | Pi 4 / Browser |
 
 ---
 
@@ -58,6 +59,14 @@ python launchers/15_esp32_servo_gui.py
 ```
 * Connects to ESP32 Main over USB serial.
 * Allows fine-tuning center trim, maximum deflection limits (plus or minus 30 degrees), and high-frequency (333 Hz) response dynamics.
+
+### Raspberry Pi 4 Dual-Core Debug Studio & Flight Black Box:
+```bash
+python launchers/17_pi4_debug_studio.py
+```
+* Connects to the Pi 4 (`robot`), verifies Core 1 (Planner) and Core 2 (Debug Server) isolation.
+* Automatically opens the Web Mission Control GUI (`http://robot:8080`) in the browser.
+* Enables frame-by-frame time-travel scrubbing, anomaly jump review, and session downloading.
 
 ### Running 3D Simulation with Curvilinear SL-MPC:
 ```bash

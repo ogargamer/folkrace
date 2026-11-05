@@ -13,8 +13,60 @@
 ================================================================================
 """
 
+import os
+import sys
 import math
 from typing import Dict, List
+
+# Ensure repository root is on sys.path for core module access
+_CURR_DIR = os.path.dirname(os.path.abspath(__file__))
+_REPO_ROOT = os.path.abspath(os.path.join(_CURR_DIR, "..", "..", "..", "..", ".."))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+from core.vehicle_params import (
+    REAR_AXLE_OFFSET_M,
+    FRONT_AXLE_OFFSET_M,
+    WHEELBASE,
+    TRACK_REAR,
+    TRACK_FRONT,
+    TRACK_KINGPIN,
+    WHEEL_RADIUS,
+    VEHICLE_MASS,
+    ACKERMANN_PERCENT,
+    MAX_SERVO_RAD,
+    MAX_STEERING_RAD,
+    SERVO_MAX_SPEED_RAD_S,
+    MOTOR_DIR,
+    V_MAX_WHEEL,
+    V_MAX_CRUISE,
+    TIRE_MU,
+    GRAVITY_G,
+    A_MAX_BASE,
+    ACCEL_FWD_RATIO,
+    BRAKE_DECEL_RATIO,
+    LAT_ACCEL_RATIO,
+    ACCEL_FWD_MAX,
+    BRAKE_DECEL_MAX,
+    LAT_ACCEL_MAX,
+    R_MIN_TURN,
+    V_MIN_CRUISE,
+    SLIP_GATE_SPEED_MPS,
+    SLIP_THRESH_SPIN_RAD_S,
+    TOF_HZ,
+    PI_LOOP_HZ,
+    DT_PI_LOOP,
+    CONTROL_LOOP_FREQ_HZ,
+    CONTROL_LOOP_DT_S,
+    SIM_TIME_STEP_MS,
+    UART_BAUD,
+    GRID_X_MAX,
+    GRID_X_MIN,
+    GRID_Y_MIN,
+    GRID_Y_MAX,
+    GRID_RES,
+    R_INFLATION_M,
+)
 
 # ==============================================================================
 # ACTIVE PLANNER CONFIGURATION
@@ -23,67 +75,12 @@ PLANNER_TYPE: str = "SL_MPC"
 
 
 # ==============================================================================
-# 1. PHYSICAL VEHICLE & ACTUATOR SPECIFICATIONS
+# 1. PHYSICAL VEHICLE, SENSORS & TIMING
+# (Unified and synchronized from config/vehicle_config.json via core.vehicle_params)
 # ==============================================================================
 
-# 1.1 Chassis Dimensions & Mass Properties
-REAR_AXLE_OFFSET_M: float = -0.0700     # meters (offset along body Y-axis from chassis origin to rear axle center)
-FRONT_AXLE_OFFSET_M: float = 0.0625    # meters (offset along body Y-axis from chassis origin to front axle center)
-WHEELBASE: float = FRONT_AXLE_OFFSET_M - REAR_AXLE_OFFSET_M  # 0.1325 meters (distance between front and rear axles)
-TRACK_REAR: float = 0.1000             # meters (lateral distance between rear wheel contact centers)
-TRACK_FRONT: float = 0.0822            # meters (lateral distance between front wheel contact centers)
-TRACK_KINGPIN: float = 0.0620          # meters (distance between front steering kingpin pivots)
-WHEEL_RADIUS: float = 0.0275           # meters (27.5 mm rolling radius)
-VEHICLE_MASS: float = 1.000            # kg total vehicle mass
-
-# 1.2 Steering Kinematics (40% Ackermann Geometry & Servo Endstops)
-ACKERMANN_PERCENT: float = 0.40        # 40% Ackermann steering geometry (0.0 = parallel, 1.0 = true Ackermann)
-MAX_SERVO_RAD: float = 0.696386        # radians (+- 39.9 deg servo limit, 0.1 deg inside Webots 40.0 deg physical hard stops)
-MAX_STEERING_RAD: float = 0.657137     # radians (+- 37.65 deg virtual center angle producing 39.9 deg at inside servo)
-
-# 1.3 Powertrain & Velocity Ceilings
-MOTOR_DIR: float = -1.0                # Webots rotational sign (-1.0 applies forward thrust)
-V_MAX_WHEEL: float = 5.0               # m/s governed wheel velocity ceiling
-V_MAX_CRUISE: float = V_MAX_WHEEL      # m/s maximum straight-line cruising speed ceiling
-
-
-# ==============================================================================
-# 2. TIRE & VEHICLE DYNAMICS LIMITS
-# ==============================================================================
-
-# 2.1 Coulomb Friction & Gravitational Reference
-TIRE_MU: float = 0.86                  # Dimensionless tire-ground Coulomb friction coefficient (GA champion)
-GRAVITY_G: float = 9.81                # m/s^2 gravitational acceleration
-
-# 2.2 Traction-Derived Acceleration & Deceleration Envelopes
-A_MAX_BASE: float = TIRE_MU * GRAVITY_G  # ~8.437 m/s^2 nominal friction limit (mu * g)
-ACCEL_FWD_RATIO: float = 0.95            # 95% of mu*g for smooth forward motor acceleration without wheel spin
-BRAKE_DECEL_RATIO: float = 1.00          # 100% of mu*g for maximum braking / stopping deceleration
-LAT_ACCEL_RATIO: float = 1.00            # 100% of mu*g for dynamic cornering grip
-
-ACCEL_FWD_MAX: float = ACCEL_FWD_RATIO * A_MAX_BASE      # ~8.015 m/s^2 maximum forward motor acceleration
-BRAKE_DECEL_MAX: float = BRAKE_DECEL_RATIO * A_MAX_BASE  # ~8.437 m/s^2 maximum braking deceleration
-LAT_ACCEL_MAX: float = LAT_ACCEL_RATIO * A_MAX_BASE      # ~8.437 m/s^2 maximum cornering lateral acceleration
-
-# 2.3 Turning Geometry & Friction-Limited Crawl Speed
-# Kinematic minimum turning radius at inside wheel lock (37.65 deg virtual center): R_min = L / tan(delta_max)
-R_MIN_TURN: float = WHEELBASE / math.tan(MAX_STEERING_RAD)  # ~0.1717 m
-V_MIN_CRUISE: float = math.sqrt(LAT_ACCEL_MAX * R_MIN_TURN)  # ~1.204 m/s dynamic cornering floor
-
-# 2.4 Digital Servo Dynamic Limits (PTK 9497 MG-D at 8.4V HV: 0.062 s / 60 deg)
-SERVO_MAX_SPEED_RAD_S: float = 16.89   # rad/s maximum steering servo slew rate at 8.4V (~968 deg/s)
-
-
-# ==============================================================================
-# 3. SENSORS, COSTMAP & TIMING (Deterministic 60 Hz ToF & Pi Planning Loop)
-# ==============================================================================
-
-# 3.1 Timing & Frequency
-TOF_HZ: float = 60.0                   # Physical ToF ranging frequency (60.0 Hz from ESP32 ToF Hub)
-PI_LOOP_HZ: float = 60.0               # Pi 4 planning & control loop execution rate (60.0 Hz)
-DT_PI_LOOP: float = 1.0 / PI_LOOP_HZ   # Pi planning cycle duration: 0.0166667 s (16.67 ms)
-
-TIME_STEP_MS: int = 8                  # Webots basicTimeStep in ms (matches world file)
+# Simulation Physics & Actuator Step Timing
+TIME_STEP_MS: int = SIM_TIME_STEP_MS    # Webots basicTimeStep in ms (matches world file: 8 ms)
 DT: float = TIME_STEP_MS / 1000.0      # Physics & fast actuator/IMU step duration (0.008 s = 8 ms)
 SIM_HZ: float = 1000.0 / TIME_STEP_MS  # Simulation physics, 4WD motors, steering, and IMU rate (125.0 Hz)
 
@@ -92,18 +89,10 @@ TOF_TIME_STEP_MS: int = TIME_STEP_MS * PLANNER_DECIMATION  # Sim ToF sampling in
 DT_PLANNER: float = DT_PI_LOOP         # Canonical planner cycle duration (0.0166667 s = 60.0 Hz)
 PLANNER_HZ: float = PI_LOOP_HZ         # ToF scan processing & trajectory planning rate (60.0 Hz)
 
-# 3.2 Realistic Hardware Latency & Lookahead Compensation
+# Realistic Hardware Latency & Lookahead Compensation
 TOF_LATENCY_STEPS: int = 2              # 2 simulation steps = 16 ms ToF integration & transport delay
 ACTUATOR_LATENCY_STEPS: int = 1         # 1 simulation step = 8 ms intrinsic Webots ODE physics integration delay
 TOTAL_LATENCY_STEPS: int = TOF_LATENCY_STEPS + ACTUATOR_LATENCY_STEPS  # 3 simulation steps = 24 ms total latency compensated by SE(2) lookahead projection
-
-# 3.2 C++ Smart Hybrid Costmap Bounds (Local Vehicle Coordinates, +Y Forward, +X Right)
-GRID_X_MAX: float = 1.25               # meters (lateral right boundary)
-GRID_X_MIN: float = -GRID_X_MAX        # meters (lateral left boundary, symmetrical)
-GRID_Y_MIN: float = 0.00               # meters (starting from robot center)
-GRID_Y_MAX: float = 1.90               # meters (forward preview range up to 1.9m)
-GRID_RES: float = 0.010                # meters (10 mm grid resolution)
-R_INFLATION_M: float = 0.075           # meters (7.5 cm inflation: half chassis width, GA-optimized)
 
 # 3.3 Sensor Device Names & Measurement Limits (16-Channel Front Rig: only_front_tofs.proto)
 TOF_SENSOR_NAMES: List[str] = [

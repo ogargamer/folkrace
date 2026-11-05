@@ -61,9 +61,15 @@ except ImportError:
     )
 
 CURR_DIR = os.path.dirname(os.path.abspath(__file__))
-DLL_PATH = os.path.join(CURR_DIR, "curvilinear_sl_mpc.dll")
-for _name in ("curvilinear_sl_mpc.so", "curvilinear_sl_mpc.dll"):
-    _cand = os.path.join(CURR_DIR, _name)
+DLL_PATH = None
+candidates = [
+    os.path.join(CURR_DIR, "curvilinear_sl_mpc.dll"),
+    os.path.join(CURR_DIR, "curvilinear_sl_mpc.so"),
+    os.path.join(os.getcwd(), "curvilinear_sl_mpc.so"),
+    os.path.join(os.getcwd(), "curvilinear_sl_mpc.dll"),
+    os.path.abspath(os.path.join(CURR_DIR, "..", "..", "..", "..", "..", "pi4", "curvilinear_sl_mpc.so")),
+]
+for _cand in candidates:
     if os.path.exists(_cand):
         DLL_PATH = _cand
         break

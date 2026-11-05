@@ -2,6 +2,7 @@
 #define ESP32_CONFIG_H
 
 #include <Arduino.h>
+#include "vehicle_params.h"
 
 // =============================================================================
 // FOLKRACE Master ESP32-S3 Hardware Pinout Configuration
@@ -18,14 +19,8 @@
 #define IMU_RST_PIN              14  // Header J1 Pin 20 (RST Active LOW)
 
 // --- Single Ackermann Steering Servo (LEDC PWM) ---
-#define SERVO_STEER_PWM_PIN      21  // Header J3 Pin 18 (333 Hz Digital Servo)
+// (SERVO_STEER_PWM_PIN, FREQ, RESOLUTION, and PULSE widths defined in vehicle_params.h)
 #define SERVO_ACKERMANN_PWM_PIN  SERVO_STEER_PWM_PIN
-#define SERVO_PWM_CHANNEL        0   // LEDC Channel 0
-#define SERVO_PWM_FREQ_HZ        333 // 333 Hz Refresh Rate (Period = 3003 us)
-#define SERVO_PWM_RESOLUTION     14  // 14-bit resolution (0..16383, ~0.183 us/count)
-#define SERVO_PULSE_MIN_US       500.0f   // Full Left endpoint (0 deg)
-#define SERVO_PULSE_NEUTRAL_US   1520.0f  // Neutral Center (90 deg / 0 rad)
-#define SERVO_PULSE_MAX_US       2500.0f  // Full Right endpoint (180 deg)
 
 // --- STM32 Motor Controller #1: Front Axle (M1 FL, M2 FR) ---
 #define STM32_1_UART_NUM         1
@@ -41,42 +36,14 @@
 
 // --- Raspberry Pi 4 Telemetry Highway (UART0) ---
 #define PI_UART_NUM              0
-#define PI_UART_BAUD             921600
+// (PI_UART_BAUD defined in vehicle_params.h)
 #define PI_UART_TX_PIN           43  // ESP32 TX -> Pi 4 RX (GPIO 15)
 #define PI_UART_RX_PIN           44  // ESP32 RX <- Pi 4 TX (GPIO 14)
 #define PI_DRDY_PIN              1   // Hardware Batch Ready Pulse -> Pi 4 GPIO
 
-// =============================================================================
-// Real-Time Control Loop Frequency & Timing (400 Hz deterministic)
-// =============================================================================
-#define CONTROL_LOOP_FREQ_HZ     400
-#define CONTROL_LOOP_PERIOD_US   2500  // 2500 us (2.5 ms)
-#define CONTROL_LOOP_DT_S        0.0025f
-
-// =============================================================================
-// Vehicle Physical Geometry & Kinematic Limits (Matching Webots Simulation)
-// =============================================================================
-#define VEHICLE_WHEELBASE_M      0.1325f  // L = 132.5 mm
-#define VEHICLE_TRACK_REAR_M     0.1000f  // W_r = 100.0 mm
-#define VEHICLE_TRACK_FRONT_M    0.0822f  // W_f = 82.2 mm
-#define VEHICLE_TRACK_KINGPIN_M  0.0620f  // W_k = 62.0 mm
-#define VEHICLE_WHEEL_RADIUS_M   0.0275f  // R_w = 27.5 mm
-#define VEHICLE_MAX_STEER_RAD    0.5236f  // Max Virtual Center Angle (+/- 30 deg)
-#define VEHICLE_ACKERMANN_PCT    0.40f    // 40% Ackermann Geometry
-#define VEHICLE_MOTOR_DIR        -1.0f    // Webots thrust sign (-1.0 pushes forward)
-#define VEHICLE_MAX_WHEEL_SPEED  5.0f     // Top speed ceiling (m/s)
-#define VEHICLE_SERVO_MAX_RATE   16.89f   // Slew rate limit (rad/s, 0.062 s / 60 deg @ 8.4V = ~968 deg/s)
-
-// Slip Detection Parameters
-#define SLIP_GATE_SPEED_MPS      0.30f    // Minimum speed to evaluate slip (m/s)
-#define SLIP_THRESH_SPIN_RAD_S   0.45f    // Base yaw rate divergence threshold
-
-// Friction & Traction Dynamic Envelope
-#define DEFAULT_ROAD_MU          0.86f    // Baseline surface friction coefficient
-#define ACCEL_FWD_MAX            8.015f   // Maximum forward motor acceleration (m/s^2)
-#define ACCEL_FWD_RATIO          0.95f    // Acceleration fraction of mu * g
-#define BRAKE_DECEL_MAX          12.0f    // Maximum braking deceleration (m/s^2)
-#define BRAKE_DECEL_RATIO        1.20f    // Braking fraction of mu * g
+// Note: Real-time control loop frequencies, vehicle physical geometry, kinematics,
+// servo pulses, slip thresholds, and friction parameters are synchronized from
+// config/vehicle_config.json via include/vehicle_params.h.
 
 // =============================================================================
 // Protocol Sync Bytes & Frame Structures
