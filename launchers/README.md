@@ -30,7 +30,7 @@ Hardware-dependent diagnostic launchers explicitly denote their target hardware 
 | **13** | Simulation | [`13_fast_champion_drive.py`](file:///c:/Users/nurmi/Documents/Folkrace/launchers/13_fast_champion_drive.py) | Ultra-lean champion 3D drive launcher for maximum real-time rendering & physics performance (zero GUI, zero UDP/HUD overhead). | Webots |
 | **14** | **ESP32** | [`14_esp32_tof_arc_gui.py`](file:///c:/Users/nurmi/Documents/Folkrace/launchers/14_esp32_tof_arc_gui.py) | Physical ESP32 dual VL53L8CX 8-zone 90-degree top-down 2D radar visualizer with proximity blind-spot / open-space fallback. | ESP32-S3 (ToF Hub) |
 | **15** | **ESP32** | [`15_esp32_servo_gui.py`](file:///c:/Users/nurmi/Documents/Folkrace/launchers/15_esp32_servo_gui.py) | Physical ESP32 333 Hz high-rate digital steering servo test bench, center trimming, and dynamic frequency sweep GUI. | ESP32-S3 (Main) |
-| **16** | **ESP32** | [`16_esp32_4tof_costmap_gui.py`](file:///c:/Users/nurmi/Documents/Folkrace/launchers/16_esp32_4tof_costmap_gui.py) | Physical ESP32 quad VL53L8CX 2D costmap & multi-target radar GUI with guarded ray clearing and dual-target obstacle stamping. | ESP32-S3 (ToF Hub) |
+| **16** | **ESP32** | [`16_esp32_4tof_gui.py`](file:///c:/Users/nurmi/Documents/Folkrace/launchers/16_esp32_4tof_gui.py) | Physical ESP32 quad VL53L8CX live 20-byte binary stream viewer displaying 1x4 2D LiDAR ray distance strips. | ESP32-S3 (ToF Hub) |
 | **17** | **Pi 4** | [`17_pi4_debug_studio.py`](file:///c:/Users/nurmi/Documents/Folkrace/launchers/17_pi4_debug_studio.py) | Raspberry Pi 4 Dual-Core Debug Studio: Web Tactical Mission Control & SQLite Black Box with frame-by-frame time-travel scrubbing. | Pi 4 / Browser |
 
 ---
