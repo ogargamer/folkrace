@@ -374,8 +374,12 @@ static void ioTask(void *pvParameters) {
                 s_ediff.reset();
                 s_fusion.reset();
                 Serial.println(F(">>> Controller & Sensor Fusion State Reset."));
+            } else if (line.length() == 1 && strchr("tTrR12345+-0mM", line[0])) {
+                s_imu.handleSerialCommand(line[0], Serial);
+            } else if (line.equalsIgnoreCase("IMU") || line.equalsIgnoreCase("I")) {
+                s_imu.printCurrentReadings(Serial);
             } else {
-                Serial.println(F("Commands: STATUS | BENCH | V <m/s> | A <deg> | RESET"));
+                Serial.println(F("Commands: STATUS | BENCH | IMU | V <m/s> | A <deg> | RESET"));
             }
         }
 
@@ -449,15 +453,38 @@ static void ioTask(void *pvParameters) {
             }
         }
 
-        // 8. Periodic Benchmark Telemetry Stream to USB Serial (every 500 ms = 2 Hz)
+        // 8. Periodic Benchmark Telemetry Stream to USB Serial (every 500 ms = 2 Hz, bench mode only)
         if (now - last_report_ms >= 500) {
             last_report_ms = now;
-            const SharedControlOutputs &c = s_controlOutputs.getReadBuffer();
-            float cpu_pct = (c.exec_us_avg / 2500.0f) * 100.0f;
+            if (s_fake_data_active) {
+                const SharedControlOutputs &c = s_controlOutputs.getReadBuffer();
+                float cpu_pct = (c.exec_us_avg / 2500.0f) * 100.0f;
 
-            Serial.printf("[400Hz BENCH] Cycles: %6u | T_exec: %5.2fus (min: %5.2f, max: %5.2f, avg: %5.2f) | CPU: %4.1f%% | Overruns: %u | v_est: %+.2fm/s | Steer: %+.1fdeg | PWM: %4.0fus\n",
-                          c.cycle_count, c.exec_us, c.exec_us_min, c.exec_us_max, c.exec_us_avg,
-                          cpu_pct, c.overrun_count, c.v_est, c.steer_deg, c.servo_pulse_us);
+                Serial.printf("[400Hz BENCH] Cycles: %6u | T_exec: %5.2fus (min: %5.2f, max: %5.2f, avg: %5.2f) | CPU: %4.1f%% | Overruns: %u | v_est: %+.2fm/s | Steer: %+.1fdeg | PWM: %4.0fus\n",
+                              c.cycle_count, c.exec_us, c.exec_us_min, c.exec_us_max, c.exec_us_avg,
+                              cpu_pct, c.overrun_count, c.v_est, c.steer_deg, c.servo_pulse_us);
+            }
+        }
+
+        // 8b. High-Speed 100Hz IMU Binary Telemetry Stream to USB Serial for Mission Dashboard GUI
+        static uint32_t s_last_imu_usb_stream_ms = 0;
+        if (!s_fake_data_active && s_imu.isInitialized() && (now - s_last_imu_usb_stream_ms >= 10)) {
+            s_last_imu_usb_stream_ms = now;
+            const auto &d = s_imu.getData();
+            uint8_t binBuf[42];
+            binBuf[0] = 0xAA;
+            binBuf[1] = 0x55;
+            memcpy(&binBuf[2],  &d.quat_w, 4);
+            memcpy(&binBuf[6],  &d.quat_x, 4);
+            memcpy(&binBuf[10], &d.quat_y, 4);
+            memcpy(&binBuf[14], &d.quat_z, 4);
+            memcpy(&binBuf[18], &d.accel_x, 4);
+            memcpy(&binBuf[22], &d.accel_y, 4);
+            memcpy(&binBuf[26], &d.accel_z, 4);
+            memcpy(&binBuf[30], &d.gyro_x, 4);
+            memcpy(&binBuf[34], &d.gyro_y, 4);
+            memcpy(&binBuf[38], &d.gyro_z, 4);
+            Serial.write(binBuf, 42);
         }
 
         vTaskDelay(pdMS_TO_TICKS(2));
@@ -498,6 +525,7 @@ void setup() {
     // 3. Initialize BNO086 IMU over SPI2 (CS=10, INT=9, SCK=12, MOSI=11, MISO=13, RST=14)
     if (s_imu.begin(IMU_SPI_CS_PIN, IMU_SPI_MISO_PIN, IMU_SPI_MOSI_PIN, IMU_SPI_SCK_PIN, IMU_INT_PIN, IMU_RST_PIN)) {
         Serial.println(F("[+] BNO086 9-DOF IMU Connected over SPI2 Master."));
+        s_fake_data_active = false; // Real IMU online: engage live sensor pipeline
     } else {
         Serial.println(F("[!] BNO086 IMU not detected. Running synthetic benchmark mode."));
     }

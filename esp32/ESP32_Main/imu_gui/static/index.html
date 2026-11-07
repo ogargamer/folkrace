@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BNO08X 9-DOF IMU Mission Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/style.css">
+    <!-- Three.js for 3D Attitude Visualization -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+</head>
+<body>
+    <div class="app-container">
+        <!-- Top Navigation Bar -->
+        <header class="top-nav">
+            <div class="brand-section">
+                <div class="logo-orb"></div>
+                <div class="brand-text">
+                    <h1>BNO08X <span class="brand-sub">9-DOF TELEMETRY</span></h1>
+                    <p class="subtitle">ESP32-S3 Master · BNO086 SPI2 (CS:10, INT:9, SCK:12, MOSI:11, MISO:13, RST:14) · 921,600 Baud</p>
+                </div>
+            </div>
+            
+            <div class="status-section">
+                <div class="metric-pill">
+                    <span class="pill-label">STREAM RATE</span>
+                    <span class="pill-value" id="val-hz">0.0 <small>Hz</small></span>
+                </div>
+                <div class="metric-pill">
+                    <span class="pill-label">LATENCY</span>
+                    <span class="pill-value" id="val-latency">0 <small>ms</small></span>
+                </div>
+                <div class="metric-pill connection-pill" id="conn-status">
+                    <span class="status-dot"></span>
+                    <span class="status-text" id="conn-text">CONNECTING</span>
+                </div>
+            </div>
+        </header>
+
+        <!-- Main Dashboard Grid -->
+        <main class="dashboard-grid">
+            
+            <!-- Left Column: 3D Attitude & Visualizer -->
+            <section class="card viewer-card">
+                <div class="card-header">
+                    <div class="header-title">
+                        <span class="icon">🧭</span>
+                        <h2>3D Attitude Orientation</h2>
+                    </div>
+                    <div class="viewer-actions">
+                        <button class="btn-sm" id="btn-reset-view" title="Reset Camera View">Center View</button>
+                        <button class="btn-sm btn-primary" id="btn-tare">🎯 Tare / Zero Yaw</button>
+                    </div>
+                </div>
+
+                <div class="canvas-container" id="canvas-3d">
+                    <div class="attitude-overlay">
+                        <div class="attitude-badge" id="badge-roll">R: 0.0°</div>
+                        <div class="attitude-badge" id="badge-pitch">P: 0.0°</div>
+                        <div class="attitude-badge" id="badge-yaw">Y: 0.0°</div>
+                    </div>
+                </div>
+
+                <div class="instruments-bar">
+                    <!-- Artificial Horizon Gauge -->
+                    <div class="instrument-box">
+                        <span class="instrument-title">ARTIFICIAL HORIZON</span>
+                        <div class="horizon-gauge">
+                            <div class="horizon-sky" id="horizon-sky">
+                                <div class="horizon-ground"></div>
+                            </div>
+                            <div class="horizon-reticle"></div>
+                        </div>
+                    </div>
+
+                    <!-- Compass Heading Gauge -->
+                    <div class="instrument-box">
+                        <span class="instrument-title">HEADING COMPASS</span>
+                        <div class="compass-gauge">
+                            <div class="compass-dial" id="compass-dial">
+                                <span class="cardinal n">N</span>
+                                <span class="cardinal e">E</span>
+                                <span class="cardinal s">S</span>
+                                <span class="cardinal w">W</span>
+                            </div>
+                            <div class="compass-needle"></div>
+                            <div class="compass-val" id="compass-deg">000°</div>
+                        </div>
+                    </div>
+
+                    <!-- G-Force Vector Gauge -->
+                    <div class="instrument-box">
+                        <span class="instrument-title">G-FORCE ACCEL</span>
+                        <div class="g-gauge">
+                            <div class="g-circle">
+                                <div class="g-dot" id="g-dot"></div>
+                            </div>
+                            <div class="g-val" id="g-total">1.00 G</div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Right Column: Settings & Live Telemetry -->
+            <section class="right-column">
+                
+                <!-- Settings Card -->
+                <div class="card settings-card">
+                    <div class="card-header">
+                        <div class="header-title">
+                            <span class="icon">⚙️</span>
+                            <h2>Sensor Configuration & Controls</h2>
+                        </div>
+                    </div>
+
+                    <div class="settings-body">
+                        <!-- Update Rate Control -->
+                        <div class="control-group">
+                            <div class="control-header">
+                                <label for="rate-slider">Output Report Rate</label>
+                                <span class="control-val-badge" id="rate-display">100 Hz</span>
+                            </div>
+                            <input type="range" id="rate-slider" min="10" max="200" step="10" value="100">
+                            <div class="preset-buttons">
+                                <button class="btn-preset" data-rate="20">20 Hz</button>
+                                <button class="btn-preset" data-rate="50">50 Hz</button>
+                                <button class="btn-preset active" data-rate="100">100 Hz</button>
+                                <button class="btn-preset" data-rate="200">200 Hz</button>
+                            </div>
+                        </div>
+
+                        <!-- Active Feature Toggles -->
+                        <div class="control-group">
+                            <label class="section-label">Active SHTP Report Streams</label>
+                            <div class="toggle-grid">
+                                <label class="toggle-item">
+                                    <input type="checkbox" id="toggle-game-rot" checked>
+                                    <span class="toggle-slider"></span>
+                                    <span class="toggle-label">Game Rotation (6-DOF)</span>
+                                </label>
+                                <label class="toggle-item">
+                                    <input type="checkbox" id="toggle-accel" checked>
+                                    <span class="toggle-slider"></span>
+                                    <span class="toggle-label">Accelerometer (Linear)</span>
+                                </label>
+                                <label class="toggle-item">
+                                    <input type="checkbox" id="toggle-gyro" checked>
+                                    <span class="toggle-slider"></span>
+                                    <span class="toggle-label">Gyroscope (Angular Rate)</span>
+                                </label>
+                                <label class="toggle-item">
+                                    <input type="checkbox" id="toggle-rot-vector">
+                                    <span class="toggle-slider"></span>
+                                    <span class="toggle-label">Absolute 9-DOF Vector</span>
+                                </label>
+                            </div>
+                        </div>
+
+                        <!-- Action Control Buttons -->
+                        <div class="action-buttons-grid">
+                            <button class="btn btn-warning" id="btn-hard-reset">
+                                <span>🔄</span> Hardware Reset Sensor
+                            </button>
+                            <button class="btn btn-secondary" id="btn-pause">
+                                <span id="pause-icon">⏸️</span> <span id="pause-text">Pause Stream</span>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Telemetry Cards Grid -->
+                <div class="card telemetry-card">
+                    <div class="card-header">
+                        <div class="header-title">
+                            <span class="icon">📊</span>
+                            <h2>Live 9-DOF Measurements</h2>
+                        </div>
+                    </div>
+
+                    <div class="telemetry-grid">
+                        <!-- Euler Angles -->
+                        <div class="telem-box">
+                            <span class="telem-label">EULER ANGLES</span>
+                            <div class="data-row">
+                                <span class="axis-tag tag-x">ROLL</span>
+                                <span class="data-value" id="val-roll">+000.00°</span>
+                            </div>
+                            <div class="data-row">
+                                <span class="axis-tag tag-y">PITCH</span>
+                                <span class="data-value" id="val-pitch">+000.00°</span>
+                            </div>
+                            <div class="data-row">
+                                <span class="axis-tag tag-z">YAW</span>
+                                <span class="data-value" id="val-yaw">+000.00°</span>
+                            </div>
+                        </div>
+
+                        <!-- Accelerometer -->
+                        <div class="telem-box">
+                            <span class="telem-label">ACCELERATION (m/s²)</span>
+                            <div class="data-row">
+                                <span class="axis-tag tag-x">ACC X</span>
+                                <span class="data-value" id="val-ax">+00.00</span>
+                            </div>
+                            <div class="data-row">
+                                <span class="axis-tag tag-y">ACC Y</span>
+                                <span class="data-value" id="val-ay">+00.00</span>
+                            </div>
+                            <div class="data-row">
+                                <span class="axis-tag tag-z">ACC Z</span>
+                                <span class="data-value" id="val-az">+00.00</span>
+                            </div>
+                        </div>
+
+                        <!-- Gyroscope -->
+                        <div class="telem-box">
+                            <span class="telem-label">GYROSCOPE (deg/s)</span>
+                            <div class="data-row">
+                                <span class="axis-tag tag-x">GYR X</span>
+                                <span class="data-value" id="val-gx">+000.0</span>
+                            </div>
+                            <div class="data-row">
+                                <span class="axis-tag tag-y">GYR Y</span>
+                                <span class="data-value" id="val-gy">+000.0</span>
+                            </div>
+                            <div class="data-row">
+                                <span class="axis-tag tag-z">GYR Z</span>
+                                <span class="data-value" id="val-gz">+000.0</span>
+                            </div>
+                        </div>
+
+                        <!-- Quaternion -->
+                        <div class="telem-box">
+                            <span class="telem-label">UNIT QUATERNION</span>
+                            <div class="data-row">
+                                <span class="axis-tag tag-w">QW</span>
+                                <span class="data-value" id="val-qw">+1.000</span>
+                            </div>
+                            <div class="data-row">
+                                <span class="axis-tag tag-x">QX</span>
+                                <span class="data-value" id="val-qx">+0.000</span>
+                            </div>
+                            <div class="data-row">
+                                <span class="axis-tag tag-y">QY</span>
+                                <span class="data-value" id="val-qy">+0.000</span>
+                            </div>
+                            <div class="data-row">
+                                <span class="axis-tag tag-z">QZ</span>
+                                <span class="data-value" id="val-qz">+0.000</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Real-time Scrolling Waveform Canvas -->
+                <div class="card graph-card">
+                    <div class="card-header">
+                        <div class="header-title">
+                            <span class="icon">📈</span>
+                            <h2>Real-Time Waveform (Roll / Pitch / Yaw)</h2>
+                        </div>
+                    </div>
+                    <div class="canvas-chart-wrapper">
+                        <canvas id="waveform-canvas"></canvas>
+                    </div>
+                </div>
+
+            </section>
+        </main>
+    </div>
+
+    <!-- Main Frontend JS Logic -->
+    <script src="/static/app.js"></script>
+</body>
+</html>
