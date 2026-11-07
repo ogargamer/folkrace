@@ -71,17 +71,17 @@ ALLOCATION = {
     "SERVO_ACKERMANN_PWM":  {"gpio": 21, "dir": "OUT", "bus": "LEDC",      "role": "333 Hz Digital Ackermann Steering Servo"},
 
     # STM32 Motor Controller 1 Link -- Header J1 Pins 10-11
-    "STM32_1_UART_TX":      {"gpio": 17, "dir": "OUT", "bus": "UART1",     "role": "UART1 TX -> STM32 #1 RX (PB7)"},
-    "STM32_1_UART_RX":      {"gpio": 18, "dir": "IN",  "bus": "UART1",     "role": "UART1 RX <- STM32 #1 TX (PB6)"},
+    "STM32_1_UART_TX":      {"gpio": 17, "dir": "OUT", "bus": "UART1",     "role": "UART1 TX -> STM32 #1 RX (PA10)"},
+    "STM32_1_UART_RX":      {"gpio": 18, "dir": "IN",  "bus": "UART1",     "role": "UART1 RX <- STM32 #1 TX (PA9)"},
 
     # STM32 Motor Controller 2 Link -- Header J1 Pins 8-9 (Directly adjacent to STM32 #1)
-    "STM32_2_UART_TX":      {"gpio": 15, "dir": "OUT", "bus": "UART2",     "role": "UART2 TX -> STM32 #2 RX (PB7)"},
-    "STM32_2_UART_RX":      {"gpio": 16, "dir": "IN",  "bus": "UART2",     "role": "UART2 RX <- STM32 #2 TX (PB6)"},
+    "STM32_2_UART_TX":      {"gpio": 15, "dir": "OUT", "bus": "UART2",     "role": "UART2 TX -> STM32 #2 RX (PA10)"},
+    "STM32_2_UART_RX":      {"gpio": 16, "dir": "IN",  "bus": "UART2",     "role": "UART2 RX <- STM32 #2 TX (PA9)"},
 
     # Raspberry Pi 4 Telemetry Highway -- Header J3 Pins 2-4 (Directly below GND Pin 1)
-    "PI_UART_TX":           {"gpio": 43, "dir": "OUT", "bus": "UART0",     "role": "UART0 TX -> Pi 4 RX (GPIO 15)"},
-    "PI_UART_RX":           {"gpio": 44, "dir": "IN",  "bus": "UART0",     "role": "UART0 RX <- Pi 4 TX (GPIO 14)"},
-    "PI_DRDY_OUT":          {"gpio": 1,  "dir": "OUT", "bus": "GPIO",      "role": "ToF/IMU Batch Ready Pulse -> Pi 4"},
+    "PI_UART_TX":           {"gpio": 43, "dir": "OUT", "bus": "UART0",     "role": "UART0 TX -> Pi RX (GPIO 15 / Pin 10)"},
+    "PI_UART_RX":           {"gpio": 44, "dir": "IN",  "bus": "UART0",     "role": "UART0 RX <- Pi TX (GPIO 14 / Pin 8)"},
+    "PI_DRDY_OUT":          {"gpio": 1,  "dir": "OUT", "bus": "GPIO",      "role": "Batch Ready INT -> Pi (GPIO 20 / Pin 38)"},
 }
 
 RESERVED_SYSTEM_PINS = {
@@ -200,46 +200,59 @@ def display_results():
     print(f"  * Dual STM32 Links Physical Block : Row 8 to Row 11 on Header J1 (adjacent 4-wire comms)")
     print(f"  * Pi 4 Telemetry Physical Block   : Row 2 to Row 4 on Header J3 (directly below GND)")
 
+    def get_header_pin(gpio):
+        if gpio in PHYSICAL_GRID:
+            side, row = PHYSICAL_GRID[gpio]
+            h = "J1" if side == "left" else "J3"
+            return f"Header {h} Pin {row:<2}"
+        return "N/A"
+
     # Structured table with exactly ONE pin per line
-    print("\n" + "-" * 80)
-    print(f"  {'SIGNAL':<21} | {'GPIO':<9} | {'BUS / TYPE':<14} | {'FUNCTION / ROLE':<31}")
-    print("-" * 80)
+    print("\n" + "-" * 95)
+    print(f"  {'SIGNAL':<21} | {'HEADER PIN':<17} | {'GPIO':<9} | {'BUS / TYPE':<14} | {'FUNCTION / ROLE':<31}")
+    print("-" * 95)
 
     # BNO086 IMU
     print("  [BNO086 9-DOF IMU -- SPI2 DEDICATED MASTER (HEADER J1 PINS 15-20)]")
     for sig in ["IMU_SPI_SCK", "IMU_SPI_MOSI", "IMU_SPI_MISO", "IMU_SPI_CS", "IMU_INT", "IMU_RST"]:
         item = ALLOCATION[sig]
-        print(f"  {sig:<21} | GPIO {item['gpio']:<4} | {item['bus']:<14} | {item['role']:<31}")
+        hpin = get_header_pin(item["gpio"])
+        print(f"  {sig:<21} | {hpin:<17} | GPIO {item['gpio']:<4} | {item['bus']:<14} | {item['role']:<31}")
 
     # Ackermann Steering Servo
     print("\n  [ACKERMANN STEERING ACTUATOR -- LEDC HIGH-RATE PWM (HEADER J3 PIN 18)]")
     item = ALLOCATION["SERVO_ACKERMANN_PWM"]
-    print(f"  {'SERVO_ACKERMANN_PWM':<21} | GPIO {item['gpio']:<4} | {item['bus']:<14} | {item['role']:<31}")
+    hpin = get_header_pin(item["gpio"])
+    print(f"  {'SERVO_ACKERMANN_PWM':<21} | {hpin:<17} | GPIO {item['gpio']:<4} | {item['bus']:<14} | {item['role']:<31}")
 
     # STM32 Controller #1 Link
     print("\n  [STM32 MOTOR CONTROLLER #1 -- UART1 LINK (HEADER J1 PINS 10-11)]")
     for sig in ["STM32_1_UART_TX", "STM32_1_UART_RX"]:
         item = ALLOCATION[sig]
-        print(f"  {sig:<21} | GPIO {item['gpio']:<4} | {item['bus']:<14} | {item['role']:<31}")
+        hpin = get_header_pin(item["gpio"])
+        print(f"  {sig:<21} | {hpin:<17} | GPIO {item['gpio']:<4} | {item['bus']:<14} | {item['role']:<31}")
 
     # STM32 Controller #2 Link
     print("\n  [STM32 MOTOR CONTROLLER #2 -- UART2 LINK (HEADER J1 PINS 8-9)]")
     for sig in ["STM32_2_UART_TX", "STM32_2_UART_RX"]:
         item = ALLOCATION[sig]
-        print(f"  {sig:<21} | GPIO {item['gpio']:<4} | {item['bus']:<14} | {item['role']:<31}")
+        hpin = get_header_pin(item["gpio"])
+        print(f"  {sig:<21} | {hpin:<17} | GPIO {item['gpio']:<4} | {item['bus']:<14} | {item['role']:<31}")
 
     # Raspberry Pi 4 Telemetry Highway
     print("\n  [RASPBERRY PI 4 TELEMETRY HIGHWAY -- UART0 + DRDY (HEADER J3 PINS 2-4)]")
     for sig in ["PI_UART_TX", "PI_UART_RX", "PI_DRDY_OUT"]:
         item = ALLOCATION[sig]
-        print(f"  {sig:<21} | GPIO {item['gpio']:<4} | {item['bus']:<14} | {item['role']:<31}")
+        hpin = get_header_pin(item["gpio"])
+        print(f"  {sig:<21} | {hpin:<17} | GPIO {item['gpio']:<4} | {item['bus']:<14} | {item['role']:<31}")
 
     # System & Reserved
     print("\n  [SYSTEM RESERVED & HARDWARE DEBUG]")
     for sig, item in RESERVED_SYSTEM_PINS.items():
-        print(f"  {sig:<21} | GPIO {item['gpio']:<4} | {item['bus']:<14} | {item['role']:<31}")
+        hpin = get_header_pin(item["gpio"])
+        print(f"  {sig:<21} | {hpin:<17} | GPIO {item['gpio']:<4} | {item['bus']:<14} | {item['role']:<31}")
 
-    print("-" * 80)
+    print("-" * 95)
     print(f"  Available Free GPIOs ({len(metrics['free_gpios'])} pins): {metrics['free_gpios']}")
     print("=" * 80 + "\n")
 

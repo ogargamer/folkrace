@@ -209,55 +209,83 @@ def display_results():
     print(f"  * Hardware BOOT0 (PB8)            : PRESERVED (unassigned to IO)")
     print(f"  * Motor PWM <-> SPI Isolation     : {best['min_pwm_miso_pitch']:.2f} pin pitches ({best['min_pwm_miso_mm']:.2f} mm)")
 
+    def get_header_loc(pin):
+        if pin in PIN_COORDS:
+            col, row = PIN_COORDS[pin]
+            if col == 0:
+                return f"P1 Outer Row {row}"
+            elif col == 1:
+                return f"P1 Inner Row {row}"
+            elif col == 4:
+                return f"P2 Inner Row {row}"
+            elif col == 5:
+                return f"P2 Outer Row {row}"
+        return "Onboard"
+
     # Structured, compact table with exactly ONE pin per line
-    print("\n" + "-" * 80)
-    print(f"  {'SIGNAL':<16} | {'PIN':<6} | {'HARDWARE MODE':<18} | {'FUNCTION / ROLE':<32}")
-    print("-" * 80)
+    print("\n" + "-" * 95)
+    print(f"  {'SIGNAL':<16} | {'PIN':<6} | {'HEADER LOCATION':<16} | {'HARDWARE MODE':<18} | {'FUNCTION / ROLE':<32}")
+    print("-" * 95)
 
     # Motor 1
     print("  [MOTOR 1 INVERTER -- TIM2 HARDWARE PWM]")
-    print(f"  {'M1_PWM_A':<16} | {assign['M1_PWM_A']:<6} | {af['M1_PWM_A']:<18} | {'Phase A Center-Aligned PWM':<32}")
-    print(f"  {'M1_PWM_B':<16} | {assign['M1_PWM_B']:<6} | {af['M1_PWM_B']:<18} | {'Phase B Center-Aligned PWM':<32}")
-    print(f"  {'M1_PWM_C':<16} | {assign['M1_PWM_C']:<6} | {af['M1_PWM_C']:<18} | {'Phase C Center-Aligned PWM':<32}")
-    print(f"  {'M1_EN':<16} | {assign['M1_EN']:<6} | {af['M1_EN']:<18} | {'Motor 1 Gate Driver Enable':<32}")
+    for sig, role in [("M1_PWM_A", "Phase A Center-Aligned PWM"),
+                      ("M1_PWM_B", "Phase B Center-Aligned PWM"),
+                      ("M1_PWM_C", "Phase C Center-Aligned PWM"),
+                      ("M1_EN", "Motor 1 Gate Driver Enable")]:
+        p = assign[sig]
+        print(f"  {sig:<16} | {p:<6} | {get_header_loc(p):<16} | {af[sig]:<18} | {role:<32}")
 
     # Motor 2
     print("\n  [MOTOR 2 INVERTER -- TIM3 HARDWARE PWM]")
-    print(f"  {'M2_PWM_A':<16} | {assign['M2_PWM_A']:<6} | {af['M2_PWM_A']:<18} | {'Phase A Center-Aligned PWM':<32}")
-    print(f"  {'M2_PWM_B':<16} | {assign['M2_PWM_B']:<6} | {af['M2_PWM_B']:<18} | {'Phase B Center-Aligned PWM':<32}")
-    print(f"  {'M2_PWM_C':<16} | {assign['M2_PWM_C']:<6} | {af['M2_PWM_C']:<18} | {'Phase C Center-Aligned PWM':<32}")
-    print(f"  {'M2_EN':<16} | {assign['M2_EN']:<6} | {af['M2_EN']:<18} | {'Motor 2 Gate Driver Enable':<32}")
+    for sig, role in [("M2_PWM_A", "Phase A Center-Aligned PWM"),
+                      ("M2_PWM_B", "Phase B Center-Aligned PWM"),
+                      ("M2_PWM_C", "Phase C Center-Aligned PWM"),
+                      ("M2_EN", "Motor 2 Gate Driver Enable")]:
+        p = assign[sig]
+        print(f"  {sig:<16} | {p:<6} | {get_header_loc(p):<16} | {af[sig]:<18} | {role:<32}")
 
     # Encoder 1
     print("\n  [ENCODER 1 -- MT6816 SPI1 HARDWARE BUS]")
-    print(f"  {'ENC1_SCK':<16} | {assign['ENC1_SCK']:<6} | {af['ENC1_SCK']:<18} | {'SPI1 Clock (PB3)':<32}")
-    print(f"  {'ENC1_MISO':<16} | {assign['ENC1_MISO']:<6} | {af['ENC1_MISO']:<18} | {'SPI1 Master In Data (PB4)':<32}")
-    print(f"  {'ENC1_MOSI':<16} | {assign['ENC1_MOSI']:<6} | {af['ENC1_MOSI']:<18} | {'SPI1 Master Out Data (PB5)':<32}")
-    print(f"  {'ENC1_CS':<16} | {assign['ENC1_CS']:<6} | {af['ENC1_CS']:<18} | {'SPI1 Chip Select (PA15)':<32}")
+    for sig, role in [("ENC1_SCK", "SPI1 Clock (PB3)"),
+                      ("ENC1_MISO", "SPI1 Master In Data (PB4)"),
+                      ("ENC1_MOSI", "SPI1 Master Out Data (PB5)"),
+                      ("ENC1_CS", "SPI1 Chip Select (PA15)")]:
+        p = assign[sig]
+        print(f"  {sig:<16} | {p:<6} | {get_header_loc(p):<16} | {af[sig]:<18} | {role:<32}")
 
     # Encoder 2
     print("\n  [ENCODER 2 -- MT6816 SPI2 HARDWARE BUS]")
-    print(f"  {'ENC2_SCK':<16} | {assign['ENC2_SCK']:<6} | {af['ENC2_SCK']:<18} | {'SPI2 Clock (PB13)':<32}")
-    print(f"  {'ENC2_CS':<16} | {assign['ENC2_CS']:<6} | {af['ENC2_CS']:<18} | {'SPI2 Chip Select (PB12 Guard)':<32}")
-    print(f"  {'ENC2_MISO':<16} | {assign['ENC2_MISO']:<6} | {af['ENC2_MISO']:<18} | {'SPI2 Master In Data (PB14)':<32}")
-    print(f"  {'ENC2_MOSI':<16} | {assign['ENC2_MOSI']:<6} | {af['ENC2_MOSI']:<18} | {'SPI2 Master Out Data (PB15)':<32}")
+    for sig, role in [("ENC2_SCK", "SPI2 Clock (PB13)"),
+                      ("ENC2_CS", "SPI2 Chip Select (PB12 Guard)"),
+                      ("ENC2_MISO", "SPI2 Master In Data (PB14)"),
+                      ("ENC2_MOSI", "SPI2 Master Out Data (PB15)")]:
+        p = assign[sig]
+        print(f"  {sig:<16} | {p:<6} | {get_header_loc(p):<16} | {af[sig]:<18} | {role:<32}")
 
     # Telemetry
     print("\n  [TELEMETRY HIGHWAY -- USART1 HARDWARE SERIAL]")
-    print(f"  {'UART_TX':<16} | {assign['UART_TX']:<6} | {af['UART_TX']:<18} | {'Serial TX to Host/Pi':<32}")
-    print(f"  {'UART_RX':<16} | {assign['UART_RX']:<6} | {af['UART_RX']:<18} | {'Serial RX from Host/Pi':<32}")
+    print(f"  {'UART_TX':<16} | {assign['UART_TX']:<6} | {get_header_loc(assign['UART_TX']):<16} | {af['UART_TX']:<18} | {'TX -> ESP32 RX (J1 Pin 11/9)':<32}")
+    print(f"  {'UART_RX':<16} | {assign['UART_RX']:<6} | {get_header_loc(assign['UART_RX']):<16} | {af['UART_RX']:<18} | {'RX <- ESP32 TX (J1 Pin 10/8)':<32}")
 
     # Diagnostics & Reserved System
     print("\n  [DIAGNOSTICS & RESERVED SYSTEM FUNCTIONS]")
-    print(f"  {'USER_BTN':<16} | {'PC13':<6} | {'GPIO Input':<18} | {'Onboard User Key Button':<32}")
-    print(f"  {'STATUS_LED':<16} | {'PA8':<6} | {'GPIO Output':<18} | {'Onboard User Status LED':<32}")
-    print(f"  {'DIAG_PWM':<16} | {'PA0':<6} | {'TIM2_CH1 (AF1)':<18} | {'Ground Truth Verification':<32}")
-    print(f"  {'USB_DM':<16} | {'PA11':<6} | {'Native USB':<18} | {'Preserved for USB CDC Serial':<32}")
-    print(f"  {'USB_DP':<16} | {'PA12':<6} | {'Native USB':<18} | {'Preserved for USB CDC Serial':<32}")
-    print(f"  {'SWDIO':<16} | {'PA13':<6} | {'SWD Debug':<18} | {'Hardware Debug Data':<32}")
-    print(f"  {'SWCLK':<16} | {'PA14':<6} | {'SWD Debug':<18} | {'Hardware Debug Clock':<32}")
-    print(f"  {'BOOT0':<16} | {'PB8':<6} | {'Boot Control':<18} | {'Hardware Bootloader Select':<32}")
-    print("-" * 80 + "\n")
+    sys_pins = [
+        ("USER_BTN", "PC13", "GPIO Input", "Onboard User Key Button"),
+        ("STATUS_LED", "PA8", "GPIO Output", "Onboard User Status LED"),
+        ("DIAG_PWM", "PA0", "TIM2_CH1 (AF1)", "Ground Truth Verification"),
+        ("USB_DM", "PA11", "Native USB", "Preserved for USB CDC Serial"),
+        ("USB_DP", "PA12", "Native USB", "Preserved for USB CDC Serial"),
+        ("SWDIO", "PA13", "SWD Debug", "Hardware Debug Data"),
+        ("SWCLK", "PA14", "SWD Debug", "Hardware Debug Clock"),
+        ("BOOT0", "PB8", "Boot Control", "Hardware Bootloader Select"),
+    ]
+    for sig, p, mode, role in sys_pins:
+        print(f"  {sig:<16} | {p:<6} | {get_header_loc(p):<16} | {mode:<18} | {role:<32}")
+    print("-" * 95)
+    print("  NOTE: STM32 firmware routes hardware USART1 via HardwareSerial Serial1(PA10, PA9).")
+    print("        Onboard USB-C CDC is mapped to Serial for interactive debugging/tuning.")
+    print("-" * 95 + "\n")
 
 
 if __name__ == "__main__":

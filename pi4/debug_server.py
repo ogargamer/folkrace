@@ -62,23 +62,35 @@ STATE = DebugServerState()
 
 def decompress_costmap_for_web(pkt: Dict[str, Any]):
     """
-    Decodes zlib base64 costmap on Core 2 to offload processing from browser.
-    Creates a 2D array representation in pkt['grid_unpacked'].
+    Decodes zlib base64 costmap and hazard mask on Core 2 to offload processing from browser.
+    Creates 2D array representations in pkt['grid_unpacked'] and pkt['hazard_unpacked'].
     """
     if "grid_data" in pkt and "grid_shape" in pkt and "grid_unpacked" not in pkt:
         try:
             shape = tuple(pkt["grid_shape"])  # e.g. (95, 125)
             raw_b = zlib.decompress(base64.b64decode(pkt["grid_data"]))
-            # Downsample / convert to list of lists for easy JSON delivery
-            # Unpack bytes into uint8 array
             vals = list(raw_b)
             rows, cols = shape
             grid_2d = []
             for r in range(rows):
                 row = vals[r * cols : (r + 1) * cols]
                 # Normalize 0..255 to 0.0..1.0
-                grid_2d.append([round(v / 255.0, 2) for v in row])
+                grid_2d.append([round(v / 255.0, 3) for v in row])
             pkt["grid_unpacked"] = grid_2d
+        except Exception:
+            pass
+
+    if "hazard_data" in pkt and "grid_shape" in pkt and "hazard_unpacked" not in pkt:
+        try:
+            shape = tuple(pkt["grid_shape"])
+            raw_h = zlib.decompress(base64.b64decode(pkt["hazard_data"]))
+            vals_h = list(raw_h)
+            rows, cols = shape
+            haz_2d = []
+            for r in range(rows):
+                row_h = vals_h[r * cols : (r + 1) * cols]
+                haz_2d.append([1 if v > 0 else 0 for v in row_h])
+            pkt["hazard_unpacked"] = haz_2d
         except Exception:
             pass
 

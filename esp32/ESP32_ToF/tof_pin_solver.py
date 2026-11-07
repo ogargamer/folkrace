@@ -200,48 +200,61 @@ def display_results():
     print("  * Header J1 Clock Shielding       : GPIO 12 (TOF2_CS) acts as static DC barrier adjacent to SCK")
     print("  * Cable-Bundle Guard Wire         : Active (MISO is flanked by DC LPN on Wire 2 in all cables)")
 
+    def get_header_pin(gpio):
+        if gpio in PHYSICAL_GRID:
+            side, row = PHYSICAL_GRID[gpio]
+            h = "J1" if side == "left" else "J3"
+            return f"Header {h} Pin {row:<2}"
+        return "N/A"
+
     # Structured, compact table with exactly ONE pin per line
-    print("\n" + "-" * 80)
-    print(f"  {'SIGNAL':<18} | {'GPIO':<9} | {'BUS / TYPE':<14} | {'FUNCTION / ROLE':<31}")
-    print("-" * 80)
+    print("\n" + "-" * 95)
+    print(f"  {'SIGNAL':<18} | {'HEADER PIN':<17} | {'GPIO':<9} | {'BUS / TYPE':<14} | {'FUNCTION / ROLE':<31}")
+    print("-" * 95)
 
     # Shared SPI Master Bus
     print("  [SHARED SPI MASTER BUS -- CLOCK & COMMANDS]")
     for sig in ["TOF_SHARED_SCK", "TOF_SHARED_MOSI"]:
         item = ALLOCATION[sig]
-        print(f"  {sig:<18} | GPIO {item['gpio']:<4} | {item['bus']:<14} | {item['role']:<31}")
+        hpin = get_header_pin(item["gpio"])
+        print(f"  {sig:<18} | {hpin:<17} | GPIO {item['gpio']:<4} | {item['bus']:<14} | {item['role']:<31}")
 
     # ToF 1
     print("\n  [TOF 1 -- FRONT LEFT (HEADER J1 PINS 4-7)]")
     for sig in ["TOF1_MISO", "TOF1_LPN", "TOF1_INT", "TOF1_CS"]:
         item = ALLOCATION[sig]
-        print(f"  {sig:<18} | GPIO {item['gpio']:<4} | {item['bus']:<14} | {item['role']:<31}")
+        hpin = get_header_pin(item["gpio"])
+        print(f"  {sig:<18} | {hpin:<17} | GPIO {item['gpio']:<4} | {item['bus']:<14} | {item['role']:<31}")
 
     # ToF 2
     print("\n  [TOF 2 -- FRONT RIGHT (HEADER J1 PINS 15-18)]")
     for sig in ["TOF2_MISO", "TOF2_LPN", "TOF2_INT", "TOF2_CS"]:
         item = ALLOCATION[sig]
-        print(f"  {sig:<18} | GPIO {item['gpio']:<4} | {item['bus']:<14} | {item['role']:<31}")
+        hpin = get_header_pin(item["gpio"])
+        print(f"  {sig:<18} | {hpin:<17} | GPIO {item['gpio']:<4} | {item['bus']:<14} | {item['role']:<31}")
 
     # ToF 3
     print("\n  [TOF 3 -- SIDE LEFT (HEADER J3 PINS 4-7)]")
     for sig in ["TOF3_MISO", "TOF3_LPN", "TOF3_INT", "TOF3_CS"]:
         item = ALLOCATION[sig]
-        print(f"  {sig:<18} | GPIO {item['gpio']:<4} | {item['bus']:<14} | {item['role']:<31}")
+        hpin = get_header_pin(item["gpio"])
+        print(f"  {sig:<18} | {hpin:<17} | GPIO {item['gpio']:<4} | {item['bus']:<14} | {item['role']:<31}")
 
     # ToF 4
     print("\n  [TOF 4 -- SIDE RIGHT (HEADER J3 PINS 8-10, 17)]")
     for sig in ["TOF4_MISO", "TOF4_LPN", "TOF4_INT", "TOF4_CS"]:
         item = ALLOCATION[sig]
-        print(f"  {sig:<18} | GPIO {item['gpio']:<4} | {item['bus']:<14} | {item['role']:<31}")
+        hpin = get_header_pin(item["gpio"])
+        print(f"  {sig:<18} | {hpin:<17} | GPIO {item['gpio']:<4} | {item['bus']:<14} | {item['role']:<31}")
 
     # Host Telemetry
     print("\n  [HOST TELEMETRY HIGHWAY (HEADER J3 PINS 2-3)]")
     for sig in ["HOST_UART_TX", "HOST_UART_RX"]:
         item = ALLOCATION[sig]
-        print(f"  {sig:<18} | GPIO {item['gpio']:<4} | {item['bus']:<14} | {item['role']:<31}")
+        hpin = get_header_pin(item["gpio"])
+        print(f"  {sig:<18} | {hpin:<17} | GPIO {item['gpio']:<4} | {item['bus']:<14} | {item['role']:<31}")
 
-    print("-" * 80 + "\n")
+    print("-" * 95 + "\n")
 
 
 if __name__ == "__main__":

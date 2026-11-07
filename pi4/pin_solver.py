@@ -242,27 +242,33 @@ def physical_pin(gpio: int) -> int:
     return int(info["PhysicalPin"])
 
 
-def solve_pi5_pinout(reserve_hat_eeprom: bool = True, reserve_console: bool = True):
-    """Return a collision-free assignment for this Pi 5 hardware topology.
+def solve_pi_pinout(enable_hardware_tof_uart: bool = True):
+    """Return a collision-free assignment for this Pi 4/5 hardware topology.
 
-    All five VL53L8CX ToF sensors are attached to the ESP32-S3 sensor hub, not
-    to the Pi 5. The Pi therefore owns only its LiDAR UART and ESP32 link.
+    Hardware Connections:
+      1. Primary High-Speed UART (/dev/ttyAMA0): Duplex link to ESP32-Main MCU (Chassis Telemetry @ 921,600 baud)
+      2. Handshake Interrupt: GPIO20 Input triggered by ESP32-Main batch-ready pulse
+      3. Secondary UART2 (/dev/ttyAMA2): Hardware UART to ESP32-ToF Hub (@ 921,600 baud)
+         (Alternative: USB-C cable to ESP32-ToF on /dev/ttyACM0)
     """
 
     reserved = set()
-    if reserve_hat_eeprom:
-        reserved.update((0, 1))
-    if reserve_console:
-        reserved.update((14, 15))
-
     solver = PinoutSolver(HEADER_GPIOS, reserved)
 
     fixed_requests = [
-        request("MS200K_LIDAR_TX", 12, "UART4_TX", "LiDAR TX / PWM control at 230400 baud"),
-        request("MS200K_LIDAR_RX", 13, "UART4_RX", "LiDAR RX data at 230400 baud"),
-        request("ESP32_SPI_CS", 18, "GPIO18", "ESP32 duplex-link chip select"),
-        request("ESP32_HANDSHAKE_INT", 20, "GPIO20", "ESP32 data-ready handshake input"),
+        # ESP32-Main Telemetry Highway (Primary UART0)
+        request("ESP32_MAIN_UART_TX", 14, "UART0_TX", "Duplex TX -> ESP32-Main RX (GPIO 44) @ 921,600 baud"),
+        request("ESP32_MAIN_UART_RX", 15, "UART0_RX", "Duplex RX <- ESP32-Main TX (GPIO 43) @ 921,600 baud"),
+        request("ESP32_MAIN_DRDY",    20, "GPIO20",   "Batch data-ready handshake pulse from ESP32-Main (GPIO 1)"),
     ]
+
+    if enable_hardware_tof_uart:
+        fixed_requests.extend([
+            # ESP32-ToF Hub Telemetry Link (Secondary UART2 via dtoverlay=uart2)
+            request("ESP32_TOF_UART_TX", 0, "UART2_TX", "Secondary TX -> ESP32-ToF RX (GPIO 44) @ 921,600 baud"),
+            request("ESP32_TOF_UART_RX", 1, "UART2_RX", "Secondary RX <- ESP32-ToF TX (GPIO 43) @ 921,600 baud"),
+        ])
+
     for fixed in fixed_requests:
         solver.reserve(fixed)
 
@@ -289,24 +295,23 @@ def solve_pi5_pinout(reserve_hat_eeprom: bool = True, reserve_console: bool = Tr
 
 
 def print_report() -> None:
-    assignments = solve_pi5_pinout()
+    assignments = solve_pi_pinout(enable_hardware_tof_uart=True)
     used = {gpio for gpio, _, _, _ in assignments.values()}
-    reserved = {0, 1, 14, 15}
-    free = sorted(set(HEADER_GPIOS) - used - reserved)
+    free = sorted(set(HEADER_GPIOS) - used)
 
-    print("\n" + "=" * 94)
-    print("  RASPBERRY PI 5 PINOUT CSP - COLLISION-FREE ASSIGNMENT")
-    print("  LiDAR UART + ESP32 SPI link (ToF sensors are allocated to the ESP32-S3)")
-    print("=" * 94)
-    print(f"  {'Signal':<23} | {'Physical pin':<12} | {'GPIO':<7} | {'Function':<13} | Description")
-    print("  " + "-" * 90)
+    print("\n" + "=" * 100)
+    print("  RASPBERRY PI 4 / 5 PINOUT CSP - VERIFIED COLLISION-FREE ASSIGNMENT")
+    print("  MCU UART Telemetry Links (ESP32-Main + ESP32-ToF) [Pure ToF + Vision Architecture]")
+    print("=" * 100)
+    print(f"  {'Signal':<21} | {'Physical pin':<14} | {'GPIO':<9} | {'Function':<12} | Description")
+    print("  " + "-" * 96)
     for name, (gpio, pin, function, description) in sorted(assignments.items(), key=lambda item: item[1][1]):
-        print(f"  {name:<23} | Pin {pin:<8} | GPIO {gpio:<2} | {function:<13} | {description}")
-    print("  " + "-" * 90)
+        print(f"  {name:<21} | Pin {pin:<10} | GPIO {gpio:<4} | {function:<12} | {description}")
+    print("  " + "-" * 96)
     print(f"  Assigned GPIOs: {len(used)} unique pins - verified collision-free")
-    print("  Reserved GPIOs: 0, 1 (HAT EEPROM); 14, 15 (UART0 console)")
-    print(f"  Free GPIOs: {free}")
-    print("=" * 94 + "\n")
+    print("  Note: ESP32-ToF can use UART2 (Pins 27/28) or direct USB-C connection (/dev/ttyACM0).")
+    print(f"  Free Available GPIOs ({len(free)} pins): {free}")
+    print("=" * 100 + "\n")
 
 
 def main() -> None:

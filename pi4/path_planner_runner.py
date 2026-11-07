@@ -207,11 +207,36 @@ def run_path_planner():
             accel_fwd = (v_cmd - v_actual) / DT_STEP
             accel_lat = v_actual * yaw_rate_rad_s
 
-            # 5. Downsample costmap for telemetry (same as Webots format)
-            prob_down = prob_map[::2, ::2]
-            haz_down = hazard_mask[::2, ::2]
+            # 5. Downsample costmap for telemetry (2x2 Max Pooling matching Webots format)
+            pm = prob_map
+            h_even = (pm.shape[0] // 2) * 2
+            w_even = (pm.shape[1] // 2) * 2
+            pm_even = pm[:h_even, :w_even]
+            prob_max = np.maximum.reduce([
+                pm_even[0::2, 0::2],
+                pm_even[0::2, 1::2],
+                pm_even[1::2, 0::2],
+                pm_even[1::2, 1::2],
+            ])
+            prob_down = (prob_max * 255.0).astype(np.uint8)
+
+            haz_even = hazard_mask[:h_even, :w_even]
+            haz_max = np.maximum.reduce([
+                haz_even[0::2, 0::2],
+                haz_even[0::2, 1::2],
+                haz_even[1::2, 0::2],
+                haz_even[1::2, 1::2],
+            ])
+            haz_down = (haz_max > 0).astype(np.uint8)
+
             grid_comp = base64.b64encode(zlib.compress(prob_down.tobytes(), 1)).decode("ascii")
             haz_comp = base64.b64encode(zlib.compress(haz_down.tobytes(), 1)).decode("ascii")
+
+            g_targets = [
+                [round(float(tgt[0]), 3), round(float(tgt[1]), 3), round(float(tgt[2]), 3)]
+                for tgt in (getattr(gap_scout, "last_targets", []) or [])
+                if isinstance(tgt, (list, tuple)) and len(tgt) >= 3
+            ]
 
             # 6. Compose Full Telemetry Packet
             t_total_ms = (time.perf_counter() - t_step_start) * 1000.0
@@ -221,8 +246,11 @@ def run_path_planner():
                 "timestamp": time.time(),
                 "sim_time": round(sim_time, 3),
                 "mode": "DRIVE",
+                "recovery_state": "DRIVE",
+                "escape_state": "NORMAL",
                 "status": opt_res.get("status", "OK"),
                 "v_cmd": round(v_cmd, 2),
+                "v_tgt": round(v_cmd, 2),
                 "v_real": round(v_actual, 2),
                 "v_est": round(v_actual, 2),
                 "steer_cmd_deg": round(steer_cmd_deg, 1),
@@ -242,13 +270,22 @@ def run_path_planner():
                 "tof": {k: round(v, 3) for k, v in raw_tof.items()},
                 "tof_ranges": [round(raw_tof.get(k, 1.8), 3) for k in SENSOR_NAMES],
                 "gap": [round(xg, 3), round(yg, 3), round(width, 3)],
+                "targets": g_targets,
                 "best_line": opt_res.get("best_line", []),
                 "candidate_lines": opt_res.get("candidate_lines", [])[:16],
+                "guide_line": opt_res.get("guide_line", []),
+                "corridor_left": opt_res.get("corridor_left", []),
+                "corridor_right": opt_res.get("corridor_right", []),
+                "shield": opt_res.get("shield", {}),
                 "plan_ms": round(t_plan_ms, 2),
                 "map_ms": round(t_map_ms, 2),
                 "scout_ms": round(t_scout_ms, 2),
+                "opt_prim_ms": round(float(opt_res.get("opt_prim_ms", 0.0)), 2),
+                "opt_alt_ms": round(float(opt_res.get("opt_alt_ms", 0.0)), 2),
+                "opt_shield_ms": round(float(opt_res.get("opt_shield_ms", 0.0)), 2),
                 "step_ms": round(t_total_ms, 2),
                 "iters_prim": int(opt_res.get("osqp_iters", 12)),
+                "iters_alt": int(opt_res.get("osqp_iters_alt", 0)),
                 "grid_shape": [int(s) for s in prob_down.shape],
                 "grid_bounds": [GRID_X_MIN, GRID_X_MAX, GRID_Y_MIN, GRID_Y_MAX],
                 "grid_data": grid_comp,
