@@ -409,6 +409,13 @@ def main():
         if not os.path.exists(PLANNER_GUI_SCRIPT):
             print(f"[Error] Desktop GUI not found at: {PLANNER_GUI_SCRIPT}")
             sys.exit(1)
+        if base_url:
+            try:
+                reg_resp = query_api_json(base_url, "/api/register_client", timeout_s=1.5)
+                if reg_resp:
+                    print(f"[Launcher] Registered this workstation for direct 60 Hz UDP telemetry from {active_host}")
+            except Exception:
+                pass
         print("[Launcher] Launching native PyQt5 Desktop GUI...")
         cmd = [sys.executable, PLANNER_GUI_SCRIPT]
         sys.exit(subprocess.run(cmd, cwd=CONTROLLERS_DIR).returncode)

@@ -29,12 +29,28 @@ from mcu_telemetry_protocol import (
     MCU_SYNC,
     MSG_ID_CHASSIS_TELEM,
     MSG_ID_TOF_TELEM,
+    MSG_ID_TOF_SUB_TELEM,
     CHASSIS_SIZE,
     TOF_SIZE,
+    TOF_SUB_SIZE,
     decode_chassis_packet,
     decode_tof_packet,
+    decode_tof_sub_packet,
     encode_motion_command,
 )
+from tof_latency_compensator import ToFLatencyCompensator, SENSOR_NAMES
+
+# Mapping of sensor_id (1..4) from ESP32_ToF to 16-channel array slots matching SENSOR_NAMES:
+# Sensor 1: Front-Left Outer (49.1° to 82.9° Left)  -> slots 4..7
+# Sensor 2: Front-Left Center (4.1° to 37.9° Left)   -> slots 0..3
+# Sensor 3: Front-Right Outer (49.1° to 82.9° Right) -> slots 12..15
+# Sensor 4: Front-Right Center (4.1° to 37.9° Right) -> slots 8..11
+SENSOR_CHANNEL_SLOTS = {
+    1: [4, 5, 6, 7],
+    2: [0, 1, 2, 3],
+    3: [12, 13, 14, 15],
+    4: [8, 9, 10, 11],
+}
 
 try:
     import serial
@@ -50,7 +66,8 @@ UART_BAUD = 921600
 class BinaryStreamParser:
     """Zero-allocation rolling stream parser for binary UART packets."""
 
-    def __init__(self):
+    def __init__(self, is_tof_port: bool = False):
+        self.is_tof_port = is_tof_port
         self.buffer = bytearray()
 
     def feed(self, chunk: bytes):
@@ -72,27 +89,40 @@ class BinaryStreamParser:
             if len(self.buffer) < 3:
                 break
 
-            msg_type = self.buffer[2]
-            if msg_type == MSG_ID_CHASSIS_TELEM:
-                if len(self.buffer) < CHASSIS_SIZE:
-                    break
-                raw_pkt = bytes(self.buffer[:CHASSIS_SIZE])
-                del self.buffer[:CHASSIS_SIZE]
-                decoded = decode_chassis_packet(raw_pkt)
-                if decoded:
-                    yield (MSG_ID_CHASSIS_TELEM, decoded)
+            msg_type_or_sensor_id = self.buffer[2]
 
-            elif msg_type == MSG_ID_TOF_TELEM:
-                if len(self.buffer) < TOF_SIZE:
-                    break
-                raw_pkt = bytes(self.buffer[:TOF_SIZE])
-                del self.buffer[:TOF_SIZE]
-                decoded = decode_tof_packet(raw_pkt)
-                if decoded:
-                    yield (MSG_ID_TOF_TELEM, decoded)
+            if not self.is_tof_port:
+                # ESP32-Main Port
+                if msg_type_or_sensor_id == MSG_ID_CHASSIS_TELEM:
+                    if len(self.buffer) < CHASSIS_SIZE:
+                        break
+                    raw_pkt = bytes(self.buffer[:CHASSIS_SIZE])
+                    del self.buffer[:CHASSIS_SIZE]
+                    decoded = decode_chassis_packet(raw_pkt)
+                    if decoded:
+                        yield (MSG_ID_CHASSIS_TELEM, decoded)
+                else:
+                    del self.buffer[:2]
             else:
-                # Unknown message ID: advance past sync header
-                del self.buffer[:2]
+                # ESP32-ToF Port (supports both 20-byte per-sensor and 78-byte full array)
+                if 1 <= msg_type_or_sensor_id <= 4:
+                    if len(self.buffer) < TOF_SUB_SIZE:
+                        break
+                    raw_pkt = bytes(self.buffer[:TOF_SUB_SIZE])
+                    del self.buffer[:TOF_SUB_SIZE]
+                    decoded = decode_tof_sub_packet(raw_pkt)
+                    if decoded:
+                        yield (MSG_ID_TOF_SUB_TELEM, decoded)
+                elif msg_type_or_sensor_id == MSG_ID_TOF_TELEM:
+                    if len(self.buffer) < TOF_SIZE:
+                        break
+                    raw_pkt = bytes(self.buffer[:TOF_SIZE])
+                    del self.buffer[:TOF_SIZE]
+                    decoded = decode_tof_packet(raw_pkt)
+                    if decoded:
+                        yield (MSG_ID_TOF_TELEM, decoded)
+                else:
+                    del self.buffer[:2]
 
 
 class MCU_UART_Bridge:
@@ -113,10 +143,12 @@ class MCU_UART_Bridge:
         self.udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.udp_sock.setblocking(False)
 
-        # State aggregation
+        # State aggregation & Option 1 Latency Compensator
+        self.compensator = ToFLatencyCompensator()
         self.lock = threading.Lock()
         self.latest_chassis: Dict[str, Any] = {}
         self.latest_tof_ranges = [1.8] * 16
+        self.latest_tof_ranges_raw = [1.8] * 16
 
     def start(self):
         if not HAS_SERIAL:
@@ -141,7 +173,8 @@ class MCU_UART_Bridge:
 
     def _uart_worker(self, port_name: str, label: str):
         print(f"[MCU Bridge] Connecting to {label} on {port_name} @ {self.baud} baud...")
-        parser = BinaryStreamParser()
+        is_tof = (label == "ESP32_ToF")
+        parser = BinaryStreamParser(is_tof_port=is_tof)
 
         while self.running:
             try:
@@ -161,16 +194,50 @@ class MCU_UART_Bridge:
         with self.lock:
             if msg_type == MSG_ID_CHASSIS_TELEM:
                 self.latest_chassis = pkt
+            elif msg_type == MSG_ID_TOF_SUB_TELEM:
+                # 20-byte per-sensor frame from ESP32_ToF/src/main.cpp
+                sensor_id = pkt.get("sensor_id", 0)
+                dists = pkt.get("distances_m", [])
+                slots = SENSOR_CHANNEL_SLOTS.get(sensor_id, [])
+                for i, slot in enumerate(slots):
+                    if i < len(dists):
+                        self.latest_tof_ranges_raw[slot] = dists[i]
+
+                # Option 1: Instantaneous Forward Extrapolation across all 16 beams
+                v_est = float(self.latest_chassis.get("v_est", self.latest_chassis.get("v_real", 0.0)))
+                gyro_z = float(self.latest_chassis.get("gyro_z", 0.0))
+                self.latest_tof_ranges = self.compensator.compensate_list(
+                    self.latest_tof_ranges_raw, v_est=v_est, gyro_z=gyro_z, dt=0.01667
+                )
             elif msg_type == MSG_ID_TOF_TELEM:
-                # Update ToF distances
+                # 78-byte full 16-channel packet
                 dists = pkt.get("distances_m", [])
                 if len(dists) == 16:
-                    self.latest_tof_ranges = dists
+                    self.latest_tof_ranges_raw = list(dists)
+                    v_est = float(self.latest_chassis.get("v_est", self.latest_chassis.get("v_real", 0.0)))
+                    gyro_z = float(self.latest_chassis.get("gyro_z", 0.0))
+                    self.latest_tof_ranges = self.compensator.compensate_list(
+                        dists, v_est=v_est, gyro_z=gyro_z, dt=0.01667
+                    )
 
             # Merge and dispatch over UDP
             telemetry = dict(self.latest_chassis)
             telemetry["timestamp"] = time.time()
             telemetry["tof_ranges"] = list(self.latest_tof_ranges)
+            telemetry["tof_ranges_raw"] = list(self.latest_tof_ranges_raw)
+            telemetry["f_tof"] = round(float(min(self.latest_tof_ranges)), 3) if self.latest_tof_ranges else 1.8
+            telemetry["f_tof_raw"] = round(float(min(self.latest_tof_ranges_raw)), 3) if self.latest_tof_ranges_raw else 1.8
+            telemetry["tof"] = {
+                SENSOR_NAMES[i]: round(self.latest_tof_ranges[i], 3)
+                for i in range(min(len(SENSOR_NAMES), len(self.latest_tof_ranges)))
+            }
+            telemetry["tof_raw"] = {
+                SENSOR_NAMES[i]: round(self.latest_tof_ranges_raw[i], 3)
+                for i in range(min(len(SENSOR_NAMES), len(self.latest_tof_ranges_raw)))
+            }
+            v_curr = float(self.latest_chassis.get("v_est", 0.0))
+            w_curr = float(self.latest_chassis.get("gyro_z", 0.0))
+            telemetry["tof_anchor_proj"] = list(self.compensator.compute_projected_anchor(v_curr, w_curr, 0.01667))
 
         try:
             raw = json.dumps(telemetry).encode("utf-8")

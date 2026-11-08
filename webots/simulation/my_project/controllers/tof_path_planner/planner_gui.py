@@ -1554,8 +1554,19 @@ class ComprehensivePlannerGUI(QMainWindow):
     def _udp_worker(self):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        except Exception:
+            pass
+        try:
+            # 512 KB receive buffer to prevent frame dropping during 60 Hz rendering
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 524288)
+        except Exception:
+            pass
+
         bound = False
-        for bind_ip in ["127.0.0.1", "0.0.0.0"]:
+        # Bind to 0.0.0.0 first to accept packets from both local Webots sim and remote Pi 4 robot over Wi-Fi
+        for bind_ip in ["0.0.0.0", "127.0.0.1"]:
             try:
                 sock.bind((bind_ip, 9876))
                 sock.settimeout(0.5)

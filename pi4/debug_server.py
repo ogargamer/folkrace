@@ -28,7 +28,7 @@ import shutil
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Set, Tuple
 
 # Ensure pi4 folder is in sys.path
 CURR_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -55,6 +55,13 @@ class DebugServerState:
         self._hz_counter = 0
         self._last_hz_calc = time.time()
         self.recorder: Optional[TelemetryFlightRecorder] = None
+        self.forward_targets: Set[Tuple[str, int]] = {
+            ("255.255.255.255", PORT_UDP_RECV),
+        }
+
+    def register_client_target(self, target: Tuple[str, int]):
+        with self.lock:
+            self.forward_targets.add(target)
 
 
 STATE = DebugServerState()
@@ -103,6 +110,11 @@ class DebugHTTPRequestHandler(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
+        # Auto-register external client IP for direct high-speed UDP streaming
+        client_ip = self.client_address[0]
+        if client_ip not in ("127.0.0.1", "localhost", "::1"):
+            STATE.register_client_target((client_ip, PORT_UDP_RECV))
+
         parsed = urlparse(self.path)
         path = parsed.path
 
@@ -114,6 +126,18 @@ class DebugHTTPRequestHandler(BaseHTTPRequestHandler):
 
         elif path == "/api/live":
             self._serve_live()
+
+        elif path.startswith("/api/register_client"):
+            qs = parse_qs(parsed.query)
+            target_ip = qs.get("ip", [client_ip])[0]
+            port = PORT_UDP_RECV
+            if "port" in qs:
+                try:
+                    port = int(qs["port"][0])
+                except ValueError:
+                    pass
+            STATE.register_client_target((target_ip, port))
+            self._send_json({"status": "registered", "target": [target_ip, port]})
 
         elif path.startswith("/api/frame/"):
             try:
@@ -184,6 +208,9 @@ class DebugHTTPRequestHandler(BaseHTTPRequestHandler):
         with STATE.lock:
             pkt = dict(STATE.latest_pkt)
             pkt["_total_frames"] = STATE.recorder.total_frames_recorded if STATE.recorder else STATE.total_frames_received
+        # On-demand decompression only if browser requests live frame
+        if "grid_unpacked" not in pkt and "grid_data" in pkt:
+            decompress_costmap_for_web(pkt)
         self._send_json(pkt)
 
     def _serve_frame(self, frame_id: int):
@@ -228,8 +255,9 @@ class DebugHTTPRequestHandler(BaseHTTPRequestHandler):
 
 def udp_listener_worker():
     """
-    Dedicated UDP telemetry ingestion thread running on Core 2.
-    Receives packets from Core 1 Planner and records to SQLite.
+    Dedicated UDP telemetry ingestion and high-speed laptop forwarder on Core 2.
+    Receives packets from Core 1 Planner, records to SQLite WAL flight recorder,
+    and forwards full-fidelity 1cm telemetry directly to laptop workstation.
     """
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -243,9 +271,27 @@ def udp_listener_worker():
 
     sock.settimeout(1.0)
 
+    # UDP Forwarder socket to laptop (broadcast + direct unicast)
+    fwd_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        fwd_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    except Exception:
+        pass
+    fwd_sock.setblocking(False)
+
     while True:
         try:
             data, _ = sock.recvfrom(65535)
+
+            # Direct binary UDP forward to laptop (zero re-encoding or serialization overhead)
+            with STATE.lock:
+                targets = list(STATE.forward_targets)
+            for target in targets:
+                try:
+                    fwd_sock.sendto(data, target)
+                except Exception:
+                    pass
+
             pkt = json.loads(data.decode("utf-8"))
 
             now = time.time()
@@ -256,9 +302,6 @@ def udp_listener_worker():
                 STATE.loop_hz = STATE._hz_counter / (now - STATE._last_hz_calc)
                 STATE._hz_counter = 0
                 STATE._last_hz_calc = now
-
-            # Decompress costmap on Core 2 for immediate Web consumption
-            decompress_costmap_for_web(pkt)
 
             with STATE.lock:
                 STATE.latest_pkt = pkt

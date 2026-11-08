@@ -20,6 +20,7 @@ PI_SYNC = b"\x55\xAA"
 
 MSG_ID_CHASSIS_TELEM = 0x01
 MSG_ID_TOF_TELEM = 0x02
+MSG_ID_TOF_SUB_TELEM = 0x05
 MSG_ID_MOTION_CMD = 0x10
 
 # Struct formats (little-endian '<', packed)
@@ -29,12 +30,17 @@ MSG_ID_MOTION_CMD = 0x10
 #          Speeds & RPMs (10h: v_cmd, v_est, fl_cmd, fr_cmd, rl_cmd, rr_cmd, fl_act, fr_act, rl_act, rr_act),
 #          slip_state(B), slip_ratio(b), flags(B), chk(B)
 CHASSIS_FORMAT = "<2sBBII8hH10hBbBB"
-CHASSIS_SIZE = struct.calcsize(CHASSIS_FORMAT)  # 50 bytes
+CHASSIS_SIZE = struct.calcsize(CHASSIS_FORMAT)  # 54 bytes
 
-# ToF: sync(2), msg_type(B), sensor_id(B), seq(I), ts(I),
+# ToF 16-zone full frame: sync(2), msg_type(B), sensor_id(B), seq(I), ts(I),
 #      dist_mm(16H), status(16B), spad(16B), temp(b), chk(B)
 TOF_FORMAT = "<2sBBII16H16B16BbB"
-TOF_SIZE = struct.calcsize(TOF_FORMAT)  # 74 bytes
+TOF_SIZE = struct.calcsize(TOF_FORMAT)  # 78 bytes
+
+# ToF 4-zone per-sensor frame (ESP32_ToF/src/main.cpp ToF_Binary_Packet):
+#      sync(2), sensor_id(B), seq(I), ts_ms(I), dist_mm(4H), chk(B)
+TOF_SUB_FORMAT = "<2sBII4HB"
+TOF_SUB_SIZE = struct.calcsize(TOF_SUB_FORMAT)  # 20 bytes
 
 # Motion Command: sync(2), msg_type(B), seq(I), v_cmd(h), steer_mrad(h), mode(B), chk(B)
 CMD_FORMAT = "<2sBIhhBB"
@@ -136,6 +142,32 @@ def decode_tof_packet(data: bytes) -> Optional[Dict[str, Any]]:
         "distances_m": ranges_m,
         "status": status,
         "spad": spad,
+    }
+
+
+def decode_tof_sub_packet(data: bytes) -> Optional[Dict[str, Any]]:
+    """Decodes 20-byte per-sensor binary ToF packet (from ESP32_ToF/src/main.cpp)."""
+    if len(data) < TOF_SUB_SIZE:
+        return None
+
+    unpacked = struct.unpack_from(TOF_SUB_FORMAT, data)
+    sync, sensor_id, seq, ts_ms = unpacked[0:4]
+    dist_mm = unpacked[4:8]
+
+    if sync != MCU_SYNC or not (1 <= sensor_id <= 4):
+        return None
+
+    expected_chk = unpacked[8]
+    actual_chk = calc_checksum(data[: TOF_SUB_SIZE - 1])
+    if actual_chk != expected_chk:
+        return None
+
+    return {
+        "sensor_id": sensor_id,
+        "seq": seq,
+        "ts_ms": ts_ms,
+        "mcu_timestamp_us": ts_ms * 1000,
+        "distances_m": [round(d / 1000.0, 3) for d in dist_mm],
     }
 
 

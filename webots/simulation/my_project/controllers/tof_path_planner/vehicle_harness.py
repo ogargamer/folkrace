@@ -1330,33 +1330,12 @@ class FolkraceVehicle:
 
         t_telem_0 = time.perf_counter()
 
-        # 2x2 Max Pooling for Costmap Telemetry:
-        # Prevents small 1-2 cell obstacle hits from being skipped/aliased during decimation,
-        # ensuring the red obstacle core is always rendered within its C-space halo.
-        pm = self.costmap.prob_map
-        h_even = (pm.shape[0] // 2) * 2
-        w_even = (pm.shape[1] // 2) * 2
-        pm_even = pm[:h_even, :w_even]
-        prob_max = np.maximum.reduce([
-            pm_even[0::2, 0::2],
-            pm_even[0::2, 1::2],
-            pm_even[1::2, 0::2],
-            pm_even[1::2, 1::2]
-        ])
-        prob_down = (prob_max * 255.0).astype(np.uint8)
+        # Full-fidelity 1cm costmap for laptop telemetry (no max-pooling distortion or pinched gaps)
+        prob_u8 = (np.clip(self.costmap.prob_map, 0.0, 1.0) * 255.0).astype(np.uint8)
+        hazard_u8 = (self.costmap.hazard_mask > 0).astype(np.uint8)
 
-        active_hazard = self.costmap.hazard_mask
-        haz_even = active_hazard[:h_even, :w_even]
-        haz_max = np.maximum.reduce([
-            haz_even[0::2, 0::2],
-            haz_even[0::2, 1::2],
-            haz_even[1::2, 0::2],
-            haz_even[1::2, 1::2]
-        ])
-        hazard_down = (haz_max > 0).astype(np.uint8)
-
-        grid_compressed = base64.b64encode(zlib.compress(prob_down.tobytes(), 1)).decode("ascii")
-        hazard_compressed = base64.b64encode(zlib.compress(hazard_down.tobytes(), 1)).decode("ascii")
+        grid_compressed = base64.b64encode(zlib.compress(prob_u8.tobytes(), 1)).decode("ascii")
+        hazard_compressed = base64.b64encode(zlib.compress(hazard_u8.tobytes(), 1)).decode("ascii")
 
         b_line = self.last_plan_res.get("best_line", [])
         c_lines = self.last_plan_res.get("candidate_lines", [])[:20]
@@ -1441,7 +1420,7 @@ class FolkraceVehicle:
             "corridor_right": self.last_plan_res.get("corridor_right", []),
             "shield": self.last_plan_res.get("shield", {}),
             "f_tof": round(float(self.cached_f_tof), 2),
-            "grid_shape": [int(s) for s in prob_down.shape],
+            "grid_shape": [int(s) for s in prob_u8.shape],
             "grid_bounds": [float(GRID_X_MIN), float(GRID_X_MAX), float(GRID_Y_MIN), float(GRID_Y_MAX)],
             "grid_data": grid_compressed,
             "hazard_data": hazard_compressed,

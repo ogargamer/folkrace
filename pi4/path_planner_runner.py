@@ -33,6 +33,7 @@ if CURR_DIR not in sys.path:
 from core_manager import set_core_affinity, set_process_priority, get_core_affinity
 from cpp_smart_hybrid_costmap import CppSmartHybridCostmap, SENSOR_NAMES
 from tof_gap_scout import ToFGapScout
+from tof_latency_compensator import ToFLatencyCompensator
 from planner_sl_mpc import CurvilinearSLMPC, CPP_AVAILABLE
 from planner_config import (
     GRID_X_MIN,
@@ -48,17 +49,17 @@ from planner_config import (
 
 TARGET_HZ = 60.0
 DT_STEP = 1.0 / TARGET_HZ
-DEBUG_UDP_PORT = 9876
-DEBUG_UDP_HOST = "127.0.0.1"
+DEBUG_UDP_PORT = int(os.environ.get("DEBUG_UDP_PORT", 9876))
+DEBUG_UDP_HOST = os.environ.get("DEBUG_UDP_HOST", "127.0.0.1")
 
 
 def create_nonblocking_udp_socket() -> socket.socket:
     """Creates a UDP socket that will never block under any circumstance."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setblocking(False)
-    # 256 KB socket buffer
+    # 512 KB socket buffer for high-rate full-fidelity telemetry
     try:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 262144)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 524288)
     except Exception:
         pass
     return sock
@@ -107,6 +108,7 @@ def run_path_planner():
         r_inflation_m=R_INFLATION_M,
     )
     gap_scout = ToFGapScout()
+    compensator = ToFLatencyCompensator(default_dt_s=DT_STEP)
     planner = CurvilinearSLMPC(costmap_engine=costmap)
     planner.costmap = costmap
 
@@ -148,19 +150,26 @@ def run_path_planner():
             raw_tof = frames[frame_idx]
             frame_idx = (frame_idx + 1) % total_frames
 
-            # 2. C++ Smart Hybrid Costmap
+            # Option 1: Instantaneous Forward Extrapolation (Ego-Motion Latency Compensation)
+            steer_rad = math.radians(steer_actual_deg)
+            yaw_rate_current = (v_actual * math.tan(steer_rad)) / wheel_base
+            comp_tof = compensator.compensate_dict(
+                raw_tof, v_est=v_actual, gyro_z=yaw_rate_current, dt=DT_STEP
+            )
+
+            # 2. C++ Smart Hybrid Costmap (evaluated on motion-compensated readings)
             t0 = time.perf_counter()
-            prob_map, hazard_mask, _ = costmap.process_tof_frame(raw_tof)
+            prob_map, hazard_mask, _ = costmap.process_tof_frame(comp_tof)
             t_map_ms = (time.perf_counter() - t0) * 1000.0
 
             # 3. ToF Gap Scout
             t0 = time.perf_counter()
             xg, yg, width, theta_g = gap_scout.scout_gap(
-                tof_readings=raw_tof,
+                tof_readings=comp_tof,
                 hazard_mask=hazard_mask,
                 costmap_obj=costmap,
                 target_lookahead_m=GAP_MAX_LOOKAHEAD_M,
-                steer_current=math.radians(steer_actual_deg),
+                steer_current=steer_rad,
                 prob_map=prob_map,
             )
             t_scout_ms = (time.perf_counter() - t0) * 1000.0
@@ -173,8 +182,8 @@ def run_path_planner():
                 theta_g=theta_g,
                 aperture_width=width,
                 v_current=v_actual,
-                steer_current=math.radians(steer_actual_deg),
-                yaw_rate_current=(v_actual * math.tan(math.radians(steer_actual_deg))) / wheel_base,
+                steer_current=steer_rad,
+                yaw_rate_current=yaw_rate_current,
                 extra_targets=getattr(gap_scout, "last_targets", None),
             )
             t_plan_ms = (time.perf_counter() - t0) * 1000.0
@@ -207,30 +216,12 @@ def run_path_planner():
             accel_fwd = (v_cmd - v_actual) / DT_STEP
             accel_lat = v_actual * yaw_rate_rad_s
 
-            # 5. Downsample costmap for telemetry (2x2 Max Pooling matching Webots format)
-            pm = prob_map
-            h_even = (pm.shape[0] // 2) * 2
-            w_even = (pm.shape[1] // 2) * 2
-            pm_even = pm[:h_even, :w_even]
-            prob_max = np.maximum.reduce([
-                pm_even[0::2, 0::2],
-                pm_even[0::2, 1::2],
-                pm_even[1::2, 0::2],
-                pm_even[1::2, 1::2],
-            ])
-            prob_down = (prob_max * 255.0).astype(np.uint8)
+            # 5. Full-fidelity 1cm costmap for laptop telemetry (no max-pooling distortion)
+            prob_u8 = (np.clip(prob_map, 0.0, 1.0) * 255.0).astype(np.uint8)
+            haz_u8 = (hazard_mask > 0).astype(np.uint8)
 
-            haz_even = hazard_mask[:h_even, :w_even]
-            haz_max = np.maximum.reduce([
-                haz_even[0::2, 0::2],
-                haz_even[0::2, 1::2],
-                haz_even[1::2, 0::2],
-                haz_even[1::2, 1::2],
-            ])
-            haz_down = (haz_max > 0).astype(np.uint8)
-
-            grid_comp = base64.b64encode(zlib.compress(prob_down.tobytes(), 1)).decode("ascii")
-            haz_comp = base64.b64encode(zlib.compress(haz_down.tobytes(), 1)).decode("ascii")
+            grid_comp = base64.b64encode(zlib.compress(prob_u8.tobytes(), 1)).decode("ascii")
+            haz_comp = base64.b64encode(zlib.compress(haz_u8.tobytes(), 1)).decode("ascii")
 
             g_targets = [
                 [round(float(tgt[0]), 3), round(float(tgt[1]), 3), round(float(tgt[2]), 3)]
@@ -266,9 +257,10 @@ def run_path_planner():
                 "accel_lat": round(accel_lat, 2),
                 "slip_state": "NORMAL",
                 "slip_ratio": 0.02,
-                "f_tof": round(float(min(raw_tof.values())), 3),
-                "tof": {k: round(v, 3) for k, v in raw_tof.items()},
-                "tof_ranges": [round(raw_tof.get(k, 1.8), 3) for k in SENSOR_NAMES],
+                "f_tof": round(float(min(comp_tof.values())), 3),
+                "tof": {k: round(v, 3) for k, v in comp_tof.items()},
+                "tof_ranges": [round(comp_tof.get(k, 1.8), 3) for k in SENSOR_NAMES],
+                "tof_ranges_raw": [round(raw_tof.get(k, 1.8), 3) for k in SENSOR_NAMES],
                 "gap": [round(xg, 3), round(yg, 3), round(width, 3)],
                 "targets": g_targets,
                 "best_line": opt_res.get("best_line", []),
@@ -286,7 +278,7 @@ def run_path_planner():
                 "step_ms": round(t_total_ms, 2),
                 "iters_prim": int(opt_res.get("osqp_iters", 12)),
                 "iters_alt": int(opt_res.get("osqp_iters_alt", 0)),
-                "grid_shape": [int(s) for s in prob_down.shape],
+                "grid_shape": [int(s) for s in prob_u8.shape],
                 "grid_bounds": [GRID_X_MIN, GRID_X_MAX, GRID_Y_MIN, GRID_Y_MAX],
                 "grid_data": grid_comp,
                 "hazard_data": haz_comp,
