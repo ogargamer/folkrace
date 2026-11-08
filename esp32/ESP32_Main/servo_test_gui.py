@@ -61,7 +61,12 @@ class SerialWorker(QThread):
         self.port_name = port_name
         self.baud_rate = baud_rate
         try:
-            self.serial_port = serial.Serial(self.port_name, self.baud_rate, timeout=0.1)
+            self.serial_port = serial.Serial(
+                self.port_name,
+                self.baud_rate,
+                timeout=0.1,
+                write_timeout=0.5
+            )
             self.is_running = True
             self.start()
             self.connection_status.emit(True, f"Connected to {self.port_name} @ {self.baud_rate} baud")
@@ -109,6 +114,8 @@ class SerialWorker(QThread):
                     if self.serial_port.in_waiting > 0:
                         raw = self.serial_port.read(self.serial_port.in_waiting).decode('utf-8', errors='ignore')
                         rx_buffer += raw
+                        if len(rx_buffer) > 4096:
+                            rx_buffer = rx_buffer[-1024:]
                         while '\n' in rx_buffer:
                             line, rx_buffer = rx_buffer.split('\n', 1)
                             line = line.strip()
@@ -117,14 +124,17 @@ class SerialWorker(QThread):
                             if line.startswith('{') and line.endswith('}'):
                                 try:
                                     data = json.loads(line)
-                                    self.telemetry_received.emit(data)
-                                    self.log_message.emit(f"<< {line}", "RX")
+                                    if "pulse_us" in data and "angle" in data:
+                                        self.telemetry_received.emit(data)
+                                        self.log_message.emit(f"<< {line}", "RX")
+                                        continue
                                 except json.JSONDecodeError:
-                                    self.log_message.emit(f"<< {line}", "INFO")
-                            else:
+                                    pass
+                            # Only display clean ASCII printable lines (ignore high-speed binary streams)
+                            if all(32 <= ord(c) < 127 or c in '\t\r' for c in line) and len(line) < 250:
                                 self.log_message.emit(f"<< {line}", "INFO")
                     else:
-                        time.sleep(0.005)
+                        time.sleep(0.01)
                 else:
                     break
             except Exception as e:
@@ -367,7 +377,7 @@ class ServoBenchGUI(QMainWindow):
         top_layout.addWidget(baud_lbl)
 
         self.baud_combo = QComboBox()
-        self.baud_combo.addItems(["115200", "921600", "500000", "230400"])
+        self.baud_combo.addItems(["921600", "115200", "500000", "230400"])
         top_layout.addWidget(self.baud_combo)
 
         self.connect_btn = QPushButton("Connect")
@@ -763,10 +773,16 @@ class ServoBenchGUI(QMainWindow):
     def refresh_ports(self):
         self.port_combo.clear()
         ports = serial.tools.list_ports.comports()
-        for p in ports:
+        default_idx = 0
+        for i, p in enumerate(ports):
+            # Prefer CH343 / USB-Serial devices over bluetooth
             self.port_combo.addItem(f"{p.device} ({p.description})", p.device)
+            if "CH34" in p.description or "USB" in p.description or p.device == "COM5":
+                default_idx = i
         if not ports:
             self.port_combo.addItem("No COM ports found", "")
+        else:
+            self.port_combo.setCurrentIndex(default_idx)
 
     def toggle_connection(self):
         if self.worker.is_running:

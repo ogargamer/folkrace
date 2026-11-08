@@ -86,6 +86,37 @@ static volatile bool s_fake_data_active = true; // Default to synthetic benchmar
 static volatile float s_manual_v = 0.0f;
 static volatile float s_manual_steer = 0.0f;
 static volatile bool s_manual_override = false;
+static volatile bool s_manual_servo_direct = false;
+static volatile float s_direct_servo_pulse = SERVO_PULSE_NEUTRAL_US;
+
+static inline float servoPulseToAngle(float pulse_us) {
+    if (pulse_us <= SERVO_PULSE_NEUTRAL_US) {
+        if (pulse_us < SERVO_PULSE_MIN_US) pulse_us = SERVO_PULSE_MIN_US;
+        return ((pulse_us - SERVO_PULSE_MIN_US) / (SERVO_PULSE_NEUTRAL_US - SERVO_PULSE_MIN_US)) * 90.0f;
+    } else {
+        if (pulse_us > SERVO_PULSE_MAX_US) pulse_us = SERVO_PULSE_MAX_US;
+        return 90.0f + ((pulse_us - SERVO_PULSE_NEUTRAL_US) / (SERVO_PULSE_MAX_US - SERVO_PULSE_NEUTRAL_US)) * 90.0f;
+    }
+}
+
+static inline float servoAngleToPulse(float angle_deg) {
+    if (angle_deg < 0.0f) angle_deg = 0.0f;
+    if (angle_deg > 180.0f) angle_deg = 180.0f;
+    if (angle_deg <= 90.0f) {
+        return SERVO_PULSE_MIN_US + (angle_deg / 90.0f) * (SERVO_PULSE_NEUTRAL_US - SERVO_PULSE_MIN_US);
+    } else {
+        return SERVO_PULSE_NEUTRAL_US + ((angle_deg - 90.0f) / 90.0f) * (SERVO_PULSE_MAX_US - SERVO_PULSE_NEUTRAL_US);
+    }
+}
+
+static void sendServoTelemetry() {
+    float cur_pulse = s_manual_servo_direct ? s_direct_servo_pulse : s_servo.getCurrentPulseUs();
+    float angle = servoPulseToAngle(cur_pulse);
+    float period_us = 1000000.0f / (float)SERVO_PWM_FREQ_HZ;
+    Serial.printf("{\"pin\":%d,\"pulse_us\":%d,\"angle\":%.2f,\"freq_hz\":%d,\"period_us\":%.1f,\"enabled\":%s}\n",
+                  SERVO_STEER_PWM_PIN, (int)cur_pulse, angle, (int)SERVO_PWM_FREQ_HZ, period_us,
+                  s_servo.isEnabled() ? "true" : "false");
+}
 
 // =============================================================================
 // Hardware Timer ISR Callback (Fires periodically every 2500 us / 400 Hz)
@@ -195,7 +226,11 @@ static void IRAM_ATTR realTimeControlTask(void *pvParameters) {
         );
 
         // 3. Command Single Steering Servo on LEDC PWM (GPIO 21 @ 333 Hz)
-        s_servo.setPulseUs(diff.servo_pulse_us);
+        if (s_manual_servo_direct) {
+            s_servo.setPulseUs(s_direct_servo_pulse);
+        } else {
+            s_servo.setPulseUs(diff.servo_pulse_us);
+        }
 
         // 4. Execute 4-Wheel Median Odometry + IMU Complementary Sensor Fusion
         FusionOutputs fusion = s_fusion.update(
@@ -234,7 +269,7 @@ static void IRAM_ATTR realTimeControlTask(void *pvParameters) {
         out.rr_target_rpm   = diff.rpm_RR;
         out.steer_rad       = diff.steer_rad;
         out.steer_deg       = diff.steer_deg;
-        out.servo_pulse_us  = diff.servo_pulse_us;
+        out.servo_pulse_us  = s_manual_servo_direct ? s_direct_servo_pulse : diff.servo_pulse_us;
         out.rate_limited_v  = diff.rate_limited_v;
         out.v_FL            = diff.v_FL;
         out.v_FR            = diff.v_FR;
@@ -323,11 +358,36 @@ static void ioTask(void *pvParameters) {
             line.trim();
             if (line.length() == 0) continue;
 
-            if (line.equalsIgnoreCase("BENCH") || line.equalsIgnoreCase("FAKE")) {
+            if (line.equalsIgnoreCase("PING")) {
+                Serial.println("PONG");
+            } else if (line.equalsIgnoreCase("D") || line.equalsIgnoreCase("DISABLE")) {
+                s_manual_servo_direct = true;
+                s_servo.disable();
+                sendServoTelemetry();
+            } else if (line.equalsIgnoreCase("E") || line.equalsIgnoreCase("ENABLE")) {
+                s_servo.enable();
+                sendServoTelemetry();
+            } else if (line.charAt(0) == 'P' || line.charAt(0) == 'p') {
+                String valStr = line.substring(1);
+                valStr.trim();
+                float us = valStr.toFloat();
+                if (us >= SERVO_PULSE_MIN_US && us <= SERVO_PULSE_MAX_US) {
+                    s_direct_servo_pulse = us;
+                    s_manual_servo_direct = true;
+                    s_servo.enable();
+                    s_servo.setPulseUs(us);
+                    sendServoTelemetry();
+                } else {
+                    Serial.printf("{\"error\":\"Pulse out of bounds (%.0f-%.0f us): %.1f\"}\n",
+                                  SERVO_PULSE_MIN_US, SERVO_PULSE_MAX_US, us);
+                }
+            } else if (line.equalsIgnoreCase("BENCH") || line.equalsIgnoreCase("FAKE")) {
                 s_fake_data_active = !s_fake_data_active;
+                s_manual_servo_direct = false;
                 Serial.printf("\n>>> [MODE] Synthetic 400Hz Benchmark Mode: %s\n",
                               s_fake_data_active ? "ENABLED (Fake Data)" : "DISABLED (Live Sensors)");
             } else if (line.equalsIgnoreCase("STATUS") || line.equalsIgnoreCase("S")) {
+                sendServoTelemetry();
                 const SharedControlOutputs &c = s_controlOutputs.getReadBuffer();
                 Serial.println(F("\n========================================================"));
                 Serial.println(F(" FOLKRACE ESP32-S3 REAL-TIME DUAL-CORE STATUS REPORT    "));
@@ -341,8 +401,8 @@ static void ioTask(void *pvParameters) {
                               100.0f - (c.exec_us_avg / 2500.0f) * 100.0f);
                 Serial.printf(" Jitter: %.2f us | Deadline Overruns: %u / %u cycles\n",
                               c.jitter_us, c.overrun_count, c.cycle_count);
-                Serial.printf(" Steering: %.2f deg (%.4f rad) | Servo PWM: %.1f us (GPIO 21)\n",
-                              c.steer_deg, c.steer_rad, c.servo_pulse_us);
+                Serial.printf(" Steering: %.2f deg (%.4f rad) | Servo PWM: %.1f us (GPIO %d)\n",
+                              c.steer_deg, c.steer_rad, c.servo_pulse_us, SERVO_STEER_PWM_PIN);
                 Serial.printf(" Speed Cmd: %.2f m/s (Rate-Limited: %.2f m/s) | Scale: %.2f\n",
                               s_manual_v, c.rate_limited_v, c.scale_factor);
                 Serial.printf(" Motor Targets (RPM): FL: %+.1f | FR: %+.1f | RL: %+.1f | RR: %+.1f\n",
@@ -361,18 +421,29 @@ static void ioTask(void *pvParameters) {
                 s_manual_override = true;
                 s_fake_data_active = false;
                 Serial.printf(">>> Manual Speed Setpoint: %.2f m/s\n", s_manual_v);
-            } else if (line.startsWith("A ") || line.startsWith("a ")) {
-                float deg = line.substring(2).toFloat();
-                s_manual_steer = deg * (3.14159265f / 180.0f);
-                s_manual_override = true;
-                s_fake_data_active = false;
-                Serial.printf(">>> Manual Steer Setpoint: %.1f deg (%.4f rad)\n", deg, s_manual_steer);
+            } else if (line.charAt(0) == 'A' || line.charAt(0) == 'a') {
+                String valStr = line.substring(1);
+                valStr.trim();
+                float deg = valStr.toFloat();
+                if (deg >= 0.0f && deg <= 180.0f) {
+                    s_direct_servo_pulse = servoAngleToPulse(deg);
+                    s_manual_servo_direct = true;
+                    s_servo.enable();
+                    s_servo.setPulseUs(s_direct_servo_pulse);
+                    s_manual_steer = (deg - 90.0f) * (3.14159265f / 180.0f);
+                    s_manual_override = true;
+                    sendServoTelemetry();
+                } else {
+                    Serial.printf("{\"error\":\"Angle out of bounds (0-180 deg): %.1f\"}\n", deg);
+                }
             } else if (line.equalsIgnoreCase("RESET")) {
                 s_manual_v = 0.0f;
                 s_manual_steer = 0.0f;
                 s_manual_override = false;
+                s_manual_servo_direct = false;
                 s_ediff.reset();
                 s_fusion.reset();
+                s_servo.setPulseUs(SERVO_PULSE_NEUTRAL_US);
                 Serial.println(F(">>> Controller & Sensor Fusion State Reset."));
             } else if (line.length() == 1 && strchr("tTrR12345+-0mM", line[0])) {
                 s_imu.handleSerialCommand(line[0], Serial);
