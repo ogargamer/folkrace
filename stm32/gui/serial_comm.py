@@ -91,6 +91,7 @@ class STM32DualSerial:
             "calib_motor": 1,
             "foc_khz": 20.0,
             "isr_lat_us": 0,
+            "isr_peak_hold_us": 0,
             "spikes_count": 0,
             "calib_progress": 0,
             "connected": False,
@@ -167,6 +168,11 @@ class STM32DualSerial:
             cmd_str += "\n"
         self.cmd_queue.put(cmd_str)
 
+    def reset_peak_hold(self):
+        with self.lock:
+            self.state["isr_peak_hold_us"] = self.state["isr_lat_us"]
+        self.send_command("PROF")
+
     def send_emergency_stop(self):
         """Immediately flush pending commands and send hardware emergency stop burst."""
         try:
@@ -176,7 +182,7 @@ class STM32DualSerial:
             pass
         if self.ser and self.ser.is_open:
             try:
-                self.ser.write(b"\n\nx\nx\nSTOP\n")
+                self.ser.write(b"\x1b\nSTOP\n")
                 self.ser.flush()
             except Exception:
                 pass
@@ -397,6 +403,10 @@ class STM32DualSerial:
 
             self.state["foc_khz"]          = foc_khz
             self.state["isr_lat_us"]       = isr_lat_us
+            if spikes < self.state["spikes_count"] and spikes == 0:
+                self.state["isr_peak_hold_us"] = isr_lat_us
+            elif isr_lat_us > self.state["isr_peak_hold_us"]:
+                self.state["isr_peak_hold_us"] = isr_lat_us
             self.state["spikes_count"]     = spikes
             self.state["calib_progress"]   = calib_prog
             self.state["last_packet_time"] = now
@@ -411,7 +421,6 @@ class STM32DualSerial:
                 self.history_m2_target_rpm.append(m2_tgt_rpm)
                 self.history_m2_actual_rpm.append(m2_act_rpm)
                 self.history_m2_uq.append(m2_uq_v)
-                self.history_uq.append(m1_uq_v)
 
         if self.on_telemetry:
             self.on_telemetry(self.state)

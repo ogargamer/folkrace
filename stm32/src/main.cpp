@@ -120,6 +120,12 @@ volatile uint8_t live_calib_progress = 0; // 0..100%
 volatile uint32_t foc_tick_count = 0;
 volatile uint32_t isr_peak_cycles = 0;
 volatile uint32_t isr_last_cycles = 0;
+volatile uint32_t isr_alltime_peak_cycles = 0;
+volatile uint32_t isr_last_c0 = 0;
+volatile uint32_t prof_period_last = 8500;
+volatile uint32_t prof_period_min = 8500;
+volatile uint32_t prof_period_max = 8500;
+volatile uint32_t prof_period_jitter_max = 0;
 volatile uint8_t  isr_jitter_spikes = 0;
 
 volatile uint32_t prof_spi_max = 0;
@@ -249,6 +255,18 @@ extern "C" unsigned long __wrap__micros() {
     return DWT->CYCCNT / (SystemCoreClock / 1000000);
 }
 
+extern "C" float __wrap_sinf(float a) {
+    return _sin(a);
+}
+
+extern "C" float __wrap_cosf(float a) {
+    return _cos(a);
+}
+
+extern "C" void __wrap_sincosf(float a, float *s, float *c) {
+    _sincos(a, s, c);
+}
+
 // ----------------------------------------------------------------------------
 // STM32G474 170 MHz Range 1 Boost Clock Configuration
 // Overrides default weak 150 MHz configuration to unleash full 170 MHz rated speed
@@ -290,6 +308,12 @@ extern "C" void SystemClock_Config(void) {
 // Direct Inlined Hardware FOC Commutation Loop (< 60 cycles / ~0.35 us)
 // Completely eliminates SimpleFOC virtual dispatch, _micros() polling, and function overhead
 // ----------------------------------------------------------------------------
+static inline float fast_fminf(float a, float b) __attribute__((always_inline));
+static inline float fast_fminf(float a, float b) { return (a < b) ? a : b; }
+
+static inline float fast_fmaxf(float a, float b) __attribute__((always_inline));
+static inline float fast_fmaxf(float a, float b) { return (a > b) ? a : b; }
+
 static inline void fastLoopFOC(BLDCMotor &motor, MT6816Sensor &encoder, FastBLDCDriver3PWM &driver, TIM_TypeDef *tim) __attribute__((always_inline));
 
 static inline void fastLoopFOC(BLDCMotor &motor, MT6816Sensor &encoder, FastBLDCDriver3PWM &driver, TIM_TypeDef *tim) {
@@ -318,8 +342,8 @@ static inline void fastLoopFOC(BLDCMotor &motor, MT6816Sensor &encoder, FastBLDC
     float uc = -0.5f * u_alpha - 0.866025404f * u_beta;
 
     // 5. SpaceVectorPWM Midpoint Centering
-    float umin = fminf(ua, fminf(ub, uc));
-    float umax = fmaxf(ua, fmaxf(ub, uc));
+    float umin = fast_fminf(ua, fast_fminf(ub, uc));
+    float umax = fast_fmaxf(ua, fast_fmaxf(ub, uc));
     float center = (driver.voltage_limit * 0.5f) - (umax + umin) * 0.5f;
 
     ua += center;
@@ -327,9 +351,9 @@ static inline void fastLoopFOC(BLDCMotor &motor, MT6816Sensor &encoder, FastBLDC
     uc += center;
 
     // 6. Direct hardware timer CCR update (no virtual dispatch, no branching)
-    uint32_t duty_a = (uint32_t)(fminf(fmaxf(ua, 0.0f), driver.voltage_limit) * driver.pwm_scale);
-    uint32_t duty_b = (uint32_t)(fminf(fmaxf(ub, 0.0f), driver.voltage_limit) * driver.pwm_scale);
-    uint32_t duty_c = (uint32_t)(fminf(fmaxf(uc, 0.0f), driver.voltage_limit) * driver.pwm_scale);
+    uint32_t duty_a = (uint32_t)(fast_fminf(fast_fmaxf(ua, 0.0f), driver.voltage_limit) * driver.pwm_scale);
+    uint32_t duty_b = (uint32_t)(fast_fminf(fast_fmaxf(ub, 0.0f), driver.voltage_limit) * driver.pwm_scale);
+    uint32_t duty_c = (uint32_t)(fast_fminf(fast_fmaxf(uc, 0.0f), driver.voltage_limit) * driver.pwm_scale);
 
     if (tim == TIM2) {
         TIM2->CCR1 = duty_a; // PA5 (TIM2 CH1)
@@ -343,10 +367,42 @@ static inline void fastLoopFOC(BLDCMotor &motor, MT6816Sensor &encoder, FastBLDC
 }
 
 // ----------------------------------------------------------------------------
+// Direct Inlined Ultrasonic 20.0 kHz Velocity Motion Control (< 45 cycles)
+// Eliminates 4 kHz step-staircasing whine, virtual dispatch, and _micros() division
+// ----------------------------------------------------------------------------
+static inline void fastMoveVelocity(BLDCMotor &motor, MT6816Sensor &encoder, float target_rad_s) __attribute__((always_inline));
+
+static inline void fastMoveVelocity(BLDCMotor &motor, MT6816Sensor &encoder, float target_rad_s) {
+    motor.target = target_rad_s;
+    motor.shaft_angle = (float)motor.sensor_direction * encoder.getFastAngle() - motor.sensor_offset;
+    float raw_vel = encoder.getVelocity();
+    motor.shaft_velocity = (float)motor.sensor_direction * motor.LPF_velocity(raw_vel);
+    if (!motor.enabled) return;
+
+    motor.shaft_velocity_sp = target_rad_s;
+    motor.current_sp = motor.PID_velocity(target_rad_s - motor.shaft_velocity);
+    motor.voltage.q = _constrain(motor.current_sp, -motor.voltage_limit, motor.voltage_limit);
+    motor.voltage.d = 0.0f;
+}
+
+// ----------------------------------------------------------------------------
 // Hard Real-Time 20.0 kHz Hardware Timer ISR (TIM6, NVIC Priority 0)
 // ----------------------------------------------------------------------------
 void focTimerISR() {
     uint32_t c0 = DWT->CYCCNT;
+    if (isr_last_c0 != 0) {
+        uint32_t period = c0 - isr_last_c0;
+        prof_period_last = period;
+        if (period < prof_period_min) prof_period_min = period;
+        if (period > prof_period_max) prof_period_max = period;
+        uint32_t jit = (period >= 8500) ? (period - 8500) : (8500 - period);
+        if (jit > prof_period_jitter_max) prof_period_jitter_max = jit;
+        // Count inter-ISR period jitter spike if period deviates by > 5.0 us (850 cycles)
+        if (jit > 850) {
+            isr_jitter_spikes++;
+        }
+    }
+    isr_last_c0 = c0;
     foc_tick_count++;
 
     // 1. Concurrent Parallel Dual-SPI Read (< 3.6 us total for BOTH encoders)
@@ -357,7 +413,24 @@ void focTimerISR() {
     encoder2.update();
     uint32_t c2 = DWT->CYCCNT;
 
-    // 2. Motor 1 Commutation Loop (with Smooth Filtered Sensor Lag Compensation)
+    // 2. Ultrasonic 20.0 kHz Velocity Filtering & PID Control (Zero 4 kHz Staircasing Whine!)
+    if (!m1_calib_active) {
+        if (m1_enabled) {
+            fastMoveVelocity(motor1, encoder1, m1_target_rpm * 0.104719755f);
+        } else {
+            motor1.shaft_velocity = (float)motor1.sensor_direction * motor1.LPF_velocity(encoder1.getVelocity());
+        }
+    }
+    if (!m2_calib_active) {
+        if (m2_enabled) {
+            fastMoveVelocity(motor2, encoder2, m2_target_rpm * 0.104719755f);
+        } else {
+            motor2.shaft_velocity = (float)motor2.sensor_direction * motor2.LPF_velocity(encoder2.getVelocity());
+        }
+    }
+    uint32_t c3 = DWT->CYCCNT;
+
+    // 3. Motor 1 Commutation Loop (with Smooth Filtered Sensor Lag Compensation)
     if (m1_enabled && !m1_calib_active) {
         if (m1_lag_comp_us > 0.0f && m1_base_zero_angle != 0.0f) {
             // Crisp 2.0 ms low-pass filter on lag compensation velocity (alpha = 0.024f @ 20 kHz)
@@ -372,9 +445,9 @@ void focTimerISR() {
         }
         fastLoopFOC(motor1, encoder1, driver1, TIM2);
     }
-    uint32_t c3 = DWT->CYCCNT;
+    uint32_t c4 = DWT->CYCCNT;
 
-    // 3. Motor 2 Commutation Loop (with Smooth Filtered Sensor Lag Compensation)
+    // 4. Motor 2 Commutation Loop (with Smooth Filtered Sensor Lag Compensation)
     if (m2_enabled && !m2_calib_active) {
         if (m2_lag_comp_us > 0.0f && m2_base_zero_angle != 0.0f) {
             m2_lag_filt_vel += 0.024f * (motor2.shaft_velocity - m2_lag_filt_vel);
@@ -387,30 +460,14 @@ void focTimerISR() {
         }
         fastLoopFOC(motor2, encoder2, driver2, TIM3);
     }
-    uint32_t c4 = DWT->CYCCNT;
-
-    // 4. Downsampled Velocity Motion Control (Staggered to prevent dual-PID latency spike)
-    if ((foc_tick_count % MOTION_DOWNSAMPLE_RATIO) == 0) {
-        if (m1_enabled && !m1_calib_active) {
-            motor1.move(m1_target_rpm * 0.104719755f);
-            motor1.voltage.q = _constrain(motor1.current_sp, -motor1.voltage_limit, motor1.voltage_limit);
-            motor1.voltage.d = 0.0f;
-        }
-    } else if ((foc_tick_count % MOTION_DOWNSAMPLE_RATIO) == 2) {
-        if (m2_enabled && !m2_calib_active) {
-            motor2.move(m2_target_rpm * 0.104719755f);
-            motor2.voltage.q = _constrain(motor2.current_sp, -motor2.voltage_limit, motor2.voltage_limit);
-            motor2.voltage.d = 0.0f;
-        }
-    }
     uint32_t c5 = DWT->CYCCNT;
 
     // 5. Profiling & Jitter Tracking
     uint32_t d_spi = c1 - c0;
     uint32_t d_upd = c2 - c1;
-    uint32_t d_m1  = c3 - c2;
-    uint32_t d_m2  = c4 - c3;
-    uint32_t d_mov = c5 - c4;
+    uint32_t d_mov = c3 - c2;
+    uint32_t d_m1  = c4 - c3;
+    uint32_t d_m2  = c5 - c4;
     uint32_t d_tot = c5 - c0;
 
     prof_spi_last = d_spi;
@@ -431,8 +488,11 @@ void focTimerISR() {
     if (d_tot > isr_peak_cycles) {
         isr_peak_cycles = d_tot;
     }
-    // Jitter spike warning threshold: > 38.0 us @ 170 MHz = 6,460 cycles (50.0 us total tick budget)
-    if (d_tot > 6460) {
+    if (d_tot > isr_alltime_peak_cycles) {
+        isr_alltime_peak_cycles = d_tot;
+    }
+    // Jitter spike warning threshold: > 35.0 us @ 170 MHz = 5,950 cycles (50.0 us total tick budget)
+    if (d_tot > 5950) {
         isr_jitter_spikes++;
     }
 }
@@ -445,6 +505,7 @@ void initMotorFOC(int motor_id) {
         motor1.enable();
         if (M1_DEFAULT_ZERO_ELECTRIC_ANGLE != 0.0f) {
             motor1.zero_electric_angle = M1_DEFAULT_ZERO_ELECTRIC_ANGLE;
+            m1_base_zero_angle = M1_DEFAULT_ZERO_ELECTRIC_ANGLE;
             motor1.sensor_direction = Direction::CW;
             motor1.initFOC();
             m1_calibrated = true;
@@ -452,6 +513,7 @@ void initMotorFOC(int motor_id) {
         } else {
             Serial.println(">>> M1: Running standard SimpleFOC alignment...");
             if (motor1.initFOC()) {
+                m1_base_zero_angle = motor1.zero_electric_angle;
                 m1_calibrated = true;
                 Serial.print(">>> M1 ALIGN OK: ZeroAngle=");
                 Serial.print(motor1.zero_electric_angle, 4);
@@ -468,6 +530,7 @@ void initMotorFOC(int motor_id) {
         motor2.enable();
         if (M2_DEFAULT_ZERO_ELECTRIC_ANGLE != 0.0f) {
             motor2.zero_electric_angle = M2_DEFAULT_ZERO_ELECTRIC_ANGLE;
+            m2_base_zero_angle = M2_DEFAULT_ZERO_ELECTRIC_ANGLE;
             motor2.sensor_direction = Direction::CW;
             motor2.initFOC();
             m2_calibrated = true;
@@ -475,6 +538,7 @@ void initMotorFOC(int motor_id) {
         } else {
             Serial.println(">>> M2: Running standard SimpleFOC alignment...");
             if (motor2.initFOC()) {
+                m2_base_zero_angle = motor2.zero_electric_angle;
                 m2_calibrated = true;
                 Serial.print(">>> M2 ALIGN OK: ZeroAngle=");
                 Serial.print(motor2.zero_electric_angle, 4);
@@ -539,17 +603,19 @@ static inline bool checkCalibrationAbort() {
     if (g_estop_active) return true;
     while (Serial.available() > 0) {
         char c = (char)Serial.read();
-        // Dedicated single-character emergency stop hotkeys: 'x', 'X', or ESC (ASCII 27)
-        if (c == 'x' || c == 'X' || c == 27) {
+        // Dedicated single-byte instant emergency stop hotkey: ESC (ASCII 27)
+        if (c == 27) {
+            rx_idx = 0;
             triggerGlobalEmergencyStop();
             return true;
         }
-        // Accumulate into incoming line buffer so commands like STOP or ESTOP still work
+        // Accumulate into incoming line buffer so commands like x, STOP, or ESTOP work cleanly
         if (c == '\n' || c == '\r') {
             if (rx_idx > 0) {
                 rx_line[rx_idx] = '\0';
-                if (strcasecmp(rx_line, "STOP") == 0 || strcasecmp(rx_line, "ESTOP") == 0 ||
-                    strcasecmp(rx_line, "HALT") == 0 || strcasecmp(rx_line, "ABORT") == 0) {
+                if (strcasecmp(rx_line, "x") == 0 || strcasecmp(rx_line, "STOP") == 0 ||
+                    strcasecmp(rx_line, "ESTOP") == 0 || strcasecmp(rx_line, "HALT") == 0 ||
+                    strcasecmp(rx_line, "ABORT") == 0) {
                     rx_idx = 0;
                     triggerGlobalEmergencyStop();
                     return true;
@@ -748,6 +814,7 @@ bool saveConfigToFlash() {
     status = HAL_FLASHEx_Erase(&EraseInitStruct, &pageError);
     if (status != HAL_OK) {
         HAL_FLASH_Lock();
+        isr_last_c0 = 0;
         __enable_irq();
         if (foc_timer) foc_timer->resume();
         Serial.printf(">>> [FLASH_ERR] Page erase failed on page %lu (status %d, err %08lX)\n",
@@ -763,6 +830,7 @@ bool saveConfigToFlash() {
         status = HAL_FLASH_Program(FLASH_TYPEPROGRAM_DOUBLEWORD, page_addr + offset, dword);
         if (status != HAL_OK) {
             HAL_FLASH_Lock();
+            isr_last_c0 = 0;
             __enable_irq();
             if (foc_timer) foc_timer->resume();
             Serial.printf(">>> [FLASH_ERR] Program failed at offset %u (status %d, err %08lX)\n",
@@ -772,6 +840,7 @@ bool saveConfigToFlash() {
     }
 
     HAL_FLASH_Lock();
+    isr_last_c0 = 0;
     __enable_irq();
     if (foc_timer) foc_timer->resume();
 
@@ -1864,8 +1933,9 @@ void resetDefaults(int motor_id) {
         motor1.PID_velocity.I = 1.50f;
         motor1.PID_velocity.D = 0.00000f;
         motor1.PID_velocity.output_ramp = 100.0f;
-        motor1.PID_velocity.Ts = 0.00025f;
+        motor1.PID_velocity.Ts = 0.00005f;
         motor1.LPF_velocity.Tf = 0.0005f;
+        motor1.LPF_velocity.Ts = 0.00005f;
         m1_lag_comp_us = 35.0f;
         m1_lag_filt_vel = 0.0f;
         m1_target_rpm = 0.0f;
@@ -1881,8 +1951,9 @@ void resetDefaults(int motor_id) {
         motor2.PID_velocity.I = 1.50f;
         motor2.PID_velocity.D = 0.00000f;
         motor2.PID_velocity.output_ramp = 100.0f;
-        motor2.PID_velocity.Ts = 0.00025f;
+        motor2.PID_velocity.Ts = 0.00005f;
         motor2.LPF_velocity.Tf = 0.0005f;
+        motor2.LPF_velocity.Ts = 0.00005f;
         m2_lag_comp_us = 35.0f;
         m2_lag_filt_vel = 0.0f;
         m2_target_rpm = 0.0f;
@@ -1890,6 +1961,10 @@ void resetDefaults(int motor_id) {
         stall_guard2.reset();
     }
     isr_jitter_spikes = 0;
+    isr_alltime_peak_cycles = isr_last_cycles;
+    prof_period_min = 8500;
+    prof_period_max = 8500;
+    prof_period_jitter_max = 0;
     Serial.println(">>> [RESET] Restored GM3506 12V Optimized Defaults & Cleared Parity Errors.");
 }
 
@@ -1902,9 +1977,9 @@ void printHelp() {
     Serial.println("================================================================================");
     Serial.print  ("  Motor 1 State    : "); Serial.println(m1_enabled ? "ENABLED" : "DISABLED");
     Serial.print  ("  Motor 2 State    : "); Serial.println(m2_enabled ? "ENABLED" : "DISABLED");
-    Serial.print  ("  FOC Timer        : TIM6 Hardware Timer @ 20.0 kHz (50.0 us tick, Priority 2)\n");
-    Serial.print  ("  Motion Control   : Downsampled 4.0 kHz (250 us tick, downsample = 5)\n");
-    Serial.print  ("  SPI Buses        : SPI1 (PB3/4/5, CS=PA15) | SPI2 (PB13/14/15, CS=PB11) @ 5.31 MHz\n");
+    Serial.print  ("  FOC Timer        : TIM6 Hardware Timer @ 20.0 kHz (50.0 us tick, Priority 0)\n");
+    Serial.print  ("  Motion Control   : Ultrasonic 20.0 kHz (50.0 us tick, downsample = 1)\n");
+    Serial.print  ("  SPI Buses        : SPI1 (PB3/4/5, CS=PA15) | SPI2 (PB13/14/15, CS=PB11) @ 10.625 MHz\n");
     Serial.print  ("  PWM Inverters    : TIM2 (M1: PA5/1/2) | TIM3 (M2: PA6/4, PB0) @ 25 kHz\n");
     Serial.print  ("  Stall Watchdog   : "); Serial.println(stall_watchdog_enabled ? "ACTIVE (I^2*t Thermal + Effort Gated)" : "DISABLED");
     Serial.println("--------------------------------------------------------------------------------");
@@ -1945,17 +2020,34 @@ void processCommand(const char *cmd) {
         Serial.printf("SystemCoreClock       : %lu Hz\n", SystemCoreClock);
         Serial.printf("PCLK1 (APB1)          : %lu Hz (SPI2)\n", HAL_RCC_GetPCLK1Freq());
         Serial.printf("PCLK2 (APB2)          : %lu Hz (SPI1)\n", HAL_RCC_GetPCLK2Freq());
-        Serial.printf("SPI1 CR1              : 0x%04lX (BR=%lu)\n", (uint32_t)SPI1->CR1, (uint32_t)((SPI1->CR1 & SPI_CR1_BR) >> SPI_CR1_BR_Pos));
-        Serial.printf("SPI2 CR1              : 0x%04lX (BR=%lu)\n", (uint32_t)SPI2->CR1, (uint32_t)((SPI2->CR1 & SPI_CR1_BR) >> SPI_CR1_BR_Pos));
+        Serial.printf("SPI1 CR1/CR2          : 0x%04lX / 0x%04lX (BR=%lu, DS=%lu, FRXTH=%lu)\n",
+                      (uint32_t)SPI1->CR1, (uint32_t)SPI1->CR2,
+                      (uint32_t)((SPI1->CR1 & SPI_CR1_BR) >> SPI_CR1_BR_Pos),
+                      (uint32_t)((SPI1->CR2 & SPI_CR2_DS) >> SPI_CR2_DS_Pos),
+                      (uint32_t)((SPI1->CR2 & SPI_CR2_FRXTH) ? 1 : 0));
+        Serial.printf("SPI2 CR1/CR2          : 0x%04lX / 0x%04lX (BR=%lu, DS=%lu, FRXTH=%lu)\n",
+                      (uint32_t)SPI2->CR1, (uint32_t)SPI2->CR2,
+                      (uint32_t)((SPI2->CR1 & SPI_CR1_BR) >> SPI_CR1_BR_Pos),
+                      (uint32_t)((SPI2->CR2 & SPI_CR2_DS) >> SPI_CR2_DS_Pos),
+                      (uint32_t)((SPI2->CR2 & SPI_CR2_FRXTH) ? 1 : 0));
         float us_scale = 1.0f / (SystemCoreClock / 1000000.0f);
         Serial.printf("Parallel SPI     Last : %5lu cyc (%5.2f us) | Peak: %5lu cyc (%5.2f us)\n", prof_spi_last, prof_spi_last * us_scale, prof_spi_max, prof_spi_max * us_scale);
         Serial.printf("Sensor Update    Last : %5lu cyc (%5.2f us) | Peak: %5lu cyc (%5.2f us)\n", prof_update_last, prof_update_last * us_scale, prof_update_max, prof_update_max * us_scale);
-        Serial.printf("M1 loopFOC       Last : %5lu cyc (%5.2f us) | Peak: %5lu cyc (%5.2f us)\n", prof_m1_foc_last, prof_m1_foc_last * us_scale, prof_m1_foc_max, prof_m1_foc_max * us_scale);
-        Serial.printf("M2 loopFOC       Last : %5lu cyc (%5.2f us) | Peak: %5lu cyc (%5.2f us)\n", prof_m2_foc_last, prof_m2_foc_last * us_scale, prof_m2_foc_max, prof_m2_foc_max * us_scale);
-        Serial.printf("Motion Move      Last : %5lu cyc (%5.2f us) | Peak: %5lu cyc (%5.2f us)\n", prof_move_last, prof_move_last * us_scale, prof_move_max, prof_move_max * us_scale);
-        Serial.printf("Total ISR        Last : %5lu cyc (%5.2f us) | Peak: %5lu cyc (%5.2f us)\n", prof_total_last, prof_total_last * us_scale, prof_total_max, prof_total_max * us_scale);
+        Serial.printf("Velocity PID     Last : %5lu cyc (%5.2f us) | Peak: %5lu cyc (%5.2f us)\n", prof_move_last, prof_move_last * us_scale, prof_move_max, prof_move_max * us_scale);
+        Serial.printf("M1 fastLoopFOC   Last : %5lu cyc (%5.2f us) | Peak: %5lu cyc (%5.2f us)\n", prof_m1_foc_last, prof_m1_foc_last * us_scale, prof_m1_foc_max, prof_m1_foc_max * us_scale);
+        Serial.printf("M2 fastLoopFOC   Last : %5lu cyc (%5.2f us) | Peak: %5lu cyc (%5.2f us)\n", prof_m2_foc_last, prof_m2_foc_last * us_scale, prof_m2_foc_max, prof_m2_foc_max * us_scale);
+        Serial.printf("Total ISR Exec   Last : %5lu cyc (%5.2f us) | Peak: %5lu cyc (%5.2f us) | All-Time Peak: %5lu cyc (%5.2f us)\n",
+                      prof_total_last, prof_total_last * us_scale, prof_total_max, prof_total_max * us_scale,
+                      isr_alltime_peak_cycles, isr_alltime_peak_cycles * us_scale);
+        Serial.printf("Inter-ISR Period Last : %5lu cyc (%5.2f us) | Min : %5lu cyc (%5.2f us) | Max: %5lu cyc (%5.2f us) | Max Jitter: %5lu cyc (%5.2f us)\n",
+                      prof_period_last, prof_period_last * us_scale,
+                      prof_period_min, prof_period_min * us_scale,
+                      prof_period_max, prof_period_max * us_scale,
+                      prof_period_jitter_max, prof_period_jitter_max * us_scale);
+        Serial.printf("Jitter Spikes Count   : %u\n", (unsigned int)isr_jitter_spikes);
         Serial.println("----------------------------------------------\n");
         prof_spi_max = 0; prof_update_max = 0; prof_m1_foc_max = 0; prof_m2_foc_max = 0; prof_move_max = 0; prof_total_max = 0;
+        prof_period_min = 8500; prof_period_max = 8500; prof_period_jitter_max = 0;
         return;
     }
 
@@ -2807,10 +2899,10 @@ void setup() {
     motor1.PID_velocity.I = 1.50f;
     motor1.PID_velocity.D = 0.00000f;
     motor1.PID_velocity.output_ramp = 100.0f;
-    motor1.PID_velocity.Ts = 0.00025f;
+    motor1.PID_velocity.Ts = 0.00005f;
     motor1.PID_velocity.limit = motor1.voltage_limit;
     motor1.LPF_velocity.Tf = 0.0005f;
-    motor1.LPF_velocity.Ts = 0.00025f;
+    motor1.LPF_velocity.Ts = 0.00005f;
     motor1.init();
     driver1.disable();
 
@@ -2826,10 +2918,10 @@ void setup() {
     motor2.PID_velocity.I = 1.50f;
     motor2.PID_velocity.D = 0.00000f;
     motor2.PID_velocity.output_ramp = 100.0f;
-    motor2.PID_velocity.Ts = 0.00025f;
+    motor2.PID_velocity.Ts = 0.00005f;
     motor2.PID_velocity.limit = motor2.voltage_limit;
     motor2.LPF_velocity.Tf = 0.0005f;
-    motor2.LPF_velocity.Ts = 0.00025f;
+    motor2.LPF_velocity.Ts = 0.00005f;
     motor2.init();
     driver2.disable();
 
@@ -2839,12 +2931,14 @@ void setup() {
     } else {
         if (M1_DEFAULT_ZERO_ELECTRIC_ANGLE != 0.0f) {
             motor1.zero_electric_angle = M1_DEFAULT_ZERO_ELECTRIC_ANGLE;
+            m1_base_zero_angle = M1_DEFAULT_ZERO_ELECTRIC_ANGLE;
             motor1.sensor_direction = Direction::CW;
             m1_calibrated = true;
         }
 
         if (M2_DEFAULT_ZERO_ELECTRIC_ANGLE != 0.0f) {
             motor2.zero_electric_angle = M2_DEFAULT_ZERO_ELECTRIC_ANGLE;
+            m2_base_zero_angle = M2_DEFAULT_ZERO_ELECTRIC_ANGLE;
             motor2.sensor_direction = Direction::CW;
             m2_calibrated = true;
         }
@@ -2870,8 +2964,10 @@ void loop() {
     // 1. Process Incoming Serial Characters into Line Buffer
     while (Serial.available() > 0) {
         char c = (char)Serial.read();
-        // Instant global emergency stop key without requiring newline
-        if (c == 'x' || c == 'X' || c == 27) {
+        // Instant global emergency stop key (ESC = ASCII 27) without requiring newline.
+        // Note: 'x'/'X' is handled as a standalone command in processCommand() so words like
+        // 'export' or 'MAXRPM1' do not falsely trigger E-STOP mid-word!
+        if (c == 27) {
             triggerGlobalEmergencyStop();
             rx_idx = 0;
             continue;

@@ -127,7 +127,8 @@
   (2000.0f * 0.104719755f) // 2000 RPM = 209.44 rad/s headroom for 1800 RPM
 
 // Direction Convention Configuration
-// Set to 1 to invert raw encoder counting direction globally in firmware so physical clockwise rotation increases angle & velocity (CW = positive)
+// Set to 1 to invert raw encoder counting direction globally in firmware so
+// physical clockwise rotation increases angle & velocity (CW = positive)
 #ifndef INVERT_ENCODER_DIRECTION
 #define INVERT_ENCODER_DIRECTION 0
 #endif
@@ -152,22 +153,29 @@
 // ----------------------------------------------------------------------------
 // Industry-Grade Stall & Thermal Protection Parameters
 // ----------------------------------------------------------------------------
-#define STALL_MIN_EFFORT_VOLTS     2.50f   // Minimum |Uq| required to qualify as stall (V)
-#define STALL_SATURATION_VOLTS     10.50f  // Near-saturation voltage threshold (V)
-#define STALL_VELOCITY_FLOOR_RPM   3.0f    // Speed below which rotor is considered stationary (RPM)
-#define STALL_VELOCITY_LAG_RPM     30.0f   // Speed error threshold under saturation (RPM)
-#define STALL_I2T_CONT_VOLTS       3.50f   // Continuous thermal voltage threshold (V)
-#define STALL_I2T_TRIP_ENERGY      60.0f   // Integrated energy capacity (V^2 * s) [~450ms at 12V dead stall]
-#define STALL_I2T_LEAK_RATE        25.0f   // Energy dissipation rate when effort drops (V^2 / s)
-#define STALL_FOLDBACK_VOLTS       2.00f   // Safe continuous holding voltage during foldback (V)
-#define STALL_MAX_RECOVERY_TRIES   3       // Dither unwedge attempts before hard shutdown
-#define STALL_DITHER_PULSE_MS      80      // Duration of reverse recovery pulse (ms)
+#define STALL_MIN_EFFORT_VOLTS                                                 \
+  2.50f // Minimum |Uq| required to qualify as stall (V)
+#define STALL_SATURATION_VOLTS 10.50f // Near-saturation voltage threshold (V)
+#define STALL_VELOCITY_FLOOR_RPM                                               \
+  3.0f // Speed below which rotor is considered stationary (RPM)
+#define STALL_VELOCITY_LAG_RPM                                                 \
+  30.0f // Speed error threshold under saturation (RPM)
+#define STALL_I2T_CONT_VOLTS 3.50f // Continuous thermal voltage threshold (V)
+#define STALL_I2T_TRIP_ENERGY                                                  \
+  60.0f // Integrated energy capacity (V^2 * s) [~450ms at 12V dead stall]
+#define STALL_I2T_LEAK_RATE                                                    \
+  25.0f // Energy dissipation rate when effort drops (V^2 / s)
+#define STALL_FOLDBACK_VOLTS                                                   \
+  2.00f // Safe continuous holding voltage during foldback (V)
+#define STALL_MAX_RECOVERY_TRIES                                               \
+  3                              // Dither unwedge attempts before hard shutdown
+#define STALL_DITHER_PULSE_MS 80 // Duration of reverse recovery pulse (ms)
 
 // Real-Time Control Loop Frequencies
 #define FOC_COMMUTATION_HZ                                                     \
   20000 // 20.0 kHz Hard Real-Time Commutation (50.0 us)
 #define MOTION_DOWNSAMPLE_RATIO                                                \
-  5 // Velocity PID downsampled to 4.0 kHz (250 us) [20 kHz / 5]
+  1 // 20.0 kHz Ultrasonic Velocity PID (every 50.0 us tick)
 #define TELEMETRY_RATE_HZ 25 // 25 Hz Binary Telemetry Stream (40 ms)
 #define SPI_SPEED_HZ                                                           \
   10625000 // 10.625 MHz (170 MHz / 16 prescaler) for high-speed low-latency

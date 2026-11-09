@@ -279,6 +279,7 @@ class DualMotorDashboardApp(tk.Tk):
 
         tk.Button(console_header, text="Clear", command=self._clear_console, bg=COLOR_CARD_SECONDARY, fg=COLOR_TEXT, bd=0, padx=8, pady=1, font=("Segoe UI", 8)).pack(side=tk.RIGHT, padx=4)
         tk.Button(console_header, text="Print Status (s)", command=lambda: self.serial_engine.send_command("s"), bg=COLOR_CARD_SECONDARY, fg=COLOR_ACCENT_CYAN, bd=0, padx=8, pady=1, font=("Segoe UI", 8)).pack(side=tk.RIGHT, padx=4)
+        tk.Button(console_header, text="ISR Profiler (PROF)", command=lambda: self.serial_engine.send_command("PROF"), bg=COLOR_CARD_SECONDARY, fg=COLOR_ACCENT_AMBER, bd=0, padx=8, pady=1, font=("Segoe UI", 8, "bold")).pack(side=tk.RIGHT, padx=4)
 
         self.console_text = tk.Text(
             bottom_frame,
@@ -376,8 +377,9 @@ class DualMotorDashboardApp(tk.Tk):
         self.m1_badge_lut.pack(side=tk.LEFT, padx=2)
         self.m1_badge_foc = tk.Label(badge_row, text="20.0 kHz", font=("Consolas", 8, "bold"), bg="#004D40", fg=COLOR_ACCENT_CYAN, padx=5)
         self.m1_badge_foc.pack(side=tk.LEFT, padx=2)
-        self.m1_badge_lat = tk.Label(badge_row, text="LAT: 12 µs", font=("Consolas", 8, "bold"), bg="#263238", fg="#ECEFF1", padx=5)
+        self.m1_badge_lat = tk.Label(badge_row, text="LAT: 10 µs (PK 10 µs | SPK 0)", font=("Consolas", 8, "bold"), bg="#263238", fg="#ECEFF1", padx=5, cursor="hand2")
         self.m1_badge_lat.pack(side=tk.LEFT, padx=2)
+        self.m1_badge_lat.bind("<Button-1>", lambda e: self.serial_engine.reset_peak_hold())
 
         # =====================================================================
         # 3. HIGH-PRECISION MASTER AUTO-CALIBRATION HUB (STEPPED LUT + ZERO)
@@ -826,15 +828,17 @@ class DualMotorDashboardApp(tk.Tk):
         badge_row2.pack(fill=tk.X, padx=8, pady=(2, 6))
         self.m2_badge_foc = tk.Label(badge_row2, text="SPI2 MODE3", font=("Consolas", 8, "bold"), bg="#004D40", fg=COLOR_ACCENT_GREEN, padx=4)
         self.m2_badge_foc.pack(side=tk.LEFT, padx=2)
-        self.m2_badge_lat = tk.Label(badge_row2, text="LAT: 12 µs", font=("Consolas", 8, "bold"), bg="#263238", fg="#ECEFF1", padx=4)
+        self.m2_badge_lat = tk.Label(badge_row2, text="LAT: 10 µs (PK 10 µs | SPK 0)", font=("Consolas", 8, "bold"), bg="#263238", fg="#ECEFF1", padx=4, cursor="hand2")
         self.m2_badge_lat.pack(side=tk.LEFT, padx=2)
+        self.m2_badge_lat.bind("<Button-1>", lambda e: self.serial_engine.reset_peak_hold())
 
         e_btn_row = tk.Frame(frame, bg=COLOR_CARD)
         e_btn_row.pack(fill=tk.X, padx=8, pady=2)
         self.sec_tare_btn = tk.Button(e_btn_row, text="Tare Enc 2 (Z2)", command=self._tare_secondary_motor, bg=COLOR_CARD_SECONDARY, fg=COLOR_TEXT, bd=0, padx=6, pady=2, font=("Segoe UI", 8))
         self.sec_tare_btn.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
         tk.Button(e_btn_row, text="SPI Bus Diag (ENC)", command=lambda: self.serial_engine.send_command("ENC"), bg=COLOR_CARD_SECONDARY, fg=COLOR_ACCENT_AMBER, bd=0, padx=6, pady=2, font=("Segoe UI", 8, "bold")).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
-        tk.Button(e_btn_row, text="Toggle Watchdog (K)", command=lambda: self.serial_engine.send_command("K"), bg=COLOR_CARD_SECONDARY, fg=COLOR_TEXT, bd=0, padx=6, pady=2, font=("Segoe UI", 8)).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+        tk.Button(e_btn_row, text="ISR Prof (PROF)", command=lambda: self.serial_engine.send_command("PROF"), bg=COLOR_CARD_SECONDARY, fg=COLOR_ACCENT_CYAN, bd=0, padx=6, pady=2, font=("Segoe UI", 8, "bold")).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+        tk.Button(e_btn_row, text="Watchdog (K)", command=lambda: self.serial_engine.send_command("K"), bg=COLOR_CARD_SECONDARY, fg=COLOR_TEXT, bd=0, padx=6, pady=2, font=("Segoe UI", 8)).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
 
         # 3. STM32 Active Pinout Documentation Card
         pin_sec = tk.LabelFrame(frame, text="HARDWARE ACTIVE PINOUT & ARCHITECTURE", bg=COLOR_CARD, fg=COLOR_ACCENT_AMBER, font=("Segoe UI", 8, "bold"))
@@ -1927,7 +1931,12 @@ class DualMotorDashboardApp(tk.Tk):
                 text="128-PT LUT: ON" if st[f"m{m}_lut_active"] else "LUT: OFF (RAW)",
                 bg="#00838F" if st[f"m{m}_lut_active"] else "#37474F"
             )
-            self.m1_badge_lat.configure(text=f"LAT: {st['isr_lat_us']} µs")
+            lat_us = st["isr_lat_us"]
+            pk_us = st.get("isr_peak_hold_us", lat_us)
+            spk = st.get("spikes_count", 0)
+            lat_bg = COLOR_ACCENT_RED if (spk > 0 or pk_us > 40) else (COLOR_ACCENT_AMBER if pk_us > 28 else "#263238")
+            lat_txt = f"LAT: {lat_us} µs (PK {pk_us} µs | SPK {spk})"
+            self.m1_badge_lat.configure(text=lat_txt, bg=lat_bg)
 
             # 2. Calibration Progress
             if st[f"m{m}_calib"]:
@@ -1983,7 +1992,7 @@ class DualMotorDashboardApp(tk.Tk):
                 text="LUT: ACTIVE" if st[f"m{other_m}_lut_active"] else "LUT: OFF",
                 bg="#00838F" if st[f"m{other_m}_lut_active"] else "#37474F"
             )
-            self.m2_badge_lat.configure(text=f"LAT: {st['isr_lat_us']} µs")
+            self.m2_badge_lat.configure(text=lat_txt, bg=lat_bg)
 
         self.after(40, self._ui_poll_loop)
 

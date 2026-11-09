@@ -6,7 +6,6 @@
 #include <SPI.h>
 #include <SimpleFOC.h>
 
-
 // ============================================================================
 // MT6816 HIGH-PERFORMANCE 14-BIT MAGNETIC ANGLE SENSOR DRIVER
 // ============================================================================
@@ -163,6 +162,17 @@ public:
     // MT6816 initial read
     readHardwareSPI();
 
+    // Force hardware SPI peripheral into 8-bit frame mode (DS = 0x7) with 8-bit
+    // RX FIFO threshold (FRXTH = 1) and BR = /16 (10.625 MHz @ 170 MHz APB) so
+    // readDualEncodersParallel()'s direct 8-bit DR accesses shift exact 16-bit
+    // frames in ~1.8 us per register!
+    SPI_TypeDef *spi_inst = (miso_pin == PB4) ? SPI1 : SPI2;
+    spi_inst->CR1 &= ~SPI_CR1_SPE;
+    spi_inst->CR1 = (spi_inst->CR1 & ~SPI_CR1_BR_Msk) | (3UL << SPI_CR1_BR_Pos);
+    spi_inst->CR2 = (spi_inst->CR2 & ~SPI_CR2_DS_Msk) |
+                    (7UL << SPI_CR2_DS_Pos) | SPI_CR2_FRXTH;
+    spi_inst->CR1 |= SPI_CR1_SPE;
+
     // Clear any glitch/noise gathered during power-on initialization
     resetErrors();
 
@@ -210,6 +220,14 @@ public:
     parseRawData(rx_h & 0xFF, rx_l & 0xFF);
 
     spi_bus->endTransaction();
+
+    // Restore 8-bit frame mode (DS = 7, FRXTH = 1) after transfer16()
+    SPI_TypeDef *spi_inst = (miso_pin == PB4) ? SPI1 : SPI2;
+    spi_inst->CR1 &= ~SPI_CR1_SPE;
+    spi_inst->CR1 = (spi_inst->CR1 & ~SPI_CR1_BR_Msk) | (3UL << SPI_CR1_BR_Pos);
+    spi_inst->CR2 = (spi_inst->CR2 & ~SPI_CR2_DS_Msk) |
+                    (7UL << SPI_CR2_DS_Pos) | SPI_CR2_FRXTH;
+    spi_inst->CR1 |= SPI_CR1_SPE;
   }
 
   inline void parseRawData(uint8_t h, uint8_t l) {
@@ -288,6 +306,10 @@ public:
     }
     cached_calibrated_angle = getCalibratedAngleRad();
     return cached_calibrated_angle;
+  }
+
+  inline float getFastAngle() const __attribute__((always_inline)) {
+    return (float)full_rotations * _2PI + cached_calibrated_angle;
   }
 
   // ------------------------------------------------------------------------

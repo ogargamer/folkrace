@@ -20,6 +20,8 @@ import sys
 import struct
 import time
 import threading
+import operator
+import functools
 from collections import deque
 
 import serial
@@ -239,21 +241,23 @@ class ToFStreamReader(QThread):
                     if idx == -1:
                         # Keep last byte in case it is 0xAA
                         if len(buf) > 1:
-                            ascii_buf.extend(buf[:-1])
+                            stray = buf[:-1]
+                            if all(32 <= b <= 126 or b in (9, 10, 13) for b in stray):
+                                ascii_buf.extend(stray)
                             del buf[:-1]
                         break
 
                     if idx > 0:
-                        ascii_buf.extend(buf[:idx])
+                        stray = buf[:idx]
+                        if all(32 <= b <= 126 or b in (9, 10, 13) for b in stray):
+                            ascii_buf.extend(stray)
                         del buf[:idx]
 
                     if len(buf) < PACKET_SIZE:
                         break
 
                     pkt_bytes = bytes(buf[:PACKET_SIZE])
-                    chk = 0
-                    for b in pkt_bytes[:-1]:
-                        chk ^= b
+                    chk = functools.reduce(operator.xor, pkt_bytes[:-1])
 
                     if chk == pkt_bytes[-1] and 1 <= pkt_bytes[2] <= 4:
                         unpacked = struct.unpack(PACKET_FMT, pkt_bytes)
@@ -268,12 +272,12 @@ class ToFStreamReader(QThread):
                             self.bad_checksums += 1
                         del buf[:2]
 
-                # Flush any accumulated ASCII boot/init lines
+                # Flush any accumulated ASCII boot/init lines (strictly valid printable ASCII)
                 while b"\n" in ascii_buf:
                     line_bytes, _, rest = ascii_buf.partition(b"\n")
                     ascii_buf = bytearray(rest)
                     text = line_bytes.decode("utf-8", errors="ignore").strip()
-                    if text:
+                    if text and all(32 <= ord(c) <= 126 for c in text):
                         self.ascii_line_received.emit(text)
                 if len(ascii_buf) > 2048:
                     ascii_buf.clear()
@@ -323,10 +327,37 @@ class SensorHeatmapCanvas(QWidget):
         self.sensor_id = sensor_id
         self.frame = None
         self.active = False
+        self._last_seq = None
+        self._last_active = None
         self.setMinimumSize(280, 160)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
+        # Pre-cache fonts and pens to avoid DirectWrite / GDI churn every frame
+        self.font_zone = QFont("Consolas", 8, QFont.Bold)
+        self.font_fb = QFont("Consolas", 8, QFont.Bold)
+        self.font_beam = QFont("Segoe UI", 7, QFont.Bold)
+        self.font_main = QFont("Segoe UI", 15, QFont.Bold)
+        self.font_sub = QFont("Consolas", 8)
+
+        self.pen_border = QPen(QColor("#26354d"), 1.2)
+        self.pen_zone = QPen(QColor(203, 213, 225, 220))
+        self.pen_beam = QPen(QColor("#38bdf8"))
+        self.pen_sat = QPen(QColor("#f59e0b"))
+        self.pen_open = QPen(QColor("#22c55e"))
+        self.pen_txt_white = QPen(QColor("#ffffff"))
+        self.pen_txt_muted = QPen(QColor("#475569"))
+        self.pen_sub_light = QPen(QColor(226, 232, 240, 130))
+
+        self.zones = SENSOR_ZONES.get(self.sensor_id, [0, 1, 2, 3])
+        webots_names = SENSOR_WEBOTS_NAMES.get(self.sensor_id, ["", "", "", ""])
+        self.beam_tags = [name.split(" ")[0].replace("tof_front_", "") for name in webots_names]
+
     def set_data(self, frame, active: bool):
+        seq = frame["seq"] if frame else None
+        if seq == self._last_seq and active == self._last_active:
+            return  # Skip repaints when telemetry has not changed
+        self._last_seq = seq
+        self._last_active = active
         self.frame = frame
         self.active = active
         self.update()
@@ -338,9 +369,6 @@ class SensorHeatmapCanvas(QWidget):
         w, h = self.width(), self.height()
         p.fillRect(0, 0, w, h, QColor("#0d1320"))
 
-        zones = SENSOR_ZONES.get(self.sensor_id, [0, 1, 2, 3])
-        webots_names = SENSOR_WEBOTS_NAMES.get(self.sensor_id, ["", "", "", ""])
-
         cols = 4
         pad = 6
         cell_w = (w - pad * (cols + 1)) / cols
@@ -348,7 +376,7 @@ class SensorHeatmapCanvas(QWidget):
 
         for c in range(cols):
             idx = c  # 0..3 (representing the 4 active 2D LiDAR rays)
-            z_id = zones[idx]
+            z_id = self.zones[idx]
             x = pad + c * (cell_w + pad)
             y = pad
             rect = QRectF(x, y, cell_w, cell_h)
@@ -363,12 +391,12 @@ class SensorHeatmapCanvas(QWidget):
                 bg = QColor("#161f30")
 
             p.setBrush(QBrush(bg))
-            p.setPen(QPen(QColor("#26354d"), 1.2))
+            p.setPen(self.pen_border)
             p.drawRoundedRect(rect, 6, 6)
 
             # Zone tag top-left (e.g. Zone 14)
-            p.setFont(QFont("Consolas", 8, QFont.Bold))
-            p.setPen(QColor(203, 213, 225, 220))
+            p.setFont(self.font_zone)
+            p.setPen(self.pen_zone)
             p.drawText(
                 QRectF(x + 5, y + 4, cell_w - 10, 16),
                 Qt.AlignLeft | Qt.AlignVCenter,
@@ -378,8 +406,8 @@ class SensorHeatmapCanvas(QWidget):
             # Fallback tag top-right (if 0mm contact or 3m open space)
             if self.frame is not None and d0 in (0, 3000):
                 fb_txt = "SAT" if d0 == 0 else "OPEN"
-                p.setFont(QFont("Consolas", 8, QFont.Bold))
-                p.setPen(QColor("#f59e0b" if d0 == 0 else "#22c55e"))
+                p.setFont(self.font_fb)
+                p.setPen(self.pen_sat if d0 == 0 else self.pen_open)
                 p.drawText(
                     QRectF(x + 5, y + 4, cell_w - 10, 16),
                     Qt.AlignRight | Qt.AlignVCenter,
@@ -387,18 +415,17 @@ class SensorHeatmapCanvas(QWidget):
                 )
 
             # Webots beam angle label
-            p.setFont(QFont("Segoe UI", 7, QFont.Bold))
-            p.setPen(QColor("#38bdf8"))
-            beam_tag = webots_names[idx].split(" ")[0].replace("tof_front_", "")
+            p.setFont(self.font_beam)
+            p.setPen(self.pen_beam)
             p.drawText(
                 QRectF(x + 4, y + 22, cell_w - 8, 14),
                 Qt.AlignCenter,
-                beam_tag,
+                self.beam_tags[idx],
             )
 
             # Primary distance (Shortest distance to closest valid target in zone)
-            p.setFont(QFont("Segoe UI", 15, QFont.Bold))
-            p.setPen(QColor("#ffffff") if self.frame is not None else QColor("#475569"))
+            p.setFont(self.font_main)
+            p.setPen(self.pen_txt_white if self.frame is not None else self.pen_txt_muted)
             main_txt = f"{d0} mm" if self.frame is not None else "---"
             p.drawText(
                 QRectF(x, y + cell_h * 0.38, cell_w, cell_h * 0.40),
@@ -407,8 +434,8 @@ class SensorHeatmapCanvas(QWidget):
             )
 
             # Subtitle
-            p.setFont(QFont("Consolas", 8))
-            p.setPen(QColor(226, 232, 240, 130) if self.frame is not None else QColor("#475569"))
+            p.setFont(self.font_sub)
+            p.setPen(self.pen_sub_light if self.frame is not None else self.pen_txt_muted)
             sub_txt = "Closest Target" if self.frame is not None else "No Data"
             p.drawText(
                 QRectF(x, y + cell_h * 0.76, cell_w, cell_h * 0.20),
@@ -421,6 +448,8 @@ class SensorCard(QFrame):
     def __init__(self, sensor_id: int, parent=None):
         super().__init__(parent)
         self.sensor_id = sensor_id
+        self._last_col = None
+        self._last_stats_text = None
         accent = SENSOR_COLORS[sensor_id]
         self.setStyleSheet(
             f"SensorCard {{ background-color: #111827; border: 1px solid #1f2937; border-radius: 8px; }}"
@@ -473,12 +502,16 @@ class SensorCard(QFrame):
             col = "#94a3b8"
 
         seq_str = f"#{frame['seq']}" if frame else "--"
-        self.lbl_stats.setText(
-            f"{status_str}  |  {hz:4.1f} Hz  |  RX: {rx} ({seq_str})  |  Lost: {lost}"
-        )
-        self.lbl_stats.setStyleSheet(
-            f"background-color: #1e293b; color: {col}; padding: 3px 8px; border-radius: 4px;"
-        )
+        new_stats = f"{status_str}  |  {hz:4.1f} Hz  |  RX: {rx} ({seq_str})  |  Lost: {lost}"
+        if new_stats != self._last_stats_text:
+            self._last_stats_text = new_stats
+            self.lbl_stats.setText(new_stats)
+
+        if col != self._last_col:
+            self._last_col = col
+            self.lbl_stats.setStyleSheet(
+                f"background-color: #1e293b; color: {col}; padding: 3px 8px; border-radius: 4px;"
+            )
         self.canvas.set_data(frame, active)
 
 
@@ -503,7 +536,7 @@ class FourToFStreamGUI(QMainWindow):
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.on_tick)
-        self.timer.start(30)  # ~33 FPS UI refresh
+        self.timer.start(16)  # ~60 FPS smooth UI refresh
 
         self.refresh_ports(auto_connect=True)
 
@@ -612,21 +645,34 @@ class FourToFStreamGUI(QMainWindow):
 
     def refresh_ports(self, auto_connect=False):
         current = self.combo_port.currentText()
-        ports = [p.device for p in serial.tools.list_ports.comports()]
+        all_ports = list(serial.tools.list_ports.comports())
+        # Filter out Bluetooth link ports that cause 5+ second OS kernel timeouts on Windows
+        usb_ports = []
+        for p in all_ports:
+            hwid = (p.hwid or "").upper()
+            desc = (p.description or "").upper()
+            if "BTHENUM" in hwid or "BLUETOOTH" in desc or "BLUETOOTH" in hwid:
+                continue
+            usb_ports.append(p.device)
+
+        display_ports = usb_ports if usb_ports else [p.device for p in all_ports]
         self.combo_port.clear()
-        if not ports:
+        if not display_ports:
             self.combo_port.addItem("COM7")
             return
 
-        self.combo_port.addItems(ports)
-        if current in ports:
+        self.combo_port.addItems(display_ports)
+        if current in display_ports:
             self.combo_port.setCurrentText(current)
-        elif "COM7" in ports:
+        elif "COM7" in display_ports:
             self.combo_port.setCurrentText("COM7")
-        elif "COM12" in ports:
+        elif "COM12" in display_ports:
             self.combo_port.setCurrentText("COM12")
+        else:
+            self.combo_port.setCurrentIndex(0)
 
-        if auto_connect and not self.reader.isRunning():
+        # Only auto-connect if an actual USB-serial port is present (never on Bluetooth links)
+        if auto_connect and usb_ports and not self.reader.isRunning():
             self.toggle_connection()
 
     def toggle_connection(self):
