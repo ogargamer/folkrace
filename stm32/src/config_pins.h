@@ -175,7 +175,7 @@
 #define FOC_COMMUTATION_HZ                                                     \
   20000 // 20.0 kHz Hard Real-Time Commutation (50.0 us)
 #define MOTION_DOWNSAMPLE_RATIO                                                \
-  1 // 20.0 kHz Ultrasonic Velocity PID (every 50.0 us tick)
+  4 // 5.0 kHz Staggered Velocity PID (every 200.0 us per motor)
 #define TELEMETRY_RATE_HZ 25 // 25 Hz Binary Telemetry Stream (40 ms)
 #define SPI_SPEED_HZ                                                           \
   10625000 // 10.625 MHz (170 MHz / 16 prescaler) for high-speed low-latency

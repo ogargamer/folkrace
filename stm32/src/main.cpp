@@ -61,6 +61,15 @@ public:
         if (res && timer_inst) {
             // Precompute scale = (ARR + 1) / voltage_power_supply
             pwm_scale = (float)(timer_inst->ARR + 1) / voltage_power_supply;
+
+            // CRITICAL FIX: SimpleFOC's _configure3PWM() does NOT enable Output Compare Preload
+            // (OC1PE / OC2PE / OC3PE) on 3-PWM timers! Without shadow register preload, writing
+            // CCR1/2/3 inside the 20 kHz ISR asynchronously against the 25 kHz PWM counter
+            // causes mid-cycle comparator crossings and narrow glitch pulses (audible static/radio crackle).
+            timer_inst->CCMR1 |= (TIM_CCMR1_OC1PE | TIM_CCMR1_OC2PE);
+            timer_inst->CCMR2 |= TIM_CCMR2_OC3PE;
+            timer_inst->CR1   |= TIM_CR1_ARPE;
+            timer_inst->EGR    = TIM_EGR_UG;
         }
         return res;
     }
@@ -75,13 +84,17 @@ public:
         uint32_t duty_c = (uint32_t)(Uc * pwm_scale);
 
         if (timer_inst == TIM2) {
+            TIM2->CR1 |= TIM_CR1_UDIS;
             TIM2->CCR1 = duty_a; // PA5 (TIM2 CH1)
             TIM2->CCR2 = duty_b; // PA1 (TIM2 CH2)
             TIM2->CCR3 = duty_c; // PA2 (TIM2 CH3)
+            TIM2->CR1 &= ~TIM_CR1_UDIS;
         } else if (timer_inst == TIM3) {
+            TIM3->CR1 |= TIM_CR1_UDIS;
             TIM3->CCR3 = duty_a; // PB0 (TIM3 CH3)
             TIM3->CCR2 = duty_b; // PA4 (TIM3 CH2)
             TIM3->CCR1 = duty_c; // PA6 (TIM3 CH1)
+            TIM3->CR1 &= ~TIM_CR1_UDIS;
         }
     }
 };
@@ -350,25 +363,29 @@ static inline void fastLoopFOC(BLDCMotor &motor, MT6816Sensor &encoder, FastBLDC
     ub += center;
     uc += center;
 
-    // 6. Direct hardware timer CCR update (no virtual dispatch, no branching)
+    // 6. Direct hardware timer CCR update with atomic shadow-register latching (TIM_CR1_UDIS)
     uint32_t duty_a = (uint32_t)(fast_fminf(fast_fmaxf(ua, 0.0f), driver.voltage_limit) * driver.pwm_scale);
     uint32_t duty_b = (uint32_t)(fast_fminf(fast_fmaxf(ub, 0.0f), driver.voltage_limit) * driver.pwm_scale);
     uint32_t duty_c = (uint32_t)(fast_fminf(fast_fmaxf(uc, 0.0f), driver.voltage_limit) * driver.pwm_scale);
 
     if (tim == TIM2) {
+        TIM2->CR1 |= TIM_CR1_UDIS;
         TIM2->CCR1 = duty_a; // PA5 (TIM2 CH1)
         TIM2->CCR2 = duty_b; // PA1 (TIM2 CH2)
         TIM2->CCR3 = duty_c; // PA2 (TIM2 CH3)
+        TIM2->CR1 &= ~TIM_CR1_UDIS;
     } else {
+        TIM3->CR1 |= TIM_CR1_UDIS;
         TIM3->CCR3 = duty_a; // PB0 (TIM3 CH3)
         TIM3->CCR2 = duty_b; // PA4 (TIM3 CH2)
         TIM3->CCR1 = duty_c; // PA6 (TIM3 CH1)
+        TIM3->CR1 &= ~TIM_CR1_UDIS;
     }
 }
 
 // ----------------------------------------------------------------------------
-// Direct Inlined Ultrasonic 20.0 kHz Velocity Motion Control (< 45 cycles)
-// Eliminates 4 kHz step-staircasing whine, virtual dispatch, and _micros() division
+// Direct Inlined 5.0 kHz Staggered Velocity Motion Control (< 45 cycles)
+// Eliminates virtual dispatch, _micros() division, and 20 kHz quantization hiss
 // ----------------------------------------------------------------------------
 static inline void fastMoveVelocity(BLDCMotor &motor, MT6816Sensor &encoder, float target_rad_s) __attribute__((always_inline));
 
@@ -413,15 +430,15 @@ void focTimerISR() {
     encoder2.update();
     uint32_t c2 = DWT->CYCCNT;
 
-    // 2. Ultrasonic 20.0 kHz Velocity Filtering & PID Control (Zero 4 kHz Staircasing Whine!)
-    if (!m1_calib_active) {
+    // 2. Staggered 5.0 kHz Velocity Filtering & PID Control (downsample = 4, 200 us period)
+    uint32_t phase = foc_tick_count & 3U;
+    if (phase == 0U && !m1_calib_active) {
         if (m1_enabled) {
             fastMoveVelocity(motor1, encoder1, m1_target_rpm * 0.104719755f);
         } else {
             motor1.shaft_velocity = (float)motor1.sensor_direction * motor1.LPF_velocity(encoder1.getVelocity());
         }
-    }
-    if (!m2_calib_active) {
+    } else if (phase == 2U && !m2_calib_active) {
         if (m2_enabled) {
             fastMoveVelocity(motor2, encoder2, m2_target_rpm * 0.104719755f);
         } else {
@@ -1933,9 +1950,9 @@ void resetDefaults(int motor_id) {
         motor1.PID_velocity.I = 1.50f;
         motor1.PID_velocity.D = 0.00000f;
         motor1.PID_velocity.output_ramp = 100.0f;
-        motor1.PID_velocity.Ts = 0.00005f;
+        motor1.PID_velocity.Ts = 0.0002f;
         motor1.LPF_velocity.Tf = 0.0005f;
-        motor1.LPF_velocity.Ts = 0.00005f;
+        motor1.LPF_velocity.Ts = 0.0002f;
         m1_lag_comp_us = 35.0f;
         m1_lag_filt_vel = 0.0f;
         m1_target_rpm = 0.0f;
@@ -1951,9 +1968,9 @@ void resetDefaults(int motor_id) {
         motor2.PID_velocity.I = 1.50f;
         motor2.PID_velocity.D = 0.00000f;
         motor2.PID_velocity.output_ramp = 100.0f;
-        motor2.PID_velocity.Ts = 0.00005f;
+        motor2.PID_velocity.Ts = 0.0002f;
         motor2.LPF_velocity.Tf = 0.0005f;
-        motor2.LPF_velocity.Ts = 0.00005f;
+        motor2.LPF_velocity.Ts = 0.0002f;
         m2_lag_comp_us = 35.0f;
         m2_lag_filt_vel = 0.0f;
         m2_target_rpm = 0.0f;
@@ -1978,9 +1995,9 @@ void printHelp() {
     Serial.print  ("  Motor 1 State    : "); Serial.println(m1_enabled ? "ENABLED" : "DISABLED");
     Serial.print  ("  Motor 2 State    : "); Serial.println(m2_enabled ? "ENABLED" : "DISABLED");
     Serial.print  ("  FOC Timer        : TIM6 Hardware Timer @ 20.0 kHz (50.0 us tick, Priority 0)\n");
-    Serial.print  ("  Motion Control   : Ultrasonic 20.0 kHz (50.0 us tick, downsample = 1)\n");
+    Serial.print  ("  Motion Control   : 5.0 kHz Staggered Velocity PID (200.0 us tick, downsample = 4)\n");
     Serial.print  ("  SPI Buses        : SPI1 (PB3/4/5, CS=PA15) | SPI2 (PB13/14/15, CS=PB11) @ 10.625 MHz\n");
-    Serial.print  ("  PWM Inverters    : TIM2 (M1: PA5/1/2) | TIM3 (M2: PA6/4, PB0) @ 25 kHz\n");
+    Serial.print  ("  PWM Inverters    : TIM2 (M1: PA5/1/2) | TIM3 (M2: PA6/4, PB0) @ 25 kHz (OCxPE Preload)\n");
     Serial.print  ("  Stall Watchdog   : "); Serial.println(stall_watchdog_enabled ? "ACTIVE (I^2*t Thermal + Effort Gated)" : "DISABLED");
     Serial.println("--------------------------------------------------------------------------------");
     Serial.println("Commands:");
@@ -2030,6 +2047,12 @@ void processCommand(const char *cmd) {
                       (uint32_t)((SPI2->CR1 & SPI_CR1_BR) >> SPI_CR1_BR_Pos),
                       (uint32_t)((SPI2->CR2 & SPI_CR2_DS) >> SPI_CR2_DS_Pos),
                       (uint32_t)((SPI2->CR2 & SPI_CR2_FRXTH) ? 1 : 0));
+        Serial.printf("TIM2 CCMR1/CCMR2/CR1  : 0x%04lX / 0x%04lX / 0x%04lX (OCPreload=%d)\n",
+                      (uint32_t)TIM2->CCMR1, (uint32_t)TIM2->CCMR2, (uint32_t)TIM2->CR1,
+                      (int)((TIM2->CCMR1 & TIM_CCMR1_OC1PE) ? 1 : 0));
+        Serial.printf("TIM3 CCMR1/CCMR2/CR1  : 0x%04lX / 0x%04lX / 0x%04lX (OCPreload=%d)\n",
+                      (uint32_t)TIM3->CCMR1, (uint32_t)TIM3->CCMR2, (uint32_t)TIM3->CR1,
+                      (int)((TIM3->CCMR1 & TIM_CCMR1_OC1PE) ? 1 : 0));
         float us_scale = 1.0f / (SystemCoreClock / 1000000.0f);
         Serial.printf("Parallel SPI     Last : %5lu cyc (%5.2f us) | Peak: %5lu cyc (%5.2f us)\n", prof_spi_last, prof_spi_last * us_scale, prof_spi_max, prof_spi_max * us_scale);
         Serial.printf("Sensor Update    Last : %5lu cyc (%5.2f us) | Peak: %5lu cyc (%5.2f us)\n", prof_update_last, prof_update_last * us_scale, prof_update_max, prof_update_max * us_scale);
@@ -2039,11 +2062,10 @@ void processCommand(const char *cmd) {
         Serial.printf("Total ISR Exec   Last : %5lu cyc (%5.2f us) | Peak: %5lu cyc (%5.2f us) | All-Time Peak: %5lu cyc (%5.2f us)\n",
                       prof_total_last, prof_total_last * us_scale, prof_total_max, prof_total_max * us_scale,
                       isr_alltime_peak_cycles, isr_alltime_peak_cycles * us_scale);
-        Serial.printf("Inter-ISR Period Last : %5lu cyc (%5.2f us) | Min : %5lu cyc (%5.2f us) | Max: %5lu cyc (%5.2f us) | Max Jitter: %5lu cyc (%5.2f us)\n",
+        Serial.printf("20kHz Timer Spacing   : %5lu cyc (%5.2f us target) | Jitter: %5.2f us (Min: %5.2f us, Max: %5.2f us)\n",
                       prof_period_last, prof_period_last * us_scale,
-                      prof_period_min, prof_period_min * us_scale,
-                      prof_period_max, prof_period_max * us_scale,
-                      prof_period_jitter_max, prof_period_jitter_max * us_scale);
+                      prof_period_jitter_max * us_scale,
+                      prof_period_min * us_scale, prof_period_max * us_scale);
         Serial.printf("Jitter Spikes Count   : %u\n", (unsigned int)isr_jitter_spikes);
         Serial.println("----------------------------------------------\n");
         prof_spi_max = 0; prof_update_max = 0; prof_m1_foc_max = 0; prof_m2_foc_max = 0; prof_move_max = 0; prof_total_max = 0;
@@ -2899,10 +2921,10 @@ void setup() {
     motor1.PID_velocity.I = 1.50f;
     motor1.PID_velocity.D = 0.00000f;
     motor1.PID_velocity.output_ramp = 100.0f;
-    motor1.PID_velocity.Ts = 0.00005f;
+    motor1.PID_velocity.Ts = 0.0002f;
     motor1.PID_velocity.limit = motor1.voltage_limit;
     motor1.LPF_velocity.Tf = 0.0005f;
-    motor1.LPF_velocity.Ts = 0.00005f;
+    motor1.LPF_velocity.Ts = 0.0002f;
     motor1.init();
     driver1.disable();
 
@@ -2918,10 +2940,10 @@ void setup() {
     motor2.PID_velocity.I = 1.50f;
     motor2.PID_velocity.D = 0.00000f;
     motor2.PID_velocity.output_ramp = 100.0f;
-    motor2.PID_velocity.Ts = 0.00005f;
+    motor2.PID_velocity.Ts = 0.0002f;
     motor2.PID_velocity.limit = motor2.voltage_limit;
     motor2.LPF_velocity.Tf = 0.0005f;
-    motor2.LPF_velocity.Ts = 0.00005f;
+    motor2.LPF_velocity.Ts = 0.0002f;
     motor2.init();
     driver2.disable();
 
