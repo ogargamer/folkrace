@@ -178,6 +178,7 @@ class MCU_UART_Bridge:
         self.latest_chassis: Dict[str, Any] = {}
         self.latest_tof_ranges = [1.8] * 16
         self.latest_tof_ranges_raw = [1.8] * 16
+        self._last_debug_dispatch = 0.0
 
     def start(self):
         if not HAS_SERIAL:
@@ -271,7 +272,11 @@ class MCU_UART_Bridge:
         try:
             raw = json.dumps(telemetry).encode("utf-8")
             self.udp_sock.sendto(raw, (self.udp_host, 9875))  # Real-time feed to Path Planner Core 1
-            self.udp_sock.sendto(raw, self.udp_target)        # Telemetry to Debug Server Core 2
+            # Rate-limit fallback telemetry to Debug Server (port 9876) to 20 Hz (prevents flooding Core 2 & SQLite)
+            now = time.time()
+            if now - self._last_debug_dispatch >= 0.05:
+                self._last_debug_dispatch = now
+                self.udp_sock.sendto(raw, self.udp_target)
         except Exception:
             pass
 

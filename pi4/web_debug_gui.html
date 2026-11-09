@@ -249,6 +249,16 @@
     <span id="modeBadge" class="badge badge-live">LIVE STREAM</span>
     <span id="cpuTempBadge" class="badge">Temp: --°C</span>
     <span id="freqBadge" class="badge">-- Hz</span>
+    <div id="perfHudBadge" class="badge" title="Laptop GUI & Network Performance: FPS | RTT | Render | Payload" style="color:#00e5ff; border-color:#00897b; background:#0d1821; font-family:Consolas, monospace; display:flex; gap:6px; align-items:center;">
+      <span style="color:#ffd600;">⚡ PROFILER:</span>
+      <span id="perfFps" style="color:#00e676; font-weight:bold;">-- FPS</span>
+      <span style="color:#484f58;">|</span>
+      <span id="perfRtt">--ms RTT</span>
+      <span style="color:#484f58;">|</span>
+      <span id="perfRender">--ms Render</span>
+      <span style="color:#484f58;">|</span>
+      <span id="perfSize" style="color:#ffd600;">-- KB</span>
+    </div>
   </div>
 </header>
 
@@ -548,6 +558,24 @@ canvas.addEventListener("mousemove", (e) => {
   document.getElementById("coordReadout").innerText = `Cursor: X=${mx.toFixed(2)}m, Y=${my.toFixed(2)}m`;
 });
 
+// Precomputed 32-bit Little-Endian RGBA Color Lookup Table (512 entries: 0..255 normal, 256..511 inflated)
+const COLOR_LUT = new Uint32Array(512);
+for (let p = 0; p < 256; p++) {
+  if (p >= 166) {
+    COLOR_LUT[p] = 0xFF0000FF; // Solid red (confirmed obstacle prob > 0.65)
+  } else if (p < 97) {
+    COLOR_LUT[p] = 0x9622160E; // Dark navy free space (prob < 0.38)
+  } else {
+    COLOR_LUT[p] = 0x821ED7F5; // Translucent yellow unknown space (0.38 <= prob <= 0.65)
+  }
+  // With hazard inflation
+  if (p >= 166) {
+    COLOR_LUT[p + 256] = 0xFF0000FF; // Obstacle hit takes precedence
+  } else {
+    COLOR_LUT[p + 256] = 0xAF402AFF; // Coral red inflated safety margin
+  }
+}
+
 // Render 2D Map Exactly Matching Webots Simulation PlannerCostmapCanvas
 function renderRadar(pkt) {
   // Background fill: QColor(10, 13, 18)
@@ -557,80 +585,85 @@ function renderRadar(pkt) {
   const b = (pkt.grid_bounds && pkt.grid_bounds.length === 4) ? pkt.grid_bounds : [-1.25, 1.25, 0.00, 1.90];
   const mapXMin = b[0], mapXMax = b[1], mapYMin = b[2], mapYMax = b[3];
 
-  // 1. Costmap Probability Image & C-Space Hazard Overlay
-  if (isLayerOn("chkCostmap") && pkt.grid_unpacked && pkt.grid_unpacked.length > 0) {
-    const g = pkt.grid_unpacked;
-    const hMask = pkt.hazard_unpacked || null;
+  // 1. Costmap Probability Image & C-Space Hazard Overlay (Constructed locally on laptop from binary)
+  if (isLayerOn("chkCostmap")) {
     const showHazard = isLayerOn("chkHazard");
-    const H = g.length;
-    const W = g[0].length;
+    let rendered = false;
 
-    if (costmapOffscreen.width !== W || costmapOffscreen.height !== H) {
-      costmapOffscreen.width = W;
-      costmapOffscreen.height = H;
-    }
+    // Fast Path A: Direct binary Uint8Array from Pi 4 binary stream
+    if (pkt.prob_bytes && pkt.grid_shape && pkt.grid_shape.length === 2) {
+      const H = pkt.grid_shape[0];
+      const W = pkt.grid_shape[1];
+      if (H > 0 && W > 0 && pkt.prob_bytes.length >= H * W) {
+        if (costmapOffscreen.width !== W || costmapOffscreen.height !== H) {
+          costmapOffscreen.width = W;
+          costmapOffscreen.height = H;
+        }
+        const imgData = costmapCtx.createImageData(W, H);
+        const u32 = new Uint32Array(imgData.data.buffer);
+        const prob = pkt.prob_bytes;
+        const haz = showHazard ? pkt.hazard_bytes : null;
 
-    const imgData = costmapCtx.createImageData(W, H);
-    const data = imgData.data;
-
-    for (let r = 0; r < H; r++) {
-      // Flip vertically (matching np.flipud in planner_gui.py)
-      const destRow = H - 1 - r;
-      const gRow = g[r];
-      const hRow = (hMask && hMask[r]) ? hMask[r] : null;
-      for (let c = 0; c < W; c++) {
-        const prob = gRow[c];
-        const idx = (destRow * W + c) * 4;
-        const isObs = prob > 0.65;
-        const isInflated = showHazard && !isObs && (hRow ? hRow[c] > 0 : false);
-
-        if (isObs) {
-          // 1c. Confirmed Obstacle Hits (prob > 0.65): Pure solid red (255, 0, 0, 255)
-          data[idx]     = 255;
-          data[idx + 1] = 0;
-          data[idx + 2] = 0;
-          data[idx + 3] = 255;
-        } else if (isInflated) {
-          // 1d. C-Space Inflated Safety Margin (hazard_mask > 0 outside direct hit): Coral red (255, 42, 64, 175)
-          data[idx]     = 255;
-          data[idx + 1] = 42;
-          data[idx + 2] = 64;
-          data[idx + 3] = 175;
-        } else if (prob < 0.38) {
-          // 1a. Free Space (prob < 0.38): Clear dark navy drivable floor (14, 22, 34, 150)
-          data[idx]     = 14;
-          data[idx + 1] = 22;
-          data[idx + 2] = 34;
-          data[idx + 3] = 150;
-        } else {
-          // 1b. Unknown Space (0.38 <= prob <= 0.65): Distinct translucent yellow (245, 215, 30, 130)
-          data[idx]     = 245;
-          data[idx + 1] = 215;
-          data[idx + 2] = 30;
-          data[idx + 3] = 130;
+        for (let r = 0; r < H; r++) {
+          const destRow = H - 1 - r;
+          const srcOff = r * W;
+          const destOff = destRow * W;
+          for (let c = 0; c < W; c++) {
+            const idx = srcOff + c;
+            const p = prob[idx];
+            const hBit = (haz && haz[idx] > 0) ? 256 : 0;
+            u32[destOff + c] = COLOR_LUT[p | hBit];
+          }
+        }
+        costmapCtx.putImageData(imgData, 0, 0);
+        rendered = true;
+      }
+    } else if (pkt.grid_unpacked && pkt.grid_unpacked.length > 0) {
+      // Legacy Path B: 2D unpacked nested arrays (fallback)
+      const g = pkt.grid_unpacked;
+      const hMask = pkt.hazard_unpacked || null;
+      const H = g.length;
+      const W = g[0].length;
+      if (costmapOffscreen.width !== W || costmapOffscreen.height !== H) {
+        costmapOffscreen.width = W;
+        costmapOffscreen.height = H;
+      }
+      const imgData = costmapCtx.createImageData(W, H);
+      const u32 = new Uint32Array(imgData.data.buffer);
+      for (let r = 0; r < H; r++) {
+        const destRow = H - 1 - r;
+        const gRow = g[r];
+        const hRow = (hMask && hMask[r]) ? hMask[r] : null;
+        const destOff = destRow * W;
+        for (let c = 0; c < W; c++) {
+          const p = Math.floor(gRow[c] * 255.0);
+          const hBit = (showHazard && hRow && hRow[c] > 0) ? 256 : 0;
+          u32[destOff + c] = COLOR_LUT[p | hBit];
         }
       }
+      costmapCtx.putImageData(imgData, 0, 0);
+      rendered = true;
     }
 
-    costmapCtx.putImageData(imgData, 0, 0);
+    if (rendered) {
+      const [tlX, tlY] = toPixel(mapXMin, mapYMax);
+      const [brX, brY] = toPixel(mapXMax, mapYMin);
+      const rectW = brX - tlX;
+      const rectH = brY - tlY;
 
-    const [tlX, tlY] = toPixel(mapXMin, mapYMax);
-    const [brX, brY] = toPixel(mapXMax, mapYMin);
-    const rectW = brX - tlX;
-    const rectH = brY - tlY;
+      ctx.save();
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(costmapOffscreen, tlX, tlY, rectW, rectH);
+      ctx.restore();
 
-    ctx.save();
-    ctx.imageSmoothingEnabled = false;
-    ctx.drawImage(costmapOffscreen, tlX, tlY, rectW, rectH);
-    ctx.restore();
-
-    // Dotted border around costmap bounds: QColor(80, 120, 160, 90)
-    ctx.save();
-    ctx.strokeStyle = "rgba(80, 120, 160, 0.35)";
-    ctx.lineWidth = 1;
-    ctx.setLineDash([2, 3]);
-    ctx.strokeRect(tlX, tlY, rectW, rectH);
-    ctx.restore();
+      // Dotted border around costmap bounds: QColor(80, 120, 160, 90)
+      ctx.save();
+      ctx.strokeStyle = "rgba(80, 120, 160, 0.35)";
+      ctx.lineWidth = 1;
+      ctx.setLineDash([2, 3]);
+      ctx.strokeRect(tlX, tlY, rectW, rectH);
+      ctx.restore();
+    }
   }
 
   // 2. Grid lines & range circles
@@ -1352,35 +1385,257 @@ function updateHUD(pkt) {
   document.getElementById("lblTime").innerText = `${mins}:${secs}`;
 }
 
-// Polling / Live Streaming (Non-blocking self-scheduling loop)
+// High-Speed Local Binary Ingestion & Real-Time Performance Profiler
+const perfMetrics = {
+  frameCount: 0,
+  lastFpsCalc: performance.now(),
+  currentFps: 60.0,
+  lastRttMs: 0.0,
+  lastRenderMs: 0.0,
+  lastPayloadKb: 0.0,
+  isBinary: true
+};
+
+async function decompressZlib(bytes) {
+  if (typeof DecompressionStream !== "undefined") {
+    try {
+      const ds = new DecompressionStream("deflate");
+      const writer = ds.writable.getWriter();
+      writer.write(bytes);
+      writer.close();
+      const res = new Response(ds.readable);
+      const buf = await res.arrayBuffer();
+      return new Uint8Array(buf);
+    } catch (e) {
+      try {
+        const dsRaw = new DecompressionStream("deflate-raw");
+        const writerRaw = dsRaw.writable.getWriter();
+        writerRaw.write(bytes);
+        writerRaw.close();
+        const resRaw = new Response(dsRaw.readable);
+        const bufRaw = await resRaw.arrayBuffer();
+        return new Uint8Array(bufRaw);
+      } catch (e2) {}
+    }
+  }
+  return null;
+}
+
+async function parseLiveBinary(ab) {
+  const view = new DataView(ab);
+  // Magic validation "FOLK" (0x464F4C4B)
+  if (view.getUint32(0, false) !== 0x464F4C4B) {
+    throw new Error("Invalid binary magic header");
+  }
+  const totalLen = view.getUint32(4, true);
+  const timeStep = view.getUint32(8, true);
+  const timestamp = view.getFloat64(12, true);
+  const simTime = view.getFloat32(20, true);
+  const vCmd = view.getFloat32(24, true);
+  const vReal = view.getFloat32(28, true);
+  const steerCmd = view.getFloat32(32, true);
+  const steerAct = view.getFloat32(36, true);
+  const yawDeg = view.getFloat32(40, true);
+  const pitchDeg = view.getFloat32(44, true);
+  const rollDeg = view.getFloat32(48, true);
+  const gyroZ = view.getFloat32(52, true);
+  const accelFwd = view.getFloat32(56, true);
+  const accelLat = view.getFloat32(60, true);
+  const slipRatio = view.getFloat32(64, true);
+  const fTof = view.getFloat32(68, true);
+  const planMs = view.getFloat32(72, true);
+  const mapMs = view.getFloat32(76, true);
+  const scoutMs = view.getFloat32(80, true);
+
+  const rpmsCmd = [
+    view.getFloat32(84, true),
+    view.getFloat32(88, true),
+    view.getFloat32(92, true),
+    view.getFloat32(96, true)
+  ];
+  const rpmsAct = [
+    view.getFloat32(100, true),
+    view.getFloat32(104, true),
+    view.getFloat32(108, true),
+    view.getFloat32(112, true)
+  ];
+  const tofRanges = [];
+  for (let i = 0; i < 16; i++) {
+    tofRanges.push(view.getFloat32(116 + i * 4, true));
+  }
+  const gap = [
+    view.getFloat32(180, true),
+    view.getFloat32(184, true),
+    view.getFloat32(188, true)
+  ];
+  const rows = view.getUint16(192, true);
+  const cols = view.getUint16(194, true);
+  const bounds = [
+    view.getFloat32(196, true),
+    view.getFloat32(200, true),
+    view.getFloat32(204, true),
+    view.getFloat32(208, true)
+  ];
+  const probCompLen = view.getUint32(212, true);
+  const probRawLen = view.getUint32(216, true);
+  const hazCompLen = view.getUint32(220, true);
+  const hazRawLen = view.getUint32(224, true);
+  const metaLen = view.getUint32(228, true);
+
+  const headerEnd = 232;
+  let probBytes = null;
+  let hazBytes = null;
+  if (probCompLen > 0 && rows > 0 && cols > 0) {
+    const slice = new Uint8Array(ab, headerEnd, probCompLen);
+    if (probCompLen < probRawLen) {
+      probBytes = await decompressZlib(slice);
+    } else {
+      probBytes = slice;
+    }
+  }
+  if (hazCompLen > 0 && rows > 0 && cols > 0) {
+    const slice = new Uint8Array(ab, headerEnd + probCompLen, hazCompLen);
+    if (hazCompLen < hazRawLen) {
+      hazBytes = await decompressZlib(slice);
+    } else {
+      hazBytes = slice;
+    }
+  }
+  let meta = {};
+  if (metaLen > 0) {
+    try {
+      const metaStr = new TextDecoder().decode(new Uint8Array(ab, headerEnd + probCompLen + hazCompLen, metaLen));
+      meta = JSON.parse(metaStr);
+    } catch (e) {}
+  }
+
+  return {
+    time_step: timeStep,
+    timestamp: timestamp,
+    sim_time: simTime,
+    v_cmd: vCmd,
+    v_real: vReal,
+    steer_cmd_deg: steerCmd,
+    steer_actual_deg: steerAct,
+    yaw_deg: yawDeg,
+    pitch_deg: pitchDeg,
+    roll_deg: rollDeg,
+    gyro_z: gyroZ,
+    accel_fwd: accelFwd,
+    accel_lat: accelLat,
+    slip_ratio: slipRatio,
+    f_tof: fTof,
+    plan_ms: planMs,
+    map_ms: mapMs,
+    scout_ms: scoutMs,
+    rpms_cmd: rpmsCmd,
+    rpms_act: rpmsAct,
+    tof_ranges: tofRanges,
+    gap: gap,
+    grid_shape: [rows, cols],
+    grid_bounds: bounds,
+    prob_bytes: probBytes,
+    hazard_bytes: hazBytes,
+    ...meta
+  };
+}
+
 let isFetching = false;
+let useBinaryEndpoint = true;
+
 async function fetchLive() {
   if (!isLive || isFetching) return;
   isFetching = true;
-  try {
-    const res = await fetch("/api/live");
-    if (res.ok) {
-      const pkt = await res.json();
-      currentPkt = pkt;
-      updateHUD(pkt);
-      renderRadar(pkt);
+  const t0 = performance.now();
+  let payloadBytes = 0;
 
-      if (pkt._total_frames) {
-        totalFrames = pkt._total_frames;
-        document.getElementById("frameSlider").max = totalFrames;
-        document.getElementById("frameSlider").value = totalFrames;
-        document.getElementById("lblFrame").innerText = `Frame ${totalFrames} / ${totalFrames}`;
+  try {
+    if (useBinaryEndpoint) {
+      const res = await fetch("/api/live_bin");
+      if (res.ok) {
+        const ab = await res.arrayBuffer();
+        payloadBytes = ab.byteLength;
+        const pkt = await parseLiveBinary(ab);
+        currentPkt = pkt;
+        updateHUD(pkt);
+
+        const tRender0 = performance.now();
+        renderRadar(pkt);
+        const tRender1 = performance.now();
+        perfMetrics.lastRenderMs = tRender1 - tRender0;
+        perfMetrics.isBinary = true;
+
+        const totFrames = pkt._total_frames || pkt.total_frames;
+        if (totFrames) {
+          totalFrames = totFrames;
+          document.getElementById("frameSlider").max = totalFrames;
+          document.getElementById("frameSlider").value = totalFrames;
+          document.getElementById("lblFrame").innerText = `Frame ${totalFrames} / ${totalFrames}`;
+        }
+      } else {
+        useBinaryEndpoint = false;
+      }
+    } else {
+      const res = await fetch("/api/live");
+      if (res.ok) {
+        const pkt = await res.json();
+        currentPkt = pkt;
+        updateHUD(pkt);
+
+        const tRender0 = performance.now();
+        renderRadar(pkt);
+        const tRender1 = performance.now();
+        perfMetrics.lastRenderMs = tRender1 - tRender0;
+        perfMetrics.isBinary = false;
+
+        const totFrames = pkt._total_frames || pkt.total_frames;
+        if (totFrames) {
+          totalFrames = totFrames;
+          document.getElementById("frameSlider").max = totalFrames;
+          document.getElementById("frameSlider").value = totalFrames;
+          document.getElementById("lblFrame").innerText = `Frame ${totalFrames} / ${totalFrames}`;
+        }
       }
     }
   } catch (err) {
+    useBinaryEndpoint = false;
   } finally {
+    const tEnd = performance.now();
+    perfMetrics.lastRttMs = tEnd - t0;
+    perfMetrics.lastPayloadKb = payloadBytes / 1024.0;
+    perfMetrics.frameCount++;
+
+    if (tEnd - perfMetrics.lastFpsCalc >= 500.0) {
+      perfMetrics.currentFps = (perfMetrics.frameCount * 1000.0) / (tEnd - perfMetrics.lastFpsCalc);
+      perfMetrics.frameCount = 0;
+      perfMetrics.lastFpsCalc = tEnd;
+      updatePerfHUD();
+    }
+
     isFetching = false;
     if (isLive) {
-      setTimeout(fetchLive, 66); // Smooth 15 FPS cadence, prevents request backlog
+      const elapsed = performance.now() - t0;
+      const delay = Math.max(0, Math.round(16.6 - elapsed)); // Target smooth 60 FPS
+      setTimeout(fetchLive, delay);
     }
   }
 }
-setTimeout(fetchLive, 100);
+setTimeout(fetchLive, 50);
+
+function updatePerfHUD() {
+  const elFps = document.getElementById("perfFps");
+  const elRtt = document.getElementById("perfRtt");
+  const elRender = document.getElementById("perfRender");
+  const elSize = document.getElementById("perfSize");
+  if (!elFps) return;
+
+  elFps.innerText = `${perfMetrics.currentFps.toFixed(1)} FPS`;
+  elFps.style.color = perfMetrics.currentFps >= 50 ? "#00e676" : (perfMetrics.currentFps >= 25 ? "#ffd600" : "#ff3d00");
+  elRtt.innerText = `${perfMetrics.lastRttMs.toFixed(1)}ms RTT`;
+  elRender.innerText = `${perfMetrics.lastRenderMs.toFixed(1)}ms Render`;
+  const typeTag = perfMetrics.isBinary ? "Bin" : "JSON";
+  elSize.innerText = `${perfMetrics.lastPayloadKb.toFixed(1)} KB (${typeTag})`;
+}
 
 // Server Status / System Info
 async function fetchStatus() {
@@ -1432,6 +1687,18 @@ async function loadFrame(frameId) {
   currentFrameId = Math.max(1, Math.min(totalFrames, frameId));
   frameSlider.value = currentFrameId;
   document.getElementById("lblFrame").innerText = `Frame ${currentFrameId} / ${totalFrames}`;
+
+  try {
+    const resBin = await fetch(`/api/frame_bin/${currentFrameId}`);
+    if (resBin.ok) {
+      const ab = await resBin.arrayBuffer();
+      const pkt = await parseLiveBinary(ab);
+      currentPkt = pkt;
+      updateHUD(pkt);
+      renderRadar(pkt);
+      return;
+    }
+  } catch (err) {}
 
   try {
     const res = await fetch(`/api/frame/${currentFrameId}`);

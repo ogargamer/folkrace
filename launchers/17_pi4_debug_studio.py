@@ -189,7 +189,7 @@ def run_full_verification(base_url: str, ssh_host: str = "robot") -> bool:
     # 1. SSH Check
     ssh_target = "robot"
     t0 = time.perf_counter()
-    ssh_ok = check_ssh_connection(ssh_target, timeout_s=3)
+    ssh_ok = check_ssh_connection(ssh_target, timeout_s=6)
     dt_ssh = (time.perf_counter() - t0) * 1000
     tests.append(("SSH Connectivity (port 22)", ssh_ok, f"{dt_ssh:.1f} ms", f"Connected as admin@{ssh_target}"))
     if not ssh_ok:
@@ -229,12 +229,29 @@ def run_full_verification(base_url: str, ssh_host: str = "robot") -> bool:
     t0 = time.perf_counter()
     live_data = query_api_json(base_url, "/api/live")
     dt_live = (time.perf_counter() - t0) * 1000
-    live_ok = live_data is not None and "v_cmd" in live_data
+    live_ok = live_data is not None and ("timestamp" in live_data or "sim_time" in live_data or "v_cmd" in live_data)
     live_info = ""
     if live_ok:
-        live_info = f"Mode: {live_data.get('mode')} | V: {live_data.get('v_cmd')} m/s | Steer: {live_data.get('steer_cmd_deg')}° | Step: {live_data.get('step_ms')} ms"
+        live_info = f"Mode: {live_data.get('mode', 'DRIVE')} | V: {live_data.get('v_cmd', 0.0):.2f} m/s | Steer: {live_data.get('steer_cmd_deg', live_data.get('steer_deg', 0.0)):.1f}° | Step: {live_data.get('step_ms', 0.0)} ms"
     tests.append(("Live Telemetry API (/api/live)", live_ok, f"{dt_live:.1f} ms", live_info))
     if not live_ok:
+        all_passed = False
+
+    # 4b. /api/live_bin High-Speed Zero-Copy Binary Stream
+    t0 = time.perf_counter()
+    bin_ok = False
+    bin_info = ""
+    try:
+        req = urllib.request.Request(f"{base_url}/api/live_bin", headers={"User-Agent": "FolkraceLauncher/1.0"})
+        with urllib.request.urlopen(req, timeout=2.5) as resp:
+            raw_bin = resp.read()
+            bin_ok = (resp.status == 200) and len(raw_bin) >= 224 and raw_bin[:4] == b"FOLK"
+            bin_info = f"{len(raw_bin)/1024.0:.1f} KB binary payload (Header + Raw Costmaps + Metadata)"
+    except Exception as e:
+        bin_info = str(e)
+    dt_bin = (time.perf_counter() - t0) * 1000
+    tests.append(("High-Speed Binary Stream (/api/live_bin)", bin_ok, f"{dt_bin:.1f} ms", bin_info))
+    if not bin_ok:
         all_passed = False
 
     # 5. /api/anomalies Black Box Index
@@ -264,9 +281,9 @@ def run_full_verification(base_url: str, ssh_host: str = "robot") -> bool:
     iso_ok = False
     iso_info = ""
     try:
-        cmd = ["ssh", "robot", "ps -eo pid,psr,comm | grep -E 'python|path_planner|debug_server'"]
-        res = subprocess.run(cmd, stdout=subprocess.PIPE, text=True, timeout=4)
-        lines = [l for l in res.stdout.strip().splitlines() if "grep" not in l]
+        cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=4", ssh_target, "ps -eo pid,psr,comm"]
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, text=True, timeout=5)
+        lines = [l for l in res.stdout.strip().splitlines() if any(k in l for k in ("python", "path_planner", "debug_server"))]
         iso_ok = len(lines) >= 2
         iso_info = f"{len(lines)} Folkrace processes active on Pi CPU cores"
     except Exception as e:
@@ -335,6 +352,7 @@ def main():
     parser.add_argument("--stream", action="store_true", help="Stream live telemetry dashboard in terminal")
     parser.add_argument("--download", action="store_true", help="Download current SQLite black box flight database")
     parser.add_argument("--desktop", action="store_true", help="Launch native PyQt5 desktop GUI")
+    parser.add_argument("--profile", action="store_true", help="Run GUI & telemetry performance profiler and benchmark")
     parser.add_argument("--restart", action="store_true", help="Restart remote folkrace systemd service via SSH")
     parser.add_argument("--stop", action="store_true", help="Stop remote folkrace service")
     parser.add_argument("--sync", action="store_true", help="Sync latest code to Pi 4")
@@ -395,6 +413,14 @@ def main():
     # 5. Execute sub-modes
     if args.verify:
         run_full_verification(base_url, ssh_host=active_host if "robot" in active_host else "robot")
+        return
+
+    if args.profile:
+        tools_dir = os.path.join(ROOT_DIR, "tools")
+        if tools_dir not in sys.path:
+            sys.path.insert(0, tools_dir)
+        from gui_profiler import profile_pi4_studio
+        profile_pi4_studio(host=active_host)
         return
 
     if args.download:

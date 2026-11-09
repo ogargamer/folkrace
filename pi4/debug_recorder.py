@@ -516,18 +516,20 @@ class TelemetryLogReader:
                 pass
         return None
 
-    def get_anomalies(self) -> List[Dict[str, Any]]:
-        """Returns indexed list of all frames flagged with anomalies."""
+    def get_anomalies(self, limit: int = 500) -> List[Dict[str, Any]]:
+        """Returns indexed list of all frames flagged with anomalies (bounded to recent)."""
         conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
         cur = conn.cursor()
         cur.execute("""
             SELECT frame_id, timestamp, sim_time, mode, slip_state, f_tof_min, plan_ms, anomaly_flags
             FROM frames
             WHERE anomaly_flags > 0
-            ORDER BY frame_id ASC;
-        """)
+            ORDER BY frame_id DESC
+            LIMIT ?;
+        """, (limit,))
         rows = cur.fetchall()
         conn.close()
+        rows.reverse()
 
         results = []
         for r in rows:

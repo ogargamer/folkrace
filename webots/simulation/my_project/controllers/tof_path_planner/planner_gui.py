@@ -16,6 +16,7 @@ import math
 import json
 import time
 import socket
+import struct
 import threading
 import zlib
 import base64
@@ -222,6 +223,13 @@ DARK_THEME_QSS = """
 # ==============================================================================
 # 1. 2D COSTMAP, ESCAPE ARCS & TRAJECTORY CANVAS
 # ==============================================================================
+# Precomputed 256-color lookup table for instant zero-allocation costmap rendering
+_COLOR_LUT = np.zeros((256, 4), dtype=np.uint8)
+_COLOR_LUT[:97] = [14, 22, 34, 150]      # Free (< 0.38)
+_COLOR_LUT[97:166] = [245, 215, 30, 130] # Unknown (0.38..0.65)
+_COLOR_LUT[166:] = [255, 0, 0, 255]      # Obstacle (> 0.65)
+
+
 class PlannerCostmapCanvas(QtWidgets.QWidget):
     """
     High-performance 2D Canvas visualizing:
@@ -437,42 +445,18 @@ class PlannerCostmapCanvas(QtWidgets.QWidget):
         painter.setRenderHint(QPainter.Antialiasing, True)
         painter.fillRect(self.rect(), QColor(10, 13, 18))
 
-        # 1. Costmap Probability Image
+        # 1. Costmap Probability Image (Optimized 256-color LUT with zero boolean mask allocations)
         if self.show_costmap and self.prob_map is not None:
             H, W = self.prob_map.shape
-            img_data = np.zeros((H, W, 4), dtype=np.uint8)
-
-            # 1a. Free Space (prob < 0.38): Clear dark navy drivable floor
-            free_mask = (self.prob_map < 0.38)
-            img_data[free_mask, 0] = 14
-            img_data[free_mask, 1] = 22
-            img_data[free_mask, 2] = 34
-            img_data[free_mask, 3] = 150
-
-            # 1b. Unknown Space (0.38 <= prob <= 0.65): Distinct translucent yellow
-            unknown_mask = (self.prob_map >= 0.38) & (self.prob_map <= 0.65)
-            img_data[unknown_mask, 0] = 245
-            img_data[unknown_mask, 1] = 215
-            img_data[unknown_mask, 2] = 30
-            img_data[unknown_mask, 3] = 130
-
-            # 1c. Confirmed Obstacle Hits (prob > 0.65): Pure solid red
-            obs_mask = (self.prob_map > 0.65)
-            img_data[obs_mask, 0] = 255
-            img_data[obs_mask, 1] = 0
-            img_data[obs_mask, 2] = 0
-            img_data[obs_mask, 3] = 255
-
-            # 1d. C-Space Inflated Safety Margin (hazard_mask > 0 outside direct hit): Coral red (previous obstacle color)
+            prob_u8 = (np.clip(self.prob_map, 0.0, 1.0) * 255.0).astype(np.uint8)
+            img_data = _COLOR_LUT[prob_u8]
             if self.show_hazard and self.hazard_mask is not None:
-                inflated_mask = (self.hazard_mask > 0) & (~obs_mask)
-                img_data[inflated_mask, 0] = 255
-                img_data[inflated_mask, 1] = 42
-                img_data[inflated_mask, 2] = 64
-                img_data[inflated_mask, 3] = 175
+                img_data = img_data.copy()
+                haz_mask = (self.hazard_mask > 0) & (prob_u8 < 166)
+                img_data[haz_mask] = [255, 42, 64, 175]
 
-            img_data = np.ascontiguousarray(np.flipud(img_data))
-            qimg = QImage(img_data.data, W, H, W * 4, QImage.Format_RGBA8888).copy()
+            img_flipped = np.ascontiguousarray(np.flipud(img_data))
+            qimg = QImage(img_flipped.data, W, H, W * 4, QImage.Format_RGBA8888)
 
             p_tl = self.world_to_screen(self.map_x_min, self.map_y_max)
             p_br = self.world_to_screen(self.map_x_max, self.map_y_min)
@@ -1500,6 +1484,9 @@ class ComprehensivePlannerGUI(QMainWindow):
         min_l = min([float(tof.get(k, 1.80)) for k in left_beams], default=1.80)
         min_r = min([float(tof.get(k, 1.80)) for k in right_beams], default=1.80)
 
+        if not hasattr(self, "_last_bar_colors"):
+            self._last_bar_colors = {}
+
         for s_name, (bar, val_lbl, name_lbl) in self.tof_bar_widgets.items():
             if s_name in tof:
                 r_m = float(tof[s_name])
@@ -1516,17 +1503,19 @@ class ComprehensivePlannerGUI(QMainWindow):
                 else:
                     bar_col = "#00e676"
 
-                bar.setStyleSheet(f"""
-                    QProgressBar {{
-                        background-color: #1a202c;
-                        border: 1px solid #2d3748;
-                        border-radius: 3px;
-                    }}
-                    QProgressBar::chunk {{
-                        background-color: {bar_col};
-                        border-radius: 2px;
-                    }}
-                """)
+                if self._last_bar_colors.get(s_name) != bar_col:
+                    self._last_bar_colors[s_name] = bar_col
+                    bar.setStyleSheet(f"""
+                        QProgressBar {{
+                            background-color: #1a202c;
+                            border: 1px solid #2d3748;
+                            border-radius: 3px;
+                        }}
+                        QProgressBar::chunk {{
+                            background-color: {bar_col};
+                            border-radius: 2px;
+                        }}
+                    """)
                 val_lbl.setText(f"{r_m:.2f}m")
                 val_lbl.setStyleSheet(f"color: {bar_col}; font-weight: bold; min-width: 44px;")
 
@@ -1550,6 +1539,114 @@ class ComprehensivePlannerGUI(QMainWindow):
             format_card(self.lbl_card_right, min_r)
             if min_overall < 900.0:
                 format_card(self.lbl_card_min, min_overall)
+
+def parse_binary_packet(data: bytes) -> Optional[dict]:
+    """Decodes compact binary telemetry packet received from Pi 4 or Webots streaming bridge."""
+    if len(data) < 232 or data[:4] != b"FOLK":
+        return None
+    header_fmt = "<4s I I d 16f 4f 4f 16f 3f 2H 4f 5I"
+    try:
+        fields = struct.unpack_from(header_fmt, data, 0)
+    except Exception:
+        return None
+
+    time_step = fields[2]
+    ts = fields[3]
+    sim_time = fields[4]
+    v_cmd = fields[5]
+    v_real = fields[6]
+    steer_cmd_deg = fields[7]
+    steer_actual_deg = fields[8]
+    yaw_deg = fields[9]
+    pitch_deg = fields[10]
+    roll_deg = fields[11]
+    gyro_z = fields[12]
+    accel_fwd = fields[13]
+    accel_lat = fields[14]
+    slip_ratio = fields[15]
+    f_tof = fields[16]
+    plan_ms = fields[17]
+    map_ms = fields[18]
+    scout_ms = fields[19]
+    rpms_cmd = list(fields[20:24])
+    rpms_act = list(fields[24:28])
+    tof_ranges = list(fields[28:44])
+    gap = list(fields[44:47])
+    rows = fields[47]
+    cols = fields[48]
+    grid_bounds = list(fields[49:53])
+    prob_comp_len = fields[53]
+    prob_raw_len = fields[54]
+    haz_comp_len = fields[55]
+    haz_raw_len = fields[56]
+    meta_len = fields[57]
+
+    header_end = 232
+    meta = {}
+    if meta_len > 0 and len(data) >= header_end + prob_comp_len + haz_comp_len + meta_len:
+        try:
+            meta_raw = data[header_end + prob_comp_len + haz_comp_len : header_end + prob_comp_len + haz_comp_len + meta_len]
+            meta = json.loads(meta_raw.decode("utf-8"))
+        except Exception:
+            pass
+
+    pkt = {
+        "time_step": time_step,
+        "timestamp": ts,
+        "sim_time": sim_time,
+        "v_cmd": v_cmd,
+        "v_tgt": v_cmd,
+        "v_real": v_real,
+        "v_est": v_real,
+        "steer_cmd_deg": steer_cmd_deg,
+        "steer_deg": steer_cmd_deg,
+        "steer_actual_deg": steer_actual_deg,
+        "yaw_deg": yaw_deg,
+        "pitch_deg": pitch_deg,
+        "roll_deg": roll_deg,
+        "gyro_z": gyro_z,
+        "accel_fwd": accel_fwd,
+        "accel_lat": accel_lat,
+        "slip_ratio": slip_ratio,
+        "f_tof": f_tof,
+        "plan_ms": plan_ms,
+        "map_ms": map_ms,
+        "scout_ms": scout_ms,
+        "rpms_cmd": rpms_cmd,
+        "rpms_act": rpms_act,
+        "tof_ranges": tof_ranges,
+        "tof": {FRONT_TOF_SENSOR_RIG[i][0]: tof_ranges[i] for i in range(min(len(FRONT_TOF_SENSOR_RIG), len(tof_ranges)))},
+        "gap": gap,
+        "grid_shape": [rows, cols],
+        "grid_bounds": grid_bounds,
+    }
+    if prob_comp_len > 0 and rows > 0 and cols > 0 and len(data) >= header_end + prob_comp_len:
+        prob_slice = data[header_end : header_end + prob_comp_len]
+        if prob_comp_len < prob_raw_len:
+            try:
+                prob_raw = zlib.decompress(prob_slice)
+            except Exception:
+                prob_raw = prob_slice
+        else:
+            prob_raw = prob_slice
+        prob_u8 = np.frombuffer(prob_raw, dtype=np.uint8).reshape((rows, cols))
+        pkt["prob_map"] = prob_u8.astype(np.float32) / 255.0
+
+    if haz_comp_len > 0 and rows > 0 and cols > 0 and len(data) >= header_end + prob_comp_len + haz_comp_len:
+        haz_slice = data[header_end + prob_comp_len : header_end + prob_comp_len + haz_comp_len]
+        if haz_comp_len < haz_raw_len:
+            try:
+                haz_raw = zlib.decompress(haz_slice)
+            except Exception:
+                haz_raw = haz_slice
+        else:
+            haz_raw = haz_slice
+        haz_u8 = np.frombuffer(haz_raw, dtype=np.uint8).reshape((rows, cols))
+        pkt["hazard_mask"] = haz_u8
+
+    pkt.update(meta)
+    return pkt
+
 
     def _udp_worker(self):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -1583,11 +1680,28 @@ class ComprehensivePlannerGUI(QMainWindow):
         while self.running:
             try:
                 data, _ = sock.recvfrom(65535)
-                pkt = json.loads(data.decode("utf-8"))
-                with self._lock:
-                    self.latest_pkt = pkt
-                    self.last_packet_time = time.time()
-                    self.udp_connected = True
+                # Drain backlog to always stay on newest real-time frame
+                while True:
+                    try:
+                        sock.setblocking(False)
+                        next_data, _ = sock.recvfrom(65535)
+                        data = next_data
+                    except (BlockingIOError, socket.error):
+                        break
+                    finally:
+                        sock.setblocking(True)
+                        sock.settimeout(0.5)
+
+                if data[:4] == b"FOLK":
+                    pkt = parse_binary_packet(data)
+                else:
+                    pkt = json.loads(data.decode("utf-8"))
+
+                if pkt:
+                    with self._lock:
+                        self.latest_pkt = pkt
+                        self.last_packet_time = time.time()
+                        self.udp_connected = True
             except socket.timeout:
                 if time.time() - self.last_packet_time > 1.5:
                     with self._lock:
@@ -1724,10 +1838,10 @@ class ComprehensivePlannerGUI(QMainWindow):
                         self.btn_obs_dir.setText("◀ Reverse (-)")
                         self.btn_obs_dir.setStyleSheet("background-color: #b71c1c; color: #ffcdd2; font-weight: bold; padding: 5px; border-radius: 4px;")
 
-            # Decompress grid
-            prob_map = None
-            hazard_mask = None
-            if "grid_data" in pkt and "grid_shape" in pkt:
+            # Decompress or unpack grid
+            prob_map = pkt.get("prob_map")
+            hazard_mask = pkt.get("hazard_mask")
+            if prob_map is None and "grid_data" in pkt and "grid_shape" in pkt:
                 try:
                     shape = tuple(pkt["grid_shape"])
                     raw_b = zlib.decompress(base64.b64decode(pkt["grid_data"]))
