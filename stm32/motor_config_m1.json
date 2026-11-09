@@ -4,7 +4,7 @@
   "sensor_direction": -1,
   "sensor_lag_comp_us": 35.0,
   "motor_kv_rating": 130.0,
-  "is_lut_calibrated": false,
+  "is_lut_calibrated": true,
   "pid_p": 0.15,
   "pid_i": 1.5,
   "pid_d": 0.0,

@@ -1,6 +1,8 @@
 #include <Arduino.h>
 #include <SPI.h>
 #include <SimpleFOC.h>
+#include <stm32g4xx_ll_cordic.h>
+#include <stm32g4xx_ll_bus.h>
 #include "config_pins.h"
 #include "mt6816_spi.h"
 
@@ -45,8 +47,47 @@ SPIClass SPI_2(PIN_SPI2_MOSI, PIN_SPI2_MISO, PIN_SPI2_SCK);
 MT6816Sensor encoder1(PIN_M1_CS, &SPI, PIN_SPI1_SCK, PIN_SPI1_MISO, PIN_SPI1_MOSI);
 MT6816Sensor encoder2(PIN_M2_CS, &SPI_2, PIN_SPI2_SCK, PIN_SPI2_MISO, PIN_SPI2_MOSI);
 
-BLDCDriver3PWM driver1(M1_PWM_A, M1_PWM_B, M1_PWM_C, M1_EN);
-BLDCDriver3PWM driver2(M2_PWM_A, M2_PWM_B, M2_PWM_C, M2_EN);
+// Fast direct-register PWM driver bypassing float divisions and switch-cases
+class FastBLDCDriver3PWM : public BLDCDriver3PWM {
+public:
+    TIM_TypeDef *timer_inst;
+    float pwm_scale;
+
+    FastBLDCDriver3PWM(int phA, int phB, int phC, int en, TIM_TypeDef *tim)
+        : BLDCDriver3PWM(phA, phB, phC, en), timer_inst(tim), pwm_scale(0.0f) {}
+
+    int init() override {
+        int res = BLDCDriver3PWM::init();
+        if (res && timer_inst) {
+            // Precompute scale = (ARR + 1) / voltage_power_supply
+            pwm_scale = (float)(timer_inst->ARR + 1) / voltage_power_supply;
+        }
+        return res;
+    }
+
+    void setPwm(float Ua, float Ub, float Uc) override {
+        Ua = _constrain(Ua, 0.0f, voltage_limit);
+        Ub = _constrain(Ub, 0.0f, voltage_limit);
+        Uc = _constrain(Uc, 0.0f, voltage_limit);
+
+        uint32_t duty_a = (uint32_t)(Ua * pwm_scale);
+        uint32_t duty_b = (uint32_t)(Ub * pwm_scale);
+        uint32_t duty_c = (uint32_t)(Uc * pwm_scale);
+
+        if (timer_inst == TIM2) {
+            TIM2->CCR1 = duty_a; // PA5 (TIM2 CH1)
+            TIM2->CCR2 = duty_b; // PA1 (TIM2 CH2)
+            TIM2->CCR3 = duty_c; // PA2 (TIM2 CH3)
+        } else if (timer_inst == TIM3) {
+            TIM3->CCR3 = duty_a; // PB0 (TIM3 CH3)
+            TIM3->CCR2 = duty_b; // PA4 (TIM3 CH2)
+            TIM3->CCR1 = duty_c; // PA6 (TIM3 CH1)
+        }
+    }
+};
+
+FastBLDCDriver3PWM driver1(M1_PWM_A, M1_PWM_B, M1_PWM_C, M1_EN, TIM2);
+FastBLDCDriver3PWM driver2(M2_PWM_A, M2_PWM_B, M2_PWM_C, M2_EN, TIM3);
 
 BLDCMotor motor1 = BLDCMotor(MOTOR_POLE_PAIRS);
 BLDCMotor motor2 = BLDCMotor(MOTOR_POLE_PAIRS);
@@ -98,17 +139,71 @@ bool show_telemetry = true;
 char rx_line[256];
 uint16_t rx_idx = 0;
 
-// Angle Normalization Helpers
+// ----------------------------------------------------------------------------
+// High-Speed Math & Hardware Acceleration Overrides (STM32G474)
+// ----------------------------------------------------------------------------
+void initHardwareCORDIC() {
+    LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_CORDIC);
+    LL_CORDIC_Config(CORDIC,
+                     LL_CORDIC_FUNCTION_COSINE,
+                     LL_CORDIC_PRECISION_6CYCLES,
+                     LL_CORDIC_SCALE_0,
+                     LL_CORDIC_NBWRITE_1,
+                     LL_CORDIC_NBREAD_2,
+                     LL_CORDIC_INSIZE_32BITS,
+                     LL_CORDIC_OUTSIZE_32BITS);
+}
+
+// Fast single-precision angle normalization (replaces slow double-precision fmod)
+float _normalizeAngle(float angle) {
+    float a = angle - _2PI * (int)(angle * (1.0f / _2PI));
+    return (a >= 0.0f) ? a : (a + _2PI);
+}
+
 static inline float normalizeAngleRad(float angle) {
-    while (angle < 0.0f) angle += _2PI;
-    while (angle >= _2PI) angle -= _2PI;
-    return angle;
+    return _normalizeAngle(angle);
 }
 
 static inline float wrapAngleRad(float angle) {
-    while (angle > _PI) angle -= _2PI;
-    while (angle < -_PI) angle += _2PI;
+    while (angle > (float)_PI) angle -= (float)_2PI;
+    while (angle < -(float)_PI) angle += (float)_2PI;
     return angle;
+}
+
+// Hardware CORDIC trigonometric accelerator (simultaneous sin & cos in hardware)
+void _sincos(float a, float *s, float *c) {
+    float angle = a;
+    while (angle > (float)_PI) angle -= (float)_2PI;
+    while (angle < -(float)_PI) angle += (float)_2PI;
+
+    // Convert angle to Q1.31: angle * (2^31 / PI) = angle * 683565275.5764f
+    int32_t arg_q31 = (int32_t)(angle * 683565275.5764f);
+
+    CORDIC->WDATA = arg_q31;
+    while (!LL_CORDIC_IsActiveFlag_RRDY(CORDIC));
+    int32_t c_raw = (int32_t)CORDIC->RDATA;
+    int32_t s_raw = (int32_t)CORDIC->RDATA;
+
+    constexpr float q31_to_f = 1.0f / 2147483648.0f;
+    *c = (float)c_raw * q31_to_f;
+    *s = (float)s_raw * q31_to_f;
+}
+
+float _sin(float a) {
+    float s, c;
+    _sincos(a, &s, &c);
+    return s;
+}
+
+float _cos(float a) {
+    float s, c;
+    _sincos(a, &s, &c);
+    return c;
+}
+
+// Fast DWT-based micros counter via GNU ld --wrap (replaces SysTick/HAL_GetTick division polling)
+extern "C" unsigned long __wrap__micros() {
+    return DWT->CYCCNT / 170;
 }
 
 // ----------------------------------------------------------------------------
@@ -506,6 +601,7 @@ bool loadConfigFromFlash() {
 void dumpConfigJSON() {
     Serial.println("\n[CONFIG_START]");
     Serial.printf("{\n");
+    // Motor 1 Configuration & 128-pt LUT
     Serial.printf("  \"zero_electric_angle\": %.6f,\n", motor1.zero_electric_angle);
     Serial.printf("  \"sensor_direction\": %d,\n", (motor1.sensor_direction == Direction::CW) ? 1 : -1);
     Serial.printf("  \"sensor_lag_comp_us\": %.1f,\n", m1_lag_comp_us);
@@ -516,11 +612,26 @@ void dumpConfigJSON() {
     Serial.printf("  \"pid_d\": %.4f,\n", motor1.PID_velocity.D);
     Serial.printf("  \"lpf_tf\": %.6f,\n", motor1.LPF_velocity.Tf);
     Serial.printf("  \"dwt_window_ms\": %.2f,\n", encoder1.window_ms);
-    Serial.printf("  \"m2_zero_electric_angle\": %.6f,\n", motor2.zero_electric_angle);
-    Serial.printf("  \"m2_sensor_direction\": %d,\n", (motor2.sensor_direction == Direction::CW) ? 1 : -1);
     Serial.printf("  \"lut_128\": [");
     for (int i = 0; i < 128; i++) {
         Serial.printf("%.6f%s", encoder1.lut_errors[i], (i == 127) ? "" : ", ");
+    }
+    Serial.printf("],\n");
+
+    // Motor 2 Configuration & 128-pt LUT
+    Serial.printf("  \"m2_zero_electric_angle\": %.6f,\n", motor2.zero_electric_angle);
+    Serial.printf("  \"m2_sensor_direction\": %d,\n", (motor2.sensor_direction == Direction::CW) ? 1 : -1);
+    Serial.printf("  \"m2_sensor_lag_comp_us\": %.1f,\n", m2_lag_comp_us);
+    Serial.printf("  \"m2_motor_kv_rating\": %.2f,\n", motor2.KV_rating);
+    Serial.printf("  \"m2_is_lut_calibrated\": %s,\n", encoder2.is_lut_active ? "true" : "false");
+    Serial.printf("  \"m2_pid_p\": %.4f,\n", motor2.PID_velocity.P);
+    Serial.printf("  \"m2_pid_i\": %.4f,\n", motor2.PID_velocity.I);
+    Serial.printf("  \"m2_pid_d\": %.4f,\n", motor2.PID_velocity.D);
+    Serial.printf("  \"m2_lpf_tf\": %.6f,\n", motor2.LPF_velocity.Tf);
+    Serial.printf("  \"m2_dwt_window_ms\": %.2f,\n", encoder2.window_ms);
+    Serial.printf("  \"m2_lut_128\": [");
+    for (int i = 0; i < 128; i++) {
+        Serial.printf("%.6f%s", encoder2.lut_errors[i], (i == 127) ? "" : ", ");
     }
     Serial.printf("]\n");
     Serial.printf("}\n");
@@ -2119,10 +2230,11 @@ void setup() {
     pinMode(M2_EN, OUTPUT);
     digitalWrite(M2_EN, LOW);
 
-    // 1. Standalone DWT Unlock (Essential for standalone battery/bench operation without ST-Link)
+    // 1. Standalone DWT Unlock & Hardware CORDIC Accelerator Init
     CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
     DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
     DWT->CYCCNT = 0;
+    initHardwareCORDIC();
 
     // 2. Status LED setup (Disabled: LOW = OFF)
     pinMode(STATUS_LED, OUTPUT);

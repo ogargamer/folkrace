@@ -1,6 +1,6 @@
 # Folkrace Autonomous High-Speed Racing Platform
 
-An autonomous, 1:10-scale high-speed racing vehicle powered by a distributed multi-processor architecture: a **Raspberry Pi 4** companion computer running Curvilinear SL-MPC path planning, an **ESP32-S3 Main** chassis controller handling high-rate vehicle dynamics, a dedicated **ESP32-S3 ToF Hub** filtering quad multizone Time-of-Flight sensors, and **two STM32G474** microcontrollers driving 4 independent direct-drive brushless motors via hardware Field Oriented Control (FOC).
+An autonomous, 1:20-scale high-speed racing vehicle powered by a distributed multi-processor architecture: a **Raspberry Pi 4** companion computer running Curvilinear SL-MPC path planning, an **ESP32-S3 Main** chassis controller handling high-rate vehicle dynamics, a dedicated **ESP32-S3 ToF Hub** filtering quad multizone Time-of-Flight sensors, and **two STM32G474** microcontrollers driving 4 independent direct-drive brushless motors via hardware Field Oriented Control (FOC).
 
 > [!IMPORTANT]
 > **No LiDAR is used in this vehicle.** Perception is 100% solid-state, utilizing a quad VL53L8CX multizone Time-of-Flight array on a shared SPI bus that streams 16 distance zones directly to the Raspberry Pi 4.

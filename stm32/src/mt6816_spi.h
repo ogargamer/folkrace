@@ -37,6 +37,7 @@ public:
     volatile uint16_t last_raw_14bit;
     uint32_t last_update_tick;
     float zero_offset_deg;
+    volatile float cached_calibrated_angle;
 
     // 128-Point Stepped Piecewise Linear Interpolation LUT
     float lut_errors[128];
@@ -55,7 +56,7 @@ public:
           consecutive_parity_errors(0), is_connected(true), slow_poll_counter(0),
           last_no_mag(false), last_parity_ok(true),
           last_raw_h(0), last_raw_l(0), last_raw_14bit(0), last_update_tick(0xFFFFFFFF),
-          zero_offset_deg(0.0f), is_lut_active(false),
+          zero_offset_deg(0.0f), cached_calibrated_angle(0.0f), is_lut_active(false),
           spi_settings(SPI_SPEED_HZ, MSBFIRST, SPI_MODE3) {
         setupCSPin(pin);
         for (int i = 0; i < 128; i++) {
@@ -267,9 +268,14 @@ public:
     }
 
     // Standard SimpleFOC Sensor contract:
-    // Called by Sensor::update() during motor.loopFOC(). Uses CACHED reading!
+    // Called by Sensor::update() and motor.loopFOC(). Returns CACHED reading within the same tick!
     float getSensorAngle() override {
-        return getCalibratedAngleRad();
+        extern volatile uint32_t foc_tick_count;
+        if (last_update_tick == foc_tick_count) {
+            return cached_calibrated_angle;
+        }
+        cached_calibrated_angle = getCalibratedAngleRad();
+        return cached_calibrated_angle;
     }
 
     // ------------------------------------------------------------------------
@@ -307,8 +313,9 @@ public:
         }
         last_update_tick = foc_tick_count;
 
-        // Direct multi-turn tracking without calling _micros() (velocity uses DWT cycle counter)
-        float val = getSensorAngle();
+        // Calculate and cache calibrated angle ONCE per tick (eliminates duplicate 128-pt LUT evaluations)
+        cached_calibrated_angle = getCalibratedAngleRad();
+        float val = cached_calibrated_angle;
         float d_ang = val - angle_prev;
         if (fabsf(d_ang) > (0.8f * _2PI)) {
             full_rotations += (d_ang > 0.0f) ? -1 : 1;
