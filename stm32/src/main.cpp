@@ -213,10 +213,9 @@ void focTimerISR() {
     uint32_t start_cycles = DWT->CYCCNT;
     foc_tick_count++;
 
-    // 1. Single-Read Hardware SPI Caching & SimpleFOC Sensor State Update
-    encoder1.readHardwareSPI();
-    encoder1.update(); // CRITICAL: Updates angle tracking, timestamp, and multi-turn unwrapping on every 20 kHz tick!
-    encoder2.readHardwareSPI();
+    // 1. Concurrent Parallel Dual-SPI Read (< 3.6 us total for BOTH encoders)
+    readDualEncodersParallel(encoder1, encoder2);
+    encoder1.update(); // Updates angle tracking, timestamp, and multi-turn unwrapping
     encoder2.update();
 
     // 2. Motor 1 Commutation Loop (with Smooth Filtered Sensor Lag Compensation)

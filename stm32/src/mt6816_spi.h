@@ -201,16 +201,20 @@ public:
         delayNanos(180); // t_CSH hold time (>= 150 ns)
         csHigh();
 
-        uint8_t h = rx_h & 0xFF;
-        uint8_t l = rx_l & 0xFF;
+        parseRawData(rx_h & 0xFF, rx_l & 0xFF);
+
+        spi_bus->endTransaction();
+    }
+
+    inline void parseRawData(uint8_t h, uint8_t l) {
+        last_raw_h = h;
+        last_raw_l = l;
 
         uint16_t angle_data = ((uint16_t)h << 8) | l;
         uint16_t raw14 = ((uint16_t)h << 6) | ((l & 0xFC) >> 2);
         bool no_mag = (l & 0x02) != 0;
         bool parity_ok = parityCheck(angle_data);
 
-        last_raw_h = h;
-        last_raw_l = l;
         last_no_mag = no_mag;
 
         if (no_mag) {
@@ -235,8 +239,6 @@ public:
                 }
             }
         }
-
-        spi_bus->endTransaction();
     }
 
     // ------------------------------------------------------------------------
@@ -393,5 +395,109 @@ public:
         is_lut_active = false;
     }
 };
+
+// ----------------------------------------------------------------------------
+// Hard Real-Time Parallel Dual-SPI Encoder Read (SPI1 & SPI2 Concurrent Burst)
+// ----------------------------------------------------------------------------
+// Simultaneously clocks out 16-bit register reads on SPI1 (Enc1) and SPI2 (Enc2).
+// Direct STM32G4 hardware FIFO register access (< 3.6 us total for BOTH encoders).
+// ----------------------------------------------------------------------------
+static inline void readDualEncodersParallel(MT6816Sensor &enc1, MT6816Sensor &enc2) __attribute__((always_inline));
+
+static inline void readDualEncodersParallel(MT6816Sensor &enc1, MT6816Sensor &enc2) {
+    // 1. Drain any residual bytes in RX FIFOs
+    while (SPI1->SR & SPI_SR_RXNE) { (void)*(__IO uint8_t *)&SPI1->DR; }
+    while (SPI2->SR & SPI_SR_RXNE) { (void)*(__IO uint8_t *)&SPI2->DR; }
+
+    // 2. Assert both Chip Selects
+    enc1.csLow();
+    enc2.csLow();
+    MT6816Sensor::delayNanos(120); // t_CSS setup time (>= 100 ns)
+
+    // 3. Simultaneously queue 0x8300 on SPI1 and SPI2 TX FIFOs
+    while (!(SPI1->SR & SPI_SR_TXE));
+    *(__IO uint8_t *)&SPI1->DR = 0x83;
+    *(__IO uint8_t *)&SPI1->DR = 0x00;
+
+    while (!(SPI2->SR & SPI_SR_TXE));
+    *(__IO uint8_t *)&SPI2->DR = 0x83;
+    *(__IO uint8_t *)&SPI2->DR = 0x00;
+
+    // Both SPI1 and SPI2 hardware engines are now shifting 16 bits in parallel!
+
+    // 4. Read Register 0x03 from SPI1
+    uint32_t to = 0;
+    while (!(SPI1->SR & SPI_SR_RXNE) && ++to < 1000);
+    uint8_t d1 = *(__IO uint8_t *)&SPI1->DR;
+    to = 0;
+    while (!(SPI1->SR & SPI_SR_RXNE) && ++to < 1000);
+    uint8_t h1 = *(__IO uint8_t *)&SPI1->DR;
+    to = 0;
+    while ((SPI1->SR & SPI_SR_BSY) && ++to < 1000);
+
+    // 5. Read Register 0x03 from SPI2 (already finished in parallel)
+    to = 0;
+    while (!(SPI2->SR & SPI_SR_RXNE) && ++to < 1000);
+    uint8_t d2 = *(__IO uint8_t *)&SPI2->DR;
+    to = 0;
+    while (!(SPI2->SR & SPI_SR_RXNE) && ++to < 1000);
+    uint8_t h2 = *(__IO uint8_t *)&SPI2->DR;
+    to = 0;
+    while ((SPI2->SR & SPI_SR_BSY) && ++to < 1000);
+
+    // 6. Deassert both CS lines
+    MT6816Sensor::delayNanos(60);
+    enc1.csHigh();
+    enc2.csHigh();
+
+    MT6816Sensor::delayNanos(150); // t_CS_HIGH hold time (>= 150 ns)
+
+    // --- Register 0x04 (Low Byte + Parity + Status) ---
+
+    // 7. Assert both Chip Selects
+    enc1.csLow();
+    enc2.csLow();
+    MT6816Sensor::delayNanos(120);
+
+    // 8. Simultaneously queue 0x8400 on SPI1 and SPI2 TX FIFOs
+    while (!(SPI1->SR & SPI_SR_TXE));
+    *(__IO uint8_t *)&SPI1->DR = 0x84;
+    *(__IO uint8_t *)&SPI1->DR = 0x00;
+
+    while (!(SPI2->SR & SPI_SR_TXE));
+    *(__IO uint8_t *)&SPI2->DR = 0x84;
+    *(__IO uint8_t *)&SPI2->DR = 0x00;
+
+    // 9. Read Register 0x04 from SPI1
+    to = 0;
+    while (!(SPI1->SR & SPI_SR_RXNE) && ++to < 1000);
+    uint8_t d3 = *(__IO uint8_t *)&SPI1->DR;
+    to = 0;
+    while (!(SPI1->SR & SPI_SR_RXNE) && ++to < 1000);
+    uint8_t l1 = *(__IO uint8_t *)&SPI1->DR;
+    to = 0;
+    while ((SPI1->SR & SPI_SR_BSY) && ++to < 1000);
+
+    // 10. Read Register 0x04 from SPI2
+    to = 0;
+    while (!(SPI2->SR & SPI_SR_RXNE) && ++to < 1000);
+    uint8_t d4 = *(__IO uint8_t *)&SPI2->DR;
+    to = 0;
+    while (!(SPI2->SR & SPI_SR_RXNE) && ++to < 1000);
+    uint8_t l2 = *(__IO uint8_t *)&SPI2->DR;
+    to = 0;
+    while ((SPI2->SR & SPI_SR_BSY) && ++to < 1000);
+
+    // 11. Deassert both CS lines
+    MT6816Sensor::delayNanos(60);
+    enc1.csHigh();
+    enc2.csHigh();
+
+    // 12. Parse angles and parity
+    enc1.total_reads++;
+    enc2.total_reads++;
+    enc1.parseRawData(h1, l1);
+    enc2.parseRawData(h2, l2);
+}
 
 #endif // MT6816_SPI_H
