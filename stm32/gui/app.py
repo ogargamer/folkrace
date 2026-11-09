@@ -1408,6 +1408,20 @@ class DualMotorDashboardApp(tk.Tk):
             except Exception:
                 pass
 
+        if os.path.exists(LUT_M1_JSON_PATH):
+            try:
+                with open(LUT_M1_JSON_PATH, "r") as f:
+                    self._update_motor_config_cache(1, json.load(f))
+            except Exception:
+                pass
+
+        if os.path.exists(LUT_M2_JSON_PATH):
+            try:
+                with open(LUT_M2_JSON_PATH, "r") as f:
+                    self._update_motor_config_cache(2, json.load(f))
+            except Exception:
+                pass
+
         # Populate GUI entries with active motor's values
         self._load_gui_from_motor_config(self.active_motor)
 
@@ -1423,6 +1437,97 @@ class DualMotorDashboardApp(tk.Tk):
         if "zero_electric_angle" in cfg: target["zero"] = float(cfg["zero_electric_angle"])
         if "sensor_direction" in cfg: target["sensor_direction"] = int(cfg["sensor_direction"])
         if "align_v" in cfg: target["align_v"] = float(cfg["align_v"])
+        if "lut_128" in cfg and isinstance(cfg["lut_128"], list) and len(cfg["lut_128"]) == 128:
+            target["lut_128"] = [float(x) for x in cfg["lut_128"]]
+        elif "lut_errors" in cfg and isinstance(cfg["lut_errors"], list) and len(cfg["lut_errors"]) == 128:
+            target["lut_128"] = [float(x) for x in cfg["lut_errors"]]
+
+    def _save_motor_config_to_disk(self, motor_id, m_cfg=None, target_file=None, silent=False):
+        """Saves specified motor's config and LUT to disk without overwriting the other motor."""
+        m = motor_id
+        if m_cfg is None:
+            cached = self.motor_configs.get(m, {})
+            lut_data = cached.get("lut_128", [0.0] * 128)
+            z = float(cached.get("zero", -12345.0))
+            is_cal = (z != -12345.0 and z != 0.0) or any(abs(x) > 1e-6 for x in lut_data)
+            m_cfg = {
+                "motor_id": m,
+                "zero_electric_angle": z,
+                "sensor_direction": int(cached.get("sensor_direction", 1)),
+                "sensor_lag_comp_us": float(cached.get("lag", 35.0)),
+                "motor_kv_rating": float(cached.get("kv", 130.0)),
+                "is_lut_calibrated": bool(is_cal),
+                "pid_p": float(cached.get("pid_p", 0.15)),
+                "pid_i": float(cached.get("pid_i", 1.5)),
+                "pid_d": float(cached.get("pid_d", 0.0)),
+                "lpf_tf": float(cached.get("lpf_tf", 0.0005)),
+                "dwt_window_ms": float(cached.get("dwt", 2.0)),
+                "lut_128": lut_data
+            }
+
+        lut = m_cfg.get("lut_128", [0.0] * 128)
+        std_cfg_path = MOTOR_CONFIG_M1_JSON_PATH if m == 1 else MOTOR_CONFIG_M2_JSON_PATH
+        std_lut_path = LUT_M1_JSON_PATH if m == 1 else LUT_M2_JSON_PATH
+
+        # 1. Save dedicated motor config
+        with open(std_cfg_path, "w") as f:
+            json.dump(m_cfg, f, indent=2)
+
+        # 2. Save dedicated motor LUT
+        with open(std_lut_path, "w") as f:
+            json.dump({
+                "motor_id": m,
+                "lut_errors": lut,
+                "zero_electric_angle": m_cfg["zero_electric_angle"],
+                "sensor_direction": m_cfg["sensor_direction"],
+                "sensor_lag_comp_us": m_cfg["sensor_lag_comp_us"]
+            }, f, indent=2)
+
+        # 3. Save combined lut_calibrations.json while PRESERVING other motor
+        lut_dual = {}
+        if os.path.exists(LUT_JSON_PATH):
+            try:
+                with open(LUT_JSON_PATH, "r") as f:
+                    lut_dual = json.load(f)
+            except Exception:
+                lut_dual = {}
+        lut_dual[f"motor{m}"] = {
+            "lut_errors": lut,
+            "zero_electric_angle": m_cfg["zero_electric_angle"],
+            "sensor_direction": m_cfg["sensor_direction"],
+            "sensor_lag_comp_us": m_cfg["sensor_lag_comp_us"]
+        }
+        with open(LUT_JSON_PATH, "w") as f:
+            json.dump(lut_dual, f, indent=2)
+
+        # 4. Save custom destination if user used 'Save As'
+        if target_file and os.path.abspath(target_file) != os.path.abspath(std_cfg_path):
+            with open(target_file, "w") as f:
+                json.dump(m_cfg, f, indent=2)
+
+        # 5. Legacy config file for backwards compatibility
+        with open(MOTOR_CONFIG_JSON_PATH, "w") as f:
+            json.dump(m_cfg, f, indent=2)
+
+        self._update_motor_config_cache(m, m_cfg)
+        self.after(0, lambda: self._load_gui_from_motor_config(self.active_motor))
+
+        self.after(0, lambda: self._log_console(
+            f"[SYS] Motor {m} calibration & profile successfully saved:\n"
+            f"      • Config -> {os.path.basename(std_cfg_path)}\n"
+            f"      • LUT    -> {os.path.basename(std_lut_path)}\n"
+            f"      • Combined -> {os.path.basename(LUT_JSON_PATH)}\n"
+        ))
+
+        if not silent:
+            dest_msg = os.path.basename(target_file) if target_file else os.path.basename(std_cfg_path)
+            self.after(0, lambda: messagebox.showinfo(
+                "Calibration Saved",
+                f"Successfully saved Motor {m} calibration & profile to:\n\n"
+                f"• {dest_msg}\n"
+                f"• {os.path.basename(std_lut_path)}\n"
+                f"• {os.path.basename(LUT_JSON_PATH)}"
+            ))
 
     def _export_config_to_json(self, motor_id=None, silent=False):
         """Exports calibration without conflict. Motor 1 -> motor_config_m1.json, Motor 2 -> motor_config_m2.json"""
@@ -1442,25 +1547,41 @@ class DualMotorDashboardApp(tk.Tk):
                 return
             target_file = chosen
 
-        self._pending_json_save_path = target_file
-        self._pending_export_motor_id = motor_id
-        self._silent_json_export = silent
-        self._explicit_export_requested = True
-        self.serial_engine.send_command("export")
+        # Update in-memory configuration from current GUI entries before exporting
+        self._save_gui_to_motor_config(self.active_motor)
+
+        if self.serial_engine.state.get("connected", False):
+            self._pending_json_save_path = target_file
+            self._pending_export_motor_id = motor_id
+            self._silent_json_export = silent
+            self._explicit_export_requested = True
+            self.serial_engine.send_command("export")
+        else:
+            # Offline export directly from cached GUI parameters
+            self._save_motor_config_to_disk(motor_id, target_file=target_file, silent=silent)
 
     def _on_config_json_received(self, json_str):
-        """Processes dual-motor config JSON from STM32 and writes separated calibration files."""
+        """Processes dual-motor config JSON from STM32."""
         try:
             cfg = json.loads(json_str)
-            target_motor = getattr(self, "_pending_export_motor_id", self.active_motor)
+            target_motor = getattr(self, "_pending_export_motor_id", None)
             is_valid = getattr(self, "_explicit_export_requested", False)
+            save_path = getattr(self, "_pending_json_save_path", None)
+            silent = getattr(self, "_silent_json_export", False)
+
+            # Reset export request flags immediately
             self._explicit_export_requested = False
+            self._pending_export_motor_id = None
+            self._pending_json_save_path = None
+            self._silent_json_export = False
 
             # Extract Motor 1 data
             m1_lut = cfg.get("lut_128", [0.0] * 128)
+            m1_zero = float(cfg.get("zero_electric_angle", -12345.0))
+            m1_is_cal = (m1_zero != -12345.0 and m1_zero != 0.0) or any(abs(x) > 1e-6 for x in m1_lut)
             m1_cfg = {
                 "motor_id": 1,
-                "zero_electric_angle": float(cfg.get("zero_electric_angle", 0.0)),
+                "zero_electric_angle": m1_zero,
                 "sensor_direction": int(cfg.get("sensor_direction", 1)),
                 "sensor_lag_comp_us": float(cfg.get("sensor_lag_comp_us", 35.0)),
                 "motor_kv_rating": float(cfg.get("motor_kv_rating", 130.0)),
@@ -1474,111 +1595,50 @@ class DualMotorDashboardApp(tk.Tk):
             }
 
             # Extract Motor 2 data
-            m2_zero = float(cfg.get("m2_zero_electric_angle", cfg.get("zero_electric_angle", 0.0)))
-            m2_dir = int(cfg.get("m2_sensor_direction", cfg.get("sensor_direction", 1)))
             m2_lut = cfg.get("m2_lut_128", [0.0] * 128)
+            m2_zero = float(cfg.get("m2_zero_electric_angle", -12345.0))
+            m2_is_cal = (m2_zero != -12345.0 and m2_zero != 0.0) or any(abs(x) > 1e-6 for x in m2_lut)
             m2_cfg = {
                 "motor_id": 2,
                 "zero_electric_angle": m2_zero,
-                "sensor_direction": m2_dir,
-                "sensor_lag_comp_us": float(cfg.get("m2_sensor_lag_comp_us", 35.0)),
-                "motor_kv_rating": float(cfg.get("m2_motor_kv_rating", 130.0)),
+                "sensor_direction": int(cfg.get("m2_sensor_direction", 1)),
+                "sensor_lag_comp_us": float(cfg.get("m2_sensor_lag_comp_us", cfg.get("sensor_lag_comp_us", 35.0))),
+                "motor_kv_rating": float(cfg.get("m2_motor_kv_rating", cfg.get("motor_kv_rating", 130.0))),
                 "is_lut_calibrated": bool(cfg.get("m2_is_lut_calibrated", False)),
-                "pid_p": float(cfg.get("m2_pid_p", 0.15)),
-                "pid_i": float(cfg.get("m2_pid_i", 1.5)),
-                "pid_d": float(cfg.get("m2_pid_d", 0.0)),
-                "lpf_tf": float(cfg.get("m2_lpf_tf", 0.0005)),
-                "dwt_window_ms": float(cfg.get("m2_dwt_window_ms", 2.0)),
+                "pid_p": float(cfg.get("m2_pid_p", cfg.get("pid_p", 0.15))),
+                "pid_i": float(cfg.get("m2_pid_i", cfg.get("pid_i", 1.5))),
+                "pid_d": float(cfg.get("m2_pid_d", cfg.get("pid_d", 0.0))),
+                "lpf_tf": float(cfg.get("m2_lpf_tf", cfg.get("lpf_tf", 0.0005))),
+                "dwt_window_ms": float(cfg.get("m2_dwt_window_ms", cfg.get("dwt_window_ms", 2.0))),
                 "lut_128": m2_lut
             }
 
-            self._update_motor_config_cache(1, m1_cfg)
-            self._update_motor_config_cache(2, m2_cfg)
+            if is_valid:
+                # User or auto-calibrator explicitly requested an export to disk
+                if target_motor == 2:
+                    self._save_motor_config_to_disk(2, m_cfg=m2_cfg, target_file=save_path, silent=silent)
+                elif target_motor == 1:
+                    self._save_motor_config_to_disk(1, m_cfg=m1_cfg, target_file=save_path, silent=silent)
+                else:
+                    # Both motors requested
+                    self._save_motor_config_to_disk(1, m_cfg=m1_cfg, silent=True)
+                    self._save_motor_config_to_disk(2, m_cfg=m2_cfg, silent=silent)
+            else:
+                # Background telemetry query (e.g. on connect or after SAVE/LOAD on firmware)
+                # NEVER write to disk! Only update in-memory cache if board has valid data
+                if m1_is_cal:
+                    self._update_motor_config_cache(1, m1_cfg)
+                if m2_is_cal:
+                    self._update_motor_config_cache(2, m2_cfg)
 
-            save_path = getattr(self, "_pending_json_save_path", None)
-
-            # Save distinct, non-conflicting calibration files
-            if is_valid or m1_cfg["zero_electric_angle"] != 0.0 or m2_cfg["zero_electric_angle"] != 0.0:
-                # 1. Distinct Motor 1 config & LUT
-                with open(MOTOR_CONFIG_M1_JSON_PATH, "w") as f:
-                    json.dump(m1_cfg, f, indent=2)
-
-                with open(LUT_M1_JSON_PATH, "w") as f:
-                    json.dump({
-                        "motor_id": 1,
-                        "lut_errors": m1_lut,
-                        "zero_electric_angle": m1_cfg["zero_electric_angle"],
-                        "sensor_direction": m1_cfg["sensor_direction"],
-                        "sensor_lag_comp_us": m1_cfg["sensor_lag_comp_us"]
-                    }, f, indent=2)
-
-                # 2. Distinct Motor 2 config & LUT
-                with open(MOTOR_CONFIG_M2_JSON_PATH, "w") as f:
-                    json.dump(m2_cfg, f, indent=2)
-
-                with open(LUT_M2_JSON_PATH, "w") as f:
-                    json.dump({
-                        "motor_id": 2,
-                        "lut_errors": m2_lut,
-                        "zero_electric_angle": m2_cfg["zero_electric_angle"],
-                        "sensor_direction": m2_cfg["sensor_direction"],
-                        "sensor_lag_comp_us": m2_cfg["sensor_lag_comp_us"]
-                    }, f, indent=2)
-
-                # 3. Combined file preserving both motor calibrations
-                lut_dual = {}
-                if os.path.exists(LUT_JSON_PATH):
-                    try:
-                        with open(LUT_JSON_PATH, "r") as f:
-                            lut_dual = json.load(f)
-                    except Exception:
-                        lut_dual = {}
-                lut_dual["motor1"] = {
-                    "lut_errors": m1_lut,
-                    "zero_electric_angle": m1_cfg["zero_electric_angle"],
-                    "sensor_direction": m1_cfg["sensor_direction"],
-                    "sensor_lag_comp_us": m1_cfg["sensor_lag_comp_us"]
-                }
-                lut_dual["motor2"] = {
-                    "lut_errors": m2_lut,
-                    "zero_electric_angle": m2_cfg["zero_electric_angle"],
-                    "sensor_direction": m2_cfg["sensor_direction"],
-                    "sensor_lag_comp_us": m2_cfg["sensor_lag_comp_us"]
-                }
-                with open(LUT_JSON_PATH, "w") as f:
-                    json.dump(lut_dual, f, indent=2)
-
-                # 4. Save custom destination if user used 'Save As'
-                if save_path and save_path not in (MOTOR_CONFIG_M1_JSON_PATH, MOTOR_CONFIG_M2_JSON_PATH):
-                    chosen_cfg = m1_cfg if target_motor == 1 else m2_cfg
-                    with open(save_path, "w") as f:
-                        json.dump(chosen_cfg, f, indent=2)
-
-                # 5. Legacy config file
-                with open(MOTOR_CONFIG_JSON_PATH, "w") as f:
-                    json.dump(cfg, f, indent=2)
-
-                # Update active GUI fields
                 self.after(0, lambda: self._load_gui_from_motor_config(self.active_motor))
 
+                m1_str = f"{m1_zero:.4f} rad" if m1_is_cal else "Not calibrated"
+                m2_str = f"{m2_zero:.4f} rad" if m2_is_cal else "Not calibrated"
                 self.after(0, lambda: self._log_console(
-                    f"[SYS] Calibrations saved without conflict:\n"
-                    f"      • Motor 1 -> {os.path.basename(MOTOR_CONFIG_M1_JSON_PATH)} & {os.path.basename(LUT_M1_JSON_PATH)}\n"
-                    f"      • Motor 2 -> {os.path.basename(MOTOR_CONFIG_M2_JSON_PATH)} & {os.path.basename(LUT_M2_JSON_PATH)}\n"
+                    f"[SYS] Board state sync: M1 Zero={m1_str}, M2 Zero={m2_str}\n"
                 ))
 
-                if not getattr(self, "_silent_json_export", False):
-                    self.after(0, lambda: messagebox.showinfo(
-                        "Calibrations Saved",
-                        f"Saved calibrations without conflict:\n\n"
-                        f"• Motor 1: {os.path.basename(MOTOR_CONFIG_M1_JSON_PATH)}\n"
-                        f"• Motor 2: {os.path.basename(MOTOR_CONFIG_M2_JSON_PATH)}\n"
-                        f"• LUT Files: {os.path.basename(LUT_M1_JSON_PATH)} / {os.path.basename(LUT_M2_JSON_PATH)}"
-                    ))
-            else:
-                self.after(0, lambda: self._log_console(
-                    f"[SYS] Live config received: M1={m1_cfg['zero_electric_angle']:.4f} rad, M2={m2_cfg['zero_electric_angle']:.4f} rad\n"
-                ))
         except Exception as ex:
             self.after(0, lambda: self._log_console(f"[JSON ERR] Failed to parse exported JSON: {ex}\n"))
 
