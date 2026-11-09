@@ -425,27 +425,16 @@ static inline void readDualEncodersParallel(MT6816Sensor &enc1, MT6816Sensor &en
 
     // Both SPI1 and SPI2 hardware engines are now shifting 16 bits in parallel!
 
-    // 4. Read Register 0x03 from SPI1
+    // 4. Wait for both SPI1 and SPI2 engines to finish shifting in parallel
     uint32_t to = 0;
-    while (!(SPI1->SR & SPI_SR_RXNE) && ++to < 1000);
+    while (((SPI1->SR & SPI_SR_BSY) || (SPI2->SR & SPI_SR_BSY)) && ++to < 2000);
+
     uint8_t d1 = *(__IO uint8_t *)&SPI1->DR;
-    to = 0;
-    while (!(SPI1->SR & SPI_SR_RXNE) && ++to < 1000);
     uint8_t h1 = *(__IO uint8_t *)&SPI1->DR;
-    to = 0;
-    while ((SPI1->SR & SPI_SR_BSY) && ++to < 1000);
-
-    // 5. Read Register 0x03 from SPI2 (already finished in parallel)
-    to = 0;
-    while (!(SPI2->SR & SPI_SR_RXNE) && ++to < 1000);
     uint8_t d2 = *(__IO uint8_t *)&SPI2->DR;
-    to = 0;
-    while (!(SPI2->SR & SPI_SR_RXNE) && ++to < 1000);
     uint8_t h2 = *(__IO uint8_t *)&SPI2->DR;
-    to = 0;
-    while ((SPI2->SR & SPI_SR_BSY) && ++to < 1000);
 
-    // 6. Deassert both CS lines
+    // 5. Deassert both CS lines
     MT6816Sensor::delayNanos(60);
     enc1.csHigh();
     enc2.csHigh();
@@ -454,12 +443,12 @@ static inline void readDualEncodersParallel(MT6816Sensor &enc1, MT6816Sensor &en
 
     // --- Register 0x04 (Low Byte + Parity + Status) ---
 
-    // 7. Assert both Chip Selects
+    // 6. Assert both Chip Selects
     enc1.csLow();
     enc2.csLow();
     MT6816Sensor::delayNanos(120);
 
-    // 8. Simultaneously queue 0x8400 on SPI1 and SPI2 TX FIFOs
+    // 7. Simultaneously queue 0x8400 on SPI1 and SPI2 TX FIFOs
     while (!(SPI1->SR & SPI_SR_TXE));
     *(__IO uint8_t *)&SPI1->DR = 0x84;
     *(__IO uint8_t *)&SPI1->DR = 0x00;
@@ -468,27 +457,16 @@ static inline void readDualEncodersParallel(MT6816Sensor &enc1, MT6816Sensor &en
     *(__IO uint8_t *)&SPI2->DR = 0x84;
     *(__IO uint8_t *)&SPI2->DR = 0x00;
 
-    // 9. Read Register 0x04 from SPI1
+    // 8. Wait for both SPI1 and SPI2 engines to finish shifting in parallel
     to = 0;
-    while (!(SPI1->SR & SPI_SR_RXNE) && ++to < 1000);
+    while (((SPI1->SR & SPI_SR_BSY) || (SPI2->SR & SPI_SR_BSY)) && ++to < 2000);
+
     uint8_t d3 = *(__IO uint8_t *)&SPI1->DR;
-    to = 0;
-    while (!(SPI1->SR & SPI_SR_RXNE) && ++to < 1000);
     uint8_t l1 = *(__IO uint8_t *)&SPI1->DR;
-    to = 0;
-    while ((SPI1->SR & SPI_SR_BSY) && ++to < 1000);
-
-    // 10. Read Register 0x04 from SPI2
-    to = 0;
-    while (!(SPI2->SR & SPI_SR_RXNE) && ++to < 1000);
     uint8_t d4 = *(__IO uint8_t *)&SPI2->DR;
-    to = 0;
-    while (!(SPI2->SR & SPI_SR_RXNE) && ++to < 1000);
     uint8_t l2 = *(__IO uint8_t *)&SPI2->DR;
-    to = 0;
-    while ((SPI2->SR & SPI_SR_BSY) && ++to < 1000);
 
-    // 11. Deassert both CS lines
+    // 9. Deassert both CS lines
     MT6816Sensor::delayNanos(60);
     enc1.csHigh();
     enc2.csHigh();
