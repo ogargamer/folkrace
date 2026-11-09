@@ -24,6 +24,7 @@ if CURR_DIR not in sys.path:
 
 PLANNER_SCRIPT = os.path.join(CURR_DIR, "path_planner_runner.py")
 DEBUG_SERVER_SCRIPT = os.path.join(CURR_DIR, "debug_server.py")
+BRIDGE_SCRIPT = os.path.join(CURR_DIR, "mcu_uart_bridge.py")
 
 
 def check_core_assignment(pid: int) -> str:
@@ -55,10 +56,22 @@ def main():
         except Exception:
             pass
 
+    # Launch MCU UART Bridge on Core 3 (if available)
+    p_bridge = None
+    if os.path.exists(BRIDGE_SCRIPT):
+        print("[1/3] Launching MCU Binary UART Bridge on Core 3...")
+        if has_taskset:
+            cmd_bridge = ["taskset", "-c", "3", sys.executable, BRIDGE_SCRIPT]
+        else:
+            cmd_bridge = [sys.executable, BRIDGE_SCRIPT]
+        p_bridge = subprocess.Popen(cmd_bridge, cwd=CURR_DIR)
+        time.sleep(0.5)
+        print(f"      PID: {p_bridge.pid} | CPU Core Mask: {check_core_assignment(p_bridge.pid)}")
+
     # Launch Debug Server on Core 2
-    print("[1/2] Launching Debug Server on Core 2...")
+    print("[2/3] Launching Debug Server on Core 2...")
     if has_taskset:
-        cmd_debug = ["taskset", "-c", "2,3", sys.executable, DEBUG_SERVER_SCRIPT]
+        cmd_debug = ["taskset", "-c", "2", sys.executable, DEBUG_SERVER_SCRIPT]
     else:
         cmd_debug = [sys.executable, DEBUG_SERVER_SCRIPT]
 
@@ -67,7 +80,7 @@ def main():
     print(f"      PID: {p_debug.pid} | CPU Core Mask: {check_core_assignment(p_debug.pid)}")
 
     # Launch Path Planner on Core 1
-    print("[2/2] Launching Real-Time Path Planner on Core 1...")
+    print("[3/3] Launching Real-Time Path Planner on Core 1...")
     if sys.platform == "linux":
         cmd_planner = ["taskset", "-c", "1", sys.executable, PLANNER_SCRIPT]
     else:
@@ -79,6 +92,7 @@ def main():
 
     print("=" * 70)
     print("  [SYSTEM READY]")
+    print("  * MCU UART Bridge is streaming real sensors on CPU CORE 3.")
     print("  * Path Planner is running deterministically on CPU CORE 1.")
     print("  * Debug Server & Black Box Recorder are running on CPU CORE 2.")
     print("  * Open Web Dashboard on connected laptop: http://robot:8080")
@@ -87,7 +101,10 @@ def main():
 
     try:
         while True:
-            # Check if either process died unexpectedly
+            # Check if any process died unexpectedly
+            if p_bridge and p_bridge.poll() is not None:
+                print(f"[Launcher] MCU UART bridge exited with code {p_bridge.returncode}")
+                break
             if p_debug.poll() is not None:
                 print(f"[Launcher] Debug server exited with code {p_debug.returncode}")
                 break
@@ -98,7 +115,7 @@ def main():
     except KeyboardInterrupt:
         print("\n[Launcher] Shutting down Folkrace subsystems...")
     finally:
-        for p in (p_planner, p_debug):
+        for p in (p_planner, p_debug, p_bridge):
             if p and p.poll() is None:
                 p.terminate()
                 try:

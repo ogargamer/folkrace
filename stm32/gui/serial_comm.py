@@ -63,6 +63,7 @@ class STM32DualSerial:
             "m1_mag_ok": True,
             "m1_parity_ok": True,
             "m1_stalled": False,
+            "m1_fault": False,
             "m1_calib": False,
             "m1_zero_angle": 0.0,
             "m1_direction": "CW",
@@ -79,6 +80,7 @@ class STM32DualSerial:
             "m2_mag_ok": True,
             "m2_parity_ok": True,
             "m2_stalled": False,
+            "m2_fault": False,
             "m2_calib": False,
             "m2_zero_angle": 0.0,
             "m2_direction": "CW",
@@ -378,6 +380,7 @@ class STM32DualSerial:
             self.state["m1_mag_ok"]      = bool(s1 & (1 << 2))
             self.state["m1_parity_ok"]   = bool(s1 & (1 << 3))
             self.state["m1_stalled"]     = bool(s1 & (1 << 4))
+            self.state["m1_fault"]       = bool(s1 & (1 << 6))
             self.state["m1_calib"]       = bool(s1 & (1 << 5))
 
             self.state["m2_raw_angle"]   = m2_raw
@@ -389,6 +392,7 @@ class STM32DualSerial:
             self.state["m2_mag_ok"]      = bool(s2 & (1 << 2))
             self.state["m2_parity_ok"]   = bool(s2 & (1 << 3))
             self.state["m2_stalled"]     = bool(s2 & (1 << 4))
+            self.state["m2_fault"]       = bool(s2 & (1 << 6))
             self.state["m2_calib"]       = bool(s2 & (1 << 5))
 
             self.state["foc_khz"]          = foc_khz

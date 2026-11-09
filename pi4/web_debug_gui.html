@@ -1352,9 +1352,11 @@ function updateHUD(pkt) {
   document.getElementById("lblTime").innerText = `${mins}:${secs}`;
 }
 
-// Polling / Live Streaming
+// Polling / Live Streaming (Non-blocking self-scheduling loop)
+let isFetching = false;
 async function fetchLive() {
-  if (!isLive) return;
+  if (!isLive || isFetching) return;
+  isFetching = true;
   try {
     const res = await fetch("/api/live");
     if (res.ok) {
@@ -1370,9 +1372,15 @@ async function fetchLive() {
         document.getElementById("lblFrame").innerText = `Frame ${totalFrames} / ${totalFrames}`;
       }
     }
-  } catch (err) {}
+  } catch (err) {
+  } finally {
+    isFetching = false;
+    if (isLive) {
+      setTimeout(fetchLive, 66); // Smooth 15 FPS cadence, prevents request backlog
+    }
+  }
 }
-setInterval(fetchLive, 33); // ~30 FPS live polling
+setTimeout(fetchLive, 100);
 
 // Server Status / System Info
 async function fetchStatus() {
@@ -1417,6 +1425,7 @@ document.getElementById("btnToggleLive").addEventListener("click", () => {
   document.getElementById("btnToggleLive").classList.add("active");
   document.getElementById("modeBadge").innerText = "LIVE STREAM";
   document.getElementById("modeBadge").className = "badge badge-live";
+  setTimeout(fetchLive, 50);
 });
 
 async function loadFrame(frameId) {

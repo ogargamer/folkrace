@@ -33,6 +33,7 @@ from mcu_telemetry_protocol import (
     CHASSIS_SIZE,
     TOF_SIZE,
     TOF_SUB_SIZE,
+    TOF_SUB60_SIZE,
     decode_chassis_packet,
     decode_tof_packet,
     decode_tof_sub_packet,
@@ -104,15 +105,28 @@ class BinaryStreamParser:
                 else:
                     del self.buffer[:2]
             else:
-                # ESP32-ToF Port (supports both 20-byte per-sensor and 78-byte full array)
+                # ESP32-ToF Port (supports 60-byte multi-target, 20-byte per-sensor, and 78-byte full array)
                 if 1 <= msg_type_or_sensor_id <= 4:
-                    if len(self.buffer) < TOF_SUB_SIZE:
+                    if len(self.buffer) >= TOF_SUB60_SIZE:
+                        raw_pkt = bytes(self.buffer[:TOF_SUB60_SIZE])
+                        decoded = decode_tof_sub_packet(raw_pkt)
+                        if decoded:
+                            del self.buffer[:TOF_SUB60_SIZE]
+                            yield (MSG_ID_TOF_SUB_TELEM, decoded)
+                            continue
+
+                    if len(self.buffer) >= TOF_SUB_SIZE and len(self.buffer) < TOF_SUB60_SIZE:
+                        raw_pkt = bytes(self.buffer[:TOF_SUB_SIZE])
+                        decoded = decode_tof_sub_packet(raw_pkt)
+                        if decoded:
+                            del self.buffer[:TOF_SUB_SIZE]
+                            yield (MSG_ID_TOF_SUB_TELEM, decoded)
+                            continue
+
+                    if len(self.buffer) < TOF_SUB60_SIZE:
                         break
-                    raw_pkt = bytes(self.buffer[:TOF_SUB_SIZE])
-                    del self.buffer[:TOF_SUB_SIZE]
-                    decoded = decode_tof_sub_packet(raw_pkt)
-                    if decoded:
-                        yield (MSG_ID_TOF_SUB_TELEM, decoded)
+
+                    del self.buffer[:2]
                 elif msg_type_or_sensor_id == MSG_ID_TOF_TELEM:
                     if len(self.buffer) < TOF_SIZE:
                         break
@@ -125,6 +139,20 @@ class BinaryStreamParser:
                     del self.buffer[:2]
 
 
+def resolve_serial_port(port: Optional[str], role: str = "tof", exclude: Optional[str] = None) -> Optional[str]:
+    """Auto-detects and verifies available serial port for MCU communication."""
+    if port and port != "auto" and os.path.exists(port):
+        return port
+    if role == "tof":
+        candidates = ["/dev/ttyACM0", "/dev/ttyUSB0", "/dev/ttyACM1", "/dev/ttyUSB1", "/dev/ttyAMA2", "/dev/ttyAMA1"]
+    else:
+        candidates = ["/dev/ttyAMA0", "/dev/ttyUSB1", "/dev/ttyUSB0"]
+    for c in candidates:
+        if c != exclude and os.path.exists(c):
+            return c
+    return port if port != "auto" else None
+
+
 class MCU_UART_Bridge:
     def __init__(
         self,
@@ -134,9 +162,10 @@ class MCU_UART_Bridge:
         udp_host: str = UDP_DISPATCH_HOST,
         udp_port: int = UDP_DISPATCH_PORT,
     ):
-        self.main_port = main_port
-        self.tof_port = tof_port
+        self.tof_port = resolve_serial_port(tof_port, role="tof")
+        self.main_port = resolve_serial_port(main_port, role="main", exclude=self.tof_port)
         self.baud = baud
+        self.udp_host = udp_host
         self.udp_target = (udp_host, udp_port)
         self.running = False
 
@@ -241,7 +270,8 @@ class MCU_UART_Bridge:
 
         try:
             raw = json.dumps(telemetry).encode("utf-8")
-            self.udp_sock.sendto(raw, self.udp_target)
+            self.udp_sock.sendto(raw, (self.udp_host, 9875))  # Real-time feed to Path Planner Core 1
+            self.udp_sock.sendto(raw, self.udp_target)        # Telemetry to Debug Server Core 2
         except Exception:
             pass
 
@@ -249,8 +279,8 @@ class MCU_UART_Bridge:
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Folkrace MCU Binary UART Bridge")
-    parser.add_argument("--main", default="/dev/ttyAMA0", help="ESP32 Main serial device")
-    parser.add_argument("--tof", default="/dev/ttyAMA2", help="ESP32 ToF Hub serial device")
+    parser.add_argument("--main", default="/dev/ttyAMA0", help="ESP32 Main serial device (or auto)")
+    parser.add_argument("--tof", default="auto", help="ESP32 ToF Hub serial device (auto-detects /dev/ttyACM0, /dev/ttyUSB0, /dev/ttyAMA2, etc.)")
     parser.add_argument("--baud", type=int, default=UART_BAUD, help="UART baud rate")
     args = parser.parse_args()
 

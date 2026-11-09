@@ -9,6 +9,10 @@ description: SSH connection, command execution, and code deployment for Raspberr
 - **Local Source**: `pi4/`
 - **Remote Target**: `/home/admin/folkrace/`
 
+## Connection Guidelines
+- Use a short timeout (`-o ConnectTimeout=2`) when checking Pi availability.
+- If the Pi does not respond or times out, **stop immediately**: do NOT retry in a loop and do NOT scan the subnet. Inform the user right away that the Pi is unreachable (e.g. insufficient USB power/brownout, power off, or network loss).
+
 ## Quick Commands
 - **Run command**: `ssh robot "<command>"`
 - **Sync pi4 files**: `scp -r pi4/* admin@robot:/home/admin/folkrace/`

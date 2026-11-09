@@ -79,9 +79,9 @@ ALLOCATION = {
     "TOF4_INT":        {"gpio": 38, "dir": "IN",  "bus": "GPIO",       "role": "ToF 4 Data Ready Interrupt"},
     "TOF4_CS":         {"gpio": 47, "dir": "OUT", "bus": "GPIO",       "role": "ToF 4 Chip Select (Active LOW)"},
 
-    # Host High-Speed Telemetry (UART0 to Raspberry Pi 5 / PC) — Header J3 Pins 2-3
-    "HOST_UART_TX":    {"gpio": 43, "dir": "OUT", "bus": "UART0",      "role": "Host Serial TX -> Pi 5 / PC"},
-    "HOST_UART_RX":    {"gpio": 44, "dir": "IN",  "bus": "UART0",      "role": "Host Serial RX <- Pi 5 / PC"},
+    # Host High-Speed Telemetry (UART0 to Raspberry Pi 4/5 / PC) — Header J3 Pins 2-3
+    "HOST_UART_TX":    {"gpio": 43, "dir": "OUT", "bus": "UART0",      "role": "TX -> Pi Pin 28 (GPIO 1 / RXD2)"},
+    "HOST_UART_RX":    {"gpio": 44, "dir": "IN",  "bus": "UART0",      "role": "RX <- Pi Pin 27 (GPIO 0 / TXD2)"},
 }
 
 
@@ -253,6 +253,7 @@ def display_results():
         item = ALLOCATION[sig]
         hpin = get_header_pin(item["gpio"])
         print(f"  {sig:<18} | {hpin:<17} | GPIO {item['gpio']:<4} | {item['bus']:<14} | {item['role']:<31}")
+    print("  * Alternative: Connect via USB-C cable directly to Pi USB port (/dev/ttyACM0).")
 
     print("-" * 95 + "\n")
 

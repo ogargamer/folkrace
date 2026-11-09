@@ -51,6 +51,7 @@ TARGET_HZ = 60.0
 DT_STEP = 1.0 / TARGET_HZ
 DEBUG_UDP_PORT = int(os.environ.get("DEBUG_UDP_PORT", 9876))
 DEBUG_UDP_HOST = os.environ.get("DEBUG_UDP_HOST", "127.0.0.1")
+SENSOR_UDP_PORT = int(os.environ.get("SENSOR_UDP_PORT", 9875))
 
 
 def create_nonblocking_udp_socket() -> socket.socket:
@@ -64,26 +65,6 @@ def create_nonblocking_udp_socket() -> socket.socket:
         pass
     return sock
 
-
-def load_dataset_frames() -> List[Dict[str, float]]:
-    """Loads recorded ToF sensor frames from local data directory."""
-    candidates = [
-        os.path.join(CURR_DIR, "data", "tof_readings_cube_10cm.csv"),
-        os.path.join(CURR_DIR, "tof_readings_cube_10cm.csv"),
-    ]
-    for p in candidates:
-        if os.path.exists(p):
-            frames = []
-            with open(p, "r", encoding="utf-8") as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    frame = {k: float(row[k]) for k in SENSOR_NAMES if k in row}
-                    if len(frame) == 16:
-                        frames.append(frame)
-            if frames:
-                print(f"[Planner Core 1] Loaded {len(frames)} benchmark ToF frames from {p}")
-                return frames
-    return []
 
 
 def run_path_planner():
@@ -112,21 +93,24 @@ def run_path_planner():
     planner = CurvilinearSLMPC(costmap_engine=costmap)
     planner.costmap = costmap
 
-    # 3. Setup Non-Blocking UDP Telemetry Dispatcher
+    # 3. Setup Non-Blocking UDP Telemetry Dispatcher & Live Sensor Receiver
     telem_sock = create_nonblocking_udp_socket()
     target_addr = (DEBUG_UDP_HOST, DEBUG_UDP_PORT)
 
-    # 4. Dataset / Perception Feed
-    frames = load_dataset_frames()
-    if not frames:
-        # Default synthetic frame if no CSV present
-        frames = [{k: 1.50 for k in SENSOR_NAMES}]
+    sensor_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sensor_sock.setblocking(False)
+    try:
+        sensor_sock.bind(("127.0.0.1", SENSOR_UDP_PORT))
+    except Exception as e:
+        print(f"[Planner Core 1] Note on sensor socket: {e}")
+
+    live_tof = {k: 1.80 for k in SENSOR_NAMES}
+    has_live_sensor_feed = False
 
     print(f"[Planner Core 1] Starting Deterministic {TARGET_HZ:.0f} Hz Loop (Period: {DT_STEP*1000:.2f} ms)...")
+    print(f"[Planner Core 1] Listening for live ToF stream on 127.0.0.1:{SENSOR_UDP_PORT}...")
     print("=" * 70)
 
-    frame_idx = 0
-    total_frames = len(frames)
     step_counter = 0
     sim_time = 0.0
 
@@ -146,9 +130,26 @@ def run_path_planner():
             sim_time += DT_STEP
             step_counter += 1
 
-            # 1. Perception Ingestion: Get 16-channel ToF frame
-            raw_tof = frames[frame_idx]
-            frame_idx = (frame_idx + 1) % total_frames
+            # 1. Perception Ingestion: Drain sensor UDP socket to receive latest real-time frame
+            while True:
+                try:
+                    raw_bytes, _ = sensor_sock.recvfrom(4096)
+                    pkt = json.loads(raw_bytes.decode("utf-8"))
+                    if "tof" in pkt and isinstance(pkt["tof"], dict):
+                        live_tof = pkt["tof"]
+                        has_live_sensor_feed = True
+                    elif "tof_ranges_raw" in pkt:
+                        live_tof = {
+                            SENSOR_NAMES[i]: pkt["tof_ranges_raw"][i]
+                            for i in range(min(16, len(pkt["tof_ranges_raw"])))
+                        }
+                        has_live_sensor_feed = True
+                except (BlockingIOError, socket.error):
+                    break
+                except Exception:
+                    break
+
+            raw_tof = live_tof
 
             # Option 1: Instantaneous Forward Extrapolation (Ego-Motion Latency Compensation)
             steer_rad = math.radians(steer_actual_deg)

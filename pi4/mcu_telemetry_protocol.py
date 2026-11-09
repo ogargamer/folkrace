@@ -42,6 +42,11 @@ TOF_SIZE = struct.calcsize(TOF_FORMAT)  # 78 bytes
 TOF_SUB_FORMAT = "<2sBII4HB"
 TOF_SUB_SIZE = struct.calcsize(TOF_SUB_FORMAT)  # 20 bytes
 
+# ToF 60-byte per-sensor frame (ESP32_ToF/src/main.cpp multi-target ToF_Binary_Packet):
+#      sync(2), sensor_id(B), seq(I), ts_ms(I), dist_mm(16H), status(16B), chk(B)
+TOF_SUB60_FORMAT = "<2sBII16H16BB"
+TOF_SUB60_SIZE = struct.calcsize(TOF_SUB60_FORMAT)  # 60 bytes
+
 # Motion Command: sync(2), msg_type(B), seq(I), v_cmd(h), steer_mrad(h), mode(B), chk(B)
 CMD_FORMAT = "<2sBIhhBB"
 CMD_SIZE = struct.calcsize(CMD_FORMAT)  # 13 bytes
@@ -146,29 +151,73 @@ def decode_tof_packet(data: bytes) -> Optional[Dict[str, Any]]:
 
 
 def decode_tof_sub_packet(data: bytes) -> Optional[Dict[str, Any]]:
-    """Decodes 20-byte per-sensor binary ToF packet (from ESP32_ToF/src/main.cpp)."""
-    if len(data) < TOF_SUB_SIZE:
-        return None
+    """Decodes per-sensor binary ToF packet (both 60-byte multi-target and 20-byte legacy frames)."""
+    if len(data) >= TOF_SUB60_SIZE:
+        unpacked = struct.unpack_from(TOF_SUB60_FORMAT, data)
+        sync, sensor_id, seq, ts_ms = unpacked[0:4]
+        if sync != MCU_SYNC or not (1 <= sensor_id <= 4):
+            return None
+        expected_chk = unpacked[-1]
+        actual_chk = calc_checksum(data[: TOF_SUB60_SIZE - 1])
+        if actual_chk != expected_chk:
+            return None
 
-    unpacked = struct.unpack_from(TOF_SUB_FORMAT, data)
-    sync, sensor_id, seq, ts_ms = unpacked[0:4]
-    dist_mm = unpacked[4:8]
+        dist_raw = unpacked[4:20]
+        status_raw = unpacked[20:36]
 
-    if sync != MCU_SYNC or not (1 <= sensor_id <= 4):
-        return None
+        # Resolve closest valid target for the 4 primary horizontal zones
+        # Each zone has 2 targets (target 0 = 2*i, target 1 = 2*i+1)
+        valid_statuses = (5, 6, 9, 10)
+        primary_distances_m = []
+        for i in range(4):
+            d0, d1 = dist_raw[2 * i], dist_raw[2 * i + 1]
+            s0, s1 = status_raw[2 * i], status_raw[2 * i + 1]
+            v0 = (s0 in valid_statuses and d0 > 0)
+            v1 = (s1 in valid_statuses and d1 > 0)
 
-    expected_chk = unpacked[8]
-    actual_chk = calc_checksum(data[: TOF_SUB_SIZE - 1])
-    if actual_chk != expected_chk:
-        return None
+            if v0 and v1:
+                chosen = min(d0, d1)
+            elif v0:
+                chosen = d0
+            elif v1:
+                chosen = d1
+            else:
+                chosen = 3000
 
-    return {
-        "sensor_id": sensor_id,
-        "seq": seq,
-        "ts_ms": ts_ms,
-        "mcu_timestamp_us": ts_ms * 1000,
-        "distances_m": [round(d / 1000.0, 3) for d in dist_mm],
-    }
+            primary_distances_m.append(round(chosen / 1000.0, 3))
+
+        return {
+            "sensor_id": sensor_id,
+            "seq": seq,
+            "ts_ms": ts_ms,
+            "mcu_timestamp_us": ts_ms * 1000,
+            "distances_m": primary_distances_m,
+            "distances_raw_mm": list(dist_raw),
+            "status_raw": list(status_raw),
+        }
+
+    if len(data) >= TOF_SUB_SIZE:
+        unpacked = struct.unpack_from(TOF_SUB_FORMAT, data)
+        sync, sensor_id, seq, ts_ms = unpacked[0:4]
+        dist_mm = unpacked[4:8]
+
+        if sync != MCU_SYNC or not (1 <= sensor_id <= 4):
+            return None
+
+        expected_chk = unpacked[8]
+        actual_chk = calc_checksum(data[: TOF_SUB_SIZE - 1])
+        if actual_chk != expected_chk:
+            return None
+
+        return {
+            "sensor_id": sensor_id,
+            "seq": seq,
+            "ts_ms": ts_ms,
+            "mcu_timestamp_us": ts_ms * 1000,
+            "distances_m": [round(d / 1000.0, 3) for d in dist_mm],
+        }
+
+    return None
 
 
 def encode_motion_command(target_v_mps: float, target_steer_rad: float, run_mode: int = 1, seq: int = 0) -> bytes:

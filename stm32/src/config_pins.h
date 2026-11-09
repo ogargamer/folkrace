@@ -149,6 +149,20 @@
 #define LUT_PKPK_LIMIT_RAD                                                     \
   0.060f // > 3.44 deg mech = bad sweep / binding / severe runout
 
+// ----------------------------------------------------------------------------
+// Industry-Grade Stall & Thermal Protection Parameters
+// ----------------------------------------------------------------------------
+#define STALL_MIN_EFFORT_VOLTS     2.50f   // Minimum |Uq| required to qualify as stall (V)
+#define STALL_SATURATION_VOLTS     10.50f  // Near-saturation voltage threshold (V)
+#define STALL_VELOCITY_FLOOR_RPM   3.0f    // Speed below which rotor is considered stationary (RPM)
+#define STALL_VELOCITY_LAG_RPM     30.0f   // Speed error threshold under saturation (RPM)
+#define STALL_I2T_CONT_VOLTS       3.50f   // Continuous thermal voltage threshold (V)
+#define STALL_I2T_TRIP_ENERGY      60.0f   // Integrated energy capacity (V^2 * s) [~450ms at 12V dead stall]
+#define STALL_I2T_LEAK_RATE        25.0f   // Energy dissipation rate when effort drops (V^2 / s)
+#define STALL_FOLDBACK_VOLTS       2.00f   // Safe continuous holding voltage during foldback (V)
+#define STALL_MAX_RECOVERY_TRIES   3       // Dither unwedge attempts before hard shutdown
+#define STALL_DITHER_PULSE_MS      80      // Duration of reverse recovery pulse (ms)
+
 // Real-Time Control Loop Frequencies
 #define FOC_COMMUTATION_HZ                                                     \
   20000 // 20.0 kHz Hard Real-Time Commutation (50.0 us)

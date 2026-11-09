@@ -48,7 +48,7 @@ PI4_DIR = os.path.join(ROOT_DIR, "pi4")
 CONTROLLERS_DIR = os.path.join(ROOT_DIR, "webots", "simulation", "my_project", "controllers", "tof_path_planner")
 PLANNER_GUI_SCRIPT = os.path.join(CONTROLLERS_DIR, "planner_gui.py")
 
-DEFAULT_CANDIDATES = ["192.168.20.117", "robot", "robot.local", "127.0.0.1"]
+DEFAULT_CANDIDATES = ["192.168.20.120", "192.168.20.117", "robot", "robot.local", "127.0.0.1"]
 REMOTE_DIR = "/home/admin/folkrace"
 PORT = 8080
 

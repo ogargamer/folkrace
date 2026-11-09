@@ -55,9 +55,8 @@ class DebugServerState:
         self._hz_counter = 0
         self._last_hz_calc = time.time()
         self.recorder: Optional[TelemetryFlightRecorder] = None
-        self.forward_targets: Set[Tuple[str, int]] = {
-            ("255.255.255.255", PORT_UDP_RECV),
-        }
+        # Forward targets registered dynamically by connecting client IPs (no global 255.255.255.255 broadcast)
+        self.forward_targets: Set[Tuple[str, int]] = set()
 
     def register_client_target(self, target: Tuple[str, int]):
         with self.lock:

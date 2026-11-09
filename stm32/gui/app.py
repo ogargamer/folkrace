@@ -1089,7 +1089,14 @@ class DualMotorDashboardApp(tk.Tk):
     # QUICK ACTION & CONTROL HANDLERS
     # =========================================================================
     def _quick_enable_motor(self):
-        self.serial_engine.send_command(f"E{self.active_motor}")
+        m = self.active_motor
+        self.serial_engine.send_command(f"E{m}")
+        val = self.coupled_slider.get()
+        if abs(val) > 0.1:
+            sign = -1.0 if self.invert_dir_var.get() else 1.0
+            self.serial_engine.send_command(f"T{m} {float(val) * sign:.1f}")
+        else:
+            self._log_console(f"[GUI] Motor {m} enabled (Target: 0 RPM). Move slider or select a speed preset (+100, +200, +400) to spin.\n")
 
     def _quick_stop_motor(self):
         self.coupled_slider.set(0)
@@ -1116,18 +1123,32 @@ class DualMotorDashboardApp(tk.Tk):
 
     def _set_active_motor_speed(self, spd):
         sign = -1.0 if self.invert_dir_var.get() else 1.0
+        # Automatically enable driver if motor is disabled
+        if not self.serial_engine.state.get(f"m{self.active_motor}_enabled", False):
+            self.serial_engine.send_command(f"E{self.active_motor}")
+        # Update slider without triggering self._on_coupled_slider callback
+        orig_cmd = self.coupled_slider.cget("command")
+        self.coupled_slider.configure(command="")
         self.coupled_slider.set(spd)
+        self.coupled_slider.configure(command=orig_cmd)
         self.serial_engine.send_command(f"T{self.active_motor} {spd * sign}")
 
     def _nudge_motor_speed(self, delta_rpm):
         sign = -1.0 if self.invert_dir_var.get() else 1.0
+        if not self.serial_engine.state.get(f"m{self.active_motor}_enabled", False):
+            self.serial_engine.send_command(f"E{self.active_motor}")
         cur = self.serial_engine.state.get(f"m{self.active_motor}_target_rpm", 0.0)
         new_spd = max(-1800.0, min(1800.0, cur + delta_rpm))
+        orig_cmd = self.coupled_slider.cget("command")
+        self.coupled_slider.configure(command="")
         self.coupled_slider.set(int(round(new_spd)))
+        self.coupled_slider.configure(command=orig_cmd)
         self.serial_engine.send_command(f"T{self.active_motor} {new_spd * sign:.1f}")
 
     def _on_coupled_slider(self, val):
         sign = -1.0 if self.invert_dir_var.get() else 1.0
+        if not self.serial_engine.state.get(f"m{self.active_motor}_enabled", False):
+            self.serial_engine.send_command(f"E{self.active_motor}")
         self.serial_engine.send_command(f"T{self.active_motor} {float(val) * sign}")
 
     def _set_align_voltage(self):
@@ -1233,6 +1254,7 @@ class DualMotorDashboardApp(tk.Tk):
         threading.Thread(target=self._master_calibrate_worker, args=(self.active_motor,), daemon=True).start()
 
     def _master_calibrate_worker(self, motor_id):
+        self._estop_triggered = False
         try:
             st = self.serial_engine.state
             m = motor_id
@@ -1271,10 +1293,17 @@ class DualMotorDashboardApp(tk.Tk):
                 if not st["connected"]:
                     self._set_calib_ui("❌ Disconnected during calibration.", "DISCONNECTED", COLOR_ACCENT_RED)
                     return
-                if self._calib_result_event.wait(timeout=0.25):
+                if getattr(self, "_estop_triggered", False):
+                    self._set_calib_ui("🛑 Calibration Aborted by E-STOP", "E-STOP ABORT", COLOR_ACCENT_RED)
+                    return
+                if self._calib_result_event.wait(timeout=0.1):
                     break
 
-            # Boost Retry if stalled
+            if getattr(self, "_estop_triggered", False) or "ESTOP" in self._calib_last_reason.upper() or "ABORT" in self._calib_last_reason.upper():
+                self._set_calib_ui("🛑 Calibration Aborted by E-STOP", "E-STOP ABORT", COLOR_ACCENT_RED)
+                return
+
+            # Boost Retry if stalled (only if not aborted by E-STOP)
             if not self._calib_last_success and self.boost_var.get() and align_v < 4.2:
                 boost_v = 4.2
                 self._set_calib_ui(
@@ -1291,8 +1320,15 @@ class DualMotorDashboardApp(tk.Tk):
                 while time.time() - t1 < 95.0:
                     if not st["connected"]:
                         return
-                    if self._calib_result_event.wait(timeout=0.25):
+                    if getattr(self, "_estop_triggered", False):
+                        self._set_calib_ui("🛑 Calibration Aborted by E-STOP", "E-STOP ABORT", COLOR_ACCENT_RED)
+                        return
+                    if self._calib_result_event.wait(timeout=0.1):
                         break
+
+            if getattr(self, "_estop_triggered", False) or "ESTOP" in self._calib_last_reason.upper() or "ABORT" in self._calib_last_reason.upper():
+                self._set_calib_ui("🛑 Calibration Aborted by E-STOP", "E-STOP ABORT", COLOR_ACCENT_RED)
+                return
 
             if not self._calib_last_success:
                 self._set_calib_ui(
@@ -1779,9 +1815,14 @@ class DualMotorDashboardApp(tk.Tk):
             self.sys_status_lbl.configure(text="● STANDBY (DISCONNECTED)", fg=COLOR_TEXT_MUTED)
 
     def global_estop(self):
+        self._estop_triggered = True
         self.serial_engine.send_emergency_stop()
         self.coupled_slider.set(0)
         self.sys_status_lbl.configure(text="🛑 GLOBAL E-STOP TRIGGERED", fg=COLOR_ACCENT_RED)
+        if self.is_master_calibrating:
+            self._calib_last_success = False
+            self._calib_last_reason = "ABORTED_BY_ESTOP"
+            self._calib_result_event.set()
 
     def _on_telemetry(self, state):
         pass
@@ -1794,6 +1835,8 @@ class DualMotorDashboardApp(tk.Tk):
             reason = text.split("[CALIB_FAILED]:")[-1].strip()
             self._calib_last_success = False
             self._calib_last_reason = reason
+            if "ESTOP" in reason.upper() or "ABORT" in reason.upper():
+                self._estop_triggered = True
             self._calib_result_event.set()
             self.after(0, lambda r=reason: self.sys_status_lbl.configure(
                 text=f"❌ CALIBRATION FAILED: {r}", fg=COLOR_ACCENT_RED
@@ -1863,7 +1906,11 @@ class DualMotorDashboardApp(tk.Tk):
             self.m1_raw_lbl.configure(text=f"Raw14: {st[f'm{m}_raw_angle']}")
             self.m1_zero_lbl.configure(text=f"Zero: {st[f'm{m}_zero_angle']:.4f} rad ({st[f'm{m}_direction']})")
 
-            if st[f"m{m}_enabled"]:
+            if st.get(f"m{m}_fault", False):
+                self.primary_status_badge.configure(text="STALL FAULT (LATCHED)", bg=COLOR_ACCENT_RED)
+            elif st.get(f"m{m}_stalled", False):
+                self.primary_status_badge.configure(text="STALL WARN / FOLDBACK", bg=COLOR_ACCENT_AMBER)
+            elif st[f"m{m}_enabled"]:
                 self.primary_status_badge.configure(text="ENABLED (CLOSED-LOOP)", bg="#1B5E20")
             else:
                 self.primary_status_badge.configure(text="DISABLED (HI-Z)", bg="#37474F")
@@ -1915,7 +1962,11 @@ class DualMotorDashboardApp(tk.Tk):
             self.m2_raw_lbl.configure(text=f"Raw: {st[f'm{other_m}_raw_angle']}")
             self.m2_uq_lbl.configure(text=f"Uq: {st[f'm{other_m}_uq_v']:+.2f} V")
 
-            if st[f"m{other_m}_enabled"]:
+            if st.get(f"m{other_m}_fault", False):
+                self.m2_status_badge.configure(text="STALL FAULT", bg=COLOR_ACCENT_RED)
+            elif st.get(f"m{other_m}_stalled", False):
+                self.m2_status_badge.configure(text="STALL WARN", bg=COLOR_ACCENT_AMBER)
+            elif st[f"m{other_m}_enabled"]:
                 self.m2_status_badge.configure(text="RUNNING", bg="#1B5E20")
             else:
                 self.m2_status_badge.configure(text="STANDBY", bg="#37474F")
