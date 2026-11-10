@@ -291,9 +291,27 @@ class STM32DualSerial:
 
         # 2. Calibration Stage & Result Parsing
         with self.lock:
-            # Detect active calibrating motor from banner
-            if "Target Motor       : GM3506 (11 Pole Pairs on STM32G474 M" in s:
-                self.state["calib_motor"] = 2 if "M2)" in s else 1
+            # Keep alive during calibration even when binary telemetry is muted
+            if self.state.get("m1_calib", False) or self.state.get("m2_calib", False):
+                self.state["last_packet_time"] = time.time()
+
+            # Detect active calibrating motor from banner or start tag
+            if "[CALIB_START]:M" in s:
+                try:
+                    cal_m = int(s.split("[CALIB_START]:M")[1][0])
+                    self.state["calib_motor"] = cal_m
+                    self.state[f"m{cal_m}_calib"] = True
+                    self.state[f"m{3-cal_m}_calib"] = False
+                    self.state["calib_progress"] = 0
+                    self.state["last_packet_time"] = time.time()
+                except Exception:
+                    pass
+            elif "Target Motor       : GM3506 (11 Pole Pairs on STM32G474 M" in s:
+                cal_m = 2 if "M2)" in s else 1
+                self.state["calib_motor"] = cal_m
+                self.state[f"m{cal_m}_calib"] = True
+                self.state[f"m{3-cal_m}_calib"] = False
+                self.state["last_packet_time"] = time.time()
 
             cal_m = self.state.get("calib_motor", 1)
             stage_key = f"m{cal_m}_calib_stage"
@@ -303,17 +321,35 @@ class STM32DualSerial:
             dir_key = f"m{cal_m}_direction"
             lag_key = f"m{cal_m}_lag_comp_us"
 
+            if "[CALIB_PROG]:" in s:
+                try:
+                    p_str = s.split("[CALIB_PROG]:")[1].replace("%", "").strip()
+                    val = int(p_str)
+                    self.state["calib_progress"] = val
+                    self.state[f"m{cal_m}_calib"] = True
+                    self.state["last_packet_time"] = time.time()
+                except Exception:
+                    pass
+            elif "[CALIB_DONE]" in s or "[CALIB_FAILED]" in s or "[CALIB_END]" in s or "[LUT_READY]" in s:
+                self.state["m1_calib"] = False
+                self.state["m2_calib"] = False
+                self.state["last_packet_time"] = time.time()
+
             if "Forward Sweep:" in s or "Reverse Sweep:" in s or "Coil cool-down:" in s:
                 self.state[stage_key] = s
+                self.state["last_packet_time"] = time.time()
             elif "STEP 1: Locking Rotor" in s or "STEP 2: Continuous 360" in s:
                 self.state[stage_key] = s
+                self.state["last_packet_time"] = time.time()
             elif "128-Point LUT ACTIVE" in s:
                 self.state[lut_key] = True
                 self.state[stage_key] = s
+                self.state["last_packet_time"] = time.time()
             elif "LUT REJECTED" in s:
                 self.state[lut_key] = False
                 self.state[grade_key] = "LUT REJECTED"
                 self.state[stage_key] = s
+                self.state["last_packet_time"] = time.time()
             elif "motor.zero_electric_angle =" in s:
                 try:
                     val_str = s.split("=")[1].replace(";", "").strip()

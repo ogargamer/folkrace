@@ -422,11 +422,34 @@ void focTimerISR() {
     isr_last_c0 = c0;
     foc_tick_count++;
 
-    // 1. Concurrent Parallel Dual-SPI Read (< 3.6 us total for BOTH encoders)
+    // 1. Encoder SPI Read Engine
+    if (m1_calib_active) {
+        // High-Precision Calibration Isolation for Motor 1:
+        // Read ONLY Encoder 1 on SPI1. SPI2 and Encoder 2 are completely silenced
+        // (CS2 held HIGH, zero 10.6 MHz clock switching on the PCB, zero digital cross-talk).
+        // ISR duration drops to < 1.8 us (< 3.6% CPU load).
+        readEncoderSingleFast(encoder1, SPI1);
+        encoder1.update();
+        uint32_t d_tot = DWT->CYCCNT - c0;
+        isr_last_cycles = d_tot;
+        if (d_tot > isr_peak_cycles) isr_peak_cycles = d_tot;
+        return;
+    } else if (m2_calib_active) {
+        // High-Precision Calibration Isolation for Motor 2:
+        // Read ONLY Encoder 2 on SPI2. SPI1 and Encoder 1 are completely silenced.
+        readEncoderSingleFast(encoder2, SPI2);
+        encoder2.update();
+        uint32_t d_tot = DWT->CYCCNT - c0;
+        isr_last_cycles = d_tot;
+        if (d_tot > isr_peak_cycles) isr_peak_cycles = d_tot;
+        return;
+    }
+
+    // Normal Dual-Motor Operation: Concurrent Parallel Dual-SPI Read (< 3.6 us total)
     readDualEncodersParallel(encoder1, encoder2);
     uint32_t c1 = DWT->CYCCNT;
 
-    encoder1.update(); // Updates angle tracking, timestamp, and multi-turn unwrapping
+    encoder1.update();
     encoder2.update();
     uint32_t c2 = DWT->CYCCNT;
 
@@ -580,6 +603,8 @@ void sendBinaryTelemetry(); // Forward declaration for real-time telemetry strea
 // Global Emergency Stop & Calibration Abort Engine
 // ----------------------------------------------------------------------------
 volatile bool g_estop_active = false;
+static bool s_calib_isolation_active = false;
+static bool s_saved_telemetry_state = true;
 
 void triggerGlobalEmergencyStop() {
     g_estop_active = true;
@@ -590,6 +615,8 @@ void triggerGlobalEmergencyStop() {
     m1_calib_active = false;
     m2_calib_active = false;
     live_calib_progress = 0;
+    s_calib_isolation_active = false;
+    show_telemetry = s_saved_telemetry_state;
 
     motor1.voltage.q = 0.0f;
     motor1.voltage.d = 0.0f;
@@ -601,6 +628,10 @@ void triggerGlobalEmergencyStop() {
 
     motor1.disable();
     motor2.disable();
+    driver1.disable();
+    driver2.disable();
+    digitalWrite(M1_EN, LOW);
+    digitalWrite(M2_EN, LOW);
 
     stall_guard1.reset();
     stall_guard2.reset();
@@ -655,6 +686,90 @@ static inline bool safeDelayWithAbort(uint32_t ms) {
     }
     return checkCalibrationAbort();
 }
+
+// ----------------------------------------------------------------------------
+// Dedicated Calibration Isolation & Environment Shield
+// ----------------------------------------------------------------------------
+void enterCalibrationIsolation(int motor_id) {
+    if (s_calib_isolation_active) return;
+    s_calib_isolation_active = true;
+    s_saved_telemetry_state = show_telemetry;
+    show_telemetry = false; // Mute all binary telemetry streaming
+
+    int other_id = (motor_id == 1) ? 2 : 1;
+    BLDCMotor &other_motor = (motor_id == 1) ? motor2 : motor1;
+    BLDCDriver3PWM &other_driver = (motor_id == 1) ? driver2 : driver1;
+    volatile bool &other_enabled = (motor_id == 1) ? m2_enabled : m1_enabled;
+    volatile float &other_target_rpm = (motor_id == 1) ? m2_target_rpm : m1_target_rpm;
+
+    // 1. Completely disable the other motor and inverter hardware (Hi-Z, zero switching/ripple/EMI)
+    other_enabled = false;
+    other_target_rpm = 0.0f;
+    other_motor.voltage.q = 0.0f;
+    other_motor.voltage.d = 0.0f;
+    other_motor.setPhaseVoltage(0.0f, 0.0f, 0.0f);
+    other_motor.disable();
+    other_driver.disable(); // Shuts down gate drivers/inverter half-bridges
+    digitalWrite((motor_id == 1) ? M2_EN : M1_EN, LOW); // Enforce hardware EN pin LOW
+
+    // 2. Silence inactive encoder SPI bus (hold CS HIGH, MISO Hi-Z, zero 10.6 MHz clock noise)
+    if (motor_id == 1) {
+        encoder2.csHigh();
+        stall_guard2.reset();
+        m1_calib_active = true;
+        m2_calib_active = false;
+    } else {
+        encoder1.csHigh();
+        stall_guard1.reset();
+        m1_calib_active = false;
+        m2_calib_active = true;
+    }
+    live_calib_progress = 0;
+
+    Serial.printf("\n>>> 🛡️ CALIBRATION ISOLATION ACTIVE for Motor %d:\n", motor_id);
+    Serial.printf("   - Motor %d driver & hardware EN pin DISABLED (Hi-Z, zero PWM/ripple/EMI)\n", other_id);
+    Serial.printf("   - Motor %d encoder SPI bus SILENCED (CS held HIGH, zero 10.6 MHz clock switching)\n", other_id);
+    Serial.printf("   - Motor %d velocity and commutation loops suspended\n", other_id);
+    Serial.println("   - Telemetry streaming MUTED to prevent USB buffer contention and jitter");
+    Serial.println("   - Stall watchdog suspended during calibration sweep");
+    Serial.println("   - 20 kHz ISR streamlined to single SPI bus (< 1.8 us / < 3.6% CPU)\n");
+    Serial.printf("[CALIB_START]:M%d\n", motor_id);
+    Serial.println("[CALIB_PROG]:0%");
+    Serial.flush();
+}
+
+void exitCalibrationIsolation(int motor_id) {
+    if (!s_calib_isolation_active) return;
+    s_calib_isolation_active = false;
+    m1_calib_active = false;
+    m2_calib_active = false;
+    live_calib_progress = 0;
+
+    // Restore telemetry streaming state
+    show_telemetry = s_saved_telemetry_state;
+
+    int other_id = (motor_id == 1) ? 2 : 1;
+    Serial.printf("\n>>> 🛡️ CALIBRATION ISOLATION RELEASED:\n");
+    Serial.printf("   - Motor %d remains safely in standby (DISABLED)\n", other_id);
+    Serial.printf("   - Telemetry streaming RESTORED (%s)\n\n", show_telemetry ? "ON" : "OFF");
+    Serial.printf("[CALIB_END]:M%d\n", motor_id);
+    Serial.flush();
+}
+
+struct CalibrationIsolationGuard {
+    int m_id;
+    bool was_active_before;
+    CalibrationIsolationGuard(int motor_id) : m_id(motor_id), was_active_before(s_calib_isolation_active) {
+        if (!was_active_before) {
+            enterCalibrationIsolation(m_id);
+        }
+    }
+    ~CalibrationIsolationGuard() {
+        if (!was_active_before) {
+            exitCalibrationIsolation(m_id);
+        }
+    }
+};
 
 // Circular 1D inverse-distance interpolation from measured samples to 128 raw LUT segments
 static float interpolateLUTAtAngle(float target_rad, const float* sample_angles, const float* sample_errors, int n) {
@@ -1171,9 +1286,8 @@ bool runSteppedLUTSweepSinglePass(int motor_id, float align_voltage, bool *out_s
         }
 
         live_calib_progress = (uint8_t)((i * 45) / TOTAL_STEPS);
-        sendBinaryTelemetry();
 
-        if ((i + 1) % 16 == 0 || i == TOTAL_STEPS - 1) {
+        if ((i + 1) % 8 == 0 || i == TOTAL_STEPS - 1) {
             Serial.printf("   Forward Sweep: %d%% Complete\n", (int)(((float)(i + 1) / (float)TOTAL_STEPS) * 100.0f));
             Serial.printf("[CALIB_PROG]:%d%%\n", live_calib_progress);
         }
@@ -1284,9 +1398,8 @@ bool runSteppedLUTSweepSinglePass(int motor_id, float align_voltage, bool *out_s
         }
 
         live_calib_progress = 45 + (uint8_t)(((TOTAL_STEPS - 1 - i) * 45) / TOTAL_STEPS);
-        sendBinaryTelemetry();
 
-        if (i % 16 == 0 || i == 0) {
+        if (i % 8 == 0 || i == 0) {
             Serial.printf("   Reverse Sweep: %d%% Complete\n", (int)(((float)(TOTAL_STEPS - i) / (float)TOTAL_STEPS) * 100.0f));
             Serial.printf("[CALIB_PROG]:%d%%\n", live_calib_progress);
         }
@@ -1407,6 +1520,7 @@ bool runSteppedLUTSweepSinglePass(int motor_id, float align_voltage, bool *out_s
 // Multi-Pole Comprehensive Electrical Zero Alignment (Matching ESP32 Suite)
 // ----------------------------------------------------------------------------
 bool runComprehensiveElectricalAlignment(int motor_id, float align_voltage, bool *out_stalled = nullptr) {
+    CalibrationIsolationGuard isolation_guard(motor_id);
     if (out_stalled) *out_stalled = false;
     float hold_voltage = fminf(align_voltage * 0.85f, 3.40f);
     Serial.println("\n================================================================================");
@@ -1780,6 +1894,7 @@ bool runComprehensiveElectricalAlignment(int motor_id, float align_voltage, bool
 // Master Auto-Calibration Orchestrator (128-pt Dual-Pass LUT + 11-Pole Zero + Dump)
 // ----------------------------------------------------------------------------
 void runMasterCalibrationSequence(int motor_id, float align_voltage) {
+    CalibrationIsolationGuard isolation_guard(motor_id);
     BLDCMotor &motor = (motor_id == 1) ? motor1 : motor2;
     BLDCDriver3PWM &driver = (motor_id == 1) ? driver1 : driver2;
     MT6816Sensor &encoder = (motor_id == 1) ? encoder1 : encoder2;
@@ -1787,8 +1902,6 @@ void runMasterCalibrationSequence(int motor_id, float align_voltage) {
     bool prev_enabled = (motor_id == 1) ? m1_enabled : m2_enabled;
 
     g_estop_active = false; // Reset on explicit user calibration start
-    calib_active = true;
-    live_calib_progress = 0;
     encoder.clearLUT();
 
     bool calib_stalled = false;
@@ -1825,7 +1938,6 @@ void runMasterCalibrationSequence(int motor_id, float align_voltage) {
             triggerGlobalEmergencyStop();
         } else {
             driver.disable();
-            calib_active = false;
             live_calib_progress = 0;
             Serial.printf("[CALIB_FAILED]:M%d LUT Sweep %s\n", motor_id, calib_stalled ? "Stalled" : "Rejected");
         }
@@ -1857,7 +1969,6 @@ void runMasterCalibrationSequence(int motor_id, float align_voltage) {
             triggerGlobalEmergencyStop();
         } else {
             driver.disable();
-            calib_active = false;
             live_calib_progress = 0;
             Serial.printf("[CALIB_FAILED]:M%d Electrical Alignment %s\n", motor_id, align_stalled ? "Stalled" : "Rejected");
         }
@@ -1868,12 +1979,11 @@ void runMasterCalibrationSequence(int motor_id, float align_voltage) {
     dumpLUT(motor_id);
 
     live_calib_progress = 100;
-    sendBinaryTelemetry();
+    Serial.println("[CALIB_PROG]:100%");
 
     motor.setPhaseVoltage(0.0f, 0.0f, 0.0f);
     motor.voltage.q = 0.0f;
     motor.voltage.d = 0.0f;
-    calib_active = false;
     if (!prev_enabled) {
         motor.disable();
     }
@@ -2765,7 +2875,7 @@ void updateStallGuard(int id, BLDCMotor &motor, FastBLDCDriver3PWM &driver,
 }
 
 void checkStallWatchdog() {
-    if (!stall_watchdog_enabled) return;
+    if (!stall_watchdog_enabled || m1_calib_active || m2_calib_active) return;
 
     static uint32_t last_check_us = 0;
     uint32_t now_us = micros();
@@ -2791,6 +2901,7 @@ void checkStallWatchdog() {
 // 26-Byte Telemetry Frame Generator (25 Hz)
 // ----------------------------------------------------------------------------
 void sendBinaryTelemetry() {
+    if (!show_telemetry || m1_calib_active || m2_calib_active) return;
     TelemetryPacket pkt;
     pkt.header[0] = 0xAA;
     pkt.header[1] = 0x55;

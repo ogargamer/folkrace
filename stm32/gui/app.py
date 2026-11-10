@@ -1898,7 +1898,7 @@ class DualMotorDashboardApp(tk.Tk):
     def _ui_poll_loop(self):
         st = self.serial_engine.state
 
-        if st["connected"] and (time.time() - st["last_packet_time"] < 1.0):
+        if st["connected"] and (time.time() - st["last_packet_time"] < 1.0 or self.is_master_calibrating or st.get("m1_calib", False) or st.get("m2_calib", False)):
             m = self.active_motor
             other_m = 2 if m == 1 else 1
 
@@ -1941,16 +1941,17 @@ class DualMotorDashboardApp(tk.Tk):
             # 2. Calibration Progress
             if st[f"m{m}_calib"]:
                 self.m1_lut_progress["value"] = st["calib_progress"]
-                if not self.is_master_calibrating:
-                    self.calib_status_lbl.configure(
-                        text=f"Calibrating M{m} ({st['calib_progress']}%): {st[f'm{m}_calib_stage']}"
-                    )
+                stage_str = st.get(f"m{m}_calib_stage", "Sweeping...")
+                self.calib_status_lbl.configure(
+                    text=f"Calibrating M{m} ({st['calib_progress']}%): {stage_str}"
+                )
             elif st[f"m{m}_lut_active"]:
                 self.m1_lut_progress["value"] = 100
-                if not self.is_master_calibrating and "GRADE" in st[f"m{m}_calib_grade"]:
+                if "GRADE" in st.get(f"m{m}_calib_grade", ""):
                     self.calib_grade_badge.configure(text=st[f"m{m}_calib_grade"], bg="#059669")
             else:
-                self.m1_lut_progress["value"] = 0
+                if not self.is_master_calibrating:
+                    self.m1_lut_progress["value"] = 0
 
             # 3. Velocity Oscilloscope (Plots active motor)
             with self.serial_engine.lock:

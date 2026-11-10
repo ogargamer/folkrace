@@ -56,7 +56,7 @@ def main():
     success = trigger_dfu(args.port)
 
     if args.upload:
-        cmd = ["pio", "run", "-e", args.env, "-t", "upload"]
+        cmd = ["pio", "run", "-d", "STM32", "-e", args.env, "-t", "upload"]
         print(f"\n[RUN] Running: {' '.join(cmd)}")
         ret = subprocess.run(cmd)
         sys.exit(ret.returncode)
