@@ -52,7 +52,7 @@ MOTOR_CONFIG_M2_JSON_PATH = os.path.abspath(os.path.join(CURRENT_DIR, "..", "mot
 MOTOR_CONFIG_JSON_PATH = os.path.abspath(os.path.join(CURRENT_DIR, "..", "motor_config_gm3506.json"))
 
 DEFAULT_MOTOR_CONFIG = {
-    "pid_p": 0.150,
+    "pid_p": 0.100,
     "pid_i": 1.500,
     "pid_d": 0.0000,
     "lpf_tf": 0.5,
@@ -61,7 +61,7 @@ DEFAULT_MOTOR_CONFIG = {
     "maxrpm": 2000.0,
     "lag": 35.0,
     "kv": 130.0,
-    "dwt": 2.0,
+    "dwt": 5.0,
     "zero": 0.0000,
     "align_v": 4.0,
     "corr_mode": 1,

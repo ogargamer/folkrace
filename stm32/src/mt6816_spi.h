@@ -321,8 +321,8 @@ public:
   uint32_t hist_dwt[VEL_HIST_LEN] = {0};
   uint8_t hist_head = 0;
   uint8_t hist_count = 0;
-  uint8_t window_samples = 40; // 40 samples = 2.0 ms default @ 20 kHz
-  float window_ms = 2.0f;
+  uint8_t window_samples = (uint8_t)(DEFAULT_DWT_WINDOW_MS * 20.0f + 0.5f);
+  float window_ms = DEFAULT_DWT_WINDOW_MS;
 
   void setDWTWindowMs(float ms) {
     if (ms < 0.2f)

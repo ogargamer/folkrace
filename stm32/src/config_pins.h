@@ -126,6 +126,15 @@
 #define MOTOR_VELOCITY_LIMIT                                                   \
   (2000.0f * 0.104719755f) // 2000 RPM = 209.44 rad/s headroom for 1800 RPM
 
+// Default Motion Control & Sensor Parameters
+#define DEFAULT_PID_P 0.10f
+#define DEFAULT_PID_I 1.50f
+#define DEFAULT_PID_D 0.00000f
+#define DEFAULT_PID_RAMP 100.0f
+#define DEFAULT_LPF_TF 0.0005f
+#define DEFAULT_LAG_COMP_US 35.0f
+#define DEFAULT_DWT_WINDOW_MS 5.0f
+
 // Direction Convention Configuration
 // Set to 1 to invert raw encoder counting direction globally in firmware so
 // physical clockwise rotation increases angle & velocity (CW = positive)
