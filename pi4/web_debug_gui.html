@@ -576,6 +576,10 @@ for (let p = 0; p < 256; p++) {
   }
 }
 
+// Persistent cached ImageData & 32-bit pixel view (zero garbage collection allocations)
+let cachedCostmapImgData = null;
+let cachedCostmapU32 = null;
+
 // Render 2D Map Exactly Matching Webots Simulation PlannerCostmapCanvas
 function renderRadar(pkt) {
   // Background fill: QColor(10, 13, 18)
@@ -598,9 +602,14 @@ function renderRadar(pkt) {
         if (costmapOffscreen.width !== W || costmapOffscreen.height !== H) {
           costmapOffscreen.width = W;
           costmapOffscreen.height = H;
+          cachedCostmapImgData = null;
+          cachedCostmapU32 = null;
         }
-        const imgData = costmapCtx.createImageData(W, H);
-        const u32 = new Uint32Array(imgData.data.buffer);
+        if (!cachedCostmapImgData) {
+          cachedCostmapImgData = costmapCtx.createImageData(W, H);
+          cachedCostmapU32 = new Uint32Array(cachedCostmapImgData.data.buffer);
+        }
+        const u32 = cachedCostmapU32;
         const prob = pkt.prob_bytes;
         const haz = showHazard ? pkt.hazard_bytes : null;
 
@@ -615,7 +624,7 @@ function renderRadar(pkt) {
             u32[destOff + c] = COLOR_LUT[p | hBit];
           }
         }
-        costmapCtx.putImageData(imgData, 0, 0);
+        costmapCtx.putImageData(cachedCostmapImgData, 0, 0);
         rendered = true;
       }
     } else if (pkt.grid_unpacked && pkt.grid_unpacked.length > 0) {
@@ -627,9 +636,14 @@ function renderRadar(pkt) {
       if (costmapOffscreen.width !== W || costmapOffscreen.height !== H) {
         costmapOffscreen.width = W;
         costmapOffscreen.height = H;
+        cachedCostmapImgData = null;
+        cachedCostmapU32 = null;
       }
-      const imgData = costmapCtx.createImageData(W, H);
-      const u32 = new Uint32Array(imgData.data.buffer);
+      if (!cachedCostmapImgData) {
+        cachedCostmapImgData = costmapCtx.createImageData(W, H);
+        cachedCostmapU32 = new Uint32Array(cachedCostmapImgData.data.buffer);
+      }
+      const u32 = cachedCostmapU32;
       for (let r = 0; r < H; r++) {
         const destRow = H - 1 - r;
         const gRow = g[r];
@@ -641,7 +655,7 @@ function renderRadar(pkt) {
           u32[destOff + c] = COLOR_LUT[p | hBit];
         }
       }
-      costmapCtx.putImageData(imgData, 0, 0);
+      costmapCtx.putImageData(cachedCostmapImgData, 0, 0);
       rendered = true;
     }
 
@@ -1393,7 +1407,8 @@ const perfMetrics = {
   lastRttMs: 0.0,
   lastRenderMs: 0.0,
   lastPayloadKb: 0.0,
-  isBinary: true
+  isBinary: true,
+  isWebSocket: false
 };
 
 async function decompressZlib(bytes) {
@@ -1542,9 +1557,87 @@ async function parseLiveBinary(ab) {
 
 let isFetching = false;
 let useBinaryEndpoint = true;
+let wsLive = null;
+let wsConnected = false;
+
+function initLiveWebSocket() {
+  if (wsLive) {
+    try { wsLive.close(); } catch(e) {}
+    wsLive = null;
+  }
+  const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+  const wsUrl = `${protocol}//${location.host}/ws_live`;
+
+  try {
+    wsLive = new WebSocket(wsUrl);
+    wsLive.binaryType = "arraybuffer";
+
+    wsLive.onopen = () => {
+      wsConnected = true;
+      perfMetrics.isWebSocket = true;
+      perfMetrics.isBinary = true;
+    };
+
+    wsLive.onmessage = async (evt) => {
+      if (!isLive) return;
+      const t0 = performance.now();
+      const ab = evt.data;
+      if (!(ab instanceof ArrayBuffer)) return;
+
+      const pkt = await parseLiveBinary(ab);
+      currentPkt = pkt;
+      updateHUD(pkt);
+
+      const tRender0 = performance.now();
+      renderRadar(pkt);
+      const tRender1 = performance.now();
+
+      perfMetrics.lastRenderMs = tRender1 - tRender0;
+      perfMetrics.lastRttMs = tRender1 - t0;
+      perfMetrics.lastPayloadKb = ab.byteLength / 1024.0;
+      perfMetrics.frameCount++;
+
+      const totFrames = pkt._total_frames || pkt.total_frames;
+      if (totFrames) {
+        totalFrames = totFrames;
+        document.getElementById("frameSlider").max = totalFrames;
+        document.getElementById("frameSlider").value = totalFrames;
+        document.getElementById("lblFrame").innerText = `Frame ${totalFrames} / ${totalFrames}`;
+      }
+
+      if (tRender1 - perfMetrics.lastFpsCalc >= 500.0) {
+        perfMetrics.currentFps = (perfMetrics.frameCount * 1000.0) / (tRender1 - perfMetrics.lastFpsCalc);
+        perfMetrics.frameCount = 0;
+        perfMetrics.lastFpsCalc = tRender1;
+        updatePerfHUD();
+      }
+    };
+
+    wsLive.onclose = () => {
+      wsConnected = false;
+      perfMetrics.isWebSocket = false;
+      if (isLive) {
+        setTimeout(initLiveWebSocket, 2000);
+        setTimeout(fetchLive, 50);
+      }
+    };
+
+    wsLive.onerror = () => {
+      wsConnected = false;
+      perfMetrics.isWebSocket = false;
+      if (isLive) {
+        setTimeout(fetchLive, 50);
+      }
+    };
+  } catch (err) {
+    wsConnected = false;
+    perfMetrics.isWebSocket = false;
+  }
+}
 
 async function fetchLive() {
   if (!isLive || isFetching) return;
+  if (wsConnected) return; // If WebSocket is actively streaming, don't poll
   isFetching = true;
   const t0 = performance.now();
   let payloadBytes = 0;
@@ -1613,13 +1706,14 @@ async function fetchLive() {
     }
 
     isFetching = false;
-    if (isLive) {
+    if (isLive && !wsConnected) {
       const elapsed = performance.now() - t0;
       const delay = Math.max(0, Math.round(16.6 - elapsed)); // Target smooth 60 FPS
       setTimeout(fetchLive, delay);
     }
   }
 }
+initLiveWebSocket();
 setTimeout(fetchLive, 50);
 
 function updatePerfHUD() {
@@ -1633,7 +1727,7 @@ function updatePerfHUD() {
   elFps.style.color = perfMetrics.currentFps >= 50 ? "#00e676" : (perfMetrics.currentFps >= 25 ? "#ffd600" : "#ff3d00");
   elRtt.innerText = `${perfMetrics.lastRttMs.toFixed(1)}ms RTT`;
   elRender.innerText = `${perfMetrics.lastRenderMs.toFixed(1)}ms Render`;
-  const typeTag = perfMetrics.isBinary ? "Bin" : "JSON";
+  const typeTag = perfMetrics.isWebSocket ? "WS-Bin" : (perfMetrics.isBinary ? "Bin" : "JSON");
   elSize.innerText = `${perfMetrics.lastPayloadKb.toFixed(1)} KB (${typeTag})`;
 }
 
@@ -1680,7 +1774,10 @@ document.getElementById("btnToggleLive").addEventListener("click", () => {
   document.getElementById("btnToggleLive").classList.add("active");
   document.getElementById("modeBadge").innerText = "LIVE STREAM";
   document.getElementById("modeBadge").className = "badge badge-live";
-  setTimeout(fetchLive, 50);
+  if (!wsConnected) {
+    initLiveWebSocket();
+    setTimeout(fetchLive, 50);
+  }
 });
 
 async function loadFrame(frameId) {

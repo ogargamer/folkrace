@@ -23,11 +23,12 @@ import time
 import json
 import zlib
 import base64
+import hashlib
 import socket
 import struct
 import shutil
 import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from typing import Dict, List, Optional, Any, Set, Tuple
 
@@ -62,10 +63,56 @@ class DebugServerState:
         # Fast cached binary & JSON representations (zero redundant work across requests)
         self._cached_bin: Optional[bytes] = None
         self._cached_json: Optional[bytes] = None
+        # Persistent WebSocket streaming clients
+        self.ws_clients: Set[socket.socket] = set()
+        self.ws_lock = threading.Lock()
+        # Disk stats cache (avoid blocking on SD card stat every 2s)
+        self._last_disk_check: float = 0.0
+        self._cached_disk_free: float = 0.0
+        self._cached_db_size: float = 0.0
 
     def register_client_target(self, target: Tuple[str, int]):
         with self.lock:
             self.forward_targets.add(target)
+
+    def register_ws_client(self, sock: socket.socket):
+        with self.ws_lock:
+            self.ws_clients.add(sock)
+
+    def unregister_ws_client(self, sock: socket.socket):
+        with self.ws_lock:
+            self.ws_clients.discard(sock)
+
+    def broadcast_ws_binary(self, payload: bytes):
+        with self.ws_lock:
+            if not self.ws_clients:
+                return
+            clients = list(self.ws_clients)
+
+        length = len(payload)
+        if length < 126:
+            hdr = struct.pack("!BB", 0x82, length)
+        elif length <= 0xFFFF:
+            hdr = struct.pack("!BBH", 0x82, 126, length)
+        else:
+            hdr = struct.pack("!BBQ", 0x82, 127, length)
+        frame = hdr + payload
+
+        dead = []
+        for s in clients:
+            try:
+                s.sendall(frame)
+            except Exception:
+                dead.append(s)
+
+        if dead:
+            with self.ws_lock:
+                for s in dead:
+                    self.ws_clients.discard(s)
+                    try:
+                        s.close()
+                    except Exception:
+                        pass
 
     def invalidate_caches(self):
         self._cached_bin = None
@@ -192,6 +239,14 @@ def build_live_binary_packet(pkt: Dict[str, Any]) -> bytes:
 
 class DebugHTTPRequestHandler(BaseHTTPRequestHandler):
     """Handles HTTP requests for Mission Control UI and REST endpoints."""
+    protocol_version = "HTTP/1.1"
+
+    def setup(self):
+        super().setup()
+        try:
+            self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except Exception:
+            pass
 
     def log_message(self, format, *args):
         # Silence routine request logging to prevent terminal spam
@@ -205,6 +260,13 @@ class DebugHTTPRequestHandler(BaseHTTPRequestHandler):
 
         parsed = urlparse(self.path)
         path = parsed.path
+
+        if path == "/ws_live":
+            upgrade = self.headers.get("Upgrade", "").lower()
+            ws_key = self.headers.get("Sec-WebSocket-Key", "")
+            if "websocket" in upgrade and ws_key:
+                self._handle_websocket_upgrade(ws_key)
+                return
 
         if path in ("/", "/index.html"):
             self._serve_file(HTML_PATH, "text/html")
@@ -253,6 +315,48 @@ class DebugHTTPRequestHandler(BaseHTTPRequestHandler):
         else:
             self._send_json({"error": "Not Found"}, 404)
 
+    def _handle_websocket_upgrade(self, ws_key: str):
+        guid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+        accept = base64.b64encode(hashlib.sha1((ws_key.strip() + guid).encode("utf-8")).digest()).decode("utf-8")
+        handshake = (
+            "HTTP/1.1 101 Switching Protocols\r\n"
+            "Upgrade: websocket\r\n"
+            "Connection: Upgrade\r\n"
+            f"Sec-WebSocket-Accept: {accept}\r\n\r\n"
+        )
+        sock = self.connection
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        sock.sendall(handshake.encode("utf-8"))
+
+        STATE.register_ws_client(sock)
+        # Push latest frame immediately on connect
+        with STATE.lock:
+            cur_bin = STATE.get_cached_bin()
+        if cur_bin:
+            STATE.broadcast_ws_binary(cur_bin)
+
+        try:
+            while True:
+                data = sock.recv(1024)
+                if not data:
+                    break
+                # Close frame
+                if (data[0] & 0x0F) == 0x08:
+                    break
+                # Ping frame -> reply pong
+                elif (data[0] & 0x0F) == 0x09:
+                    pong = bytearray(data)
+                    pong[0] = (pong[0] & 0xF0) | 0x0A
+                    sock.sendall(pong)
+        except Exception:
+            pass
+        finally:
+            STATE.unregister_ws_client(sock)
+            try:
+                sock.close()
+            except Exception:
+                pass
+
     def _serve_file(self, filepath: str, content_type: str):
         if not os.path.exists(filepath):
             self.send_error(404, "File not found")
@@ -263,6 +367,7 @@ class DebugHTTPRequestHandler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(content)))
+            self.send_header("Connection", "keep-alive")
             self.send_header("Cache-Control", "no-cache")
             self.end_headers()
             self.wfile.write(content)
@@ -274,17 +379,26 @@ class DebugHTTPRequestHandler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "keep-alive")
         self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         self.wfile.write(body)
 
     def _serve_status(self):
         stats = get_system_cpu_stats()
-        disk_total, disk_used, disk_free = shutil.disk_usage(STATE.recorder.output_dir if STATE.recorder else CURR_DIR)
-
-        db_size_mb = 0.0
-        if STATE.recorder and os.path.exists(STATE.recorder.db_path):
-            db_size_mb = round(os.path.getsize(STATE.recorder.db_path) / (1024 * 1024), 2)
+        now = time.time()
+        if (now - STATE._last_disk_check) >= 5.0:
+            STATE._last_disk_check = now
+            try:
+                disk_total, disk_used, disk_free = shutil.disk_usage(STATE.recorder.output_dir if STATE.recorder else CURR_DIR)
+                STATE._cached_disk_free = round(disk_free / (1024**3), 2)
+            except Exception:
+                pass
+            if STATE.recorder and os.path.exists(STATE.recorder.db_path):
+                try:
+                    STATE._cached_db_size = round(os.path.getsize(STATE.recorder.db_path) / (1024 * 1024), 2)
+                except Exception:
+                    pass
 
         data = {
             "session_id": STATE.recorder.session_id if STATE.recorder else "none",
@@ -294,8 +408,8 @@ class DebugHTTPRequestHandler(BaseHTTPRequestHandler):
             "driving_seconds": round(STATE.recorder.total_driving_seconds, 1) if STATE.recorder else 0.0,
             "driving_minutes": round(STATE.recorder.total_driving_seconds / 60.0, 1) if STATE.recorder else 0.0,
             "max_buffer_minutes": round((STATE.recorder.max_driving_seconds / 60.0), 1) if STATE.recorder else 30.0,
-            "file_size_mb": db_size_mb,
-            "disk_free_gb": round(disk_free / (1024**3), 2),
+            "file_size_mb": STATE._cached_db_size,
+            "disk_free_gb": STATE._cached_disk_free,
             "temp_c": stats.get("temp_c", 0.0),
             "loop_hz": round(STATE.loop_hz, 1),
             "cpu_affinity": list(get_core_affinity()),
@@ -308,6 +422,7 @@ class DebugHTTPRequestHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "keep-alive")
         self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         self.wfile.write(body)
@@ -318,6 +433,7 @@ class DebugHTTPRequestHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "application/octet-stream")
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "keep-alive")
         self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         self.wfile.write(body)
@@ -438,12 +554,17 @@ def udp_listener_worker():
                         STATE.last_planner_pkt_time = now
                 STATE.last_pkt_time = now
                 STATE.invalidate_caches()
+                bin_data = STATE.get_cached_bin() if is_planner else None
+
+            # Push live binary frame instantly to connected WebSockets (zero polling overhead)
+            if bin_data:
+                STATE.broadcast_ws_binary(bin_data)
 
             # Non-blocking write to Flight Recorder (all planner frames, bounded sensor frames)
             if STATE.recorder:
                 if is_planner or (now - getattr(STATE, "_last_db_record", 0.0) >= 0.05):
                     STATE._last_db_record = now
-                    STATE.recorder.record_frame(pkt)
+                    STATE.recorder.record_frame(pkt, raw_bytes=data)
 
         except socket.timeout:
             continue
@@ -470,9 +591,9 @@ def run_debug_server():
     udp_thread = threading.Thread(target=udp_listener_worker, name="UDPListener", daemon=True)
     udp_thread.start()
 
-    # 4. Start HTTP Web Server on Core 2
+    # 4. Start High-Performance Threading HTTP & WebSocket Server on Core 2
     server_address = (HOST_BIND, PORT_HTTP)
-    httpd = HTTPServer(server_address, DebugHTTPRequestHandler)
+    httpd = ThreadingHTTPServer(server_address, DebugHTTPRequestHandler)
     print(f"[DebugServer] Web Mission Control GUI: http://localhost:{PORT_HTTP} or http://robot:{PORT_HTTP}")
     print(f"[DebugServer] Real-time Flight Black Box saving to: {STATE.recorder.db_path}")
     print("=" * 70)

@@ -59,8 +59,8 @@ class TelemetryFlightRecorder:
         max_driving_seconds: float = 1800.0,       # 30-minute running buffer of active driving
         prune_interval_driving_s: float = 30.0,    # Lazy prune check every 30s of driving
         min_free_space_bytes: int = 5 * 1024 * 1024 * 1024,  # 5 GB safety reserve
-        batch_size: int = 30,
-        commit_interval_s: float = 0.5,
+        batch_size: int = 60,
+        commit_interval_s: float = 2.0,
     ):
         self.output_dir = output_dir
         os.makedirs(self.output_dir, exist_ok=True)
@@ -210,7 +210,7 @@ class TelemetryFlightRecorder:
 
             print(f"[FlightRecorder] Stopped. Total frames saved: {self.total_frames_recorded} (Dropped: {self.dropped_frames})")
 
-    def record_frame(self, telemetry: Dict[str, Any]) -> bool:
+    def record_frame(self, telemetry: Dict[str, Any], raw_bytes: Optional[bytes] = None) -> bool:
         """
         Non-blocking ingestion of a telemetry frame.
         Guaranteed zero-wait for the caller.
@@ -219,7 +219,7 @@ class TelemetryFlightRecorder:
             return False
 
         try:
-            self.queue.put_nowait(telemetry)
+            self.queue.put_nowait((telemetry, raw_bytes))
             return True
         except queue.Full:
             self.dropped_frames += 1
@@ -290,13 +290,17 @@ class TelemetryFlightRecorder:
 
         conn.close()
 
-    def _flush_batch(self, cur: sqlite3.Cursor, conn: sqlite3.Connection, batch: List[Dict[str, Any]]):
+    def _flush_batch(self, cur: sqlite3.Cursor, conn: sqlite3.Connection, batch: List[Any]):
         """Flushes a batch of telemetry frames in a single transaction."""
         if not batch:
             return
 
         rows = []
-        for telem in batch:
+        for item in batch:
+            if isinstance(item, tuple):
+                telem, raw_b = item
+            else:
+                telem, raw_b = item, None
             frame_id = self.total_frames_recorded + 1
             ts = float(telem.get("timestamp", time.time()))
             sim_time = float(telem.get("sim_time", 0.0))
@@ -343,7 +347,10 @@ class TelemetryFlightRecorder:
             anomaly_flags = self.detect_anomalies(telem)
 
             # Fast zlib-compressed JSON payload of full frame (trajectories, costmap, gaps)
-            raw_bytes = json.dumps(telem).encode("utf-8")
+            if raw_b is not None:
+                raw_bytes = raw_b
+            else:
+                raw_bytes = json.dumps(telem).encode("utf-8")
             compressed_payload = zlib.compress(raw_bytes, level=1)
 
             rows.append((
