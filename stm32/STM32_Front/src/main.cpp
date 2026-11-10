@@ -1,6 +1,8 @@
 #include <Arduino.h>
 #include <SPI.h>
 #include <SimpleFOC.h>
+#include <stm32g4xx_ll_cordic.h>
+#include <stm32g4xx_ll_bus.h>
 #include "config_pins.h"
 #include "mt6816_spi.h"
 
@@ -37,6 +39,54 @@ struct __attribute__((packed)) TelemetryPacket {
 static_assert(sizeof(TelemetryPacket) == 26, "TelemetryPacket must be exactly 26 bytes");
 
 // ----------------------------------------------------------------------------
+// ESP32 High-Speed 400 Hz UART Protocol Definitions
+// ----------------------------------------------------------------------------
+#define STM32_CMD_SYNC_BYTE        0xAA
+#define STM32_FEEDBACK_SYNC_1      0xAA
+#define STM32_FEEDBACK_SYNC_2      0x55
+
+enum STM32CommandMode : uint8_t {
+    STM32_CMD_DRIVE      = 0x00, // Regular 400Hz velocity command (param1=m1_rpm, param2=m2_rpm)
+    STM32_CMD_ESTOP      = 0x01, // Immediate E-stop: cut PWM, zero voltage, disable drivers
+    STM32_CMD_ENABLE     = 0x02, // Enable motor drivers
+    STM32_CMD_CALIB_M1   = 0x10, // Start Motor 1 Calibration (param1=align_voltage)
+    STM32_CMD_CALIB_M2   = 0x11, // Start Motor 2 Calibration (param1=align_voltage)
+    STM32_CMD_SET_PID    = 0x20, // Set velocity PID (param1=Kp, param2=Ki)
+    STM32_CMD_SAVE_FLASH = 0x30, // Save active calibration & gains to STM32 Flash
+    STM32_CMD_ENTER_DFU  = 0xDF  // Reboot into ROM DFU bootloader
+};
+
+struct __attribute__((packed)) STM32MotorCommandPacket {
+    uint8_t sync;       // 0xAA (STM32_CMD_SYNC_BYTE)
+    uint8_t cmd_mode;   // STM32CommandMode
+    float   param1;     // m1 target RPM / Kp / align_voltage
+    float   param2;     // m2 target RPM / Ki
+    uint8_t checksum;   // XOR of bytes 1..9 (cmd_mode, param1, param2)
+};
+static_assert(sizeof(STM32MotorCommandPacket) == 11, "STM32MotorCommandPacket must be 11 bytes");
+
+#define STM32_STATUS_M1_ENABLED     (1 << 0)
+#define STM32_STATUS_M2_ENABLED     (1 << 1)
+#define STM32_STATUS_CALIB_ACTIVE   (1 << 2)
+#define STM32_STATUS_STALL_WARNING  (1 << 3)
+#define STM32_STATUS_LATCHED_FAULT  (1 << 4)
+#define STM32_STATUS_ENC1_OK        (1 << 5)
+#define STM32_STATUS_ENC2_OK        (1 << 6)
+
+struct __attribute__((packed)) STM32FeedbackPacket {
+    uint8_t header[2];      // 0xAA, 0x55
+    uint8_t status_flags;   // Bitfield (enabled, calib, stall, fault, enc_ok)
+    float   m1_actual_rpm;  // Actual shaft RPM
+    float   m2_actual_rpm;  // Actual shaft RPM
+    uint8_t calib_progress; // 0..100%
+    uint8_t checksum;       // XOR over bytes 2..11 (status_flags, m1, m2, calib_progress)
+};
+static_assert(sizeof(STM32FeedbackPacket) == 13, "STM32FeedbackPacket must be 13 bytes");
+
+// Hardware Serial instance connected to ESP32 on USART1 (PA10 RX, PA9 TX)
+HardwareSerial SerialESP(PIN_ESP_UART_RX, PIN_ESP_UART_TX);
+
+// ----------------------------------------------------------------------------
 // Global Peripherals & Motor Instances
 // ----------------------------------------------------------------------------
 // Dedicated hardware SPI2 instance: constructor order is (MOSI, MISO, SCK)
@@ -45,8 +95,60 @@ SPIClass SPI_2(PIN_SPI2_MOSI, PIN_SPI2_MISO, PIN_SPI2_SCK);
 MT6816Sensor encoder1(PIN_M1_CS, &SPI, PIN_SPI1_SCK, PIN_SPI1_MISO, PIN_SPI1_MOSI);
 MT6816Sensor encoder2(PIN_M2_CS, &SPI_2, PIN_SPI2_SCK, PIN_SPI2_MISO, PIN_SPI2_MOSI);
 
-BLDCDriver3PWM driver1(M1_PWM_A, M1_PWM_B, M1_PWM_C, M1_EN);
-BLDCDriver3PWM driver2(M2_PWM_A, M2_PWM_B, M2_PWM_C, M2_EN);
+// Fast direct-register PWM driver bypassing float divisions and switch-cases
+class FastBLDCDriver3PWM : public BLDCDriver3PWM {
+public:
+    TIM_TypeDef *timer_inst;
+    float pwm_scale;
+
+    FastBLDCDriver3PWM(int phA, int phB, int phC, int en, TIM_TypeDef *tim)
+        : BLDCDriver3PWM(phA, phB, phC, en), timer_inst(tim), pwm_scale(0.0f) {}
+
+    int init() override {
+        int res = BLDCDriver3PWM::init();
+        if (res && timer_inst) {
+            // Precompute scale = (ARR + 1) / voltage_power_supply
+            pwm_scale = (float)(timer_inst->ARR + 1) / voltage_power_supply;
+
+            // CRITICAL FIX: SimpleFOC's _configure3PWM() does NOT enable Output Compare Preload
+            // (OC1PE / OC2PE / OC3PE) on 3-PWM timers! Without shadow register preload, writing
+            // CCR1/2/3 inside the 20 kHz ISR asynchronously against the 25 kHz PWM counter
+            // causes mid-cycle comparator crossings and narrow glitch pulses (audible static/radio crackle).
+            timer_inst->CCMR1 |= (TIM_CCMR1_OC1PE | TIM_CCMR1_OC2PE);
+            timer_inst->CCMR2 |= TIM_CCMR2_OC3PE;
+            timer_inst->CR1   |= TIM_CR1_ARPE;
+            timer_inst->EGR    = TIM_EGR_UG;
+        }
+        return res;
+    }
+
+    void setPwm(float Ua, float Ub, float Uc) override {
+        Ua = _constrain(Ua, 0.0f, voltage_limit);
+        Ub = _constrain(Ub, 0.0f, voltage_limit);
+        Uc = _constrain(Uc, 0.0f, voltage_limit);
+
+        uint32_t duty_a = (uint32_t)(Ua * pwm_scale);
+        uint32_t duty_b = (uint32_t)(Ub * pwm_scale);
+        uint32_t duty_c = (uint32_t)(Uc * pwm_scale);
+
+        if (timer_inst == TIM2) {
+            TIM2->CR1 |= TIM_CR1_UDIS;
+            TIM2->CCR1 = duty_a; // PA5 (TIM2 CH1)
+            TIM2->CCR2 = duty_b; // PA1 (TIM2 CH2)
+            TIM2->CCR3 = duty_c; // PA2 (TIM2 CH3)
+            TIM2->CR1 &= ~TIM_CR1_UDIS;
+        } else if (timer_inst == TIM3) {
+            TIM3->CR1 |= TIM_CR1_UDIS;
+            TIM3->CCR3 = duty_a; // PB0 (TIM3 CH3)
+            TIM3->CCR2 = duty_b; // PA4 (TIM3 CH2)
+            TIM3->CCR1 = duty_c; // PA6 (TIM3 CH1)
+            TIM3->CR1 &= ~TIM_CR1_UDIS;
+        }
+    }
+};
+
+FastBLDCDriver3PWM driver1(M1_PWM_A, M1_PWM_B, M1_PWM_C, M1_EN, TIM2);
+FastBLDCDriver3PWM driver2(M2_PWM_A, M2_PWM_B, M2_PWM_C, M2_EN, TIM3);
 
 BLDCMotor motor1 = BLDCMotor(MOTOR_POLE_PAIRS);
 BLDCMotor motor2 = BLDCMotor(MOTOR_POLE_PAIRS);
@@ -79,9 +181,58 @@ volatile uint8_t live_calib_progress = 0; // 0..100%
 volatile uint32_t foc_tick_count = 0;
 volatile uint32_t isr_peak_cycles = 0;
 volatile uint32_t isr_last_cycles = 0;
+volatile uint32_t isr_alltime_peak_cycles = 0;
+volatile uint32_t isr_last_c0 = 0;
+volatile uint32_t prof_period_last = 8500;
+volatile uint32_t prof_period_min = 8500;
+volatile uint32_t prof_period_max = 8500;
+volatile uint32_t prof_period_jitter_max = 0;
 volatile uint8_t  isr_jitter_spikes = 0;
 
+volatile uint32_t prof_spi_max = 0;
+volatile uint32_t prof_update_max = 0;
+volatile uint32_t prof_m1_foc_max = 0;
+volatile uint32_t prof_m2_foc_max = 0;
+volatile uint32_t prof_move_max = 0;
+volatile uint32_t prof_total_max = 0;
+
+volatile uint32_t prof_spi_last = 0;
+volatile uint32_t prof_update_last = 0;
+volatile uint32_t prof_m1_foc_last = 0;
+volatile uint32_t prof_m2_foc_last = 0;
+volatile uint32_t prof_move_last = 0;
+volatile uint32_t prof_total_last = 0;
+
 // Stall & Safety Watchdog Tracking
+// ----------------------------------------------------------------------------
+// Industry-Grade Stall & Thermal Protection FSM
+// ----------------------------------------------------------------------------
+enum class StallState : uint8_t {
+    NORMAL          = 0,
+    WARNING         = 1,
+    FOLDBACK        = 2,
+    UNWEDGE_DITHER  = 3,
+    LATCHED_FAULT   = 4
+};
+
+struct IndustrialStallGuard {
+    StallState state = StallState::NORMAL;
+    float energy_accumulator = 0.0f;
+    uint32_t state_timer = 0;
+    uint8_t recovery_attempts = 0;
+    bool latched_fault = false;
+
+    void reset() {
+        state = StallState::NORMAL;
+        energy_accumulator = 0.0f;
+        state_timer = 0;
+        recovery_attempts = 0;
+        latched_fault = false;
+    }
+};
+
+IndustrialStallGuard stall_guard1;
+IndustrialStallGuard stall_guard2;
 bool stall_watchdog_enabled = true;
 uint32_t m1_stall_timer = 0;
 uint32_t m2_stall_timer = 0;
@@ -98,33 +249,276 @@ bool show_telemetry = true;
 char rx_line[256];
 uint16_t rx_idx = 0;
 
-// Angle Normalization Helpers
+// ----------------------------------------------------------------------------
+// High-Speed Math & Hardware Acceleration Overrides (STM32G474)
+// ----------------------------------------------------------------------------
+void initHardwareCORDIC() {
+    LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_CORDIC);
+    LL_CORDIC_Config(CORDIC,
+                     LL_CORDIC_FUNCTION_COSINE,
+                     LL_CORDIC_PRECISION_6CYCLES,
+                     LL_CORDIC_SCALE_0,
+                     LL_CORDIC_NBWRITE_1,
+                     LL_CORDIC_NBREAD_2,
+                     LL_CORDIC_INSIZE_32BITS,
+                     LL_CORDIC_OUTSIZE_32BITS);
+}
+
+// Fast single-precision angle normalization (replaces slow double-precision fmod)
+float _normalizeAngle(float angle) {
+    float a = angle - _2PI * (int)(angle * (1.0f / _2PI));
+    return (a >= 0.0f) ? a : (a + _2PI);
+}
+
 static inline float normalizeAngleRad(float angle) {
-    while (angle < 0.0f) angle += _2PI;
-    while (angle >= _2PI) angle -= _2PI;
-    return angle;
+    return _normalizeAngle(angle);
 }
 
 static inline float wrapAngleRad(float angle) {
-    while (angle > _PI) angle -= _2PI;
-    while (angle < -_PI) angle += _2PI;
+    while (angle > (float)_PI) angle -= (float)_2PI;
+    while (angle < -(float)_PI) angle += (float)_2PI;
     return angle;
 }
 
+// Hardware CORDIC trigonometric accelerator (simultaneous sin & cos in hardware)
+void _sincos(float a, float *s, float *c) {
+    float angle = a;
+    while (angle > (float)_PI) angle -= (float)_2PI;
+    while (angle < -(float)_PI) angle += (float)_2PI;
+
+    // Convert angle to Q1.31: angle * (2^31 / PI) = angle * 683565275.5764f
+    int32_t arg_q31 = (int32_t)(angle * 683565275.5764f);
+
+    CORDIC->WDATA = arg_q31;
+    while (!LL_CORDIC_IsActiveFlag_RRDY(CORDIC));
+    int32_t c_raw = (int32_t)CORDIC->RDATA;
+    int32_t s_raw = (int32_t)CORDIC->RDATA;
+
+    constexpr float q31_to_f = 1.0f / 2147483648.0f;
+    *c = (float)c_raw * q31_to_f;
+    *s = (float)s_raw * q31_to_f;
+}
+
+float _sin(float a) {
+    float s, c;
+    _sincos(a, &s, &c);
+    return s;
+}
+
+float _cos(float a) {
+    float s, c;
+    _sincos(a, &s, &c);
+    return c;
+}
+
+// Fast DWT-based micros counter via GNU ld --wrap (replaces SysTick/HAL_GetTick division polling)
+extern "C" unsigned long __wrap__micros() {
+    return DWT->CYCCNT / (SystemCoreClock / 1000000);
+}
+
+extern "C" float __wrap_sinf(float a) {
+    return _sin(a);
+}
+
+extern "C" float __wrap_cosf(float a) {
+    return _cos(a);
+}
+
+extern "C" void __wrap_sincosf(float a, float *s, float *c) {
+    _sincos(a, s, c);
+}
+
 // ----------------------------------------------------------------------------
-// Hard Real-Time 20.0 kHz Hardware Timer ISR (TIM6, NVIC Priority 2)
+// STM32G474 170 MHz Range 1 Boost Clock Configuration
+// Overrides default weak 150 MHz configuration to unleash full 170 MHz rated speed
+// ----------------------------------------------------------------------------
+extern "C" void SystemClock_Config(void) {
+    RCC_OscInitTypeDef RCC_OscInitStruct = {};
+    RCC_ClkInitTypeDef RCC_ClkInitStruct = {};
+
+    HAL_PWREx_ControlVoltageScaling(PWR_REGULATOR_VOLTAGE_SCALE1_BOOST);
+
+    RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI | RCC_OSCILLATORTYPE_HSI48;
+    RCC_OscInitStruct.HSIState = RCC_HSI_ON;
+    RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+    RCC_OscInitStruct.HSI48State = RCC_HSI48_ON;
+    RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+    RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
+    RCC_OscInitStruct.PLL.PLLM = RCC_PLLM_DIV4; // 16 / 4 = 4 MHz
+    RCC_OscInitStruct.PLL.PLLN = 85;             // 4 * 85 = 340 MHz (VCO)
+    RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
+    RCC_OscInitStruct.PLL.PLLQ = RCC_PLLQ_DIV2;
+    RCC_OscInitStruct.PLL.PLLR = RCC_PLLR_DIV2; // 340 / 2 = 170 MHz!
+    if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK) {
+        Error_Handler();
+    }
+
+    RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK
+                                | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
+    RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
+    RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
+    RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
+    RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
+
+    if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_4) != HAL_OK) {
+        Error_Handler();
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Direct Inlined Hardware FOC Commutation Loop (< 60 cycles / ~0.35 us)
+// Completely eliminates SimpleFOC virtual dispatch, _micros() polling, and function overhead
+// ----------------------------------------------------------------------------
+static inline float fast_fminf(float a, float b) __attribute__((always_inline));
+static inline float fast_fminf(float a, float b) { return (a < b) ? a : b; }
+
+static inline float fast_fmaxf(float a, float b) __attribute__((always_inline));
+static inline float fast_fmaxf(float a, float b) { return (a > b) ? a : b; }
+
+static inline void fastLoopFOC(BLDCMotor &motor, MT6816Sensor &encoder, FastBLDCDriver3PWM &driver, TIM_TypeDef *tim) __attribute__((always_inline));
+
+static inline void fastLoopFOC(BLDCMotor &motor, MT6816Sensor &encoder, FastBLDCDriver3PWM &driver, TIM_TypeDef *tim) {
+    if (!motor.enabled) return;
+
+    // 1. Electrical angle from calibrated mechanical angle
+    float mech_angle = encoder.cached_calibrated_angle;
+    float el_ang = (float)(motor.sensor_direction * motor.pole_pairs) * mech_angle - motor.zero_electric_angle;
+    el_ang = _normalizeAngle(el_ang);
+    motor.electrical_angle = el_ang;
+
+    // 2. Hardware CORDIC sin & cos
+    float sa, ca;
+    _sincos(el_ang, &sa, &ca);
+
+    // 3. Inverse Park Transform
+    float uq = _constrain(motor.voltage.q, -motor.voltage_limit, motor.voltage_limit);
+    float ud = motor.voltage.d;
+
+    float u_alpha = ca * ud - sa * uq;
+    float u_beta  = sa * ud + ca * uq;
+
+    // 4. Clarke Transform
+    float ua = u_alpha;
+    float ub = -0.5f * u_alpha + 0.866025404f * u_beta;
+    float uc = -0.5f * u_alpha - 0.866025404f * u_beta;
+
+    // 5. SpaceVectorPWM Midpoint Centering
+    float umin = fast_fminf(ua, fast_fminf(ub, uc));
+    float umax = fast_fmaxf(ua, fast_fmaxf(ub, uc));
+    float center = (driver.voltage_limit * 0.5f) - (umax + umin) * 0.5f;
+
+    ua += center;
+    ub += center;
+    uc += center;
+
+    // 6. Direct hardware timer CCR update with atomic shadow-register latching (TIM_CR1_UDIS)
+    uint32_t duty_a = (uint32_t)(fast_fminf(fast_fmaxf(ua, 0.0f), driver.voltage_limit) * driver.pwm_scale);
+    uint32_t duty_b = (uint32_t)(fast_fminf(fast_fmaxf(ub, 0.0f), driver.voltage_limit) * driver.pwm_scale);
+    uint32_t duty_c = (uint32_t)(fast_fminf(fast_fmaxf(uc, 0.0f), driver.voltage_limit) * driver.pwm_scale);
+
+    if (tim == TIM2) {
+        TIM2->CR1 |= TIM_CR1_UDIS;
+        TIM2->CCR1 = duty_a; // PA5 (TIM2 CH1)
+        TIM2->CCR2 = duty_b; // PA1 (TIM2 CH2)
+        TIM2->CCR3 = duty_c; // PA2 (TIM2 CH3)
+        TIM2->CR1 &= ~TIM_CR1_UDIS;
+    } else {
+        TIM3->CR1 |= TIM_CR1_UDIS;
+        TIM3->CCR3 = duty_a; // PB0 (TIM3 CH3)
+        TIM3->CCR2 = duty_b; // PA4 (TIM3 CH2)
+        TIM3->CCR1 = duty_c; // PA6 (TIM3 CH1)
+        TIM3->CR1 &= ~TIM_CR1_UDIS;
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Direct Inlined 5.0 kHz Staggered Velocity Motion Control (< 45 cycles)
+// Eliminates virtual dispatch, _micros() division, and 20 kHz quantization hiss
+// ----------------------------------------------------------------------------
+static inline void fastMoveVelocity(BLDCMotor &motor, MT6816Sensor &encoder, float target_rad_s) __attribute__((always_inline));
+
+static inline void fastMoveVelocity(BLDCMotor &motor, MT6816Sensor &encoder, float target_rad_s) {
+    motor.target = target_rad_s;
+    motor.shaft_angle = (float)motor.sensor_direction * encoder.getFastAngle() - motor.sensor_offset;
+    float raw_vel = encoder.getVelocity();
+    motor.shaft_velocity = (float)motor.sensor_direction * motor.LPF_velocity(raw_vel);
+    if (!motor.enabled) return;
+
+    motor.shaft_velocity_sp = target_rad_s;
+    motor.current_sp = motor.PID_velocity(target_rad_s - motor.shaft_velocity);
+    motor.voltage.q = _constrain(motor.current_sp, -motor.voltage_limit, motor.voltage_limit);
+    motor.voltage.d = 0.0f;
+}
+
+// ----------------------------------------------------------------------------
+// Hard Real-Time 20.0 kHz Hardware Timer ISR (TIM6, NVIC Priority 0)
 // ----------------------------------------------------------------------------
 void focTimerISR() {
-    uint32_t start_cycles = DWT->CYCCNT;
+    uint32_t c0 = DWT->CYCCNT;
+    if (isr_last_c0 != 0) {
+        uint32_t period = c0 - isr_last_c0;
+        prof_period_last = period;
+        if (period < prof_period_min) prof_period_min = period;
+        if (period > prof_period_max) prof_period_max = period;
+        uint32_t jit = (period >= 8500) ? (period - 8500) : (8500 - period);
+        if (jit > prof_period_jitter_max) prof_period_jitter_max = jit;
+        // Count inter-ISR period jitter spike if period deviates by > 5.0 us (850 cycles)
+        if (jit > 850) {
+            isr_jitter_spikes++;
+        }
+    }
+    isr_last_c0 = c0;
     foc_tick_count++;
 
-    // 1. Single-Read Hardware SPI Caching & SimpleFOC Sensor State Update
-    encoder1.readHardwareSPI();
-    encoder1.update(); // CRITICAL: Updates angle tracking, timestamp, and multi-turn unwrapping on every 20 kHz tick!
-    encoder2.readHardwareSPI();
-    encoder2.update();
+    // 1. Encoder SPI Read Engine
+    if (m1_calib_active) {
+        // High-Precision Calibration Isolation for Motor 1:
+        // Read ONLY Encoder 1 on SPI1. SPI2 and Encoder 2 are completely silenced
+        // (CS2 held HIGH, zero 10.6 MHz clock switching on the PCB, zero digital cross-talk).
+        // ISR duration drops to < 1.8 us (< 3.6% CPU load).
+        readEncoderSingleFast(encoder1, SPI1);
+        encoder1.update();
+        uint32_t d_tot = DWT->CYCCNT - c0;
+        isr_last_cycles = d_tot;
+        if (d_tot > isr_peak_cycles) isr_peak_cycles = d_tot;
+        return;
+    } else if (m2_calib_active) {
+        // High-Precision Calibration Isolation for Motor 2:
+        // Read ONLY Encoder 2 on SPI2. SPI1 and Encoder 1 are completely silenced.
+        readEncoderSingleFast(encoder2, SPI2);
+        encoder2.update();
+        uint32_t d_tot = DWT->CYCCNT - c0;
+        isr_last_cycles = d_tot;
+        if (d_tot > isr_peak_cycles) isr_peak_cycles = d_tot;
+        return;
+    }
 
-    // 2. Motor 1 Commutation Loop (with Smooth Filtered Sensor Lag Compensation)
+    // Normal Dual-Motor Operation: Concurrent Parallel Dual-SPI Read (< 3.6 us total)
+    readDualEncodersParallel(encoder1, encoder2);
+    uint32_t c1 = DWT->CYCCNT;
+
+    encoder1.update();
+    encoder2.update();
+    uint32_t c2 = DWT->CYCCNT;
+
+    // 2. Staggered 5.0 kHz Velocity Filtering & PID Control (downsample = 4, 200 us period)
+    uint32_t phase = foc_tick_count & 3U;
+    if (phase == 0U && !m1_calib_active) {
+        if (m1_enabled) {
+            fastMoveVelocity(motor1, encoder1, m1_target_rpm * 0.104719755f);
+        } else {
+            motor1.shaft_velocity = (float)motor1.sensor_direction * motor1.LPF_velocity(encoder1.getVelocity());
+        }
+    } else if (phase == 2U && !m2_calib_active) {
+        if (m2_enabled) {
+            fastMoveVelocity(motor2, encoder2, m2_target_rpm * 0.104719755f);
+        } else {
+            motor2.shaft_velocity = (float)motor2.sensor_direction * motor2.LPF_velocity(encoder2.getVelocity());
+        }
+    }
+    uint32_t c3 = DWT->CYCCNT;
+
+    // 3. Motor 1 Commutation Loop (with Smooth Filtered Sensor Lag Compensation)
     if (m1_enabled && !m1_calib_active) {
         if (m1_lag_comp_us > 0.0f && m1_base_zero_angle != 0.0f) {
             // Crisp 2.0 ms low-pass filter on lag compensation velocity (alpha = 0.024f @ 20 kHz)
@@ -137,10 +531,11 @@ void focTimerISR() {
                 motor1.zero_electric_angle = m1_base_zero_angle;
             }
         }
-        motor1.loopFOC();
+        fastLoopFOC(motor1, encoder1, driver1, TIM2);
     }
+    uint32_t c4 = DWT->CYCCNT;
 
-    // 3. Motor 2 Commutation Loop (with Smooth Filtered Sensor Lag Compensation)
+    // 4. Motor 2 Commutation Loop (with Smooth Filtered Sensor Lag Compensation)
     if (m2_enabled && !m2_calib_active) {
         if (m2_lag_comp_us > 0.0f && m2_base_zero_angle != 0.0f) {
             m2_lag_filt_vel += 0.024f * (motor2.shaft_velocity - m2_lag_filt_vel);
@@ -151,28 +546,41 @@ void focTimerISR() {
                 motor2.zero_electric_angle = m2_base_zero_angle;
             }
         }
-        motor2.loopFOC();
+        fastLoopFOC(motor2, encoder2, driver2, TIM3);
     }
-
-    // 4. Downsampled Velocity Motion Control (Staggered to prevent dual-PID latency spike)
-    if ((foc_tick_count % MOTION_DOWNSAMPLE_RATIO) == 0) {
-        if (m1_enabled && !m1_calib_active) {
-            motor1.move(m1_target_rpm * 0.104719755f);
-        }
-    } else if ((foc_tick_count % MOTION_DOWNSAMPLE_RATIO) == 2) {
-        if (m2_enabled && !m2_calib_active) {
-            motor2.move(m2_target_rpm * 0.104719755f);
-        }
-    }
+    uint32_t c5 = DWT->CYCCNT;
 
     // 5. Profiling & Jitter Tracking
-    uint32_t elapsed = DWT->CYCCNT - start_cycles;
-    isr_last_cycles = elapsed;
-    if (elapsed > isr_peak_cycles) {
-        isr_peak_cycles = elapsed;
+    uint32_t d_spi = c1 - c0;
+    uint32_t d_upd = c2 - c1;
+    uint32_t d_mov = c3 - c2;
+    uint32_t d_m1  = c4 - c3;
+    uint32_t d_m2  = c5 - c4;
+    uint32_t d_tot = c5 - c0;
+
+    prof_spi_last = d_spi;
+    prof_update_last = d_upd;
+    prof_m1_foc_last = d_m1;
+    prof_m2_foc_last = d_m2;
+    prof_move_last = d_mov;
+    prof_total_last = d_tot;
+
+    if (d_spi > prof_spi_max) prof_spi_max = d_spi;
+    if (d_upd > prof_update_max) prof_update_max = d_upd;
+    if (d_m1 > prof_m1_foc_max) prof_m1_foc_max = d_m1;
+    if (d_m2 > prof_m2_foc_max) prof_m2_foc_max = d_m2;
+    if (d_mov > prof_move_max) prof_move_max = d_mov;
+    if (d_tot > prof_total_max) prof_total_max = d_tot;
+
+    isr_last_cycles = d_tot;
+    if (d_tot > isr_peak_cycles) {
+        isr_peak_cycles = d_tot;
     }
-    // Jitter spike warning threshold: > 38.0 us @ 170 MHz = 6,460 cycles (50.0 us total tick budget)
-    if (elapsed > 6460) {
+    if (d_tot > isr_alltime_peak_cycles) {
+        isr_alltime_peak_cycles = d_tot;
+    }
+    // Jitter spike warning threshold: > 35.0 us @ 170 MHz = 5,950 cycles (50.0 us total tick budget)
+    if (d_tot > 5950) {
         isr_jitter_spikes++;
     }
 }
@@ -182,9 +590,10 @@ void focTimerISR() {
 // ----------------------------------------------------------------------------
 void initMotorFOC(int motor_id) {
     if (motor_id == 1) {
-        driver1.enable();
+        motor1.enable();
         if (M1_DEFAULT_ZERO_ELECTRIC_ANGLE != 0.0f) {
             motor1.zero_electric_angle = M1_DEFAULT_ZERO_ELECTRIC_ANGLE;
+            m1_base_zero_angle = M1_DEFAULT_ZERO_ELECTRIC_ANGLE;
             motor1.sensor_direction = Direction::CW;
             motor1.initFOC();
             m1_calibrated = true;
@@ -192,6 +601,7 @@ void initMotorFOC(int motor_id) {
         } else {
             Serial.println(">>> M1: Running standard SimpleFOC alignment...");
             if (motor1.initFOC()) {
+                m1_base_zero_angle = motor1.zero_electric_angle;
                 m1_calibrated = true;
                 Serial.print(">>> M1 ALIGN OK: ZeroAngle=");
                 Serial.print(motor1.zero_electric_angle, 4);
@@ -200,14 +610,15 @@ void initMotorFOC(int motor_id) {
             } else {
                 m1_calibrated = false;
                 m1_enabled = false;
-                driver1.disable();
+                motor1.disable();
                 Serial.println(">>> M1 ALIGN FAILED!");
             }
         }
     } else if (motor_id == 2) {
-        driver2.enable();
+        motor2.enable();
         if (M2_DEFAULT_ZERO_ELECTRIC_ANGLE != 0.0f) {
             motor2.zero_electric_angle = M2_DEFAULT_ZERO_ELECTRIC_ANGLE;
+            m2_base_zero_angle = M2_DEFAULT_ZERO_ELECTRIC_ANGLE;
             motor2.sensor_direction = Direction::CW;
             motor2.initFOC();
             m2_calibrated = true;
@@ -215,6 +626,7 @@ void initMotorFOC(int motor_id) {
         } else {
             Serial.println(">>> M2: Running standard SimpleFOC alignment...");
             if (motor2.initFOC()) {
+                m2_base_zero_angle = motor2.zero_electric_angle;
                 m2_calibrated = true;
                 Serial.print(">>> M2 ALIGN OK: ZeroAngle=");
                 Serial.print(motor2.zero_electric_angle, 4);
@@ -223,7 +635,7 @@ void initMotorFOC(int motor_id) {
             } else {
                 m2_calibrated = false;
                 m2_enabled = false;
-                driver2.disable();
+                motor2.disable();
                 Serial.println(">>> M2 ALIGN FAILED!");
             }
         }
@@ -235,16 +647,177 @@ void initMotorFOC(int motor_id) {
 // ----------------------------------------------------------------------------
 void sendBinaryTelemetry(); // Forward declaration for real-time telemetry streaming
 
+// ----------------------------------------------------------------------------
+// Global Emergency Stop & Calibration Abort Engine
+// ----------------------------------------------------------------------------
+volatile bool g_estop_active = false;
+static bool s_calib_isolation_active = false;
+static bool s_saved_telemetry_state = true;
+
+void triggerGlobalEmergencyStop() {
+    g_estop_active = true;
+    m1_enabled = false;
+    m2_enabled = false;
+    m1_target_rpm = 0.0f;
+    m2_target_rpm = 0.0f;
+    m1_calib_active = false;
+    m2_calib_active = false;
+    live_calib_progress = 0;
+    s_calib_isolation_active = false;
+    show_telemetry = s_saved_telemetry_state;
+
+    motor1.voltage.q = 0.0f;
+    motor1.voltage.d = 0.0f;
+    motor2.voltage.q = 0.0f;
+    motor2.voltage.d = 0.0f;
+
+    motor1.setPhaseVoltage(0.0f, 0.0f, 0.0f);
+    motor2.setPhaseVoltage(0.0f, 0.0f, 0.0f);
+
+    motor1.disable();
+    motor2.disable();
+    driver1.disable();
+    driver2.disable();
+    digitalWrite(M1_EN, LOW);
+    digitalWrite(M2_EN, LOW);
+
+    stall_guard1.reset();
+    stall_guard2.reset();
+    motor1.voltage_limit = MOTOR_VOLTAGE_LIMIT;
+    motor1.PID_velocity.limit = motor1.voltage_limit;
+    motor2.voltage_limit = MOTOR_VOLTAGE_LIMIT;
+    motor2.PID_velocity.limit = motor2.voltage_limit;
+
+    while (Serial.available()) Serial.read();
+
+    Serial.println("\n>>> 🛑 GLOBAL EMERGENCY STOP: ALL MOTORS SHUT DOWN UNCONDITIONALLY! <<<");
+    Serial.println("[CALIB_FAILED]:ABORTED_BY_ESTOP");
+    Serial.flush();
+}
+
 static inline bool checkCalibrationAbort() {
-    if (Serial.available()) {
-        char c = (char)Serial.peek();
-        if (c == 'x' || c == 'X' || c == 's' || c == 'S' || c == ' ') {
-            while (Serial.available()) Serial.read();
+    if (g_estop_active) return true;
+    while (Serial.available() > 0) {
+        char c = (char)Serial.read();
+        // Dedicated single-byte instant emergency stop hotkey: ESC (ASCII 27)
+        if (c == 27) {
+            rx_idx = 0;
+            triggerGlobalEmergencyStop();
             return true;
+        }
+        // Accumulate into incoming line buffer so commands like x, STOP, or ESTOP work cleanly
+        if (c == '\n' || c == '\r') {
+            if (rx_idx > 0) {
+                rx_line[rx_idx] = '\0';
+                if (strcasecmp(rx_line, "x") == 0 || strcasecmp(rx_line, "STOP") == 0 ||
+                    strcasecmp(rx_line, "ESTOP") == 0 || strcasecmp(rx_line, "HALT") == 0 ||
+                    strcasecmp(rx_line, "ABORT") == 0) {
+                    rx_idx = 0;
+                    triggerGlobalEmergencyStop();
+                    return true;
+                }
+                rx_idx = 0;
+            }
+        } else if (rx_idx < sizeof(rx_line) - 1) {
+            rx_line[rx_idx++] = c;
         }
     }
     return false;
 }
+
+static inline bool safeDelayWithAbort(uint32_t ms) {
+    uint32_t start = millis();
+    while (millis() - start < ms) {
+        if (checkCalibrationAbort()) return true;
+        uint32_t rem = ms - (millis() - start);
+        delay(rem > 10 ? 10 : rem);
+    }
+    return checkCalibrationAbort();
+}
+
+// ----------------------------------------------------------------------------
+// Dedicated Calibration Isolation & Environment Shield
+// ----------------------------------------------------------------------------
+void enterCalibrationIsolation(int motor_id) {
+    if (s_calib_isolation_active) return;
+    s_calib_isolation_active = true;
+    s_saved_telemetry_state = show_telemetry;
+    show_telemetry = false; // Mute all binary telemetry streaming
+
+    int other_id = (motor_id == 1) ? 2 : 1;
+    BLDCMotor &other_motor = (motor_id == 1) ? motor2 : motor1;
+    BLDCDriver3PWM &other_driver = (motor_id == 1) ? driver2 : driver1;
+    volatile bool &other_enabled = (motor_id == 1) ? m2_enabled : m1_enabled;
+    volatile float &other_target_rpm = (motor_id == 1) ? m2_target_rpm : m1_target_rpm;
+
+    // 1. Completely disable the other motor and inverter hardware (Hi-Z, zero switching/ripple/EMI)
+    other_enabled = false;
+    other_target_rpm = 0.0f;
+    other_motor.voltage.q = 0.0f;
+    other_motor.voltage.d = 0.0f;
+    other_motor.setPhaseVoltage(0.0f, 0.0f, 0.0f);
+    other_motor.disable();
+    other_driver.disable(); // Shuts down gate drivers/inverter half-bridges
+    digitalWrite((motor_id == 1) ? M2_EN : M1_EN, LOW); // Enforce hardware EN pin LOW
+
+    // 2. Silence inactive encoder SPI bus (hold CS HIGH, MISO Hi-Z, zero 10.6 MHz clock noise)
+    if (motor_id == 1) {
+        encoder2.csHigh();
+        stall_guard2.reset();
+        m1_calib_active = true;
+        m2_calib_active = false;
+    } else {
+        encoder1.csHigh();
+        stall_guard1.reset();
+        m1_calib_active = false;
+        m2_calib_active = true;
+    }
+    live_calib_progress = 0;
+
+    Serial.printf("\n>>> 🛡️ CALIBRATION ISOLATION ACTIVE for Motor %d:\n", motor_id);
+    Serial.printf("   - Motor %d driver & hardware EN pin DISABLED (Hi-Z, zero PWM/ripple/EMI)\n", other_id);
+    Serial.printf("   - Motor %d encoder SPI bus SILENCED (CS held HIGH, zero 10.6 MHz clock switching)\n", other_id);
+    Serial.printf("   - Motor %d velocity and commutation loops suspended\n", other_id);
+    Serial.println("   - Telemetry streaming MUTED to prevent USB buffer contention and jitter");
+    Serial.println("   - Stall watchdog suspended during calibration sweep");
+    Serial.println("   - 20 kHz ISR streamlined to single SPI bus (< 1.8 us / < 3.6% CPU)\n");
+    Serial.printf("[CALIB_START]:M%d\n", motor_id);
+    Serial.println("[CALIB_PROG]:0%");
+    Serial.flush();
+}
+
+void exitCalibrationIsolation(int motor_id) {
+    if (!s_calib_isolation_active) return;
+    s_calib_isolation_active = false;
+    m1_calib_active = false;
+    m2_calib_active = false;
+    live_calib_progress = 0;
+
+    // Restore telemetry streaming state
+    show_telemetry = s_saved_telemetry_state;
+
+    int other_id = (motor_id == 1) ? 2 : 1;
+    Serial.printf("\n>>> 🛡️ CALIBRATION ISOLATION RELEASED:\n");
+    Serial.printf("   - Motor %d remains safely in standby (DISABLED)\n", other_id);
+    Serial.printf("   - Telemetry streaming RESTORED (%s)\n\n", show_telemetry ? "ON" : "OFF");
+    Serial.printf("[CALIB_END]:M%d\n", motor_id);
+    Serial.flush();
+}
+
+struct CalibrationIsolationGuard {
+    int m_id;
+    bool was_active_before;
+    CalibrationIsolationGuard(int motor_id) : m_id(motor_id), was_active_before(s_calib_isolation_active) {
+        if (!was_active_before) {
+            enterCalibrationIsolation(m_id);
+        }
+    }
+    ~CalibrationIsolationGuard() {
+        if (!was_active_before) {
+            exitCalibrationIsolation(m_id);
+        }
+    }
+};
 
 // Circular 1D inverse-distance interpolation from measured samples to 128 raw LUT segments
 static float interpolateLUTAtAngle(float target_rad, const float* sample_angles, const float* sample_errors, int n) {
@@ -387,8 +960,19 @@ bool saveConfigToFlash() {
     cfg.checksum = computeConfigChecksum(cfg);
 
     // Disable motor PWM and pause 20kHz FOC interrupt during flash write
-    driver1.disable();
-    driver2.disable();
+    motor1.disable();
+    motor2.disable();
+    motor1.voltage.q = 0.0f;
+    motor1.voltage.d = 0.0f;
+    motor2.voltage.q = 0.0f;
+    motor2.voltage.d = 0.0f;
+
+    stall_guard1.reset();
+    stall_guard2.reset();
+    motor1.voltage_limit = MOTOR_VOLTAGE_LIMIT;
+    motor1.PID_velocity.limit = motor1.voltage_limit;
+    motor2.voltage_limit = MOTOR_VOLTAGE_LIMIT;
+    motor2.PID_velocity.limit = motor2.voltage_limit;
     m1_enabled = false;
     m2_enabled = false;
 
@@ -410,6 +994,7 @@ bool saveConfigToFlash() {
     status = HAL_FLASHEx_Erase(&EraseInitStruct, &pageError);
     if (status != HAL_OK) {
         HAL_FLASH_Lock();
+        isr_last_c0 = 0;
         __enable_irq();
         if (foc_timer) foc_timer->resume();
         Serial.printf(">>> [FLASH_ERR] Page erase failed on page %lu (status %d, err %08lX)\n",
@@ -425,6 +1010,7 @@ bool saveConfigToFlash() {
         status = HAL_FLASH_Program(FLASH_TYPEPROGRAM_DOUBLEWORD, page_addr + offset, dword);
         if (status != HAL_OK) {
             HAL_FLASH_Lock();
+            isr_last_c0 = 0;
             __enable_irq();
             if (foc_timer) foc_timer->resume();
             Serial.printf(">>> [FLASH_ERR] Program failed at offset %u (status %d, err %08lX)\n",
@@ -434,6 +1020,7 @@ bool saveConfigToFlash() {
     }
 
     HAL_FLASH_Lock();
+    isr_last_c0 = 0;
     __enable_irq();
     if (foc_timer) foc_timer->resume();
 
@@ -506,6 +1093,7 @@ bool loadConfigFromFlash() {
 void dumpConfigJSON() {
     Serial.println("\n[CONFIG_START]");
     Serial.printf("{\n");
+    // Motor 1 Configuration & 128-pt LUT
     Serial.printf("  \"zero_electric_angle\": %.6f,\n", motor1.zero_electric_angle);
     Serial.printf("  \"sensor_direction\": %d,\n", (motor1.sensor_direction == Direction::CW) ? 1 : -1);
     Serial.printf("  \"sensor_lag_comp_us\": %.1f,\n", m1_lag_comp_us);
@@ -516,11 +1104,26 @@ void dumpConfigJSON() {
     Serial.printf("  \"pid_d\": %.4f,\n", motor1.PID_velocity.D);
     Serial.printf("  \"lpf_tf\": %.6f,\n", motor1.LPF_velocity.Tf);
     Serial.printf("  \"dwt_window_ms\": %.2f,\n", encoder1.window_ms);
-    Serial.printf("  \"m2_zero_electric_angle\": %.6f,\n", motor2.zero_electric_angle);
-    Serial.printf("  \"m2_sensor_direction\": %d,\n", (motor2.sensor_direction == Direction::CW) ? 1 : -1);
     Serial.printf("  \"lut_128\": [");
     for (int i = 0; i < 128; i++) {
         Serial.printf("%.6f%s", encoder1.lut_errors[i], (i == 127) ? "" : ", ");
+    }
+    Serial.printf("],\n");
+
+    // Motor 2 Configuration & 128-pt LUT
+    Serial.printf("  \"m2_zero_electric_angle\": %.6f,\n", motor2.zero_electric_angle);
+    Serial.printf("  \"m2_sensor_direction\": %d,\n", (motor2.sensor_direction == Direction::CW) ? 1 : -1);
+    Serial.printf("  \"m2_sensor_lag_comp_us\": %.1f,\n", m2_lag_comp_us);
+    Serial.printf("  \"m2_motor_kv_rating\": %.2f,\n", motor2.KV_rating);
+    Serial.printf("  \"m2_is_lut_calibrated\": %s,\n", encoder2.is_lut_active ? "true" : "false");
+    Serial.printf("  \"m2_pid_p\": %.4f,\n", motor2.PID_velocity.P);
+    Serial.printf("  \"m2_pid_i\": %.4f,\n", motor2.PID_velocity.I);
+    Serial.printf("  \"m2_pid_d\": %.4f,\n", motor2.PID_velocity.D);
+    Serial.printf("  \"m2_lpf_tf\": %.6f,\n", motor2.LPF_velocity.Tf);
+    Serial.printf("  \"m2_dwt_window_ms\": %.2f,\n", encoder2.window_ms);
+    Serial.printf("  \"m2_lut_128\": [");
+    for (int i = 0; i < 128; i++) {
+        Serial.printf("%.6f%s", encoder2.lut_errors[i], (i == 127) ? "" : ", ");
     }
     Serial.printf("]\n");
     Serial.printf("}\n");
@@ -530,7 +1133,8 @@ void dumpConfigJSON() {
 // ----------------------------------------------------------------------------
 // Stepped 128-Point Calibration Sweep (Single Pass - Matching ESP32 Master Suite)
 // ----------------------------------------------------------------------------
-bool runSteppedLUTSweepSinglePass(int motor_id, float align_voltage) {
+bool runSteppedLUTSweepSinglePass(int motor_id, float align_voltage, bool *out_stalled = nullptr) {
+    if (out_stalled) *out_stalled = false;
     float hold_voltage = fminf(align_voltage, CALIB_HOLD_VOLTAGE);
     Serial.println("\n================================================================================");
     Serial.println(">>> 🔬 STARTING 128-POINT DUAL-PASS NON-LINEARITY LUT CALIBRATION <<<");
@@ -553,7 +1157,7 @@ bool runSteppedLUTSweepSinglePass(int motor_id, float align_voltage) {
 
     // 1. Pre-flight MT6816 Health Check
     Serial.print("1. Checking MT6816 Sensor Health... ");
-    delay(50);
+    if (safeDelayWithAbort(50)) return false;
     if (encoder.last_no_mag) {
         Serial.println("FAILED!");
         Serial.println("   ❌ ABORT: MT6816 reports NO_MAG flag (airgap too large or magnet missing).");
@@ -573,16 +1177,15 @@ bool runSteppedLUTSweepSinglePass(int motor_id, float align_voltage) {
     // 2. Commutation Direction & Rotor Stall Verification
     Serial.print("2. Determining Sensor Direction & Verifying Motion (Stall Check)... ");
     motor.setPhaseVoltage(align_voltage, 0.0f, _3PI_2);
-    delay(100);
+    if (safeDelayWithAbort(100)) return false;
     motor.setPhaseVoltage(hold_voltage, 0.0f, _3PI_2);
-    delay(300);
+    if (safeDelayWithAbort(300)) return false;
 
     float start_raw = encoder.getRawMechanicalAngle();
 
     const int DIR_STEPS = 200;
     for (int step = 0; step <= DIR_STEPS; step++) {
         if (checkCalibrationAbort()) {
-            Serial.println("\n>>> 🛑 CALIBRATION ABORTED BY USER <<<");
             motor.setPhaseVoltage(0.0f, 0.0f, 0.0f);
             return false;
         }
@@ -590,12 +1193,11 @@ bool runSteppedLUTSweepSinglePass(int motor_id, float align_voltage) {
         motor.setPhaseVoltage(align_voltage, 0.0f, el_ang);
         delayMicroseconds(2000);
     }
-    delay(150);
+    if (safeDelayWithAbort(150)) return false;
     float mid_raw = encoder.getRawMechanicalAngle();
 
     for (int step = DIR_STEPS; step >= 0; step--) {
         if (checkCalibrationAbort()) {
-            Serial.println("\n>>> 🛑 CALIBRATION ABORTED BY USER <<<");
             motor.setPhaseVoltage(0.0f, 0.0f, 0.0f);
             return false;
         }
@@ -603,13 +1205,14 @@ bool runSteppedLUTSweepSinglePass(int motor_id, float align_voltage) {
         motor.setPhaseVoltage(align_voltage, 0.0f, el_ang);
         delayMicroseconds(2000);
     }
-    delay(150);
+    if (safeDelayWithAbort(150)) return false;
 
     float d_ang = wrapAngleRad(mid_raw - start_raw);
     float moved_deg = fabsf(d_ang) * 57.2957795f;
     float expected_deg = (360.0f / (float)MOTOR_POLE_PAIRS) * 0.40f;
 
     if (fabsf(d_ang) < 0.05f) {
+        if (out_stalled) *out_stalled = true;
         Serial.println("FAILED!");
         Serial.println("  -------------------------------------------------------------");
         Serial.printf ("  ❌ MOTION CHECK FAILED: Rotor moved only %.2f deg mech (expected >= %.2f deg).\n",
@@ -641,9 +1244,9 @@ bool runSteppedLUTSweepSinglePass(int motor_id, float align_voltage) {
     static float temp_errors[CALIB_TOTAL_STEPS];
 
     // --- PASS 1: FORWARD (CW) SWEEP ---
+    int fwd_stall_consecutive = 0;
     for (int i = 0; i < TOTAL_STEPS; i++) {
         if (checkCalibrationAbort()) {
-            Serial.println("\n>>> 🛑 CALIBRATION ABORTED BY USER <<<");
             motor.setPhaseVoltage(0.0f, 0.0f, 0.0f);
             return false;
         }
@@ -657,13 +1260,17 @@ bool runSteppedLUTSweepSinglePass(int motor_id, float align_voltage) {
             float prev_mech = (float)(i - 1) * step_mech_rad;
             float prev_elec = _3PI_2 + (float)dir_sign * (float)MOTOR_POLE_PAIRS * prev_mech;
             for (int s = 1; s <= INTERP; s++) {
+                if (checkCalibrationAbort()) {
+                    motor.setPhaseVoltage(0.0f, 0.0f, 0.0f);
+                    return false;
+                }
                 float el = prev_elec + (target_elec - prev_elec) * ((float)s / (float)INTERP);
                 motor.setPhaseVoltage(align_voltage, 0.0f, el);
                 delayMicroseconds(1000);
             }
         } else {
             motor.setPhaseVoltage(align_voltage, 0.0f, target_elec);
-            delay(250);
+            if (safeDelayWithAbort(250)) return false;
         }
 
         motor.setPhaseVoltage(align_voltage, 0.0f, target_elec);
@@ -679,7 +1286,7 @@ bool runSteppedLUTSweepSinglePass(int motor_id, float align_voltage) {
         }
 
         motor.setPhaseVoltage(hold_voltage, 0.0f, target_elec);
-        delay(CALIB_SWEEP_DAMP_SETTLE_MS);
+        if (safeDelayWithAbort(CALIB_SWEEP_DAMP_SETTLE_MS)) return false;
 
         // Oversampled vector averaging (96 samples)
         float sum_sin = 0.0f, sum_cos = 0.0f;
@@ -691,10 +1298,44 @@ bool runSteppedLUTSweepSinglePass(int motor_id, float align_voltage) {
         }
         fwd_measured[i] = normalizeAngleRad(atan2f(sum_sin, sum_cos));
 
-        live_calib_progress = (uint8_t)((i * 45) / TOTAL_STEPS);
-        sendBinaryTelemetry();
+        // Real-Time Stall Detection (Zero impact on valid results: tolerant to slot cogging/detents)
+        if (i > 0) {
+            float expected_mech = normalizeAngleRad(fwd_measured[0] + (float)dir_sign * (float)i * step_mech_rad);
+            float tracking_lag = fabsf(wrapAngleRad(fwd_measured[i] - expected_mech));
+            float step_prog = wrapAngleRad(fwd_measured[i] - fwd_measured[i - 1]) * (float)dir_sign;
 
-        if ((i + 1) % 16 == 0 || i == TOTAL_STEPS - 1) {
+            if (step_prog < 0.008f) { // < 0.46° mech
+                fwd_stall_consecutive++;
+                if (fwd_stall_consecutive >= 3 && fwd_stall_consecutive < 6) {
+                    // Cogging detent micro-dither to overcome magnetic slot stiction
+                    motor.setPhaseVoltage(align_voltage, 0.0f, target_elec + 0.10f);
+                    delayMicroseconds(600);
+                    motor.setPhaseVoltage(align_voltage, 0.0f, target_elec - 0.10f);
+                    delayMicroseconds(600);
+                    motor.setPhaseVoltage(hold_voltage, 0.0f, target_elec);
+                }
+            } else {
+                fwd_stall_consecutive = 0;
+            }
+
+            // Stall criteria: Severe lag > 0.18 rad (~10.3° mech / ~113° elec) or 6 consecutive stationary steps
+            if ((tracking_lag > 0.18f && step_prog < 0.015f) || (fwd_stall_consecutive >= 6)) {
+                if (out_stalled) *out_stalled = true;
+                motor.setPhaseVoltage(0.0f, 0.0f, 0.0f);
+                Serial.println("\n-------------------------------------------------------------");
+                Serial.printf ("❌ ROTOR STALL DETECTED at Step %d/128 (Forward Sweep)!\n", i + 1);
+                Serial.printf ("   Lag Error: %.2f° mech (%.1f° elec) | Step Delta: %+.2f° | Stalled Steps: %d\n",
+                               tracking_lag * 57.2957795f, tracking_lag * 57.2957795f * (float)MOTOR_POLE_PAIRS,
+                               step_prog * 57.2957795f, fwd_stall_consecutive);
+                Serial.println("   Phase voltages cut to 0.0V immediately for coil safety.");
+                Serial.println("-------------------------------------------------------------\n");
+                return false;
+            }
+        }
+
+        live_calib_progress = (uint8_t)((i * 45) / TOTAL_STEPS);
+
+        if ((i + 1) % 8 == 0 || i == TOTAL_STEPS - 1) {
             Serial.printf("   Forward Sweep: %d%% Complete\n", (int)(((float)(i + 1) / (float)TOTAL_STEPS) * 100.0f));
             Serial.printf("[CALIB_PROG]:%d%%\n", live_calib_progress);
         }
@@ -705,11 +1346,7 @@ bool runSteppedLUTSweepSinglePass(int motor_id, float align_voltage) {
     motor.setPhaseVoltage(0.0f, 0.0f, 0.0f);
     for (int sec = CALIB_COOLDOWN_PAUSE_SEC; sec > 0; sec--) {
         Serial.printf("   Coil cool-down: %ds remaining...\n", sec);
-        delay(1000);
-        if (checkCalibrationAbort()) {
-            Serial.println("\n>>> 🛑 CALIBRATION ABORTED BY USER <<<");
-            return false;
-        }
+        if (safeDelayWithAbort(1000)) return false;
     }
     Serial.println(">>> ❄️ Coils thermally stabilized. Resuming Reverse Sweep...\n");
 
@@ -717,14 +1354,14 @@ bool runSteppedLUTSweepSinglePass(int motor_id, float align_voltage) {
     float rev_start_mech = (float)(TOTAL_STEPS - 1) * step_mech_rad;
     float rev_start_elec = _3PI_2 + (float)dir_sign * (float)MOTOR_POLE_PAIRS * rev_start_mech;
     motor.setPhaseVoltage(align_voltage, 0.0f, rev_start_elec);
-    delay(100);
+    if (safeDelayWithAbort(100)) return false;
     motor.setPhaseVoltage(hold_voltage, 0.0f, rev_start_elec);
-    delay(250);
+    if (safeDelayWithAbort(250)) return false;
 
     // --- PASS 2: REVERSE (CCW) SWEEP ---
+    int rev_stall_consecutive = 0;
     for (int i = TOTAL_STEPS - 1; i >= 0; i--) {
         if (checkCalibrationAbort()) {
-            Serial.println("\n>>> 🛑 CALIBRATION ABORTED BY USER <<<");
             motor.setPhaseVoltage(0.0f, 0.0f, 0.0f);
             return false;
         }
@@ -738,6 +1375,10 @@ bool runSteppedLUTSweepSinglePass(int motor_id, float align_voltage) {
             float prev_mech = (float)(i + 1) * step_mech_rad;
             float prev_elec = _3PI_2 + (float)dir_sign * (float)MOTOR_POLE_PAIRS * prev_mech;
             for (int s = 1; s <= INTERP; s++) {
+                if (checkCalibrationAbort()) {
+                    motor.setPhaseVoltage(0.0f, 0.0f, 0.0f);
+                    return false;
+                }
                 float el = prev_elec + (target_elec - prev_elec) * ((float)s / (float)INTERP);
                 motor.setPhaseVoltage(align_voltage, 0.0f, el);
                 delayMicroseconds(1000);
@@ -757,7 +1398,7 @@ bool runSteppedLUTSweepSinglePass(int motor_id, float align_voltage) {
         }
 
         motor.setPhaseVoltage(hold_voltage, 0.0f, target_elec);
-        delay(CALIB_SWEEP_DAMP_SETTLE_MS);
+        if (safeDelayWithAbort(CALIB_SWEEP_DAMP_SETTLE_MS)) return false;
 
         // Oversampled vector averaging (96 samples)
         float sum_sin = 0.0f, sum_cos = 0.0f;
@@ -769,10 +1410,44 @@ bool runSteppedLUTSweepSinglePass(int motor_id, float align_voltage) {
         }
         rev_measured[i] = normalizeAngleRad(atan2f(sum_sin, sum_cos));
 
-        live_calib_progress = 45 + (uint8_t)(((TOTAL_STEPS - 1 - i) * 45) / TOTAL_STEPS);
-        sendBinaryTelemetry();
+        // Real-Time Stall Detection on Reverse Sweep
+        if (i < TOTAL_STEPS - 1) {
+            int step_idx_rev = (TOTAL_STEPS - 1 - i);
+            float expected_rev = normalizeAngleRad(rev_measured[TOTAL_STEPS - 1] - (float)dir_sign * (float)step_idx_rev * step_mech_rad);
+            float tracking_lag = fabsf(wrapAngleRad(rev_measured[i] - expected_rev));
+            float step_prog = wrapAngleRad(rev_measured[i + 1] - rev_measured[i]) * (float)dir_sign;
 
-        if (i % 16 == 0 || i == 0) {
+            if (step_prog < 0.008f) {
+                rev_stall_consecutive++;
+                if (rev_stall_consecutive >= 3 && rev_stall_consecutive < 6) {
+                    // Cogging detent micro-dither to overcome magnetic slot stiction
+                    motor.setPhaseVoltage(align_voltage, 0.0f, target_elec + 0.10f);
+                    delayMicroseconds(600);
+                    motor.setPhaseVoltage(align_voltage, 0.0f, target_elec - 0.10f);
+                    delayMicroseconds(600);
+                    motor.setPhaseVoltage(hold_voltage, 0.0f, target_elec);
+                }
+            } else {
+                rev_stall_consecutive = 0;
+            }
+
+            if ((tracking_lag > 0.18f && step_prog < 0.015f) || (rev_stall_consecutive >= 6)) {
+                if (out_stalled) *out_stalled = true;
+                motor.setPhaseVoltage(0.0f, 0.0f, 0.0f);
+                Serial.println("\n-------------------------------------------------------------");
+                Serial.printf ("❌ ROTOR STALL DETECTED at Step %d/128 (Reverse Sweep)!\n", i + 1);
+                Serial.printf ("   Lag Error: %.2f° mech (%.1f° elec) | Step Delta: %+.2f° | Stalled Steps: %d\n",
+                               tracking_lag * 57.2957795f, tracking_lag * 57.2957795f * (float)MOTOR_POLE_PAIRS,
+                               step_prog * 57.2957795f, rev_stall_consecutive);
+                Serial.println("   Phase voltages cut to 0.0V immediately for coil safety.");
+                Serial.println("-------------------------------------------------------------\n");
+                return false;
+            }
+        }
+
+        live_calib_progress = 45 + (uint8_t)(((TOTAL_STEPS - 1 - i) * 45) / TOTAL_STEPS);
+
+        if (i % 8 == 0 || i == 0) {
             Serial.printf("   Reverse Sweep: %d%% Complete\n", (int)(((float)(TOTAL_STEPS - i) / (float)TOTAL_STEPS) * 100.0f));
             Serial.printf("[CALIB_PROG]:%d%%\n", live_calib_progress);
         }
@@ -892,7 +1567,9 @@ bool runSteppedLUTSweepSinglePass(int motor_id, float align_voltage) {
 // ----------------------------------------------------------------------------
 // Multi-Pole Comprehensive Electrical Zero Alignment (Matching ESP32 Suite)
 // ----------------------------------------------------------------------------
-bool runComprehensiveElectricalAlignment(int motor_id, float align_voltage) {
+bool runComprehensiveElectricalAlignment(int motor_id, float align_voltage, bool *out_stalled = nullptr) {
+    CalibrationIsolationGuard isolation_guard(motor_id);
+    if (out_stalled) *out_stalled = false;
     float hold_voltage = fminf(align_voltage * 0.85f, 3.40f);
     Serial.println("\n================================================================================");
     Serial.println(">>> STARTING COMPREHENSIVE MULTI-POINT ELECTRICAL ZERO CALIBRATION <<<");
@@ -913,13 +1590,12 @@ bool runComprehensiveElectricalAlignment(int motor_id, float align_voltage) {
     // 1. Determining Sensor Commutation Direction & Verifying Motion
     Serial.print("1. Determining Sensor Commutation Direction & Verifying Motion... ");
     motor.setPhaseVoltage(align_voltage, 0.0f, _3PI_2);
-    delay(400);
+    if (safeDelayWithAbort(400)) return false;
     float start_angle = encoder.getCalibratedAngleRad();
 
     const int DIR_STEPS = 400;
     for (int step = 0; step <= DIR_STEPS; step++) {
         if (checkCalibrationAbort()) {
-            Serial.println("\n>>> 🛑 CALIBRATION ABORTED BY USER <<<");
             motor.setPhaseVoltage(0.0f, 0.0f, 0.0f);
             return false;
         }
@@ -927,12 +1603,11 @@ bool runComprehensiveElectricalAlignment(int motor_id, float align_voltage) {
         motor.setPhaseVoltage(align_voltage, 0.0f, el_ang);
         delayMicroseconds(2500);
     }
-    delay(200);
+    if (safeDelayWithAbort(200)) return false;
     float mid_angle = encoder.getCalibratedAngleRad();
 
     for (int step = DIR_STEPS; step >= 0; step--) {
         if (checkCalibrationAbort()) {
-            Serial.println("\n>>> 🛑 CALIBRATION ABORTED BY USER <<<");
             motor.setPhaseVoltage(0.0f, 0.0f, 0.0f);
             return false;
         }
@@ -940,13 +1615,14 @@ bool runComprehensiveElectricalAlignment(int motor_id, float align_voltage) {
         motor.setPhaseVoltage(align_voltage, 0.0f, el_ang);
         delayMicroseconds(2500);
     }
-    delay(200);
+    if (safeDelayWithAbort(200)) return false;
 
     float d_ang_fwd = wrapAngleRad(mid_angle - start_angle);
     float moved_rad = fabsf(d_ang_fwd);
     float min_expected_rad = (2.0f * _2PI / (float)MOTOR_POLE_PAIRS) * 0.40f;
 
     if (moved_rad < min_expected_rad) {
+        if (out_stalled) *out_stalled = true;
         Serial.println("FAILED!");
         Serial.println("  -------------------------------------------------------------");
         Serial.printf ("  ❌ MOTION CHECK FAILED: Rotor moved only %.2f deg mech (expected >= %.2f deg).\n",
@@ -980,7 +1656,6 @@ bool runComprehensiveElectricalAlignment(int motor_id, float align_voltage) {
     // PASS 1: FORWARD (CW) 360° SWEEP (Poles 0 -> 10)
     for (int p = 0; p < num_poles; p++) {
         if (checkCalibrationAbort()) {
-            Serial.println("\n>>> 🛑 CALIBRATION ABORTED BY USER <<<");
             motor.setPhaseVoltage(0.0f, 0.0f, 0.0f);
             return false;
         }
@@ -990,13 +1665,17 @@ bool runComprehensiveElectricalAlignment(int motor_id, float align_voltage) {
             const int INTERP_STEPS = 120;
             float prev_el = _3PI_2 + (float)(p - 1) * _2PI;
             for (int s = 1; s <= INTERP_STEPS; s++) {
+                if (checkCalibrationAbort()) {
+                    motor.setPhaseVoltage(0.0f, 0.0f, 0.0f);
+                    return false;
+                }
                 float el = prev_el + (target_el - prev_el) * ((float)s / (float)INTERP_STEPS);
                 motor.setPhaseVoltage(align_voltage, 0.0f, el);
                 delayMicroseconds(2500);
             }
         } else {
             motor.setPhaseVoltage(align_voltage, 0.0f, target_el);
-            delay(300);
+            if (safeDelayWithAbort(300)) return false;
         }
 
         // Decaying micro-dither (8 steps)
@@ -1008,7 +1687,7 @@ bool runComprehensiveElectricalAlignment(int motor_id, float align_voltage) {
             delayMicroseconds(800);
         }
         motor.setPhaseVoltage(hold_voltage, 0.0f, target_el);
-        delay(120);
+        if (safeDelayWithAbort(120)) return false;
 
         float mech = 0.0f;
         for (int s = 0; s < CALIB_ALIGN_OVERSAMPLE_COUNT; s++) {
@@ -1022,20 +1701,31 @@ bool runComprehensiveElectricalAlignment(int motor_id, float align_voltage) {
         float step_deg = 0.0f;
         if (p > 0) {
             step_deg = wrapAngleRad(fwd_mechs[p] - fwd_mechs[p - 1]) * (sensor_dir == Direction::CW ? 1.0f : -1.0f) * 57.2957795f;
-            if (step_deg < 12.0f) {
+            if (step_deg < 10.0f) {
                 stall_detected = true;
                 stall_count++;
+            } else {
+                stall_count = 0;
             }
+        }
+        if (stall_count >= 3) {
+            if (out_stalled) *out_stalled = true;
+            motor.setPhaseVoltage(0.0f, 0.0f, 0.0f);
+            Serial.println("\n-------------------------------------------------------------");
+            Serial.println("❌ ROTOR STALL DETECTED: Consecutive poles stalled during electrical alignment.");
+            Serial.println("   Phase voltages cut to 0.0V immediately for coil safety.");
+            Serial.println("-------------------------------------------------------------\n");
+            return false;
         }
         Serial.printf("   [Pass 1 CW]  Pole #%2d/11 @ target el %4.0f° | mech %5.1f° (Δ=%+5.1f°) %s\n",
                       p + 1, (float)p * 360.0f, fwd_mechs[p] * 57.2957795f, step_deg,
-                      (p > 0 && step_deg < 12.0f) ? "❌ STALL!" : "OK");
+                      (p > 0 && step_deg < 10.0f) ? "❌ STALL!" : "OK");
     }
 
     // PASS 2: REVERSE (CCW) 360° RETURN SWEEP (Poles 10 -> 0)
+    stall_count = 0;
     for (int p = num_poles - 1; p >= 0; p--) {
         if (checkCalibrationAbort()) {
-            Serial.println("\n>>> 🛑 CALIBRATION ABORTED BY USER <<<");
             motor.setPhaseVoltage(0.0f, 0.0f, 0.0f);
             return false;
         }
@@ -1045,13 +1735,17 @@ bool runComprehensiveElectricalAlignment(int motor_id, float align_voltage) {
             const int INTERP_STEPS = 120;
             float prev_el = _3PI_2 + (float)(p + 1) * _2PI;
             for (int s = 1; s <= INTERP_STEPS; s++) {
+                if (checkCalibrationAbort()) {
+                    motor.setPhaseVoltage(0.0f, 0.0f, 0.0f);
+                    return false;
+                }
                 float el = prev_el + (target_el - prev_el) * ((float)s / (float)INTERP_STEPS);
                 motor.setPhaseVoltage(align_voltage, 0.0f, el);
                 delayMicroseconds(2500);
             }
         } else {
             motor.setPhaseVoltage(align_voltage, 0.0f, target_el);
-            delay(150);
+            if (safeDelayWithAbort(150)) return false;
         }
 
         // Decaying micro-dither (8 steps)
@@ -1063,7 +1757,7 @@ bool runComprehensiveElectricalAlignment(int motor_id, float align_voltage) {
             delayMicroseconds(800);
         }
         motor.setPhaseVoltage(hold_voltage, 0.0f, target_el);
-        delay(120);
+        if (safeDelayWithAbort(120)) return false;
 
         float mech = 0.0f;
         for (int s = 0; s < CALIB_ALIGN_OVERSAMPLE_COUNT; s++) {
@@ -1077,14 +1771,25 @@ bool runComprehensiveElectricalAlignment(int motor_id, float align_voltage) {
         float rev_step_deg = 0.0f;
         if (p < num_poles - 1) {
             rev_step_deg = wrapAngleRad(rev_mechs[p] - rev_mechs[p + 1]) * (sensor_dir == Direction::CW ? -1.0f : 1.0f) * 57.2957795f;
-            if (rev_step_deg < 12.0f) {
+            if (rev_step_deg < 10.0f) {
                 stall_detected = true;
                 stall_count++;
+            } else {
+                stall_count = 0;
             }
+        }
+        if (stall_count >= 3) {
+            if (out_stalled) *out_stalled = true;
+            motor.setPhaseVoltage(0.0f, 0.0f, 0.0f);
+            Serial.println("\n-------------------------------------------------------------");
+            Serial.println("❌ ROTOR STALL DETECTED: Consecutive poles stalled during reverse alignment.");
+            Serial.println("   Phase voltages cut to 0.0V immediately for coil safety.");
+            Serial.println("-------------------------------------------------------------\n");
+            return false;
         }
         Serial.printf("   [Pass 2 CCW] Pole #%2d/11 @ target el %4.0f° | mech %5.1f° (Δ=%+5.1f°) %s\n",
                       p + 1, (float)p * 360.0f, rev_mechs[p] * 57.2957795f, rev_step_deg,
-                      (p < num_poles - 1 && rev_step_deg < 12.0f) ? "❌ STALL!" : "OK");
+                      (p < num_poles - 1 && rev_step_deg < 10.0f) ? "❌ STALL!" : "OK");
     }
 
     // Cumulative Motion Check
@@ -1237,33 +1942,53 @@ bool runComprehensiveElectricalAlignment(int motor_id, float align_voltage) {
 // Master Auto-Calibration Orchestrator (128-pt Dual-Pass LUT + 11-Pole Zero + Dump)
 // ----------------------------------------------------------------------------
 void runMasterCalibrationSequence(int motor_id, float align_voltage) {
+    CalibrationIsolationGuard isolation_guard(motor_id);
     BLDCMotor &motor = (motor_id == 1) ? motor1 : motor2;
     BLDCDriver3PWM &driver = (motor_id == 1) ? driver1 : driver2;
     MT6816Sensor &encoder = (motor_id == 1) ? encoder1 : encoder2;
     volatile bool &calib_active = (motor_id == 1) ? m1_calib_active : m2_calib_active;
     bool prev_enabled = (motor_id == 1) ? m1_enabled : m2_enabled;
 
-    calib_active = true;
-    live_calib_progress = 0;
+    g_estop_active = false; // Reset on explicit user calibration start
     encoder.clearLUT();
 
+    bool calib_stalled = false;
+
     // Pass 1: 128-point LUT Sweep
-    bool lut_ok = runSteppedLUTSweepSinglePass(motor_id, align_voltage);
-    if (!lut_ok && align_voltage < CALIB_BOOST_VOLTAGE) {
+    bool lut_ok = runSteppedLUTSweepSinglePass(motor_id, align_voltage, &calib_stalled);
+
+    // If E-STOP was triggered, abort immediately and unconditionally!
+    if (g_estop_active) {
+        triggerGlobalEmergencyStop();
+        return;
+    }
+
+    // Only retry with boost voltage if it stalled and NOT aborted by user
+    if (!lut_ok && calib_stalled && align_voltage < CALIB_BOOST_VOLTAGE) {
         Serial.println("\n================================================================================");
         Serial.printf ("⚠️ STEPPED LUT CALIBRATION STALLED @ %.2fV!\n", align_voltage);
         Serial.printf ("⚡ AUTOMATIC TORQUE BOOST: Ramping to %.2fV and retrying sweep...\n", CALIB_BOOST_VOLTAGE);
         Serial.println("================================================================================\n");
-        delay(400);
-        lut_ok = runSteppedLUTSweepSinglePass(motor_id, CALIB_BOOST_VOLTAGE);
+        if (safeDelayWithAbort(400)) {
+            triggerGlobalEmergencyStop();
+            return;
+        }
+        lut_ok = runSteppedLUTSweepSinglePass(motor_id, CALIB_BOOST_VOLTAGE, &calib_stalled);
+        if (g_estop_active) {
+            triggerGlobalEmergencyStop();
+            return;
+        }
     }
 
     if (!lut_ok) {
         motor.setPhaseVoltage(0.0f, 0.0f, 0.0f);
-        if (!prev_enabled) driver.disable();
-        calib_active = false;
-        live_calib_progress = 0;
-        Serial.printf("[CALIB_FAILED]:M%d LUT Sweep Rejected\n", motor_id);
+        if (g_estop_active) {
+            triggerGlobalEmergencyStop();
+        } else {
+            driver.disable();
+            live_calib_progress = 0;
+            Serial.printf("[CALIB_FAILED]:M%d LUT Sweep %s\n", motor_id, calib_stalled ? "Stalled" : "Rejected");
+        }
         return;
     }
 
@@ -1272,24 +1997,29 @@ void runMasterCalibrationSequence(int motor_id, float align_voltage) {
     motor.setPhaseVoltage(0.0f, 0.0f, 0.0f);
     for (int sec = CALIB_COOLDOWN_PAUSE_SEC; sec > 0; sec--) {
         Serial.printf("   Coil cool-down: %ds remaining...\n", sec);
-        delay(1000);
-        if (checkCalibrationAbort()) {
-            Serial.println("\n>>> 🛑 CALIBRATION ABORTED BY USER <<<");
-            if (!prev_enabled) driver.disable();
-            calib_active = false;
-            live_calib_progress = 0;
+        if (safeDelayWithAbort(1000)) {
+            triggerGlobalEmergencyStop();
             return;
         }
     }
 
     // Pass 2: 11-pole Electrical Alignment on Linearized Sensor
-    bool align_ok = runComprehensiveElectricalAlignment(motor_id, align_voltage);
+    bool align_stalled = false;
+    bool align_ok = runComprehensiveElectricalAlignment(motor_id, align_voltage, &align_stalled);
+    if (g_estop_active) {
+        triggerGlobalEmergencyStop();
+        return;
+    }
+
     if (!align_ok) {
         motor.setPhaseVoltage(0.0f, 0.0f, 0.0f);
-        if (!prev_enabled) driver.disable();
-        calib_active = false;
-        live_calib_progress = 0;
-        Serial.printf("[CALIB_FAILED]:M%d Electrical Alignment Rejected\n", motor_id);
+        if (g_estop_active) {
+            triggerGlobalEmergencyStop();
+        } else {
+            driver.disable();
+            live_calib_progress = 0;
+            Serial.printf("[CALIB_FAILED]:M%d Electrical Alignment %s\n", motor_id, align_stalled ? "Stalled" : "Rejected");
+        }
         return;
     }
 
@@ -1297,12 +2027,13 @@ void runMasterCalibrationSequence(int motor_id, float align_voltage) {
     dumpLUT(motor_id);
 
     live_calib_progress = 100;
-    sendBinaryTelemetry();
+    Serial.println("[CALIB_PROG]:100%");
 
     motor.setPhaseVoltage(0.0f, 0.0f, 0.0f);
-    calib_active = false;
+    motor.voltage.q = 0.0f;
+    motor.voltage.d = 0.0f;
     if (!prev_enabled) {
-        driver.disable();
+        motor.disable();
     }
 
     Serial.println(">>> 🏆 MASTER CALIBRATION SEQUENCE FULLY CERTIFIED & ACTIVE! <<<\n");
@@ -1373,34 +2104,44 @@ void resetDefaults(int motor_id) {
         motor1.PID_velocity.limit = motor1.voltage_limit;
         motor1.velocity_limit = MOTOR_VELOCITY_LIMIT;
         motor1.KV_rating = MOTOR_KV_RATING;
-        motor1.PID_velocity.P = 0.15f;
-        motor1.PID_velocity.I = 1.50f;
-        motor1.PID_velocity.D = 0.00000f;
-        motor1.PID_velocity.output_ramp = 100.0f;
-        motor1.PID_velocity.Ts = 0.00025f;
-        motor1.LPF_velocity.Tf = 0.0005f;
-        m1_lag_comp_us = 35.0f;
+        motor1.PID_velocity.P = DEFAULT_PID_P;
+        motor1.PID_velocity.I = DEFAULT_PID_I;
+        motor1.PID_velocity.D = DEFAULT_PID_D;
+        motor1.PID_velocity.output_ramp = DEFAULT_PID_RAMP;
+        motor1.PID_velocity.Ts = 0.0002f;
+        motor1.LPF_velocity.Tf = DEFAULT_LPF_TF;
+        motor1.LPF_velocity.Ts = 0.0002f;
+        m1_lag_comp_us = DEFAULT_LAG_COMP_US;
         m1_lag_filt_vel = 0.0f;
         m1_target_rpm = 0.0f;
+        encoder1.setDWTWindowMs(DEFAULT_DWT_WINDOW_MS);
         encoder1.resetErrors();
+        stall_guard1.reset();
     }
     if (motor_id == 2 || motor_id == 0) {
         motor2.voltage_limit = MOTOR_VOLTAGE_LIMIT;
         motor2.PID_velocity.limit = motor2.voltage_limit;
         motor2.velocity_limit = MOTOR_VELOCITY_LIMIT;
         motor2.KV_rating = MOTOR_KV_RATING;
-        motor2.PID_velocity.P = 0.15f;
-        motor2.PID_velocity.I = 1.50f;
-        motor2.PID_velocity.D = 0.00000f;
-        motor2.PID_velocity.output_ramp = 100.0f;
-        motor2.PID_velocity.Ts = 0.00025f;
-        motor2.LPF_velocity.Tf = 0.0005f;
-        m2_lag_comp_us = 35.0f;
+        motor2.PID_velocity.P = DEFAULT_PID_P;
+        motor2.PID_velocity.I = DEFAULT_PID_I;
+        motor2.PID_velocity.D = DEFAULT_PID_D;
+        motor2.PID_velocity.output_ramp = DEFAULT_PID_RAMP;
+        motor2.PID_velocity.Ts = 0.0002f;
+        motor2.LPF_velocity.Tf = DEFAULT_LPF_TF;
+        motor2.LPF_velocity.Ts = 0.0002f;
+        m2_lag_comp_us = DEFAULT_LAG_COMP_US;
         m2_lag_filt_vel = 0.0f;
         m2_target_rpm = 0.0f;
+        encoder2.setDWTWindowMs(DEFAULT_DWT_WINDOW_MS);
         encoder2.resetErrors();
+        stall_guard2.reset();
     }
     isr_jitter_spikes = 0;
+    isr_alltime_peak_cycles = isr_last_cycles;
+    prof_period_min = 8500;
+    prof_period_max = 8500;
+    prof_period_jitter_max = 0;
     Serial.println(">>> [RESET] Restored GM3506 12V Optimized Defaults & Cleared Parity Errors.");
 }
 
@@ -1413,11 +2154,11 @@ void printHelp() {
     Serial.println("================================================================================");
     Serial.print  ("  Motor 1 State    : "); Serial.println(m1_enabled ? "ENABLED" : "DISABLED");
     Serial.print  ("  Motor 2 State    : "); Serial.println(m2_enabled ? "ENABLED" : "DISABLED");
-    Serial.print  ("  FOC Timer        : TIM6 Hardware Timer @ 20.0 kHz (50.0 us tick, Priority 2)\n");
-    Serial.print  ("  Motion Control   : Downsampled 4.0 kHz (250 us tick, downsample = 5)\n");
-    Serial.print  ("  SPI Buses        : SPI1 (PB3/4/5, CS=PA15) | SPI2 (PB13/14/15, CS=PB11) @ 5.31 MHz\n");
-    Serial.print  ("  PWM Inverters    : TIM2 (M1: PA5/1/2) | TIM3 (M2: PA6/4, PB0) @ 25 kHz\n");
-    Serial.print  ("  Stall Watchdog   : "); Serial.println(stall_watchdog_enabled ? "ACTIVE (Target >= 5 RPM & Actual == 0)" : "DISABLED");
+    Serial.print  ("  FOC Timer        : TIM6 Hardware Timer @ 20.0 kHz (50.0 us tick, Priority 0)\n");
+    Serial.print  ("  Motion Control   : 5.0 kHz Staggered Velocity PID (200.0 us tick, downsample = 4)\n");
+    Serial.print  ("  SPI Buses        : SPI1 (PB3/4/5, CS=PA15) | SPI2 (PB13/14/15, CS=PB11) @ 10.625 MHz\n");
+    Serial.print  ("  PWM Inverters    : TIM2 (M1: PA5/1/2) | TIM3 (M2: PA6/4, PB0) @ 25 kHz (OCxPE Preload)\n");
+    Serial.print  ("  Stall Watchdog   : "); Serial.println(stall_watchdog_enabled ? "ACTIVE (I^2*t Thermal + Effort Gated)" : "DISABLED");
     Serial.println("--------------------------------------------------------------------------------");
     Serial.println("Commands:");
     Serial.println("  E1 / E2 / E      : Enable Motor 1 / Motor 2 / Both");
@@ -1450,6 +2191,47 @@ void printHelp() {
 // ----------------------------------------------------------------------------
 void processCommand(const char *cmd) {
     if (strlen(cmd) == 0) return;
+
+    if (strcasecmp(cmd, "PROF") == 0) {
+        Serial.println("\n--- [REAL-TIME LATENCY PROFILER BREAKDOWN] ---");
+        Serial.printf("SystemCoreClock       : %lu Hz\n", SystemCoreClock);
+        Serial.printf("PCLK1 (APB1)          : %lu Hz (SPI2)\n", HAL_RCC_GetPCLK1Freq());
+        Serial.printf("PCLK2 (APB2)          : %lu Hz (SPI1)\n", HAL_RCC_GetPCLK2Freq());
+        Serial.printf("SPI1 CR1/CR2          : 0x%04lX / 0x%04lX (BR=%lu, DS=%lu, FRXTH=%lu)\n",
+                      (uint32_t)SPI1->CR1, (uint32_t)SPI1->CR2,
+                      (uint32_t)((SPI1->CR1 & SPI_CR1_BR) >> SPI_CR1_BR_Pos),
+                      (uint32_t)((SPI1->CR2 & SPI_CR2_DS) >> SPI_CR2_DS_Pos),
+                      (uint32_t)((SPI1->CR2 & SPI_CR2_FRXTH) ? 1 : 0));
+        Serial.printf("SPI2 CR1/CR2          : 0x%04lX / 0x%04lX (BR=%lu, DS=%lu, FRXTH=%lu)\n",
+                      (uint32_t)SPI2->CR1, (uint32_t)SPI2->CR2,
+                      (uint32_t)((SPI2->CR1 & SPI_CR1_BR) >> SPI_CR1_BR_Pos),
+                      (uint32_t)((SPI2->CR2 & SPI_CR2_DS) >> SPI_CR2_DS_Pos),
+                      (uint32_t)((SPI2->CR2 & SPI_CR2_FRXTH) ? 1 : 0));
+        Serial.printf("TIM2 CCMR1/CCMR2/CR1  : 0x%04lX / 0x%04lX / 0x%04lX (OCPreload=%d)\n",
+                      (uint32_t)TIM2->CCMR1, (uint32_t)TIM2->CCMR2, (uint32_t)TIM2->CR1,
+                      (int)((TIM2->CCMR1 & TIM_CCMR1_OC1PE) ? 1 : 0));
+        Serial.printf("TIM3 CCMR1/CCMR2/CR1  : 0x%04lX / 0x%04lX / 0x%04lX (OCPreload=%d)\n",
+                      (uint32_t)TIM3->CCMR1, (uint32_t)TIM3->CCMR2, (uint32_t)TIM3->CR1,
+                      (int)((TIM3->CCMR1 & TIM_CCMR1_OC1PE) ? 1 : 0));
+        float us_scale = 1.0f / (SystemCoreClock / 1000000.0f);
+        Serial.printf("Parallel SPI     Last : %5lu cyc (%5.2f us) | Peak: %5lu cyc (%5.2f us)\n", prof_spi_last, prof_spi_last * us_scale, prof_spi_max, prof_spi_max * us_scale);
+        Serial.printf("Sensor Update    Last : %5lu cyc (%5.2f us) | Peak: %5lu cyc (%5.2f us)\n", prof_update_last, prof_update_last * us_scale, prof_update_max, prof_update_max * us_scale);
+        Serial.printf("Velocity PID     Last : %5lu cyc (%5.2f us) | Peak: %5lu cyc (%5.2f us)\n", prof_move_last, prof_move_last * us_scale, prof_move_max, prof_move_max * us_scale);
+        Serial.printf("M1 fastLoopFOC   Last : %5lu cyc (%5.2f us) | Peak: %5lu cyc (%5.2f us)\n", prof_m1_foc_last, prof_m1_foc_last * us_scale, prof_m1_foc_max, prof_m1_foc_max * us_scale);
+        Serial.printf("M2 fastLoopFOC   Last : %5lu cyc (%5.2f us) | Peak: %5lu cyc (%5.2f us)\n", prof_m2_foc_last, prof_m2_foc_last * us_scale, prof_m2_foc_max, prof_m2_foc_max * us_scale);
+        Serial.printf("Total ISR Exec   Last : %5lu cyc (%5.2f us) | Peak: %5lu cyc (%5.2f us) | All-Time Peak: %5lu cyc (%5.2f us)\n",
+                      prof_total_last, prof_total_last * us_scale, prof_total_max, prof_total_max * us_scale,
+                      isr_alltime_peak_cycles, isr_alltime_peak_cycles * us_scale);
+        Serial.printf("20kHz Timer Spacing   : %5lu cyc (%5.2f us target) | Jitter: %5.2f us (Min: %5.2f us, Max: %5.2f us)\n",
+                      prof_period_last, prof_period_last * us_scale,
+                      prof_period_jitter_max * us_scale,
+                      prof_period_min * us_scale, prof_period_max * us_scale);
+        Serial.printf("Jitter Spikes Count   : %u\n", (unsigned int)isr_jitter_spikes);
+        Serial.println("----------------------------------------------\n");
+        prof_spi_max = 0; prof_update_max = 0; prof_m1_foc_max = 0; prof_m2_foc_max = 0; prof_move_max = 0; prof_total_max = 0;
+        prof_period_min = 8500; prof_period_max = 8500; prof_period_jitter_max = 0;
+        return;
+    }
 
     // Check LUT toggle mode (e.g. 'LUT_MODE 1 1', 'LUT_MODE 2 0')
     if (strncasecmp(cmd, "LUT_MODE", 8) == 0) {
@@ -1496,63 +2278,93 @@ void processCommand(const char *cmd) {
     }
 
     // Single-character or prefix commands
-    if (strcmp(cmd, "STOP") == 0 || strcmp(cmd, "x") == 0 || strcmp(cmd, "X") == 0 || strcmp(cmd, " ") == 0) {
-        m1_target_rpm = 0.0f;
-        m2_target_rpm = 0.0f;
-        m1_enabled = false;
-        m2_enabled = false;
-        driver1.disable();
-        driver2.disable();
-        Serial.println(">>> 🛑 EMERGENCY STOP: BOTH MOTORS DISABLED.");
+    if (strcmp(cmd, "STOP") == 0 || strcmp(cmd, "x") == 0 || strcmp(cmd, "X") == 0 || strcmp(cmd, " ") == 0 ||
+        strcasecmp(cmd, "ESTOP") == 0 || strcasecmp(cmd, "EMERGENCY") == 0 || strcasecmp(cmd, "HALT") == 0) {
+        triggerGlobalEmergencyStop();
         return;
     }
 
     if (strcmp(cmd, "E1") == 0) {
+        g_estop_active = false;
+        stall_guard1.reset();
+        motor1.voltage_limit = MOTOR_VOLTAGE_LIMIT;
+        motor1.PID_velocity.limit = motor1.voltage_limit;
         m1_enabled = true;
+        motor1.enable();
         if (!m1_calibrated) initMotorFOC(1);
-        else driver1.enable();
         Serial.println(">>> M1: ENABLED");
         return;
     }
     if (strcmp(cmd, "E2") == 0) {
+        g_estop_active = false;
+        stall_guard2.reset();
+        motor2.voltage_limit = MOTOR_VOLTAGE_LIMIT;
+        motor2.PID_velocity.limit = motor2.voltage_limit;
         m2_enabled = true;
+        motor2.enable();
         if (!m2_calibrated) initMotorFOC(2);
-        else driver2.enable();
         Serial.println(">>> M2: ENABLED");
         return;
     }
     if (strcmp(cmd, "E") == 0 || strcmp(cmd, "e") == 0) {
+        g_estop_active = false;
+        stall_guard1.reset();
+        stall_guard2.reset();
+        motor1.voltage_limit = MOTOR_VOLTAGE_LIMIT;
+        motor1.PID_velocity.limit = motor1.voltage_limit;
+        motor2.voltage_limit = MOTOR_VOLTAGE_LIMIT;
+        motor2.PID_velocity.limit = motor2.voltage_limit;
         m1_enabled = true;
         m2_enabled = true;
+        motor1.enable();
+        motor2.enable();
         if (!m1_calibrated) initMotorFOC(1);
-        else driver1.enable();
         if (!m2_calibrated) initMotorFOC(2);
-        else driver2.enable();
         Serial.println(">>> BOTH MOTORS: ENABLED");
         return;
     }
 
     if (strcmp(cmd, "D1") == 0) {
         m1_enabled = false;
-        driver1.disable();
+        motor1.disable();
         m1_target_rpm = 0.0f;
+        motor1.voltage.q = 0.0f;
+        motor1.voltage.d = 0.0f;
+        stall_guard1.reset();
+        motor1.voltage_limit = MOTOR_VOLTAGE_LIMIT;
+        motor1.PID_velocity.limit = motor1.voltage_limit;
         Serial.println(">>> M1: DISABLED");
         return;
     }
     if (strcmp(cmd, "D2") == 0) {
         m2_enabled = false;
-        driver2.disable();
+        motor2.disable();
         m2_target_rpm = 0.0f;
+        motor2.voltage.q = 0.0f;
+        motor2.voltage.d = 0.0f;
+        stall_guard2.reset();
+        motor2.voltage_limit = MOTOR_VOLTAGE_LIMIT;
+        motor2.PID_velocity.limit = motor2.voltage_limit;
         Serial.println(">>> M2: DISABLED");
         return;
     }
     if (strcmp(cmd, "D") == 0 || strcmp(cmd, "d") == 0) {
         m1_enabled = false;
         m2_enabled = false;
-        driver1.disable();
-        driver2.disable();
+        motor1.disable();
+        motor2.disable();
         m1_target_rpm = 0.0f;
         m2_target_rpm = 0.0f;
+        motor1.voltage.q = 0.0f;
+        motor1.voltage.d = 0.0f;
+        motor2.voltage.q = 0.0f;
+        motor2.voltage.d = 0.0f;
+        stall_guard1.reset();
+        stall_guard2.reset();
+        motor1.voltage_limit = MOTOR_VOLTAGE_LIMIT;
+        motor1.PID_velocity.limit = motor1.voltage_limit;
+        motor2.voltage_limit = MOTOR_VOLTAGE_LIMIT;
+        motor2.PID_velocity.limit = motor2.voltage_limit;
         Serial.println(">>> BOTH MOTORS: DISABLED");
         return;
     }
@@ -1603,9 +2415,19 @@ void processCommand(const char *cmd) {
     }
 
     if (strcmp(cmd, "K") == 0 || strcmp(cmd, "k") == 0) {
-        stall_watchdog_enabled = !stall_watchdog_enabled;
-        Serial.print(">>> Stall Watchdog: ");
-        Serial.println(stall_watchdog_enabled ? "ENABLED" : "DISABLED");
+        if (stall_guard1.latched_fault || stall_guard2.latched_fault) {
+            stall_guard1.reset();
+            stall_guard2.reset();
+            motor1.voltage_limit = MOTOR_VOLTAGE_LIMIT;
+            motor1.PID_velocity.limit = motor1.voltage_limit;
+            motor2.voltage_limit = MOTOR_VOLTAGE_LIMIT;
+            motor2.PID_velocity.limit = motor2.voltage_limit;
+            Serial.println(">>> [STALL] Latched faults CLEARED. Stall watchdog active.");
+        } else {
+            stall_watchdog_enabled = !stall_watchdog_enabled;
+            Serial.print(">>> Stall Watchdog: ");
+            Serial.println(stall_watchdog_enabled ? "ENABLED" : "DISABLED");
+        }
         return;
     }
 
@@ -1897,31 +2719,43 @@ void processCommand(const char *cmd) {
     // Open-loop voltage commands: 'v1 <volts>', 'v2 <volts>', or 'v <volts>' (both)
     if (strncasecmp(cmd, "v1 ", 3) == 0 || strncasecmp(cmd, "v1", 2) == 0) {
         float val = atof(cmd + 2);
-        driver1.enable();
+        motor1.enable();
+        m1_enabled = true;
 #if defined(INVERT_ENCODER_DIRECTION) && (INVERT_ENCODER_DIRECTION == 1)
         val = -val;
 #endif
+        motor1.voltage.q = val;
+        motor1.voltage.d = 0.0f;
         motor1.setPhaseVoltage(fabsf(val), 0.0f, (val >= 0.0f) ? 0.0f : _PI);
         Serial.printf(">>> M1 Open-Loop Voltage: %+.2f V\n", val);
         return;
     }
     if (strncasecmp(cmd, "v2 ", 3) == 0 || strncasecmp(cmd, "v2", 2) == 0) {
         float val = atof(cmd + 2);
-        driver2.enable();
+        motor2.enable();
+        m2_enabled = true;
 #if defined(INVERT_ENCODER_DIRECTION) && (INVERT_ENCODER_DIRECTION == 1)
         val = -val;
 #endif
+        motor2.voltage.q = val;
+        motor2.voltage.d = 0.0f;
         motor2.setPhaseVoltage(fabsf(val), 0.0f, (val >= 0.0f) ? 0.0f : _PI);
         Serial.printf(">>> M2 Open-Loop Voltage: %+.2f V\n", val);
         return;
     }
     if ((cmd[0] == 'v' || cmd[0] == 'V') && (cmd[1] == ' ' || cmd[1] == '+' || cmd[1] == '-' || (cmd[1] >= '0' && cmd[1] <= '9'))) {
         float val = atof(cmd + 1);
-        driver1.enable();
-        driver2.enable();
+        motor1.enable();
+        motor2.enable();
+        m1_enabled = true;
+        m2_enabled = true;
 #if defined(INVERT_ENCODER_DIRECTION) && (INVERT_ENCODER_DIRECTION == 1)
         val = -val;
 #endif
+        motor1.voltage.q = val;
+        motor1.voltage.d = 0.0f;
+        motor2.voltage.q = val;
+        motor2.voltage.d = 0.0f;
         motor1.setPhaseVoltage(fabsf(val), 0.0f, (val >= 0.0f) ? 0.0f : _PI);
         motor2.setPhaseVoltage(fabsf(val), 0.0f, (val >= 0.0f) ? 0.0f : _PI);
         Serial.printf(">>> Both Motors Open-Loop Voltage: %+.2f V\n", val);
@@ -1986,51 +2820,128 @@ void processCommand(const char *cmd) {
 }
 
 // ----------------------------------------------------------------------------
-// Autonomous Stall Protection Watchdog
+// Autonomous Industry-Grade Stall Protection Watchdog (Thermal I^2*t + FSM)
 // ----------------------------------------------------------------------------
-void checkStallWatchdog() {
-    if (!stall_watchdog_enabled) return;
-
-    // Motor 1 Stall Check
-    if (m1_enabled) {
-        float actual1 = fabsf(motor1.shaftVelocity() * 9.54929659f);
-        float target1 = fabsf(m1_target_rpm);
-        if (target1 >= 5.0f && actual1 < 1.0f) {
-            if (m1_stall_timer == 0) m1_stall_timer = millis();
-            else if (millis() - m1_stall_timer >= 2000) m1_is_stalled = true;
-        } else {
-            m1_stall_timer = 0;
-        }
-
-        if (m1_is_stalled) {
-            Serial.println("\n>>> 🚨 SAFETY SHUTDOWN: Motor 1 Stalled (Target >= 5 RPM, Actual == 0 RPM)!");
-            m1_enabled = false;
-            driver1.disable();
-            m1_target_rpm = 0.0f;
-            m1_is_stalled = false;
-            m1_stall_timer = 0;
-        }
+void updateStallGuard(int id, BLDCMotor &motor, FastBLDCDriver3PWM &driver,
+                      volatile bool &enabled, volatile float &target_rpm,
+                      IndustrialStallGuard &guard, float dt) {
+    if (!enabled) {
+        guard.reset();
+        return;
     }
 
-    // Motor 2 Stall Check
-    if (m2_enabled) {
-        float actual2 = fabsf(motor2.shaftVelocity() * 9.54929659f);
-        float target2 = fabsf(m2_target_rpm);
-        if (target2 >= 5.0f && actual2 < 1.0f) {
-            if (m2_stall_timer == 0) m2_stall_timer = millis();
-            else if (millis() - m2_stall_timer >= 2000) m2_is_stalled = true;
-        } else {
-            m2_stall_timer = 0;
-        }
+    if (guard.latched_fault) {
+        enabled = false;
+        driver.disable();
+        target_rpm = 0.0f;
+        return;
+    }
 
-        if (m2_is_stalled) {
-            Serial.println("\n>>> 🚨 SAFETY SHUTDOWN: Motor 2 Stalled (Target >= 5 RPM, Actual == 0 RPM)!");
-            m2_enabled = false;
-            driver2.disable();
-            m2_target_rpm = 0.0f;
-            m2_is_stalled = false;
-            m2_stall_timer = 0;
+    float actual_rpm = motor.shaftVelocity() * 9.54929659f;
+    float abs_actual = fabsf(actual_rpm);
+    float abs_target = fabsf(target_rpm);
+    float abs_uq = fabsf(motor.voltage.q);
+    float vel_error = fabsf(target_rpm - actual_rpm);
+
+    // Effort-motion co-incidence and reversal masking
+    bool is_reversing = (target_rpm * actual_rpm < 0.0f) && (abs_actual > STALL_VELOCITY_FLOOR_RPM);
+    bool effort_active = (abs_uq >= STALL_MIN_EFFORT_VOLTS);
+    bool motion_stalled = (abs_target >= STALL_VELOCITY_FLOOR_RPM) && (abs_actual < STALL_VELOCITY_FLOOR_RPM);
+    bool severe_lag = (abs_uq >= STALL_SATURATION_VOLTS) && (vel_error > STALL_VELOCITY_LAG_RPM);
+
+    bool stall_qualified = effort_active && !is_reversing && (motion_stalled || severe_lag);
+
+    // Thermal I^2*t leaky energy accumulator
+    if (stall_qualified) {
+        float excess = (abs_uq * abs_uq) - (STALL_I2T_CONT_VOLTS * STALL_I2T_CONT_VOLTS);
+        if (excess > 0.0f) {
+            guard.energy_accumulator += excess * dt;
         }
+    } else {
+        guard.energy_accumulator = fmaxf(0.0f, guard.energy_accumulator - (STALL_I2T_LEAK_RATE * dt));
+    }
+
+    // Progressive Multi-Stage Mitigation FSM
+    switch (guard.state) {
+        case StallState::NORMAL:
+            if (guard.energy_accumulator >= (STALL_I2T_TRIP_ENERGY * 0.60f)) {
+                guard.state = StallState::WARNING;
+            }
+            break;
+
+        case StallState::WARNING:
+            if (guard.energy_accumulator < (STALL_I2T_TRIP_ENERGY * 0.30f)) {
+                guard.state = StallState::NORMAL;
+            } else if (guard.energy_accumulator >= STALL_I2T_TRIP_ENERGY) {
+                guard.state = StallState::FOLDBACK;
+                guard.state_timer = millis();
+                motor.voltage_limit = STALL_FOLDBACK_VOLTS;
+                motor.PID_velocity.limit = STALL_FOLDBACK_VOLTS;
+                Serial.printf("\n>>> ⚠️ [STALL FOLDBACK] Motor %d thermal threshold exceeded! Clamping to %.1fV.\n",
+                              id, STALL_FOLDBACK_VOLTS);
+            }
+            break;
+
+        case StallState::FOLDBACK:
+            motor.voltage_limit = STALL_FOLDBACK_VOLTS;
+            motor.PID_velocity.limit = STALL_FOLDBACK_VOLTS;
+            if (millis() - guard.state_timer >= 300) {
+                if (guard.recovery_attempts < STALL_MAX_RECOVERY_TRIES) {
+                    guard.recovery_attempts++;
+                    guard.state = StallState::UNWEDGE_DITHER;
+                    guard.state_timer = millis();
+                    target_rpm = -target_rpm * 0.5f;
+                } else {
+                    guard.state = StallState::LATCHED_FAULT;
+                    guard.latched_fault = true;
+                    enabled = false;
+                    driver.disable();
+                    target_rpm = 0.0f;
+                    Serial.printf("\n>>> 🚨 [SAFETY SHUTDOWN] Motor %d Latched Stall Fault (Obstruction Unresolved)!\n", id);
+                }
+            }
+            break;
+
+        case StallState::UNWEDGE_DITHER:
+            if (abs_actual >= STALL_VELOCITY_FLOOR_RPM * 2.0f) {
+                guard.reset();
+                motor.voltage_limit = MOTOR_VOLTAGE_LIMIT;
+                motor.PID_velocity.limit = MOTOR_VOLTAGE_LIMIT;
+                Serial.printf(">>> ✅ [STALL CLEARED] Motor %d motion restored.\n", id);
+            } else if (millis() - guard.state_timer >= STALL_DITHER_PULSE_MS) {
+                guard.state = StallState::FOLDBACK;
+                guard.state_timer = millis();
+            }
+            break;
+
+        case StallState::LATCHED_FAULT:
+            enabled = false;
+            driver.disable();
+            target_rpm = 0.0f;
+            break;
+    }
+}
+
+void checkStallWatchdog() {
+    if (!stall_watchdog_enabled || m1_calib_active || m2_calib_active) return;
+
+    static uint32_t last_check_us = 0;
+    uint32_t now_us = micros();
+    if (last_check_us == 0) {
+        last_check_us = now_us;
+        return;
+    }
+    uint32_t diff_us = now_us - last_check_us;
+    if (diff_us < 5000) return; // ~200 Hz evaluation
+    float dt = (float)diff_us * 1e-6f;
+    last_check_us = now_us;
+    if (dt > 0.05f) dt = 0.05f;
+
+    if (!m1_calib_active) {
+        updateStallGuard(1, motor1, driver1, m1_enabled, m1_target_rpm, stall_guard1, dt);
+    }
+    if (!m2_calib_active) {
+        updateStallGuard(2, motor2, driver2, m2_enabled, m2_target_rpm, stall_guard2, dt);
     }
 }
 
@@ -2038,6 +2949,7 @@ void checkStallWatchdog() {
 // 26-Byte Telemetry Frame Generator (25 Hz)
 // ----------------------------------------------------------------------------
 void sendBinaryTelemetry() {
+    if (!show_telemetry || m1_calib_active || m2_calib_active) return;
     TelemetryPacket pkt;
     pkt.header[0] = 0xAA;
     pkt.header[1] = 0x55;
@@ -2054,7 +2966,11 @@ void sendBinaryTelemetry() {
     if (!encoder1.last_no_mag) s1 |= (1 << 2);
     if (encoder1.last_parity_ok) s1 |= (1 << 3);
     if (m1_is_stalled)         s1 |= (1 << 4);
+    if (stall_guard1.state == StallState::WARNING || stall_guard1.state == StallState::FOLDBACK || stall_guard1.state == StallState::UNWEDGE_DITHER || stall_guard1.latched_fault) {
+        s1 |= (1 << 4);
+    }
     if (m1_calib_active)       s1 |= (1 << 5);
+    if (stall_guard1.latched_fault) s1 |= (1 << 6);
     pkt.m1_status = s1;
 
     // Motor 2 Fields
@@ -2069,13 +2985,17 @@ void sendBinaryTelemetry() {
     if (!encoder2.last_no_mag) s2 |= (1 << 2);
     if (encoder2.last_parity_ok) s2 |= (1 << 3);
     if (m2_is_stalled)         s2 |= (1 << 4);
+    if (stall_guard2.state == StallState::WARNING || stall_guard2.state == StallState::FOLDBACK || stall_guard2.state == StallState::UNWEDGE_DITHER || stall_guard2.latched_fault) {
+        s2 |= (1 << 4);
+    }
     if (m2_calib_active)       s2 |= (1 << 5);
+    if (stall_guard2.latched_fault) s2 |= (1 << 6);
     pkt.m2_status = s2;
 
     // Real-Time Control & Profiler Stats
     pkt.foc_khz_x10    = 200; // 20.0 kHz
-    // Peak ISR latency converted from cycles to microseconds (170 cycles/us)
-    uint32_t lat_us    = isr_peak_cycles / 170;
+    // Peak ISR latency converted from cycles to microseconds
+    uint32_t lat_us    = isr_peak_cycles / (SystemCoreClock / 1000000);
     pkt.isr_lat_us     = (lat_us > 255) ? 255 : (uint8_t)lat_us;
     pkt.spikes_count   = isr_jitter_spikes;
     pkt.calib_progress = live_calib_progress;
@@ -2093,6 +3013,134 @@ void sendBinaryTelemetry() {
 
     // Atomic binary write to serial buffer
     Serial.write(raw_ptr, sizeof(TelemetryPacket));
+}
+
+// ----------------------------------------------------------------------------
+// ESP32 High-Speed 400 Hz Bidirectional Link Handlers
+// ----------------------------------------------------------------------------
+static uint32_t last_esp_packet_ms = 0;
+static bool esp_link_active = false;
+
+void sendESP32Feedback() {
+    if (SerialESP.availableForWrite() < (int)sizeof(STM32FeedbackPacket)) return;
+
+    STM32FeedbackPacket resp;
+    resp.header[0] = STM32_FEEDBACK_SYNC_1;
+    resp.header[1] = STM32_FEEDBACK_SYNC_2;
+
+    uint8_t st = 0;
+    if (m1_enabled) st |= STM32_STATUS_M1_ENABLED;
+    if (m2_enabled) st |= STM32_STATUS_M2_ENABLED;
+    if (m1_calib_active || m2_calib_active) st |= STM32_STATUS_CALIB_ACTIVE;
+    if (stall_guard1.state != StallState::NORMAL || stall_guard2.state != StallState::NORMAL) st |= STM32_STATUS_STALL_WARNING;
+    if (stall_guard1.latched_fault || stall_guard2.latched_fault) st |= STM32_STATUS_LATCHED_FAULT;
+    if (encoder1.last_parity_ok && !encoder1.last_no_mag) st |= STM32_STATUS_ENC1_OK;
+    if (encoder2.last_parity_ok && !encoder2.last_no_mag) st |= STM32_STATUS_ENC2_OK;
+    resp.status_flags = st;
+
+    resp.m1_actual_rpm = motor1.shaftVelocity() * 9.54929659f;
+    resp.m2_actual_rpm = motor2.shaftVelocity() * 9.54929659f;
+    resp.calib_progress = live_calib_progress;
+
+    uint8_t chk = 0;
+    const uint8_t *p = (const uint8_t *)&resp;
+    for (size_t i = 2; i < sizeof(STM32FeedbackPacket) - 1; i++) {
+        chk ^= p[i];
+    }
+    resp.checksum = chk;
+
+    SerialESP.write((const uint8_t *)&resp, sizeof(resp));
+}
+
+void processESP32Link() {
+    static uint8_t rx_buf[sizeof(STM32MotorCommandPacket)];
+    static uint8_t rx_idx = 0;
+
+    while (SerialESP.available() > 0) {
+        uint8_t b = SerialESP.read();
+
+        if (rx_idx == 0) {
+            if (b == STM32_CMD_SYNC_BYTE) {
+                rx_buf[0] = b;
+                rx_idx = 1;
+            }
+        } else {
+            rx_buf[rx_idx++] = b;
+            if (rx_idx == sizeof(STM32MotorCommandPacket)) {
+                rx_idx = 0;
+                // Verify XOR checksum over bytes [1 .. 9]
+                uint8_t chk = 0;
+                for (size_t i = 1; i < sizeof(STM32MotorCommandPacket) - 1; i++) {
+                    chk ^= rx_buf[i];
+                }
+                if (chk == rx_buf[sizeof(STM32MotorCommandPacket) - 1]) {
+                    const STM32MotorCommandPacket *pkt = (const STM32MotorCommandPacket *)rx_buf;
+                    last_esp_packet_ms = millis();
+                    esp_link_active = true;
+
+                    switch (pkt->cmd_mode) {
+                        case STM32_CMD_DRIVE:
+                            if (!g_estop_active) {
+                                m1_target_rpm = pkt->param1;
+                                m2_target_rpm = pkt->param2;
+                                if (!m1_enabled) { m1_enabled = true; motor1.enable(); }
+                                if (!m2_enabled) { m2_enabled = true; motor2.enable(); }
+                            }
+                            break;
+
+                        case STM32_CMD_ESTOP:
+                            triggerGlobalEmergencyStop();
+                            break;
+
+                        case STM32_CMD_ENABLE:
+                            g_estop_active = false;
+                            m1_enabled = true;
+                            m2_enabled = true;
+                            motor1.enable();
+                            motor2.enable();
+                            break;
+
+                        case STM32_CMD_SET_PID:
+                            if (pkt->param1 > 0.0f) {
+                                motor1.PID_velocity.P = pkt->param1;
+                                motor2.PID_velocity.P = pkt->param1;
+                            }
+                            if (pkt->param2 >= 0.0f) {
+                                motor1.PID_velocity.I = pkt->param2;
+                                motor2.PID_velocity.I = pkt->param2;
+                            }
+                            break;
+
+                        case STM32_CMD_CALIB_M1:
+                            runMasterCalibrationSequence(1, pkt->param1 > 0.0f ? pkt->param1 : CALIB_ALIGN_VOLTAGE);
+                            break;
+
+                        case STM32_CMD_CALIB_M2:
+                            runMasterCalibrationSequence(2, pkt->param1 > 0.0f ? pkt->param1 : CALIB_ALIGN_VOLTAGE);
+                            break;
+
+                        case STM32_CMD_SAVE_FLASH:
+                            saveConfigToFlash();
+                            break;
+
+                        case STM32_CMD_ENTER_DFU:
+                            delay(20);
+                            __HAL_RCC_PWR_CLK_ENABLE();
+                            HAL_PWR_EnableBkUpAccess();
+                            TAMP->BKP0R = 0xDEADBEEF;
+                            NVIC_SystemReset();
+                            break;
+
+                        default:
+                            break;
+                    }
+
+                    // Synchronous 400 Hz Ping-Pong Feedback Reply
+                    sendESP32Feedback();
+                }
+            }
+        }
+    }
 }
 
 // ----------------------------------------------------------------------------
@@ -2119,10 +3167,11 @@ void setup() {
     pinMode(M2_EN, OUTPUT);
     digitalWrite(M2_EN, LOW);
 
-    // 1. Standalone DWT Unlock (Essential for standalone battery/bench operation without ST-Link)
+    // 1. Standalone DWT Unlock & Hardware CORDIC Accelerator Init
     CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
     DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
     DWT->CYCCNT = 0;
+    initHardwareCORDIC();
 
     // 2. Status LED setup (Disabled: LOW = OFF)
     pinMode(STATUS_LED, OUTPUT);
@@ -2130,6 +3179,7 @@ void setup() {
 
     // 3. Serial Port Initialization (921600 Baud for Ultra High Speed Telemetry)
     Serial.begin(921600);
+    SerialESP.begin(ESP_UART_BAUD);
 
     // 4. Initialize MT6816 Encoders on Independent Hardware SPI Buses (SPI1 & SPI2)
     encoder1.init();
@@ -2157,13 +3207,14 @@ void setup() {
     motor1.KV_rating = MOTOR_KV_RATING;
     motor1.voltage_sensor_align = MOTOR_ALIGN_VOLTAGE;
     motor1.controller = MotionControlType::velocity;
-    motor1.PID_velocity.P = 0.15f;
-    motor1.PID_velocity.I = 1.50f;
-    motor1.PID_velocity.D = 0.00000f;
-    motor1.PID_velocity.output_ramp = 100.0f;
-    motor1.PID_velocity.Ts = 0.00025f;
+    motor1.PID_velocity.P = DEFAULT_PID_P;
+    motor1.PID_velocity.I = DEFAULT_PID_I;
+    motor1.PID_velocity.D = DEFAULT_PID_D;
+    motor1.PID_velocity.output_ramp = DEFAULT_PID_RAMP;
+    motor1.PID_velocity.Ts = 0.0002f;
     motor1.PID_velocity.limit = motor1.voltage_limit;
-    motor1.LPF_velocity.Tf = 0.0005f;
+    motor1.LPF_velocity.Tf = DEFAULT_LPF_TF;
+    motor1.LPF_velocity.Ts = 0.0002f;
     motor1.init();
     driver1.disable();
 
@@ -2175,13 +3226,14 @@ void setup() {
     motor2.KV_rating = MOTOR_KV_RATING;
     motor2.voltage_sensor_align = MOTOR_ALIGN_VOLTAGE;
     motor2.controller = MotionControlType::velocity;
-    motor2.PID_velocity.P = 0.15f;
-    motor2.PID_velocity.I = 1.50f;
-    motor2.PID_velocity.D = 0.00000f;
-    motor2.PID_velocity.output_ramp = 100.0f;
-    motor2.PID_velocity.Ts = 0.00025f;
+    motor2.PID_velocity.P = DEFAULT_PID_P;
+    motor2.PID_velocity.I = DEFAULT_PID_I;
+    motor2.PID_velocity.D = DEFAULT_PID_D;
+    motor2.PID_velocity.output_ramp = DEFAULT_PID_RAMP;
+    motor2.PID_velocity.Ts = 0.0002f;
     motor2.PID_velocity.limit = motor2.voltage_limit;
-    motor2.LPF_velocity.Tf = 0.0005f;
+    motor2.LPF_velocity.Tf = DEFAULT_LPF_TF;
+    motor2.LPF_velocity.Ts = 0.0002f;
     motor2.init();
     driver2.disable();
 
@@ -2191,22 +3243,24 @@ void setup() {
     } else {
         if (M1_DEFAULT_ZERO_ELECTRIC_ANGLE != 0.0f) {
             motor1.zero_electric_angle = M1_DEFAULT_ZERO_ELECTRIC_ANGLE;
+            m1_base_zero_angle = M1_DEFAULT_ZERO_ELECTRIC_ANGLE;
             motor1.sensor_direction = Direction::CW;
             m1_calibrated = true;
         }
 
         if (M2_DEFAULT_ZERO_ELECTRIC_ANGLE != 0.0f) {
             motor2.zero_electric_angle = M2_DEFAULT_ZERO_ELECTRIC_ANGLE;
+            m2_base_zero_angle = M2_DEFAULT_ZERO_ELECTRIC_ANGLE;
             motor2.sensor_direction = Direction::CW;
             m2_calibrated = true;
         }
     }
 
-    // 8. Configure & Start TIM6 Hardware Timer Interrupt @ 20.0 kHz (Priority 2)
+    // 8. Configure & Start TIM6 Hardware Timer Interrupt @ 20.0 kHz (Highest Priority 0)
     foc_timer = new HardwareTimer(TIM6);
     foc_timer->setOverflow(FOC_COMMUTATION_HZ, HERTZ_FORMAT);
     foc_timer->attachInterrupt(focTimerISR);
-    foc_timer->setInterruptPriority(2, 0);
+    foc_timer->setInterruptPriority(0, 0);
     foc_timer->resume();
 
     last_telemetry_time = millis();
@@ -2219,9 +3273,32 @@ void setup() {
 // Background Task Loop (Serial Parsing, Telemetry, Safety)
 // ----------------------------------------------------------------------------
 void loop() {
+    uint32_t now = millis();
+
+    // 0. High-Speed 400 Hz Bidirectional Binary Link to ESP32
+    processESP32Link();
+
+    // 0b. Safety Watchdog: If no ESP32 packet received for > 60 ms while motors armed, disarm motors
+    if (esp_link_active && (m1_enabled || m2_enabled) && (now - last_esp_packet_ms > 60)) {
+        m1_target_rpm = 0.0f;
+        m2_target_rpm = 0.0f;
+        motor1.disable();
+        motor2.disable();
+        m1_enabled = false;
+        m2_enabled = false;
+    }
+
     // 1. Process Incoming Serial Characters into Line Buffer
     while (Serial.available() > 0) {
         char c = (char)Serial.read();
+        // Instant global emergency stop key (ESC = ASCII 27) without requiring newline.
+        // Note: 'x'/'X' is handled as a standalone command in processCommand() so words like
+        // 'export' or 'MAXRPM1' do not falsely trigger E-STOP mid-word!
+        if (c == 27) {
+            triggerGlobalEmergencyStop();
+            rx_idx = 0;
+            continue;
+        }
         if (c == '\n' || c == '\r') {
             if (rx_idx > 0) {
                 rx_line[rx_idx] = '\0';
@@ -2236,9 +3313,8 @@ void loop() {
     // 2. Autonomous Stall Protection
     checkStallWatchdog();
 
-    // 3. Periodic Telemetry Stream (25 Hz = 40 ms)
-    uint32_t now = millis();
-    if (show_telemetry && (now - last_telemetry_time >= (1000 / TELEMETRY_RATE_HZ))) {
+    // 3. Periodic Telemetry Stream (25 Hz = 40 ms) - Active when ESP32 link is not running
+    if (!esp_link_active && show_telemetry && (now - last_telemetry_time >= (1000 / TELEMETRY_RATE_HZ))) {
         last_telemetry_time = now;
         sendBinaryTelemetry();
     }

@@ -14,11 +14,21 @@
 // Telemetry: USART1 (PA9 TX, PA10 RX)
 // Native USB: PA11 (DM), PA12 (DP)
 // ============================================================================
-// Host ESP32 Connection Reference:
-//   Connects to ESP32 UART1:
-//     STM32 Front PA10 (RX) <- ESP32 GPIO 17 (STM32_1_UART_TX_PIN)
-//     STM32 Front PA9  (TX) -> ESP32 GPIO 18 (STM32_1_UART_RX_PIN)
-// ============================================================================
+
+// ----------------------------------------------------------------------------
+// ESP32 High-Speed 400 Hz UART Link (USART1)
+// ----------------------------------------------------------------------------
+#ifndef PIN_ESP_UART_TX
+#define PIN_ESP_UART_TX PA9   // STM32 TX -> ESP32 RX
+#endif
+
+#ifndef PIN_ESP_UART_RX
+#define PIN_ESP_UART_RX PA10  // STM32 RX <- ESP32 TX
+#endif
+
+#ifndef ESP_UART_BAUD
+#define ESP_UART_BAUD 921600
+#endif
 
 // ----------------------------------------------------------------------------
 // SPI1 Bus (MT6816 Encoder 1)
@@ -131,8 +141,18 @@
 #define MOTOR_VELOCITY_LIMIT                                                   \
   (2000.0f * 0.104719755f) // 2000 RPM = 209.44 rad/s headroom for 1800 RPM
 
+// Default Motion Control & Sensor Parameters
+#define DEFAULT_PID_P 0.10f
+#define DEFAULT_PID_I 1.50f
+#define DEFAULT_PID_D 0.00000f
+#define DEFAULT_PID_RAMP 100.0f
+#define DEFAULT_LPF_TF 0.0005f
+#define DEFAULT_LAG_COMP_US 35.0f
+#define DEFAULT_DWT_WINDOW_MS 5.0f
+
 // Direction Convention Configuration
-// Set to 1 to invert raw encoder counting direction globally in firmware so physical clockwise rotation increases angle & velocity (CW = positive)
+// Set to 1 to invert raw encoder counting direction globally in firmware so
+// physical clockwise rotation increases angle & velocity (CW = positive)
 #ifndef INVERT_ENCODER_DIRECTION
 #define INVERT_ENCODER_DIRECTION 0
 #endif
@@ -154,11 +174,32 @@
 #define LUT_PKPK_LIMIT_RAD                                                     \
   0.060f // > 3.44 deg mech = bad sweep / binding / severe runout
 
+// ----------------------------------------------------------------------------
+// Industry-Grade Stall & Thermal Protection Parameters
+// ----------------------------------------------------------------------------
+#define STALL_MIN_EFFORT_VOLTS                                                 \
+  2.50f // Minimum |Uq| required to qualify as stall (V)
+#define STALL_SATURATION_VOLTS 10.50f // Near-saturation voltage threshold (V)
+#define STALL_VELOCITY_FLOOR_RPM                                               \
+  3.0f // Speed below which rotor is considered stationary (RPM)
+#define STALL_VELOCITY_LAG_RPM                                                 \
+  30.0f // Speed error threshold under saturation (RPM)
+#define STALL_I2T_CONT_VOLTS 3.50f // Continuous thermal voltage threshold (V)
+#define STALL_I2T_TRIP_ENERGY                                                  \
+  60.0f // Integrated energy capacity (V^2 * s) [~450ms at 12V dead stall]
+#define STALL_I2T_LEAK_RATE                                                    \
+  25.0f // Energy dissipation rate when effort drops (V^2 / s)
+#define STALL_FOLDBACK_VOLTS                                                   \
+  2.00f // Safe continuous holding voltage during foldback (V)
+#define STALL_MAX_RECOVERY_TRIES                                               \
+  3                              // Dither unwedge attempts before hard shutdown
+#define STALL_DITHER_PULSE_MS 80 // Duration of reverse recovery pulse (ms)
+
 // Real-Time Control Loop Frequencies
 #define FOC_COMMUTATION_HZ                                                     \
   20000 // 20.0 kHz Hard Real-Time Commutation (50.0 us)
 #define MOTION_DOWNSAMPLE_RATIO                                                \
-  5 // Velocity PID downsampled to 4.0 kHz (250 us) [20 kHz / 5]
+  4 // 5.0 kHz Staggered Velocity PID (every 200.0 us per motor)
 #define TELEMETRY_RATE_HZ 25 // 25 Hz Binary Telemetry Stream (40 ms)
 #define SPI_SPEED_HZ                                                           \
   10625000 // 10.625 MHz (170 MHz / 16 prescaler) for high-speed low-latency

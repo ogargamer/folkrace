@@ -412,10 +412,45 @@ static void ioTask(void *pvParameters) {
                 Serial.printf(" Slip State: %s (Slip Ratio: %.2f, Yaw Error: %+.2f rad/s)\n",
                               c.slip_state == SLIP_OVERSTEER ? "OVERSTEER" : (c.slip_state == SLIP_UNDERSTEER ? "UNDERSTEER" : "NORMAL"),
                               c.slip_ratio, c.yaw_error);
-                Serial.printf(" STM32 Links: Front = %s | Rear = %s\n",
+                Serial.printf(" STM32 Front (FL/FR): %s | Actual RPM: %+.1f / %+.1f | Pkts: %u (Err: %u) | En: %d/%d | Prog: %u%%\n",
                               s_stm32Link.isFrontConnected() ? "ONLINE" : "OFFLINE",
-                              s_stm32Link.isRearConnected() ? "ONLINE" : "OFFLINE");
+                              s_stm32Link.getFL_RPM(), s_stm32Link.getFR_RPM(),
+                              s_stm32Link.getFront().getValidPacketCount(),
+                              s_stm32Link.getFront().getChecksumErrorCount(),
+                              s_stm32Link.getFront().isM1Enabled(), s_stm32Link.getFront().isM2Enabled(),
+                              s_stm32Link.getFront().getCalibProgress());
+                Serial.printf(" STM32 Rear  (RL/RR): %s | Actual RPM: %+.1f / %+.1f | Pkts: %u (Err: %u) | En: %d/%d | Prog: %u%%\n",
+                              s_stm32Link.isRearConnected() ? "ONLINE" : "OFFLINE",
+                              s_stm32Link.getRL_RPM(), s_stm32Link.getRR_RPM(),
+                              s_stm32Link.getRear().getValidPacketCount(),
+                              s_stm32Link.getRear().getChecksumErrorCount(),
+                              s_stm32Link.getRear().isM1Enabled(), s_stm32Link.getRear().isM2Enabled(),
+                              s_stm32Link.getRear().getCalibProgress());
                 Serial.println(F("========================================================\n"));
+            } else if (line.equalsIgnoreCase("ESTOP") || line.equalsIgnoreCase("STOP") || line.equalsIgnoreCase("X")) {
+                s_manual_v = 0.0f;
+                s_stm32Link.emergencyStop();
+                Serial.println(F(">>> 🛑 EMERGENCY STOP BROADCAST TO ALL STM32s!"));
+            } else if (line.equalsIgnoreCase("MOTORS") || line.equalsIgnoreCase("START")) {
+                s_stm32Link.enableDrivers();
+                Serial.println(F(">>> ⚡ MOTORS ENABLED ON ALL STM32s."));
+            } else if (line.startsWith("PID ") || line.startsWith("pid ")) {
+                float kp = 0.1f, ki = 1.5f;
+                sscanf(line.c_str() + 4, "%f %f", &kp, &ki);
+                s_stm32Link.setPID(kp, ki);
+                Serial.printf(">>> Velocity PID Dispatched to STM32s: Kp=%.3f, Ki=%.3f\n", kp, ki);
+            } else if (line.equalsIgnoreCase("SAVE")) {
+                s_stm32Link.saveFlash();
+                Serial.println(F(">>> 💾 FLASH SAVE DISPATCHED TO ALL STM32s."));
+            } else if (line.equalsIgnoreCase("DFU")) {
+                s_stm32Link.enterDFU(true, true);
+                Serial.println(F(">>> 🔄 DFU BOOTLOADER REBOOT DISPATCHED TO ALL STM32s."));
+            } else if (line.startsWith("CALIB ") || line.startsWith("calib ")) {
+                int axle = 0, motor = 1;
+                float v = 4.0f;
+                sscanf(line.c_str() + 6, "%d %d %f", &axle, &motor, &v);
+                s_stm32Link.startCalibration(axle, motor, v);
+                Serial.printf(">>> Calibration Dispatched: Axle %d, Motor %d @ %.1fV\n", axle, motor, v);
             } else if (line.startsWith("V ") || line.startsWith("v ")) {
                 s_manual_v = line.substring(2).toFloat();
                 s_manual_override = true;

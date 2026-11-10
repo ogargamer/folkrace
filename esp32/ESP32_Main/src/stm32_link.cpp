@@ -6,6 +6,8 @@ STM32Channel::STM32Channel()
       sync_found_(false),
       m1_actual_rpm_(0.0f),
       m2_actual_rpm_(0.0f),
+      status_flags_(0),
+      calib_progress_(0),
       last_packet_ms_(0),
       valid_packet_count_(0),
       checksum_error_count_(0) {}
@@ -17,7 +19,7 @@ void STM32Channel::begin(HardwareSerial *serial, uint32_t baud, int rxPin, int t
     serial_->begin(baud, SERIAL_8N1, rxPin, txPin);
 }
 
-void STM32Channel::sendCommand(float m1_rpm, float m2_rpm) {
+void STM32Channel::sendPacket(uint8_t mode, float param1, float param2) {
     if (!serial_) return;
 
     // Non-blocking guard
@@ -26,9 +28,10 @@ void STM32Channel::sendCommand(float m1_rpm, float m2_rpm) {
     }
 
     STM32MotorCommandPacket pkt;
-    pkt.sync = COMMAND_SYNC_BYTE;
-    pkt.m1_rpm = m1_rpm;
-    pkt.m2_rpm = m2_rpm;
+    pkt.sync = STM32_CMD_SYNC_BYTE;
+    pkt.cmd_mode = mode;
+    pkt.param1 = param1;
+    pkt.param2 = param2;
 
     uint8_t chk = 0;
     const uint8_t *p = (const uint8_t *)&pkt;
@@ -48,11 +51,11 @@ bool STM32Channel::update() {
         uint8_t b = serial_->read();
 
         if (!sync_found_) {
-            if (b == 0xAA) {
-                rx_buffer_[0] = 0xAA;
+            if (b == STM32_FEEDBACK_SYNC_1) {
+                rx_buffer_[0] = STM32_FEEDBACK_SYNC_1;
                 rx_index_ = 1;
-            } else if (rx_index_ == 1 && b == 0x55) {
-                rx_buffer_[1] = 0x55;
+            } else if (rx_index_ == 1 && b == STM32_FEEDBACK_SYNC_2) {
+                rx_buffer_[1] = STM32_FEEDBACK_SYNC_2;
                 rx_index_ = 2;
                 sync_found_ = true;
             } else {
@@ -61,22 +64,25 @@ bool STM32Channel::update() {
         } else {
             rx_buffer_[rx_index_++] = b;
 
-            // 26-Byte Telemetry Frame
-            if (rx_index_ >= 26) {
+            // 13-Byte High-Speed 400 Hz Feedback Packet
+            if (rx_index_ >= sizeof(STM32FeedbackPacket)) {
                 sync_found_ = false;
                 rx_index_ = 0;
 
-                // Validate XOR checksum over bytes [2 .. 24]
-                uint8_t expected_chk = rx_buffer_[25];
+                // Validate XOR checksum over payload bytes [2 .. 11]
+                uint8_t expected_chk = rx_buffer_[sizeof(STM32FeedbackPacket) - 1];
                 uint8_t computed_chk = 0;
-                for (int i = 2; i < 25; i++) {
+                for (size_t i = 2; i < sizeof(STM32FeedbackPacket) - 1; i++) {
                     computed_chk ^= rx_buffer_[i];
                 }
 
                 if (computed_chk == expected_chk) {
-                    const STM32TelemetryPacket *pkt = (const STM32TelemetryPacket *)rx_buffer_;
-                    m1_actual_rpm_ = (float)pkt->m1_actual_rpm * 0.1f;
-                    m2_actual_rpm_ = (float)pkt->m2_actual_rpm * 0.1f;
+                    const STM32FeedbackPacket *pkt = (const STM32FeedbackPacket *)rx_buffer_;
+                    m1_actual_rpm_ = pkt->m1_actual_rpm;
+                    m2_actual_rpm_ = pkt->m2_actual_rpm;
+                    status_flags_  = pkt->status_flags;
+                    calib_progress_= pkt->calib_progress;
+
                     valid_packet_count_++;
                     last_packet_ms_ = millis();
                     new_packet = true;
@@ -90,7 +96,7 @@ bool STM32Channel::update() {
 }
 
 bool STM32Channel::isConnected() const {
-    return (last_packet_ms_ > 0) && (millis() - last_packet_ms_ < 200);
+    return (last_packet_ms_ > 0) && (millis() - last_packet_ms_ < 100);
 }
 
 // =============================================================================
@@ -105,9 +111,43 @@ void STM32DualLink::begin(uint32_t baud, int front_rx, int front_tx, int rear_rx
     rear_.begin(&serial_rear_, baud, rear_rx, rear_tx);
 }
 
-void STM32DualLink::sendCommands(float fl_rpm, float fr_rpm, float rl_rpm, float rr_rpm) {
-    front_.sendCommand(fl_rpm, fr_rpm);
-    rear_.sendCommand(rl_rpm, rr_rpm);
+void STM32DualLink::sendDrive(float fl_rpm, float fr_rpm, float rl_rpm, float rr_rpm) {
+    front_.sendDrive(fl_rpm, fr_rpm);
+    rear_.sendDrive(rl_rpm, rr_rpm);
+}
+
+void STM32DualLink::emergencyStop() {
+    front_.emergencyStop();
+    rear_.emergencyStop();
+}
+
+void STM32DualLink::enableDrivers() {
+    front_.enableDrivers();
+    rear_.enableDrivers();
+}
+
+void STM32DualLink::setPID(float kp, float ki) {
+    front_.setPID(kp, ki);
+    rear_.setPID(kp, ki);
+}
+
+void STM32DualLink::saveFlash() {
+    front_.saveFlash();
+    rear_.saveFlash();
+}
+
+void STM32DualLink::enterDFU(bool front, bool rear) {
+    if (front) front_.enterDFU();
+    if (rear)  rear_.enterDFU();
+}
+
+void STM32DualLink::startCalibration(uint8_t axle, int motor_id, float align_voltage) {
+    if (axle == 0 || axle == 1) { // 0=both/front, 1=front
+        front_.startCalibration(motor_id, align_voltage);
+    }
+    if (axle == 0 || axle == 2) { // 0=both/rear, 2=rear
+        rear_.startCalibration(motor_id, align_voltage);
+    }
 }
 
 bool STM32DualLink::update() {

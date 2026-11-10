@@ -39,6 +39,54 @@ struct __attribute__((packed)) TelemetryPacket {
 static_assert(sizeof(TelemetryPacket) == 26, "TelemetryPacket must be exactly 26 bytes");
 
 // ----------------------------------------------------------------------------
+// ESP32 High-Speed 400 Hz UART Protocol Definitions
+// ----------------------------------------------------------------------------
+#define STM32_CMD_SYNC_BYTE        0xAA
+#define STM32_FEEDBACK_SYNC_1      0xAA
+#define STM32_FEEDBACK_SYNC_2      0x55
+
+enum STM32CommandMode : uint8_t {
+    STM32_CMD_DRIVE      = 0x00, // Regular 400Hz velocity command (param1=m1_rpm, param2=m2_rpm)
+    STM32_CMD_ESTOP      = 0x01, // Immediate E-stop: cut PWM, zero voltage, disable drivers
+    STM32_CMD_ENABLE     = 0x02, // Enable motor drivers
+    STM32_CMD_CALIB_M1   = 0x10, // Start Motor 1 Calibration (param1=align_voltage)
+    STM32_CMD_CALIB_M2   = 0x11, // Start Motor 2 Calibration (param1=align_voltage)
+    STM32_CMD_SET_PID    = 0x20, // Set velocity PID (param1=Kp, param2=Ki)
+    STM32_CMD_SAVE_FLASH = 0x30, // Save active calibration & gains to STM32 Flash
+    STM32_CMD_ENTER_DFU  = 0xDF  // Reboot into ROM DFU bootloader
+};
+
+struct __attribute__((packed)) STM32MotorCommandPacket {
+    uint8_t sync;       // 0xAA (STM32_CMD_SYNC_BYTE)
+    uint8_t cmd_mode;   // STM32CommandMode
+    float   param1;     // m1 target RPM / Kp / align_voltage
+    float   param2;     // m2 target RPM / Ki
+    uint8_t checksum;   // XOR of bytes 1..9 (cmd_mode, param1, param2)
+};
+static_assert(sizeof(STM32MotorCommandPacket) == 11, "STM32MotorCommandPacket must be 11 bytes");
+
+#define STM32_STATUS_M1_ENABLED     (1 << 0)
+#define STM32_STATUS_M2_ENABLED     (1 << 1)
+#define STM32_STATUS_CALIB_ACTIVE   (1 << 2)
+#define STM32_STATUS_STALL_WARNING  (1 << 3)
+#define STM32_STATUS_LATCHED_FAULT  (1 << 4)
+#define STM32_STATUS_ENC1_OK        (1 << 5)
+#define STM32_STATUS_ENC2_OK        (1 << 6)
+
+struct __attribute__((packed)) STM32FeedbackPacket {
+    uint8_t header[2];      // 0xAA, 0x55
+    uint8_t status_flags;   // Bitfield (enabled, calib, stall, fault, enc_ok)
+    float   m1_actual_rpm;  // Actual shaft RPM
+    float   m2_actual_rpm;  // Actual shaft RPM
+    uint8_t calib_progress; // 0..100%
+    uint8_t checksum;       // XOR over bytes 2..11 (status_flags, m1, m2, calib_progress)
+};
+static_assert(sizeof(STM32FeedbackPacket) == 13, "STM32FeedbackPacket must be 13 bytes");
+
+// Hardware Serial instance connected to ESP32 on USART1 (PA10 RX, PA9 TX)
+HardwareSerial SerialESP(PIN_ESP_UART_RX, PIN_ESP_UART_TX);
+
+// ----------------------------------------------------------------------------
 // Global Peripherals & Motor Instances
 // ----------------------------------------------------------------------------
 // Dedicated hardware SPI2 instance: constructor order is (MOSI, MISO, SCK)
@@ -2968,6 +3016,134 @@ void sendBinaryTelemetry() {
 }
 
 // ----------------------------------------------------------------------------
+// ESP32 High-Speed 400 Hz Bidirectional Link Handlers
+// ----------------------------------------------------------------------------
+static uint32_t last_esp_packet_ms = 0;
+static bool esp_link_active = false;
+
+void sendESP32Feedback() {
+    if (SerialESP.availableForWrite() < (int)sizeof(STM32FeedbackPacket)) return;
+
+    STM32FeedbackPacket resp;
+    resp.header[0] = STM32_FEEDBACK_SYNC_1;
+    resp.header[1] = STM32_FEEDBACK_SYNC_2;
+
+    uint8_t st = 0;
+    if (m1_enabled) st |= STM32_STATUS_M1_ENABLED;
+    if (m2_enabled) st |= STM32_STATUS_M2_ENABLED;
+    if (m1_calib_active || m2_calib_active) st |= STM32_STATUS_CALIB_ACTIVE;
+    if (stall_guard1.state != StallState::NORMAL || stall_guard2.state != StallState::NORMAL) st |= STM32_STATUS_STALL_WARNING;
+    if (stall_guard1.latched_fault || stall_guard2.latched_fault) st |= STM32_STATUS_LATCHED_FAULT;
+    if (encoder1.last_parity_ok && !encoder1.last_no_mag) st |= STM32_STATUS_ENC1_OK;
+    if (encoder2.last_parity_ok && !encoder2.last_no_mag) st |= STM32_STATUS_ENC2_OK;
+    resp.status_flags = st;
+
+    resp.m1_actual_rpm = motor1.shaftVelocity() * 9.54929659f;
+    resp.m2_actual_rpm = motor2.shaftVelocity() * 9.54929659f;
+    resp.calib_progress = live_calib_progress;
+
+    uint8_t chk = 0;
+    const uint8_t *p = (const uint8_t *)&resp;
+    for (size_t i = 2; i < sizeof(STM32FeedbackPacket) - 1; i++) {
+        chk ^= p[i];
+    }
+    resp.checksum = chk;
+
+    SerialESP.write((const uint8_t *)&resp, sizeof(resp));
+}
+
+void processESP32Link() {
+    static uint8_t rx_buf[sizeof(STM32MotorCommandPacket)];
+    static uint8_t rx_idx = 0;
+
+    while (SerialESP.available() > 0) {
+        uint8_t b = SerialESP.read();
+
+        if (rx_idx == 0) {
+            if (b == STM32_CMD_SYNC_BYTE) {
+                rx_buf[0] = b;
+                rx_idx = 1;
+            }
+        } else {
+            rx_buf[rx_idx++] = b;
+            if (rx_idx == sizeof(STM32MotorCommandPacket)) {
+                rx_idx = 0;
+                // Verify XOR checksum over bytes [1 .. 9]
+                uint8_t chk = 0;
+                for (size_t i = 1; i < sizeof(STM32MotorCommandPacket) - 1; i++) {
+                    chk ^= rx_buf[i];
+                }
+                if (chk == rx_buf[sizeof(STM32MotorCommandPacket) - 1]) {
+                    const STM32MotorCommandPacket *pkt = (const STM32MotorCommandPacket *)rx_buf;
+                    last_esp_packet_ms = millis();
+                    esp_link_active = true;
+
+                    switch (pkt->cmd_mode) {
+                        case STM32_CMD_DRIVE:
+                            if (!g_estop_active) {
+                                m1_target_rpm = pkt->param1;
+                                m2_target_rpm = pkt->param2;
+                                if (!m1_enabled) { m1_enabled = true; motor1.enable(); }
+                                if (!m2_enabled) { m2_enabled = true; motor2.enable(); }
+                            }
+                            break;
+
+                        case STM32_CMD_ESTOP:
+                            triggerGlobalEmergencyStop();
+                            break;
+
+                        case STM32_CMD_ENABLE:
+                            g_estop_active = false;
+                            m1_enabled = true;
+                            m2_enabled = true;
+                            motor1.enable();
+                            motor2.enable();
+                            break;
+
+                        case STM32_CMD_SET_PID:
+                            if (pkt->param1 > 0.0f) {
+                                motor1.PID_velocity.P = pkt->param1;
+                                motor2.PID_velocity.P = pkt->param1;
+                            }
+                            if (pkt->param2 >= 0.0f) {
+                                motor1.PID_velocity.I = pkt->param2;
+                                motor2.PID_velocity.I = pkt->param2;
+                            }
+                            break;
+
+                        case STM32_CMD_CALIB_M1:
+                            runMasterCalibrationSequence(1, pkt->param1 > 0.0f ? pkt->param1 : CALIB_ALIGN_VOLTAGE);
+                            break;
+
+                        case STM32_CMD_CALIB_M2:
+                            runMasterCalibrationSequence(2, pkt->param1 > 0.0f ? pkt->param1 : CALIB_ALIGN_VOLTAGE);
+                            break;
+
+                        case STM32_CMD_SAVE_FLASH:
+                            saveConfigToFlash();
+                            break;
+
+                        case STM32_CMD_ENTER_DFU:
+                            delay(20);
+                            __HAL_RCC_PWR_CLK_ENABLE();
+                            HAL_PWR_EnableBkUpAccess();
+                            TAMP->BKP0R = 0xDEADBEEF;
+                            NVIC_SystemReset();
+                            break;
+
+                        default:
+                            break;
+                    }
+
+                    // Synchronous 400 Hz Ping-Pong Feedback Reply
+                    sendESP32Feedback();
+                }
+            }
+        }
+    }
+}
+
+// ----------------------------------------------------------------------------
 // Arduino Setup: Autonomous Standalone Initialization (< 150 ms)
 // ----------------------------------------------------------------------------
 void setup() {
@@ -3003,6 +3179,7 @@ void setup() {
 
     // 3. Serial Port Initialization (921600 Baud for Ultra High Speed Telemetry)
     Serial.begin(921600);
+    SerialESP.begin(ESP_UART_BAUD);
 
     // 4. Initialize MT6816 Encoders on Independent Hardware SPI Buses (SPI1 & SPI2)
     encoder1.init();
@@ -3096,6 +3273,21 @@ void setup() {
 // Background Task Loop (Serial Parsing, Telemetry, Safety)
 // ----------------------------------------------------------------------------
 void loop() {
+    uint32_t now = millis();
+
+    // 0. High-Speed 400 Hz Bidirectional Binary Link to ESP32
+    processESP32Link();
+
+    // 0b. Safety Watchdog: If no ESP32 packet received for > 60 ms while motors armed, disarm motors
+    if (esp_link_active && (m1_enabled || m2_enabled) && (now - last_esp_packet_ms > 60)) {
+        m1_target_rpm = 0.0f;
+        m2_target_rpm = 0.0f;
+        motor1.disable();
+        motor2.disable();
+        m1_enabled = false;
+        m2_enabled = false;
+    }
+
     // 1. Process Incoming Serial Characters into Line Buffer
     while (Serial.available() > 0) {
         char c = (char)Serial.read();
@@ -3121,9 +3313,8 @@ void loop() {
     // 2. Autonomous Stall Protection
     checkStallWatchdog();
 
-    // 3. Periodic Telemetry Stream (25 Hz = 40 ms)
-    uint32_t now = millis();
-    if (show_telemetry && (now - last_telemetry_time >= (1000 / TELEMETRY_RATE_HZ))) {
+    // 3. Periodic Telemetry Stream (25 Hz = 40 ms) - Active when ESP32 link is not running
+    if (!esp_link_active && show_telemetry && (now - last_telemetry_time >= (1000 / TELEMETRY_RATE_HZ))) {
         last_telemetry_time = now;
         sendBinaryTelemetry();
     }

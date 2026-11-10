@@ -46,37 +46,51 @@
 // config/vehicle_config.json via include/vehicle_params.h.
 
 // =============================================================================
-// Protocol Sync Bytes & Frame Structures
+// STM32 FOC Dual-Motor Real-Time 400 Hz Protocol
 // =============================================================================
-#define COMMAND_SYNC_BYTE        0xAA
-#define FEEDBACK_SYNC_BYTE       0x55
+#define STM32_CMD_SYNC_BYTE        0xAA
+#define STM32_FEEDBACK_SYNC_1      0xAA
+#define STM32_FEEDBACK_SYNC_2      0x55
 
-// STM32 Dual-Motor Command Packet (transmitted to each STM32 at 400 Hz)
+enum STM32CommandMode : uint8_t {
+    STM32_CMD_DRIVE      = 0x00, // Regular 400Hz velocity command (param1=m1_rpm, param2=m2_rpm)
+    STM32_CMD_ESTOP      = 0x01, // Immediate E-stop: cut PWM, zero voltage, disable drivers
+    STM32_CMD_ENABLE     = 0x02, // Enable motor drivers
+    STM32_CMD_CALIB_M1   = 0x10, // Start Motor 1 Calibration (param1=align_voltage)
+    STM32_CMD_CALIB_M2   = 0x11, // Start Motor 2 Calibration (param1=align_voltage)
+    STM32_CMD_SET_PID    = 0x20, // Set velocity PID (param1=Kp, param2=Ki)
+    STM32_CMD_SAVE_FLASH = 0x30, // Save active calibration & gains to STM32 Flash
+    STM32_CMD_ENTER_DFU  = 0xDF  // Reboot into ROM DFU bootloader
+};
+
+// 11-Byte Command Packet (transmitted from ESP32 to each STM32 at 400 Hz)
 struct __attribute__((__packed__)) STM32MotorCommandPacket {
-    uint8_t sync;      // 0xAA
-    float m1_rpm;      // Motor 1 Target RPM
-    float m2_rpm;      // Motor 2 Target RPM
-    uint8_t checksum;  // XOR checksum over payload bytes
+    uint8_t sync;       // 0xAA (STM32_CMD_SYNC_BYTE)
+    uint8_t cmd_mode;   // STM32CommandMode
+    float   param1;     // m1 target RPM / Kp / align_voltage
+    float   param2;     // m2 target RPM / Ki
+    uint8_t checksum;   // XOR of bytes 1..9 (cmd_mode, param1, param2)
 };
+static_assert(sizeof(STM32MotorCommandPacket) == 11, "STM32MotorCommandPacket must be 11 bytes");
 
-// 26-Byte Binary Telemetry Frame (received from STM32 FOC controller)
-struct __attribute__((__packed__)) STM32TelemetryPacket {
-    uint8_t  header[2];      // 0xAA, 0x55
-    uint16_t m1_raw_angle;   // 0 .. 16383 (Raw 14-bit encoder)
-    int16_t  m1_actual_rpm;  // Actual RPM x10
-    int16_t  m1_target_rpm;  // Target RPM x10
-    int16_t  m1_uq_mv;       // Phase voltage Uq (mV)
-    uint8_t  m1_status;      // Bitfield
-    uint16_t m2_raw_angle;   // 0 .. 16383
-    int16_t  m2_actual_rpm;  // Actual RPM x10
-    int16_t  m2_target_rpm;  // Target RPM x10
-    int16_t  m2_uq_mv;       // Phase voltage Uq (mV)
-    uint8_t  m2_status;      // Bitfield
-    uint16_t foc_khz_x10;    // 200 = 20.0 kHz
-    uint8_t  isr_lat_us;     // Peak ISR latency in us
-    uint8_t  spikes_count;   // Jitter spikes
-    uint8_t  calib_progress; // 0..100%
-    uint8_t  checksum;       // XOR over bytes 2..24
+// Status Flags Bitfield (from STM32)
+#define STM32_STATUS_M1_ENABLED     (1 << 0)
+#define STM32_STATUS_M2_ENABLED     (1 << 1)
+#define STM32_STATUS_CALIB_ACTIVE   (1 << 2)
+#define STM32_STATUS_STALL_WARNING  (1 << 3)
+#define STM32_STATUS_LATCHED_FAULT  (1 << 4)
+#define STM32_STATUS_ENC1_OK        (1 << 5)
+#define STM32_STATUS_ENC2_OK        (1 << 6)
+
+// 13-Byte High-Speed Feedback Packet (received from STM32 in 400 Hz ping-pong reply)
+struct __attribute__((__packed__)) STM32FeedbackPacket {
+    uint8_t header[2];      // 0xAA, 0x55
+    uint8_t status_flags;   // Bitfield (enabled, calib, stall, fault, enc_ok)
+    float   m1_actual_rpm;  // Actual shaft RPM
+    float   m2_actual_rpm;  // Actual shaft RPM
+    uint8_t calib_progress; // 0..100%
+    uint8_t checksum;       // XOR over bytes 2..11 (status_flags, m1, m2, calib_progress)
 };
+static_assert(sizeof(STM32FeedbackPacket) == 13, "STM32FeedbackPacket must be 13 bytes");
 
 #endif // ESP32_CONFIG_H
