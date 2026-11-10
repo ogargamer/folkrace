@@ -9,7 +9,9 @@ Base Reference: FOLKRACE Master Sensor & Actuator Hub
 Peripherals:
   - 1x BNO086 9-DOF IMU over Dedicated SPI Master (SCK, MOSI, MISO, CS, INT, RST)
   - 1x Ackermann Steering Servo on LEDC PWM (333 Hz high-rate digital PWM)
-  - 2x STM32G474 Motor Controllers on dedicated hardware UARTs (Full Duplex @ 921,600 Baud)
+  - 2x STM32G474 Motor Controllers on dedicated hardware UARTs:
+      * STM32 #1 (Front Axle): Full Duplex (TX + RX @ 921,600 Baud)
+      * STM32 #2 (Rear Axle): Full Duplex (TX + RX @ 921,600 Baud)
   - 1x Raspberry Pi 4 Host Telemetry Highway (Dedicated Hardware UART + DRDY interrupt pulse)
   - Native USB CDC Serial / JTAG preserved for flashing and debug monitoring
 
@@ -60,38 +62,38 @@ PHYSICAL_GRID = {
 # ==============================================================================
 ALLOCATION = {
     # BNO086 9-DOF IMU (Dedicated SPI Master) -- Header J1 Pins 15-20 (Adjacent to 5V & GND)
-    "IMU_SPI_SCK":          {"gpio": 12, "dir": "OUT", "bus": "SPI2_HOST", "role": "SPI Master Clock (3-10 MHz)"},
-    "IMU_SPI_MOSI":         {"gpio": 11, "dir": "OUT", "bus": "SPI2_HOST", "role": "SPI Master Out / MOSI"},
-    "IMU_SPI_MISO":         {"gpio": 13, "dir": "IN",  "bus": "SPI2_HOST", "role": "SPI Master In / MISO"},
-    "IMU_SPI_CS":           {"gpio": 10, "dir": "OUT", "bus": "GPIO",      "role": "IMU Chip Select (Active LOW)"},
-    "IMU_INT":              {"gpio": 9,  "dir": "IN",  "bus": "GPIO",      "role": "IMU Data Ready INT (Falling Edge)"},
-    "IMU_RST":              {"gpio": 14, "dir": "OUT", "bus": "GPIO",      "role": "IMU Hardware Reset (Active LOW)"},
+    "IMU_SPI_SCK":          {"gpio": 12, "dir": "OUT", "bus": "SPI2_HOST", "target": "BNO086 SCK (CLK)"},
+    "IMU_SPI_MOSI":         {"gpio": 11, "dir": "OUT", "bus": "SPI2_HOST", "target": "BNO086 DI (MOSI)"},
+    "IMU_SPI_MISO":         {"gpio": 13, "dir": "IN",  "bus": "SPI2_HOST", "target": "BNO086 SDO (MISO)"},
+    "IMU_SPI_CS":           {"gpio": 10, "dir": "OUT", "bus": "GPIO",      "target": "BNO086 CSN (CS)"},
+    "IMU_INT":              {"gpio": 9,  "dir": "IN",  "bus": "GPIO",      "target": "BNO086 HINTN (INT)"},
+    "IMU_RST":              {"gpio": 14, "dir": "OUT", "bus": "GPIO",      "target": "BNO086 NRST (RST)"},
 
     # Single Ackermann Steering Servo (LEDC PWM) -- Header J3 Pin 18 (Directly adjacent to GND Pins 21-22)
-    "SERVO_ACKERMANN_PWM":  {"gpio": 21, "dir": "OUT", "bus": "LEDC",      "role": "333 Hz Digital Ackermann Steering Servo"},
+    "SERVO_ACKERMANN_PWM":  {"gpio": 21, "dir": "OUT", "bus": "LEDC",      "target": "Steering Servo PWM (Signal)"},
 
-    # STM32 Motor Controller 1 Link -- Header J1 Pins 10-11
-    "STM32_1_UART_TX":      {"gpio": 17, "dir": "OUT", "bus": "UART1",     "role": "UART1 TX -> STM32 #1 RX (PA10)"},
-    "STM32_1_UART_RX":      {"gpio": 18, "dir": "IN",  "bus": "UART1",     "role": "UART1 RX <- STM32 #1 TX (PA9)"},
+    # STM32 Motor Controller 1 Link (Front Axle) -- Header J1 Pins 10-11 (Full Duplex)
+    "STM32_1_UART_TX":      {"gpio": 17, "dir": "OUT", "bus": "UART1",     "target": "STM32 #1 PA10 (RX)"},
+    "STM32_1_UART_RX":      {"gpio": 18, "dir": "IN",  "bus": "UART1",     "target": "STM32 #1 PA9 (TX)"},
 
-    # STM32 Motor Controller 2 Link -- Header J1 Pins 8-9 (Directly adjacent to STM32 #1)
-    "STM32_2_UART_TX":      {"gpio": 15, "dir": "OUT", "bus": "UART2",     "role": "UART2 TX -> STM32 #2 RX (PA10)"},
-    "STM32_2_UART_RX":      {"gpio": 16, "dir": "IN",  "bus": "UART2",     "role": "UART2 RX <- STM32 #2 TX (PA9)"},
+    # STM32 Motor Controller 2 Link (Rear Axle) -- Header J1 Pins 8-9 (Full Duplex)
+    "STM32_2_UART_TX":      {"gpio": 15, "dir": "OUT", "bus": "UART2",     "target": "STM32 #2 PA10 (RX)"},
+    "STM32_2_UART_RX":      {"gpio": 16, "dir": "IN",  "bus": "UART2",     "target": "STM32 #2 PA9 (TX)"},
 
     # Raspberry Pi 4 Telemetry Highway -- Header J3 Pins 2-4 (Directly below GND Pin 1)
-    "PI_UART_TX":           {"gpio": 43, "dir": "OUT", "bus": "UART0",     "role": "UART0 TX -> Pi RX (GPIO 15 / Pin 10)"},
-    "PI_UART_RX":           {"gpio": 44, "dir": "IN",  "bus": "UART0",     "role": "UART0 RX <- Pi TX (GPIO 14 / Pin 8)"},
-    "PI_DRDY_OUT":          {"gpio": 1,  "dir": "OUT", "bus": "GPIO",      "role": "Batch Ready INT -> Pi (GPIO 20 / Pin 38)"},
+    "PI_UART_TX":           {"gpio": 43, "dir": "OUT", "bus": "UART0",     "target": "Pi 4 GPIO 15 (Pin 10 / RXD0)"},
+    "PI_UART_RX":           {"gpio": 44, "dir": "IN",  "bus": "UART0",     "target": "Pi 4 GPIO 14 (Pin 8 / TXD0)"},
+    "PI_DRDY_OUT":          {"gpio": 1,  "dir": "OUT", "bus": "GPIO",      "target": "Pi 4 GPIO 20 (Pin 38 / INT)"},
 }
 
 RESERVED_SYSTEM_PINS = {
-    "USB_DM":      {"gpio": 19, "dir": "I/O", "bus": "USB_CDC", "role": "Native USB Serial/JTAG D-"},
-    "USB_DP":      {"gpio": 20, "dir": "I/O", "bus": "USB_CDC", "role": "Native USB Serial/JTAG D+"},
-    "BOOT_STRAP":  {"gpio": 0,  "dir": "IN",  "bus": "STRAP",   "role": "Boot Mode Strap (Onboard BOOT Btn)"},
-    "JTAG_STRAP":  {"gpio": 3,  "dir": "IN",  "bus": "STRAP",   "role": "JTAG Selection Strap"},
-    "VDD_SPI":     {"gpio": 45, "dir": "IN",  "bus": "STRAP",   "role": "Flash Voltage Strap (Must be LOW)"},
-    "ROM_PRINT":   {"gpio": 46, "dir": "IN",  "bus": "STRAP",   "role": "Boot ROM Print Strap (Input-Only)"},
-    "WS2812_LED":  {"gpio": 48, "dir": "OUT", "bus": "RGB_LED", "role": "Onboard WS2812 RGB LED Data"},
+    "USB_DM":      {"gpio": 19, "dir": "I/O", "bus": "USB_CDC", "target": "Native USB D-"},
+    "USB_DP":      {"gpio": 20, "dir": "I/O", "bus": "USB_CDC", "target": "Native USB D+"},
+    "BOOT_STRAP":  {"gpio": 0,  "dir": "IN",  "bus": "STRAP",   "target": "Onboard BOOT Button (GND when pressed)"},
+    "JTAG_STRAP":  {"gpio": 3,  "dir": "IN",  "bus": "STRAP",   "target": "JTAG Selection Strap (Internal)"},
+    "VDD_SPI":     {"gpio": 45, "dir": "IN",  "bus": "STRAP",   "target": "Flash Voltage Strap (Must be LOW)"},
+    "ROM_PRINT":   {"gpio": 46, "dir": "IN",  "bus": "STRAP",   "target": "Boot ROM Print Strap (Input-Only)"},
+    "WS2812_LED":  {"gpio": 48, "dir": "OUT", "bus": "RGB_LED", "target": "Onboard WS2812 RGB LED Data"},
 }
 
 
@@ -186,7 +188,7 @@ def display_results():
     print("\n[MATHEMATICAL PROOF & HARDWARE VALIDATION]")
     print(f"  * Total Signals Assigned          : {metrics['total_assigned']} pins")
     print(f"  * Pin Collision Check             : PASSED (0 overlaps, strict 1:1 mapping)")
-    print(f"  * 3x Independent Hardware UARTs   : CONFIRMED (UART0=Pi 4, UART1=STM32_1, UART2=STM32_2)")
+    print(f"  * Hardware UART Links             : CONFIRMED (UART0=Pi 4, UART1=STM32_1 Full-Duplex, UART2=STM32_2 Full-Duplex)")
     print(f"  * Dedicated SPI2 Master (BNO086)  : 6 Dedicated Pins (Adjacent to 5V/GND on Header J1)")
     print(f"  * Ackermann Steering Servo (LEDC) : Assigned to GPIO 21 (Header J3 Row 18)")
     print(f"  * Octal Flash/PSRAM (GPIO 26-37)  : SAFE (100% untouched)")
@@ -197,62 +199,68 @@ def display_results():
     print("\n[PHYSICAL CLUSTERING & EMI IMMUNITY METRICS]")
     print(f"  * IMU SPI Ribbon Pin Pitch        : Row 15 to Row 20 contiguous header block on J1")
     print(f"  * Servo PWM to IMU Separation     : {metrics['servo_to_imu_pitch']:.2f} pin pitches ({metrics['servo_to_imu_mm']:.2f} mm across board)")
-    print(f"  * Dual STM32 Links Physical Block : Row 8 to Row 11 on Header J1 (adjacent 4-wire comms)")
+    print(f"  * Dual STM32 Links Physical Block : Row 8 to Row 11 on Header J1 (adjacent comms)")
     print(f"  * Pi 4 Telemetry Physical Block   : Row 2 to Row 4 on Header J3 (directly below GND)")
 
-    def get_header_pin(gpio):
-        if gpio in PHYSICAL_GRID:
-            side, row = PHYSICAL_GRID[gpio]
-            h = "J1" if side == "left" else "J3"
-            return f"Header {h} Pin {row:<2}"
-        return "N/A"
+    def format_signal(sig, item):
+        target = item.get("target", "")
+        direction = item.get("dir", "")
+        if not target:
+            return sig
+        if direction == "OUT":
+            arrow = " -> "
+        elif direction == "IN":
+            arrow = " <- "
+        else:
+            arrow = " <-> "
+        return f"{sig}{arrow}{target}"
 
-    # Structured table with exactly ONE pin per line
-    print("\n" + "-" * 95)
-    print(f"  {'SIGNAL':<21} | {'HEADER PIN':<17} | {'GPIO':<9} | {'BUS / TYPE':<14} | {'FUNCTION / ROLE':<31}")
-    print("-" * 95)
+    # Structured table with exactly SIGNAL and GPIO columns
+    print("\n" + "-" * 72)
+    print(f"  {'SIGNAL':<56} | {'GPIO':<9}")
+    print("-" * 72)
 
     # BNO086 IMU
-    print("  [BNO086 9-DOF IMU -- SPI2 DEDICATED MASTER (HEADER J1 PINS 15-20)]")
+    print("  [BNO086 9-DOF IMU -- SPI2 DEDICATED MASTER]")
     for sig in ["IMU_SPI_SCK", "IMU_SPI_MOSI", "IMU_SPI_MISO", "IMU_SPI_CS", "IMU_INT", "IMU_RST"]:
         item = ALLOCATION[sig]
-        hpin = get_header_pin(item["gpio"])
-        print(f"  {sig:<21} | {hpin:<17} | GPIO {item['gpio']:<4} | {item['bus']:<14} | {item['role']:<31}")
+        sig_str = format_signal(sig, item)
+        print(f"  {sig_str:<56} | GPIO {item['gpio']:<4}")
 
     # Ackermann Steering Servo
-    print("\n  [ACKERMANN STEERING ACTUATOR -- LEDC HIGH-RATE PWM (HEADER J3 PIN 18)]")
+    print("\n  [ACKERMANN STEERING ACTUATOR -- LEDC HIGH-RATE PWM]")
     item = ALLOCATION["SERVO_ACKERMANN_PWM"]
-    hpin = get_header_pin(item["gpio"])
-    print(f"  {'SERVO_ACKERMANN_PWM':<21} | {hpin:<17} | GPIO {item['gpio']:<4} | {item['bus']:<14} | {item['role']:<31}")
+    sig_str = format_signal("SERVO_ACKERMANN_PWM", item)
+    print(f"  {sig_str:<56} | GPIO {item['gpio']:<4}")
 
     # STM32 Controller #1 Link
-    print("\n  [STM32 MOTOR CONTROLLER #1 -- UART1 LINK (HEADER J1 PINS 10-11)]")
+    print("\n  [STM32 MOTOR CONTROLLER #1 -- UART1 LINK (FRONT AXLE FULL-DUPLEX)]")
     for sig in ["STM32_1_UART_TX", "STM32_1_UART_RX"]:
         item = ALLOCATION[sig]
-        hpin = get_header_pin(item["gpio"])
-        print(f"  {sig:<21} | {hpin:<17} | GPIO {item['gpio']:<4} | {item['bus']:<14} | {item['role']:<31}")
+        sig_str = format_signal(sig, item)
+        print(f"  {sig_str:<56} | GPIO {item['gpio']:<4}")
 
     # STM32 Controller #2 Link
-    print("\n  [STM32 MOTOR CONTROLLER #2 -- UART2 LINK (HEADER J1 PINS 8-9)]")
+    print("\n  [STM32 MOTOR CONTROLLER #2 -- UART2 LINK (REAR AXLE FULL-DUPLEX)]")
     for sig in ["STM32_2_UART_TX", "STM32_2_UART_RX"]:
         item = ALLOCATION[sig]
-        hpin = get_header_pin(item["gpio"])
-        print(f"  {sig:<21} | {hpin:<17} | GPIO {item['gpio']:<4} | {item['bus']:<14} | {item['role']:<31}")
+        sig_str = format_signal(sig, item)
+        print(f"  {sig_str:<56} | GPIO {item['gpio']:<4}")
 
     # Raspberry Pi 4 Telemetry Highway
-    print("\n  [RASPBERRY PI 4 TELEMETRY HIGHWAY -- UART0 + DRDY (HEADER J3 PINS 2-4)]")
+    print("\n  [RASPBERRY PI 4 TELEMETRY HIGHWAY -- UART0 + DRDY]")
     for sig in ["PI_UART_TX", "PI_UART_RX", "PI_DRDY_OUT"]:
         item = ALLOCATION[sig]
-        hpin = get_header_pin(item["gpio"])
-        print(f"  {sig:<21} | {hpin:<17} | GPIO {item['gpio']:<4} | {item['bus']:<14} | {item['role']:<31}")
+        sig_str = format_signal(sig, item)
+        print(f"  {sig_str:<56} | GPIO {item['gpio']:<4}")
 
     # System & Reserved
     print("\n  [SYSTEM RESERVED & HARDWARE DEBUG]")
     for sig, item in RESERVED_SYSTEM_PINS.items():
-        hpin = get_header_pin(item["gpio"])
-        print(f"  {sig:<21} | {hpin:<17} | GPIO {item['gpio']:<4} | {item['bus']:<14} | {item['role']:<31}")
+        sig_str = format_signal(sig, item)
+        print(f"  {sig_str:<56} | GPIO {item['gpio']:<4}")
 
-    print("-" * 95)
+    print("-" * 72)
     print(f"  Available Free GPIOs ({len(metrics['free_gpios'])} pins): {metrics['free_gpios']}")
     print("=" * 80 + "\n")
 
@@ -274,12 +282,12 @@ def print_c_header():
     print(f"#define SERVO_STEER_PWM_PIN      {ALLOCATION['SERVO_ACKERMANN_PWM']['gpio']}")
     print(f"#define SERVO_ACKERMANN_PWM_PIN  SERVO_STEER_PWM_PIN")
     print()
-    print("// STM32 Motor Controller 1 Link (UART1)")
+    print("// STM32 Motor Controller 1 Link (UART1 - Front Axle Full Duplex)")
     print("#define STM32_1_UART_BAUD        921600")
     print(f"#define STM32_1_UART_TX_PIN      {ALLOCATION['STM32_1_UART_TX']['gpio']}")
     print(f"#define STM32_1_UART_RX_PIN      {ALLOCATION['STM32_1_UART_RX']['gpio']}")
     print()
-    print("// STM32 Motor Controller 2 Link (UART2)")
+    print("// STM32 Motor Controller 2 Link (UART2 - Rear Axle Full Duplex)")
     print("#define STM32_2_UART_BAUD        921600")
     print(f"#define STM32_2_UART_TX_PIN      {ALLOCATION['STM32_2_UART_TX']['gpio']}")
     print(f"#define STM32_2_UART_RX_PIN      {ALLOCATION['STM32_2_UART_RX']['gpio']}")

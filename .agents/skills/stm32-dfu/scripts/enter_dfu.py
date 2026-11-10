@@ -6,6 +6,7 @@ sends 'DFU\\n' to trigger firmware software jump to bootloader, and optionally
 executes PlatformIO upload.
 """
 
+import os
 import sys
 import time
 import argparse
@@ -56,7 +57,10 @@ def main():
     success = trigger_dfu(args.port)
 
     if args.upload:
-        cmd = ["pio", "run", "-d", "STM32", "-e", args.env, "-t", "upload"]
+        if os.path.exists("platformio.ini"):
+            cmd = ["pio", "run", "-e", args.env, "-t", "upload"]
+        else:
+            cmd = ["pio", "run", "-d", "STM32", "-e", args.env, "-t", "upload"]
         print(f"\n[RUN] Running: {' '.join(cmd)}")
         ret = subprocess.run(cmd)
         sys.exit(ret.returncode)
