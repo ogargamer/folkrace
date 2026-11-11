@@ -61,6 +61,7 @@ except ImportError:
 
 UDP_DISPATCH_HOST = "127.0.0.1"
 UDP_DISPATCH_PORT = 9876
+UDP_CMD_PORT = 9877
 UART_BAUD = 921600
 
 
@@ -80,11 +81,36 @@ class BinaryStreamParser:
             # 1. Search for sync header 0xAA 0x55
             idx = self.buffer.find(MCU_SYNC)
             if idx == -1:
-                # Keep last byte in case header split across reads
-                self.buffer = self.buffer[-1:]
+                # Check for complete ASCII text lines from MCU (e.g. status or command responses)
+                if not self.is_tof_port and b"\n" in self.buffer:
+                    nl_idx = self.buffer.rfind(b"\n")
+                    text_bytes = bytes(self.buffer[:nl_idx])
+                    del self.buffer[:nl_idx + 1]
+                    try:
+                        text_str = text_bytes.decode("utf-8", errors="ignore")
+                        for line in text_str.splitlines():
+                            line = line.strip()
+                            if line:
+                                yield ("TEXT", line)
+                    except Exception:
+                        pass
+                else:
+                    # Keep last byte in case header split across reads
+                    self.buffer = self.buffer[-1:]
                 break
 
             if idx > 0:
+                if not self.is_tof_port:
+                    prefix = bytes(self.buffer[:idx])
+                    if b"\n" in prefix:
+                        try:
+                            text_str = prefix.decode("utf-8", errors="ignore")
+                            for line in text_str.splitlines():
+                                line = line.strip()
+                                if line:
+                                    yield ("TEXT", line)
+                        except Exception:
+                            pass
                 del self.buffer[:idx]
 
             if len(self.buffer) < 3:
@@ -227,6 +253,11 @@ class MCU_UART_Bridge:
         self.udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.udp_sock.setblocking(False)
 
+        self.serial_lock = threading.Lock()
+        self.main_serial: Optional[Any] = None
+        self.latest_mcu_msg: str = ""
+        self.mcu_log: list = []
+
         # State aggregation & Option 1 Latency Compensator
         self.compensator = ToFLatencyCompensator()
         self.lock = threading.Lock()
@@ -241,6 +272,11 @@ class MCU_UART_Bridge:
             return
 
         self.running = True
+
+        # Start Command Ingestion Worker (listens for uplink packets to forward to ESP32 Main)
+        t_cmd = threading.Thread(target=self._command_listener_worker, name="MCUCommandWorker", daemon=True)
+        t_cmd.start()
+
         if self.main_port and os.path.exists(self.main_port):
             t_main = threading.Thread(target=self._uart_worker, args=(self.main_port, "ESP32_Main"), daemon=True)
             t_main.start()
@@ -256,6 +292,46 @@ class MCU_UART_Bridge:
     def stop(self):
         self.running = False
 
+    def _command_listener_worker(self):
+        """Listens on UDP 127.0.0.1:9877 for motion/motor commands from GUI or planner and writes to ESP32."""
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind((self.udp_host, UDP_CMD_PORT))
+            print(f"[MCU Bridge] Uplink Command Listener active on {self.udp_host}:{UDP_CMD_PORT}")
+        except Exception as e:
+            print(f"[MCU Bridge ERROR] Cannot bind UDP command port {UDP_CMD_PORT}: {e}")
+            return
+
+        sock.settimeout(0.5)
+        while self.running:
+            try:
+                data, _ = sock.recvfrom(2048)
+                if data:
+                    self.send_to_main_mcu(data)
+            except socket.timeout:
+                continue
+            except Exception as e:
+                pass
+        try:
+            sock.close()
+        except Exception:
+            pass
+
+    def send_to_main_mcu(self, data: bytes):
+        """Thread-safe transmission to ESP32 Main over USB Serial."""
+        with self.serial_lock:
+            if self.main_serial and getattr(self.main_serial, "is_open", False):
+                try:
+                    self.main_serial.write(data)
+                    self.main_serial.flush()
+                    preview = data.decode("utf-8", errors="replace").strip() if b"\n" in data else f"{len(data)}b binary"
+                    print(f"[MCU Bridge -> ESP32] Sent: {preview}")
+                except Exception as e:
+                    print(f"[MCU Bridge ERROR] Failed writing to ESP32: {e}")
+            else:
+                print(f"[MCU Bridge WARN] Cannot dispatch command (ESP32 serial offline)")
+
     def _uart_worker(self, port_name: str, label: str):
         print(f"[MCU Bridge] Connecting to {label} on {port_name} @ {self.baud} baud...")
         is_tof = (label == "ESP32_ToF")
@@ -265,18 +341,35 @@ class MCU_UART_Bridge:
             try:
                 with serial.Serial(port_name, self.baud, timeout=0.1) as ser:
                     print(f"[MCU Bridge] Connected to {label} ({port_name})")
-                    while self.running:
-                        data = ser.read(256)
-                        if data:
-                            parser.feed(data)
-                            for msg_type, decoded in parser.extract_packets():
-                                self._handle_packet(msg_type, decoded)
+                    if label == "ESP32_Main":
+                        with self.serial_lock:
+                            self.main_serial = ser
+                    try:
+                        while self.running:
+                            data = ser.read(256)
+                            if data:
+                                parser.feed(data)
+                                for msg_type, decoded in parser.extract_packets():
+                                    self._handle_packet(msg_type, decoded)
+                    finally:
+                        if label == "ESP32_Main":
+                            with self.serial_lock:
+                                self.main_serial = None
             except Exception as e:
                 print(f"[MCU Bridge] Error on {label} ({port_name}): {e}")
                 time.sleep(1.0)
 
-    def _handle_packet(self, msg_type: int, pkt: Dict[str, Any]):
+    def _handle_packet(self, msg_type: Any, pkt: Any):
         with self.lock:
+            if msg_type == "TEXT":
+                text = str(pkt)
+                self.latest_mcu_msg = text
+                self.mcu_log.append(text)
+                if len(self.mcu_log) > 50:
+                    self.mcu_log = self.mcu_log[-50:]
+                print(f"[MCU Main Text] {text}")
+                return
+
             if msg_type == MSG_ID_CHASSIS_TELEM:
                 self.latest_chassis = pkt
             elif msg_type == MSG_ID_TOF_SUB_TELEM:
@@ -323,6 +416,8 @@ class MCU_UART_Bridge:
             v_curr = float(self.latest_chassis.get("v_est", 0.0))
             w_curr = float(self.latest_chassis.get("gyro_z", 0.0))
             telemetry["tof_anchor_proj"] = list(self.compensator.compute_projected_anchor(v_curr, w_curr, 0.01667))
+            telemetry["mcu_msg"] = self.latest_mcu_msg
+            telemetry["mcu_log"] = list(self.mcu_log[-10:])
 
         try:
             raw = json.dumps(telemetry).encode("utf-8")

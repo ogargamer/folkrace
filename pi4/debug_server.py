@@ -42,9 +42,22 @@ from debug_recorder import TelemetryFlightRecorder, TelemetryLogReader
 
 PORT_HTTP = 8080
 PORT_UDP_RECV = 9876
+UDP_CMD_PORT = 9877
 HOST_BIND = "0.0.0.0"
 
 HTML_PATH = os.path.join(CURR_DIR, "web_debug_gui.html")
+
+
+def send_mcu_cmd(cmd_bytes: bytes) -> bool:
+    """Dispatches command bytes to MCU UART Bridge on UDP 127.0.0.1:9877."""
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.sendto(cmd_bytes, ("127.0.0.1", UDP_CMD_PORT))
+        sock.close()
+        return True
+    except Exception as e:
+        print(f"[DebugServer] Failed dispatching MCU command: {e}")
+        return False
 
 
 class DebugServerState:
@@ -175,6 +188,12 @@ def build_live_binary_packet(pkt: Dict[str, Any]) -> bytes:
         "is_wrong_way": pkt.get("is_wrong_way", False),
         "target_yaw": pkt.get("target_yaw", 0.0),
         "total_frames": pkt.get("_total_frames", 0),
+        "flags": pkt.get("flags", {}),
+        "servo_pulse_us": pkt.get("servo_pulse_us", 1520),
+        "mcu_msg": pkt.get("mcu_msg", ""),
+        "mcu_log": pkt.get("mcu_log", []),
+        "last_action": pkt.get("last_action", ""),
+        "last_cmd_sent": pkt.get("last_cmd_sent", ""),
     }
     meta_bytes = json.dumps(meta).encode("utf-8")
 
@@ -314,6 +333,92 @@ class DebugHTTPRequestHandler(BaseHTTPRequestHandler):
 
         else:
             self._send_json({"error": "Not Found"}, 404)
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
+
+    def do_POST(self):
+        parsed = urlparse(self.path)
+        path = parsed.path
+        if path in ("/api/mcu/command", "/api/motor/command"):
+            content_len = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_len) if content_len > 0 else b"{}"
+            try:
+                data = json.loads(body.decode("utf-8"))
+            except Exception:
+                self._send_json({"error": "Invalid JSON"}, 400)
+                return
+
+            action = data.get("action", "").lower()
+            cmd_str = ""
+
+            if action == "motors":
+                enable = data.get("enable", True)
+                cmd_str = "MOTORS\n" if enable else "DISABLE\n"
+            elif action == "estop":
+                cmd_str = "ESTOP\n"
+            elif action == "pid":
+                kp = float(data.get("kp", 0.1))
+                ki = float(data.get("ki", 1.5))
+                cmd_str = f"PID {kp:.3f} {ki:.3f}\n"
+            elif action == "calib":
+                axle = int(data.get("axle", 0))
+                motor = int(data.get("motor", 1))
+                voltage = float(data.get("voltage", 4.0))
+                cmd_str = f"CALIB {axle} {motor} {voltage:.1f}\n"
+            elif action == "save":
+                cmd_str = "SAVE\n"
+            elif action == "dfu":
+                cmd_str = "DFU\n"
+            elif action == "speed":
+                v = float(data.get("v", 0.0))
+                cmd_str = f"V {v:.2f}\n"
+            elif action == "steer":
+                deg = float(data.get("deg", 90.0))
+                cmd_str = f"A {deg:.1f}\n"
+            elif action == "pulse":
+                pulse = float(data.get("pulse", 1520.0))
+                cmd_str = f"P {pulse:.0f}\n"
+            elif action == "bench":
+                cmd_str = "BENCH\n"
+            elif action == "reset":
+                cmd_str = "RESET\n"
+            elif action == "status":
+                cmd_str = "STATUS\n"
+            elif action == "raw":
+                cmd_str = f"{data.get('cmd', '').strip()}\n"
+            else:
+                self._send_json({"error": f"Unknown action: {action}"}, 400)
+                return
+
+            ok = send_mcu_cmd(cmd_str.encode("utf-8"))
+
+            # Update cached state
+            with STATE.lock:
+                if action == "speed":
+                    STATE.latest_pkt["v_cmd"] = float(data.get("v", 0.0))
+                elif action == "steer":
+                    STATE.latest_pkt["steer_cmd_deg"] = float(data.get("deg", 0.0))
+                elif action == "estop":
+                    STATE.latest_pkt["v_cmd"] = 0.0
+                    STATE.latest_pkt["mode"] = "ESTOP"
+                elif action == "motors":
+                    STATE.latest_pkt["mode"] = "DRIVE" if data.get("enable", True) else "IDLE"
+                STATE.latest_pkt["last_action"] = action
+                STATE.latest_pkt["last_cmd_sent"] = cmd_str.strip()
+
+            self._send_json({
+                "status": "dispatched" if ok else "failed",
+                "action": action,
+                "cmd": cmd_str.strip(),
+                "pipe": "pi4 -> esp32 -> stm32"
+            })
+        else:
+            self._send_json({"error": "Endpoint not found"}, 404)
 
     def _handle_websocket_upgrade(self, ws_key: str):
         guid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -609,5 +714,10 @@ def run_debug_server():
 
 
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="Folkrace Debug Server")
+    parser.add_argument("--port", type=int, default=PORT_HTTP, help="HTTP port")
+    args = parser.parse_args()
+    PORT_HTTP = args.port
     run_debug_server()
 

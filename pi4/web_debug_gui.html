@@ -234,22 +234,513 @@
   }
   .legend-item { display: flex; align-items: center; gap: 4px; }
   .legend-dot { width: 8px; height: 8px; border-radius: 50%; }
+
+  /* Navigation Tabs */
+  .nav-tabs {
+    display: flex;
+    gap: 4px;
+    background: #0d1117;
+    padding: 3px;
+    border-radius: 6px;
+    border: 1px solid var(--border-color);
+  }
+  .nav-tab {
+    background: transparent;
+    border: 1px solid transparent;
+    color: var(--text-secondary);
+    padding: 5px 12px;
+    font-size: 12px;
+    font-weight: 600;
+    font-family: inherit;
+    border-radius: 4px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    transition: all 0.15s ease;
+  }
+  .nav-tab:hover {
+    color: var(--text-primary);
+    background: #1c212c;
+  }
+  .nav-tab.active {
+    color: var(--accent-cyan);
+    background: #192434;
+    border-color: #1f6feb88;
+    box-shadow: 0 0 8px rgba(0, 229, 255, 0.15);
+  }
+
+  /* Interactive Live / Fake Data Toggle Button */
+  .btn-toggle-fake {
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    font-weight: 700;
+    padding: 4px 10px;
+    border-radius: 4px;
+    border: 1px solid;
+    transition: all 0.2s ease;
+    user-select: none;
+    font-family: inherit;
+    outline: none;
+  }
+  .btn-toggle-fake.state-live {
+    color: var(--accent-green);
+    border-color: #00c853;
+    background: #003d1c44;
+    box-shadow: 0 0 8px rgba(0, 230, 118, 0.25);
+  }
+  .btn-toggle-fake.state-live:hover {
+    background: #00552766;
+    box-shadow: 0 0 12px rgba(0, 230, 118, 0.45);
+  }
+  .btn-toggle-fake.state-fake {
+    color: #f7d6ff;
+    border-color: var(--accent-purple);
+    background: #351c4a66;
+    box-shadow: 0 0 8px rgba(224, 64, 251, 0.3);
+  }
+  .btn-toggle-fake.state-fake:hover {
+    background: #4f287088;
+    box-shadow: 0 0 12px rgba(224, 64, 251, 0.55);
+  }
+  .tab-page {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+    min-height: 0;
+  }
+
+  /* Page 2: Powertrain & STM32 Pipeline */
+  #pageMotors {
+    flex-direction: column;
+    padding: 10px;
+    gap: 10px;
+    overflow-y: auto;
+  }
+  
+  /* Pipeline Topology Ribbon */
+  .pipeline-ribbon {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: var(--card-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    padding: 8px 14px;
+    gap: 8px;
+    flex-shrink: 0;
+  }
+  .pipe-node {
+    flex: 1;
+    background: #0e121a;
+    border: 1px solid var(--border-color);
+    border-radius: 5px;
+    padding: 6px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    position: relative;
+  }
+  .pipe-node-title {
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--text-primary);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .pipe-node-sub {
+    font-size: 10px;
+    color: var(--text-secondary);
+    font-family: Consolas, monospace;
+  }
+  .pipe-arrow {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    color: var(--accent-cyan);
+    font-size: 14px;
+    padding: 0 4px;
+    user-select: none;
+  }
+  .pipe-arrow-sub {
+    font-size: 8px;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    font-family: Consolas, monospace;
+    white-space: nowrap;
+  }
+
+  .badge-online {
+    color: var(--accent-green);
+    border: 1px solid #00c853;
+    background: #003d1c33;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-size: 10px;
+    font-weight: 700;
+  }
+  .badge-offline {
+    color: var(--accent-red);
+    border: 1px solid #d50000;
+    background: #8b000033;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-size: 10px;
+    font-weight: 700;
+  }
+  .badge-bench {
+    color: var(--accent-purple);
+    border: 1px solid var(--accent-purple);
+    background: #351c4a33;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-size: 10px;
+    font-weight: 700;
+  }
+
+  /* Master Action Bar */
+  .motor-action-bar {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    background: var(--card-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    padding: 8px 12px;
+    align-items: center;
+    flex-shrink: 0;
+  }
+  .btn-motor-action {
+    padding: 6px 14px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 700;
+    font-family: inherit;
+    cursor: pointer;
+    border: 1px solid;
+    transition: all 0.15s ease;
+  }
+  .btn-arm {
+    background: #003d1c;
+    border-color: var(--accent-green);
+    color: #e6ffed;
+  }
+  .btn-arm:hover {
+    background: #00602d;
+    box-shadow: 0 0 10px rgba(0, 230, 118, 0.3);
+  }
+  .btn-estop {
+    background: #8b0000;
+    border-color: #ff1744;
+    color: #fff;
+    animation: estop-pulse 2s infinite;
+  }
+  .btn-estop:hover {
+    background: #b71c1c;
+    box-shadow: 0 0 12px rgba(255, 23, 68, 0.5);
+  }
+  @keyframes estop-pulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(255, 23, 68, 0.4); }
+    50% { box-shadow: 0 0 10px 3px rgba(255, 23, 68, 0.6); }
+  }
+  .btn-disarm {
+    background: #21262d;
+    border-color: var(--border-color);
+    color: var(--text-secondary);
+  }
+  .btn-disarm:hover {
+    background: #30363d;
+    color: var(--text-primary);
+  }
+  .btn-query {
+    background: #0d2838;
+    border-color: var(--accent-cyan);
+    color: #cff;
+  }
+  .btn-query:hover { background: #13425f; }
+  .btn-save {
+    background: #1c2b42;
+    border-color: #58a6ff;
+    color: #cce5ff;
+  }
+  .btn-save:hover { background: #263e63; }
+  .btn-bench {
+    background: #351c4a;
+    border-color: var(--accent-purple);
+    color: #f7d6ff;
+  }
+  .btn-bench:hover { background: #4f2870; }
+  .btn-dfu {
+    background: #422d0d;
+    border-color: var(--accent-gold);
+    color: #fff1cc;
+  }
+  .btn-dfu:hover { background: #614213; }
+  .btn-reset {
+    background: #1f2328;
+    border-color: #38404a;
+    color: #c9d1d9;
+  }
+  .btn-reset:hover { background: #2d333b; }
+
+  /* Motor Main Body Split */
+  .motor-body {
+    display: flex;
+    flex: 1;
+    gap: 10px;
+    min-height: 0;
+  }
+  .motor-col-left {
+    flex: 6;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .motor-col-right {
+    flex: 5;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  /* 4-Wheel Motor Grid */
+  .motor-wheel-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+  }
+  .motor-card {
+    background: var(--card-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    position: relative;
+  }
+  .motor-card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1px solid var(--border-color);
+    padding-bottom: 4px;
+    font-size: 11px;
+    font-weight: 700;
+  }
+  .motor-rpm-hero {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    padding: 4px 0;
+  }
+  .motor-rpm-large {
+    font-size: 22px;
+    font-weight: 700;
+    font-family: Consolas, monospace;
+  }
+  .motor-delta-badge {
+    font-size: 11px;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-family: Consolas, monospace;
+    font-weight: 700;
+  }
+  .motor-metrics-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 4px;
+    font-size: 10px;
+    background: #0e121a;
+    padding: 6px;
+    border-radius: 4px;
+  }
+  .motor-calib-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 10px;
+    margin-top: 2px;
+  }
+  .calib-prog-bar-bg {
+    flex: 1;
+    height: 6px;
+    background: #21262d;
+    border-radius: 3px;
+    overflow: hidden;
+  }
+  .calib-prog-bar-fill {
+    height: 100%;
+    width: 0%;
+    background: var(--accent-green);
+    transition: width 0.2s ease;
+  }
+
+  /* Waveform Strip Chart Panel */
+  .motor-chart-panel {
+    background: var(--card-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-height: 220px;
+  }
+  .chart-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--text-primary);
+  }
+  .chart-legend {
+    display: flex;
+    gap: 12px;
+    font-size: 10px;
+    align-items: center;
+  }
+  #motorWaveCanvas {
+    width: 100%;
+    height: 160px;
+    background: #090c10;
+    border: 1px solid #1c212c;
+    border-radius: 4px;
+  }
+
+  /* Right Column Cards */
+  .bench-slider-group {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 4px;
+  }
+  .slider-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 11px;
+  }
+  .bench-slider {
+    width: 100%;
+    height: 6px;
+    border-radius: 3px;
+    background: #21262d;
+    outline: none;
+    cursor: pointer;
+  }
+  .preset-row {
+    display: flex;
+    gap: 6px;
+    margin-top: 4px;
+  }
+  .btn-preset {
+    flex: 1;
+    padding: 3px 6px;
+    font-size: 10px;
+    border: 1px solid var(--border-color);
+    background: #1c212c;
+    color: var(--text-primary);
+    border-radius: 3px;
+    cursor: pointer;
+  }
+  .btn-preset:hover { background: #263040; border-color: var(--accent-cyan); }
+
+  /* PID Tuner Grid */
+  .pid-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    margin-top: 4px;
+  }
+  .pid-input-box {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+  .pid-input {
+    background: #090c10;
+    border: 1px solid var(--border-color);
+    color: var(--text-primary);
+    padding: 5px 8px;
+    border-radius: 4px;
+    font-family: Consolas, monospace;
+    font-size: 13px;
+    font-weight: 700;
+  }
+  .pid-input:focus {
+    outline: none;
+    border-color: var(--accent-cyan);
+  }
+
+  /* MCU Response Console */
+  #mcuConsole {
+    background: #090c10;
+    border: 1px solid #1c212c;
+    border-radius: 4px;
+    padding: 8px;
+    font-family: Consolas, monospace;
+    font-size: 11px;
+    color: #58a6ff;
+    height: 120px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+    line-height: 1.4;
+  }
+  .cmd-input-row {
+    display: flex;
+    gap: 6px;
+    margin-top: 6px;
+  }
+  #rawCmdInput {
+    flex: 1;
+    background: #090c10;
+    border: 1px solid var(--border-color);
+    color: #e6edf3;
+    padding: 5px 8px;
+    border-radius: 4px;
+    font-family: Consolas, monospace;
+    font-size: 12px;
+  }
+  #rawCmdInput:focus {
+    outline: none;
+    border-color: var(--accent-cyan);
+  }
 </style>
 </head>
 <body>
 
 <header>
-  <div class="header-title">
-    <span>🏎️ FOLKRACE PI 4 TACTICAL DEBUGGER</span>
+  <div style="display:flex; align-items:center; gap:16px;">
+    <div class="header-title">
+      <span>🏎️ FOLKRACE PI 4</span>
+    </div>
+    <div class="nav-tabs">
+      <button id="tabNavBtn" class="nav-tab active" onclick="switchPage('nav')">
+        <span>🗺️ 1. Navigation &amp; SL-MPC</span>
+      </button>
+      <button id="tabMotorsBtn" class="nav-tab" onclick="switchPage('motors')">
+        <span>⚡ 2. Powertrain &amp; STM32 Pipeline</span>
+      </button>
+    </div>
   </div>
   <div class="header-badges">
     <span class="badge badge-core">Core 1: Planner (Dedicated)</span>
-    <span class="badge badge-core">Core 2: Debug Server & WAL Logger</span>
+    <span class="badge badge-core">Core 2: Debug Server &amp; WAL Logger</span>
     <span id="bufferBadge" class="badge" style="color:var(--accent-cyan);border-color:var(--accent-cyan)">Buffer: 0.0 / 30m</span>
-    <span id="modeBadge" class="badge badge-live">LIVE STREAM</span>
+    <button id="btnToggleFakeData" class="badge btn-toggle-fake state-live" onclick="toggleFakeData()" title="Click to toggle between Live Hardware Sensors and Synthetic Benchmark Data">
+      <span id="fakeToggleIcon">🟢</span>
+      <span id="fakeToggleText">LIVE SENSORS</span>
+    </button>
     <span id="cpuTempBadge" class="badge">Temp: --°C</span>
     <span id="freqBadge" class="badge">-- Hz</span>
-    <div id="perfHudBadge" class="badge" title="Laptop GUI & Network Performance: FPS | RTT | Render | Payload" style="color:#00e5ff; border-color:#00897b; background:#0d1821; font-family:Consolas, monospace; display:flex; gap:6px; align-items:center;">
+    <div id="perfHudBadge" class="badge" title="Laptop GUI &amp; Network Performance: FPS | RTT | Render | Payload" style="color:#00e5ff; border-color:#00897b; background:#0d1821; font-family:Consolas, monospace; display:flex; gap:6px; align-items:center;">
       <span style="color:#ffd600;">⚡ PROFILER:</span>
       <span id="perfFps" style="color:#00e676; font-weight:bold;">-- FPS</span>
       <span style="color:#484f58;">|</span>
@@ -262,6 +753,8 @@
   </div>
 </header>
 
+<!-- PAGE 1: Navigation, ToF Costmap & Curvilinear SL-MPC Trajectory Viewport -->
+<div id="pageNav" class="tab-page active">
 <div class="main-content">
   <!-- 2D Canvas matching Webots GUI -->
   <div class="canvas-panel">
@@ -307,7 +800,7 @@
 
     <!-- 2. IMU & Traction Dynamics -->
     <div class="card">
-      <div class="card-title">IMU Attitude & Traction Stability</div>
+      <div class="card-title">IMU Attitude &amp; Traction Stability</div>
       <div class="gauge-grid">
         <div class="gauge-box">
           <div class="gauge-label">YAW / GYRO Z</div>
@@ -381,6 +874,268 @@
         <div>Driving Buffer: <span id="drivingTime" style="color:var(--accent-cyan);font-weight:700">0.0 min</span> / 30 min (Rolling Auto-Delete)</div>
         <div>Stored Frames: <span id="recFrames" style="color:var(--text-primary);font-weight:700">0</span> (<span id="recSize">0.0 MB</span>) | Pruned: <span id="prunedFrames">0</span></div>
         <div>Free SD Storage: <span id="diskFree" style="color:var(--accent-green);font-weight:700">-- GB</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+</div>
+
+<!-- PAGE 2: Dedicated Powertrain & End-to-End STM32 Motor Pipeline -->
+<div id="pageMotors" class="tab-page" style="display:none;">
+  <!-- Pipeline Topology Ribbon -->
+  <div class="pipeline-ribbon">
+    <div class="pipe-node" id="nodePi4">
+      <div class="pipe-node-title">
+        <span>🖥️ PI 4 HOST</span>
+        <span class="badge-online" id="badgePi4">ONLINE</span>
+      </div>
+      <div class="pipe-node-sub" id="pipePi4Status">Bridge: 127.0.0.1:9877 (60 Hz)</div>
+    </div>
+    <div class="pipe-arrow">➔<div class="pipe-arrow-sub">USB CDC 921.6k</div></div>
+    <div class="pipe-node" id="nodeEsp32">
+      <div class="pipe-node-title">
+        <span>⚡ ESP32-S3 MASTER</span>
+        <span class="badge-online" id="badgeEsp32">LIVE 400Hz</span>
+      </div>
+      <div class="pipe-node-sub" id="pipeEsp32Mode">RTOS Core 1 (2500 µs loop)</div>
+    </div>
+    <div class="pipe-arrow">➔<div class="pipe-arrow-sub">UART1 921.6k</div></div>
+    <div class="pipe-node" id="nodeStmFront">
+      <div class="pipe-node-title">
+        <span>🏎️ STM32 FRONT (FL / FR)</span>
+        <span class="badge-online" id="badgeStmFront">ONLINE</span>
+      </div>
+      <div class="pipe-node-sub" id="pipeFrontRpm">FL: 0 | FR: 0 RPM</div>
+    </div>
+    <div class="pipe-arrow">➔<div class="pipe-arrow-sub">UART2 921.6k</div></div>
+    <div class="pipe-node" id="nodeStmRear">
+      <div class="pipe-node-title">
+        <span>🏎️ STM32 REAR (RL / RR)</span>
+        <span class="badge-online" id="badgeStmRear">ONLINE</span>
+      </div>
+      <div class="pipe-node-sub" id="pipeRearRpm">RL: 0 | RR: 0 RPM</div>
+    </div>
+  </div>
+
+  <!-- Master Powertrain Action Bar -->
+  <div class="motor-action-bar">
+    <button class="btn-motor-action btn-arm" onclick="enableMotors(true)">⚡ ARM MOTORS</button>
+    <button class="btn-motor-action btn-estop" onclick="emergencyStop()">🛑 EMERGENCY STOP</button>
+    <button class="btn-motor-action btn-disarm" onclick="enableMotors(false)">🚫 DISABLE</button>
+    <button class="btn-motor-action btn-query" onclick="queryStatus()">📋 QUERY STATUS</button>
+    <button class="btn-motor-action btn-save" onclick="saveFlash()">💾 SAVE FLASH</button>
+    <button class="btn-motor-action btn-bench" id="btnBenchToggle" onclick="toggleFakeData()">🧪 FAKE DATA: OFF</button>
+    <button class="btn-motor-action btn-dfu" onclick="enterDfu()">🔧 DFU REBOOT</button>
+    <button class="btn-motor-action btn-reset" onclick="resetControllers()">🔄 RESET</button>
+    <span id="motorActionStatus" style="font-size:11px;color:var(--accent-cyan);font-family:Consolas, monospace;margin-left:auto;">Pipeline ready</span>
+  </div>
+
+  <!-- Main Body Split -->
+  <div class="motor-body">
+    <!-- Left Column: 4-Wheel Motor Grid & Live Oscilloscope -->
+    <div class="motor-col-left">
+      <!-- 4-Wheel Independent Motor Pods (2x2 Chassis Matrix) -->
+      <div class="motor-wheel-grid">
+        <!-- Front-Left (FL) -->
+        <div class="motor-card" id="cardFL">
+          <div class="motor-card-header">
+            <span style="color:var(--accent-cyan);">🏎️ FRONT-LEFT (FL)</span>
+            <span style="color:var(--text-secondary);font-size:10px;">Axle 0 (Front) | M1</span>
+          </div>
+          <div class="motor-rpm-hero">
+            <div class="motor-rpm-large"><span id="mFL_rpmAct" style="color:var(--accent-cyan);">0</span> <small style="font-size:12px;color:var(--text-secondary);">/ <span id="mFL_rpmCmd">0</span> RPM</small></div>
+            <div class="motor-delta-badge" id="mFL_rpmDelta">Δ 0</div>
+          </div>
+          <div class="motor-metrics-row">
+            <div>Wheel Speed: <span id="mFL_speed" style="font-weight:700;color:#fff;">0.00</span> m/s</div>
+            <div>Driver: <span id="mFL_status" style="color:var(--accent-green);font-weight:700;">ENABLED</span></div>
+            <div>MT6816 Angle: <span id="mFL_enc" style="color:var(--accent-green);font-weight:700;">OK (14-bit)</span></div>
+            <div>Stall Warn: <span id="mFL_stall" style="color:var(--text-secondary);">NONE</span></div>
+          </div>
+          <div class="motor-calib-row">
+            <button class="btn-preset" style="max-width:85px;" onclick="calibrateMotor(0, 1)">Calib M1</button>
+            <input id="calibVolt_0_1" type="number" step="0.5" value="4.0" style="width:42px;background:#090c10;border:1px solid #30363d;color:#fff;padding:2px;font-size:10px;border-radius:3px;">
+            <span style="font-size:9px;color:var(--text-secondary);">V</span>
+            <div class="calib-prog-bar-bg"><div id="mFL_calibProg" class="calib-prog-bar-fill"></div></div>
+          </div>
+        </div>
+
+        <!-- Front-Right (FR) -->
+        <div class="motor-card" id="cardFR">
+          <div class="motor-card-header">
+            <span style="color:var(--accent-gold);">🏎️ FRONT-RIGHT (FR)</span>
+            <span style="color:var(--text-secondary);font-size:10px;">Axle 0 (Front) | M2</span>
+          </div>
+          <div class="motor-rpm-hero">
+            <div class="motor-rpm-large"><span id="mFR_rpmAct" style="color:var(--accent-gold);">0</span> <small style="font-size:12px;color:var(--text-secondary);">/ <span id="mFR_rpmCmd">0</span> RPM</small></div>
+            <div class="motor-delta-badge" id="mFR_rpmDelta">Δ 0</div>
+          </div>
+          <div class="motor-metrics-row">
+            <div>Wheel Speed: <span id="mFR_speed" style="font-weight:700;color:#fff;">0.00</span> m/s</div>
+            <div>Driver: <span id="mFR_status" style="color:var(--accent-green);font-weight:700;">ENABLED</span></div>
+            <div>MT6816 Angle: <span id="mFR_enc" style="color:var(--accent-green);font-weight:700;">OK (14-bit)</span></div>
+            <div>Stall Warn: <span id="mFR_stall" style="color:var(--text-secondary);">NONE</span></div>
+          </div>
+          <div class="motor-calib-row">
+            <button class="btn-preset" style="max-width:85px;" onclick="calibrateMotor(0, 2)">Calib M2</button>
+            <input id="calibVolt_0_2" type="number" step="0.5" value="4.0" style="width:42px;background:#090c10;border:1px solid #30363d;color:#fff;padding:2px;font-size:10px;border-radius:3px;">
+            <span style="font-size:9px;color:var(--text-secondary);">V</span>
+            <div class="calib-prog-bar-bg"><div id="mFR_calibProg" class="calib-prog-bar-fill"></div></div>
+          </div>
+        </div>
+
+        <!-- Rear-Left (RL) -->
+        <div class="motor-card" id="cardRL">
+          <div class="motor-card-header">
+            <span style="color:var(--accent-purple);">🏎️ REAR-LEFT (RL)</span>
+            <span style="color:var(--text-secondary);font-size:10px;">Axle 1 (Rear) | M1</span>
+          </div>
+          <div class="motor-rpm-hero">
+            <div class="motor-rpm-large"><span id="mRL_rpmAct" style="color:var(--accent-purple);">0</span> <small style="font-size:12px;color:var(--text-secondary);">/ <span id="mRL_rpmCmd">0</span> RPM</small></div>
+            <div class="motor-delta-badge" id="mRL_rpmDelta">Δ 0</div>
+          </div>
+          <div class="motor-metrics-row">
+            <div>Wheel Speed: <span id="mRL_speed" style="font-weight:700;color:#fff;">0.00</span> m/s</div>
+            <div>Driver: <span id="mRL_status" style="color:var(--accent-green);font-weight:700;">ENABLED</span></div>
+            <div>MT6816 Angle: <span id="mRL_enc" style="color:var(--accent-green);font-weight:700;">OK (14-bit)</span></div>
+            <div>Stall Warn: <span id="mRL_stall" style="color:var(--text-secondary);">NONE</span></div>
+          </div>
+          <div class="motor-calib-row">
+            <button class="btn-preset" style="max-width:85px;" onclick="calibrateMotor(1, 1)">Calib M1</button>
+            <input id="calibVolt_1_1" type="number" step="0.5" value="4.0" style="width:42px;background:#090c10;border:1px solid #30363d;color:#fff;padding:2px;font-size:10px;border-radius:3px;">
+            <span style="font-size:9px;color:var(--text-secondary);">V</span>
+            <div class="calib-prog-bar-bg"><div id="mRL_calibProg" class="calib-prog-bar-fill"></div></div>
+          </div>
+        </div>
+
+        <!-- Rear-Right (RR) -->
+        <div class="motor-card" id="cardRR">
+          <div class="motor-card-header">
+            <span style="color:var(--accent-green);">🏎️ REAR-RIGHT (RR)</span>
+            <span style="color:var(--text-secondary);font-size:10px;">Axle 1 (Rear) | M2</span>
+          </div>
+          <div class="motor-rpm-hero">
+            <div class="motor-rpm-large"><span id="mRR_rpmAct" style="color:var(--accent-green);">0</span> <small style="font-size:12px;color:var(--text-secondary);">/ <span id="mRR_rpmCmd">0</span> RPM</small></div>
+            <div class="motor-delta-badge" id="mRR_rpmDelta">Δ 0</div>
+          </div>
+          <div class="motor-metrics-row">
+            <div>Wheel Speed: <span id="mRR_speed" style="font-weight:700;color:#fff;">0.00</span> m/s</div>
+            <div>Driver: <span id="mRR_status" style="color:var(--accent-green);font-weight:700;">ENABLED</span></div>
+            <div>MT6816 Angle: <span id="mRR_enc" style="color:var(--accent-green);font-weight:700;">OK (14-bit)</span></div>
+            <div>Stall Warn: <span id="mRR_stall" style="color:var(--text-secondary);">NONE</span></div>
+          </div>
+          <div class="motor-calib-row">
+            <button class="btn-preset" style="max-width:85px;" onclick="calibrateMotor(1, 2)">Calib M2</button>
+            <input id="calibVolt_1_2" type="number" step="0.5" value="4.0" style="width:42px;background:#090c10;border:1px solid #30363d;color:#fff;padding:2px;font-size:10px;border-radius:3px;">
+            <span style="font-size:9px;color:var(--text-secondary);">V</span>
+            <div class="calib-prog-bar-bg"><div id="mRR_calibProg" class="calib-prog-bar-fill"></div></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Live 4-Wheel Rolling Oscilloscope Strip Chart -->
+      <div class="motor-chart-panel">
+        <div class="chart-header">
+          <span>Real-Time 4-Wheel RPM Waveform Strip Chart (400 Hz Feedback)</span>
+          <div class="chart-legend">
+            <span style="color:var(--accent-cyan);">■ FL</span>
+            <span style="color:var(--accent-gold);">■ FR</span>
+            <span style="color:var(--accent-purple);">■ RL</span>
+            <span style="color:var(--accent-green);">■ RR</span>
+            <span style="color:#ffffff;">┄ Target</span>
+            <div style="display:flex;gap:4px;margin-left:8px;">
+              <button class="btn-preset" onclick="setChartWindow(120)">2s</button>
+              <button class="btn-preset" onclick="setChartWindow(300)">5s</button>
+              <button class="btn-preset" onclick="setChartWindow(600)">10s</button>
+              <button class="btn-preset" id="btnPauseWave" onclick="toggleWavePause()">⏸</button>
+            </div>
+          </div>
+        </div>
+        <canvas id="motorWaveCanvas"></canvas>
+      </div>
+    </div>
+
+    <!-- Right Column: Interactive Diff Bench, PID Gain Tuner & Raw Console -->
+    <div class="motor-col-right">
+      <!-- 1. Interactive Electronic Differential & Throttle Bench -->
+      <div class="card">
+        <div class="card-title">
+          <span>4WD Electronic Differential &amp; Throttle Bench</span>
+          <span style="color:var(--accent-cyan);font-size:11px;" id="diffSplitReadout">Split: 50% / 50%</span>
+        </div>
+        <div class="bench-slider-group">
+          <!-- Manual Speed Slider -->
+          <div class="slider-row">
+            <span>Target Speed (v_cmd):</span>
+            <span id="throttleVal" style="font-weight:700;color:var(--accent-cyan);">0.00 m/s</span>
+          </div>
+          <input type="range" id="throttleSlider" class="bench-slider" min="-3.0" max="5.0" step="0.1" value="0.0" oninput="onThrottleInput(this.value)">
+          <div class="preset-row">
+            <button class="btn-preset" onclick="setSpeed(0.0)">STOP (0.0)</button>
+            <button class="btn-preset" onclick="setSpeed(1.0)">1.0 m/s</button>
+            <button class="btn-preset" onclick="setSpeed(2.5)">2.5 m/s</button>
+            <button class="btn-preset" onclick="setSpeed(4.0)">4.0 m/s</button>
+          </div>
+
+          <!-- Steering Angle Slider -->
+          <div class="slider-row" style="margin-top:6px;">
+            <span>Ackermann Steering Angle:</span>
+            <span id="steerSliderVal" style="font-weight:700;color:var(--accent-gold);">0.0°</span>
+          </div>
+          <input type="range" id="steerSlider" class="bench-slider" min="-25.0" max="25.0" step="0.5" value="0.0" oninput="onSteerInput(this.value)">
+          <div class="preset-row">
+            <button class="btn-preset" onclick="setSteer(-20.0)">◀ Hard Left</button>
+            <button class="btn-preset" onclick="setSteer(0.0)">Center (0°)</button>
+            <button class="btn-preset" onclick="setSteer(20.0)">Hard Right ▶</button>
+          </div>
+
+          <!-- Differential Split Metrics -->
+          <div style="background:#0e121a;padding:8px;border-radius:4px;margin-top:8px;font-size:11px;display:flex;justify-content:space-between;">
+            <div>Left Axle Avg: <span id="diffLeftAvg" style="color:var(--accent-cyan);font-weight:700;">0</span> RPM</div>
+            <div>Right Axle Avg: <span id="diffRightAvg" style="color:var(--accent-gold);font-weight:700;">0</span> RPM</div>
+            <div>Delta (R - L): <span id="diffDelta" style="color:var(--accent-green);font-weight:700;">0 RPM</span></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 2. STM32 FOC Velocity PID Gain Tuner -->
+      <div class="card">
+        <div class="card-title">
+          <span>STM32 FOC Velocity PID Controller</span>
+          <span style="color:var(--text-secondary);font-size:10px;">Broadcasts to Front &amp; Rear UARTs</span>
+        </div>
+        <div class="pid-grid">
+          <div class="pid-input-box">
+            <label style="font-size:10px;color:var(--text-secondary);">PROPORTIONAL GAIN (Kp):</label>
+            <input type="number" id="pidKpInput" class="pid-input" step="0.01" value="0.100">
+          </div>
+          <div class="pid-input-box">
+            <label style="font-size:10px;color:var(--text-secondary);">INTEGRAL GAIN (Ki):</label>
+            <input type="number" id="pidKiInput" class="pid-input" step="0.1" value="1.500">
+          </div>
+        </div>
+        <div class="preset-row" style="margin-top:8px;">
+          <button class="btn-preset" onclick="setPidPreset(0.05, 0.8)">Soft (0.05 / 0.8)</button>
+          <button class="btn-preset" onclick="setPidPreset(0.10, 1.5)">Default (0.10 / 1.5)</button>
+          <button class="btn-preset" onclick="setPidPreset(0.20, 3.0)">Track (0.20 / 3.0)</button>
+        </div>
+        <div style="display:flex;gap:6px;margin-top:8px;">
+          <button class="btn-motor-action btn-save" style="flex:1;" onclick="sendPidGains()">⚡ DISPATCH PID TO STM32s</button>
+          <button class="btn-preset" style="flex:0.6;" onclick="saveFlash()">💾 Persist Flash</button>
+        </div>
+      </div>
+
+      <!-- 3. ESP32 & STM32 Live Pipeline Terminal Console -->
+      <div class="card" style="flex:1;display:flex;flex-direction:column;min-height:160px;">
+        <div class="card-title">
+          <span>ESP32 Master &amp; STM32 Live Pipeline Console</span>
+          <span style="font-size:10px;color:var(--text-secondary);">UART Stream Responses</span>
+        </div>
+        <div id="mcuConsole" data-last-log="">[Console Ready] Folkrace Pi 4 Pipeline Active.</div>
+        <div class="cmd-input-row">
+          <input type="text" id="rawCmdInput" placeholder="Command (e.g. STATUS, V 2.5, A 90, PID 0.12 1.8)" onkeydown="if(event.key==='Enter')sendRawCommand()">
+          <button class="btn-preset" style="padding:5px 12px;" onclick="sendRawCommand()">Send</button>
+        </div>
       </div>
     </div>
   </div>
@@ -1397,6 +2152,494 @@ function updateHUD(pkt) {
   const mins = Math.floor(simT / 60);
   const secs = (simT % 60).toFixed(2).padStart(5, "0");
   document.getElementById("lblTime").innerText = `${mins}:${secs}`;
+
+  // Update Page 2 Dedicated Powertrain & STM32 Pipeline
+  updateMotorPage(pkt);
+}
+
+// =============================================================================
+// PAGE 2: POWERTRAIN & STM32 PIPELINE LOGIC & WAVEFORM OSCILLOSCOPE
+// =============================================================================
+
+let currentPage = 'nav';
+const motorCanvas = document.getElementById("motorWaveCanvas");
+const ctxMotor = motorCanvas ? motorCanvas.getContext("2d") : null;
+
+const motorWaveformBuffer = {
+  maxPoints: 300,
+  isPaused: false,
+  cmd: [],
+  fl: [],
+  fr: [],
+  rl: [],
+  rr: []
+};
+
+function switchPage(page) {
+  currentPage = page;
+  const navBtn = document.getElementById("tabNavBtn");
+  const motorsBtn = document.getElementById("tabMotorsBtn");
+  const pageNav = document.getElementById("pageNav");
+  const pageMotors = document.getElementById("pageMotors");
+
+  if (page === 'nav') {
+    if (navBtn) navBtn.classList.add("active");
+    if (motorsBtn) motorsBtn.classList.remove("active");
+    if (pageNav) pageNav.style.display = "flex";
+    if (pageMotors) pageMotors.style.display = "none";
+    resizeCanvas();
+  } else {
+    if (motorsBtn) motorsBtn.classList.add("active");
+    if (navBtn) navBtn.classList.remove("active");
+    if (pageNav) pageNav.style.display = "none";
+    if (pageMotors) pageMotors.style.display = "flex";
+    resizeMotorCanvas();
+    renderMotorChart();
+  }
+}
+
+function resizeMotorCanvas() {
+  if (!motorCanvas || !motorCanvas.parentElement) return;
+  const rect = motorCanvas.parentElement.getBoundingClientRect();
+  motorCanvas.width = Math.max(200, rect.width - 24);
+  motorCanvas.height = Math.max(160, rect.height - 45);
+}
+
+window.addEventListener("resize", () => {
+  if (currentPage === 'motors') resizeMotorCanvas();
+});
+
+function setChartWindow(pts) {
+  motorWaveformBuffer.maxPoints = pts;
+  while (motorWaveformBuffer.fl.length > pts) {
+    motorWaveformBuffer.cmd.shift();
+    motorWaveformBuffer.fl.shift();
+    motorWaveformBuffer.fr.shift();
+    motorWaveformBuffer.rl.shift();
+    motorWaveformBuffer.rr.shift();
+  }
+  if (currentPage === 'motors') renderMotorChart();
+}
+
+function toggleWavePause() {
+  motorWaveformBuffer.isPaused = !motorWaveformBuffer.isPaused;
+  const btn = document.getElementById("btnPauseWave");
+  if (btn) btn.innerText = motorWaveformBuffer.isPaused ? "▶" : "⏸";
+}
+
+function renderMotorChart() {
+  if (!ctxMotor || !motorCanvas) return;
+  const w = motorCanvas.width;
+  const h = motorCanvas.height;
+
+  // Background
+  ctxMotor.fillStyle = "#090c10";
+  ctxMotor.fillRect(0, 0, w, h);
+
+  // Determine dynamic scale (RPM range)
+  let maxRpm = 1000;
+  for (let i = 0; i < motorWaveformBuffer.fl.length; i++) {
+    const val = Math.max(
+      Math.abs(motorWaveformBuffer.fl[i] || 0),
+      Math.abs(motorWaveformBuffer.fr[i] || 0),
+      Math.abs(motorWaveformBuffer.rl[i] || 0),
+      Math.abs(motorWaveformBuffer.rr[i] || 0),
+      Math.abs(motorWaveformBuffer.cmd[i] || 0)
+    );
+    if (val > maxRpm) maxRpm = val;
+  }
+  maxRpm = Math.ceil((maxRpm * 1.25) / 250) * 250;
+
+  // Grid lines
+  ctxMotor.save();
+  ctxMotor.lineWidth = 1;
+  const midY = h / 2.0;
+
+  // 0 RPM Center Axis
+  ctxMotor.strokeStyle = "#2d333b";
+  ctxMotor.setLineDash([4, 4]);
+  ctxMotor.beginPath();
+  ctxMotor.moveTo(0, midY);
+  ctxMotor.lineTo(w, midY);
+  ctxMotor.stroke();
+
+  // +/- Quarters
+  ctxMotor.strokeStyle = "#161b22";
+  ctxMotor.setLineDash([2, 4]);
+  const qY1 = midY - (midY * 0.5);
+  const qY2 = midY + (midY * 0.5);
+  ctxMotor.beginPath();
+  ctxMotor.moveTo(0, qY1);
+  ctxMotor.lineTo(w, qY1);
+  ctxMotor.moveTo(0, qY2);
+  ctxMotor.lineTo(w, qY2);
+  ctxMotor.stroke();
+  ctxMotor.restore();
+
+  // Scale labels
+  ctxMotor.font = "9px Consolas, monospace";
+  ctxMotor.fillStyle = "#8b949e";
+  ctxMotor.fillText(`+${maxRpm}`, 6, 12);
+  ctxMotor.fillText(`+${Math.round(maxRpm / 2)}`, 6, qY1 + 3);
+  ctxMotor.fillText(`0 RPM`, 6, midY - 3);
+  ctxMotor.fillText(`-${Math.round(maxRpm / 2)}`, 6, qY2 + 3);
+  ctxMotor.fillText(`-${maxRpm}`, 6, h - 4);
+
+  const n = motorWaveformBuffer.fl.length;
+  if (n < 2) return;
+
+  const dx = (w - 70) / (motorWaveformBuffer.maxPoints - 1);
+  const startX = 65 + (motorWaveformBuffer.maxPoints - n) * dx;
+
+  function toY(val) {
+    const norm = (val || 0) / maxRpm;
+    return midY - norm * (midY - 12);
+  }
+
+  function drawTrace(arr, strokeStyle, isDashed = false) {
+    ctxMotor.save();
+    ctxMotor.strokeStyle = strokeStyle;
+    ctxMotor.lineWidth = isDashed ? 1.5 : 2.0;
+    if (isDashed) ctxMotor.setLineDash([4, 3]);
+    ctxMotor.beginPath();
+    for (let i = 0; i < n; i++) {
+      const x = startX + i * dx;
+      const y = toY(arr[i]);
+      if (i === 0) ctxMotor.moveTo(x, y);
+      else ctxMotor.lineTo(x, y);
+    }
+    ctxMotor.stroke();
+    ctxMotor.restore();
+  }
+
+  // Draw Traces: Target (Dashed White), FL, FR, RL, RR
+  drawTrace(motorWaveformBuffer.cmd, "rgba(255, 255, 255, 0.7)", true);
+  drawTrace(motorWaveformBuffer.fl, "#00e5ff");
+  drawTrace(motorWaveformBuffer.fr, "#ffd600");
+  drawTrace(motorWaveformBuffer.rl, "#e040fb");
+  drawTrace(motorWaveformBuffer.rr, "#00e676");
+
+  // Right Edge Current Value Tags
+  const lastIdx = n - 1;
+  const tagVals = [
+    { label: "FL", val: motorWaveformBuffer.fl[lastIdx], col: "#00e5ff" },
+    { label: "FR", val: motorWaveformBuffer.fr[lastIdx], col: "#ffd600" },
+    { label: "RL", val: motorWaveformBuffer.rl[lastIdx], col: "#e040fb" },
+    { label: "RR", val: motorWaveformBuffer.rr[lastIdx], col: "#00e676" },
+  ];
+  ctxMotor.font = "bold 9px Consolas, monospace";
+  let curTagY = 16;
+  for (const t of tagVals) {
+    ctxMotor.fillStyle = t.col;
+    ctxMotor.fillText(`${t.label}: ${Math.round(t.val || 0)}`, w - 60, curTagY);
+    curTagY += 12;
+  }
+}
+
+// REST Dispatcher to debug_server -> UDP 9877 -> MCU UART Bridge -> ESP32 -> STM32
+async function sendMcuCommand(payload) {
+  const statusEl = document.getElementById("motorActionStatus");
+  if (statusEl) statusEl.innerText = `Dispatching ${payload.action || 'cmd'}...`;
+
+  try {
+    const res = await fetch("/api/mcu/command", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    appendMcuConsole(`[SENT -> STM32] ${JSON.stringify(payload)} => status: ${data.status}`);
+    if (statusEl) statusEl.innerText = `Dispatched: ${data.action} (${data.cmd || 'OK'})`;
+  } catch (err) {
+    appendMcuConsole(`[ERROR] Network fault: ${err.message}`);
+    if (statusEl) statusEl.innerText = `Error: ${err.message}`;
+  }
+}
+
+function appendMcuConsole(text) {
+  const c = document.getElementById("mcuConsole");
+  if (!c) return;
+  const timestamp = new Date().toLocaleTimeString();
+  c.innerText += `\n[${timestamp}] ${text}`;
+  c.scrollTop = c.scrollHeight;
+}
+
+function enableMotors(enable) {
+  sendMcuCommand({ action: "motors", enable: enable });
+}
+
+function emergencyStop() {
+  document.getElementById("throttleSlider").value = 0.0;
+  document.getElementById("throttleVal").innerText = "0.00 m/s";
+  sendMcuCommand({ action: "estop" });
+}
+
+function queryStatus() {
+  sendMcuCommand({ action: "status" });
+}
+
+function saveFlash() {
+  sendMcuCommand({ action: "save" });
+}
+
+function enterDfu() {
+  if (confirm("Reboot both Front and Rear STM32 controllers into System ROM DFU Bootloader for USB firmware flashing?")) {
+    sendMcuCommand({ action: "dfu" });
+  }
+}
+
+async function toggleFakeData() {
+  const btn = document.getElementById("btnToggleFakeData");
+  if (btn) btn.style.opacity = "0.5";
+  appendMcuConsole(">>> Toggling Synthetic Fake Data / Live Sensors mode (BENCH)...");
+  await sendMcuCommand({ action: "bench" });
+  if (btn) setTimeout(() => { btn.style.opacity = "1.0"; }, 250);
+}
+
+function toggleBench() {
+  toggleFakeData();
+}
+
+function resetControllers() {
+  document.getElementById("throttleSlider").value = 0.0;
+  document.getElementById("throttleVal").innerText = "0.00 m/s";
+  document.getElementById("steerSlider").value = 0.0;
+  document.getElementById("steerSliderVal").innerText = "0.0°";
+  sendMcuCommand({ action: "reset" });
+}
+
+function setSpeed(v) {
+  document.getElementById("throttleSlider").value = v;
+  document.getElementById("throttleVal").innerText = `${Number(v).toFixed(2)} m/s`;
+  sendMcuCommand({ action: "speed", v: v });
+}
+
+function onThrottleInput(v) {
+  document.getElementById("throttleVal").innerText = `${Number(v).toFixed(2)} m/s`;
+  sendMcuCommand({ action: "speed", v: parseFloat(v) });
+}
+
+function setSteer(deg) {
+  document.getElementById("steerSlider").value = deg;
+  document.getElementById("steerSliderVal").innerText = `${Number(deg).toFixed(1)}°`;
+  sendMcuCommand({ action: "steer", deg: deg });
+}
+
+function onSteerInput(deg) {
+  document.getElementById("steerSliderVal").innerText = `${Number(deg).toFixed(1)}°`;
+  sendMcuCommand({ action: "steer", deg: parseFloat(deg) });
+}
+
+function setPidPreset(kp, ki) {
+  document.getElementById("pidKpInput").value = kp;
+  document.getElementById("pidKiInput").value = ki;
+}
+
+function sendPidGains() {
+  const kp = parseFloat(document.getElementById("pidKpInput").value) || 0.1;
+  const ki = parseFloat(document.getElementById("pidKiInput").value) || 1.5;
+  sendMcuCommand({ action: "pid", kp: kp, ki: ki });
+}
+
+function calibrateMotor(axle, motor) {
+  const voltInput = document.getElementById(`calibVolt_${axle}_${motor}`);
+  const voltage = voltInput ? parseFloat(voltInput.value) || 4.0 : 4.0;
+  appendMcuConsole(`>>> Starting calibration on Axle ${axle} (0=Front, 1=Rear), Motor ${motor} @ ${voltage.toFixed(1)}V...`);
+  sendMcuCommand({ action: "calib", axle: axle, motor: motor, voltage: voltage });
+}
+
+function sendRawCommand() {
+  const input = document.getElementById("rawCmdInput");
+  const cmd = input ? input.value.trim() : "";
+  if (cmd) {
+    sendMcuCommand({ action: "raw", cmd: cmd });
+    input.value = "";
+  }
+}
+
+function updateMotorPage(pkt) {
+  const rpms_cmd = pkt.rpms_cmd || [0, 0, 0, 0];
+  const rpms_act = pkt.rpms_act || [0, 0, 0, 0];
+  const flags = pkt.flags || {};
+  const wheel_r = 0.0275; // meters
+  const rpmToMps = (2.0 * Math.PI * wheel_r) / 60.0;
+
+  if (!motorWaveformBuffer.isPaused) {
+    motorWaveformBuffer.cmd.push(rpms_cmd[0] || 0);
+    motorWaveformBuffer.fl.push(rpms_act[0] || 0);
+    motorWaveformBuffer.fr.push(rpms_act[1] || 0);
+    motorWaveformBuffer.rl.push(rpms_act[2] || 0);
+    motorWaveformBuffer.rr.push(rpms_act[3] || 0);
+    if (motorWaveformBuffer.fl.length > motorWaveformBuffer.maxPoints) {
+      motorWaveformBuffer.cmd.shift();
+      motorWaveformBuffer.fl.shift();
+      motorWaveformBuffer.fr.shift();
+      motorWaveformBuffer.rl.shift();
+      motorWaveformBuffer.rr.shift();
+    }
+  }
+
+  // FL
+  const flCmd = Math.round(rpms_cmd[0] || 0);
+  const flAct = Math.round(rpms_act[0] || 0);
+  const flDelta = flAct - flCmd;
+  const elFLCmd = document.getElementById("mFL_rpmCmd");
+  const elFLAct = document.getElementById("mFL_rpmAct");
+  const elFLDelta = document.getElementById("mFL_rpmDelta");
+  const elFLSpeed = document.getElementById("mFL_speed");
+  if (elFLCmd) elFLCmd.innerText = flCmd;
+  if (elFLAct) elFLAct.innerText = flAct;
+  if (elFLDelta) {
+    elFLDelta.innerText = `Δ ${flDelta >= 0 ? '+' : ''}${flDelta}`;
+    elFLDelta.style.background = Math.abs(flDelta) > 150 ? '#8b000044' : '#1c212c';
+    elFLDelta.style.color = Math.abs(flDelta) > 150 ? 'var(--accent-red)' : 'var(--text-secondary)';
+  }
+  if (elFLSpeed) elFLSpeed.innerText = (flAct * rpmToMps).toFixed(2);
+
+  // FR
+  const frCmd = Math.round(rpms_cmd[1] || 0);
+  const frAct = Math.round(rpms_act[1] || 0);
+  const frDelta = frAct - frCmd;
+  const elFRCmd = document.getElementById("mFR_rpmCmd");
+  const elFRAct = document.getElementById("mFR_rpmAct");
+  const elFRDelta = document.getElementById("mFR_rpmDelta");
+  const elFRSpeed = document.getElementById("mFR_speed");
+  if (elFRCmd) elFRCmd.innerText = frCmd;
+  if (elFRAct) elFRAct.innerText = frAct;
+  if (elFRDelta) {
+    elFRDelta.innerText = `Δ ${frDelta >= 0 ? '+' : ''}${frDelta}`;
+    elFRDelta.style.background = Math.abs(frDelta) > 150 ? '#8b000044' : '#1c212c';
+    elFRDelta.style.color = Math.abs(frDelta) > 150 ? 'var(--accent-red)' : 'var(--text-secondary)';
+  }
+  if (elFRSpeed) elFRSpeed.innerText = (frAct * rpmToMps).toFixed(2);
+
+  // RL
+  const rlCmd = Math.round(rpms_cmd[2] || 0);
+  const rlAct = Math.round(rpms_act[2] || 0);
+  const rlDelta = rlAct - rlCmd;
+  const elRLCmd = document.getElementById("mRL_rpmCmd");
+  const elRLAct = document.getElementById("mRL_rpmAct");
+  const elRLDelta = document.getElementById("mRL_rpmDelta");
+  const elRLSpeed = document.getElementById("mRL_speed");
+  if (elRLCmd) elRLCmd.innerText = rlCmd;
+  if (elRLAct) elRLAct.innerText = rlAct;
+  if (elRLDelta) {
+    elRLDelta.innerText = `Δ ${rlDelta >= 0 ? '+' : ''}${rlDelta}`;
+    elRLDelta.style.background = Math.abs(rlDelta) > 150 ? '#8b000044' : '#1c212c';
+    elRLDelta.style.color = Math.abs(rlDelta) > 150 ? 'var(--accent-red)' : 'var(--text-secondary)';
+  }
+  if (elRLSpeed) elRLSpeed.innerText = (rlAct * rpmToMps).toFixed(2);
+
+  // RR
+  const rrCmd = Math.round(rpms_cmd[3] || 0);
+  const rrAct = Math.round(rpms_act[3] || 0);
+  const rrDelta = rrAct - rrCmd;
+  const elRRCmd = document.getElementById("mRR_rpmCmd");
+  const elRRAct = document.getElementById("mRR_rpmAct");
+  const elRRDelta = document.getElementById("mRR_rpmDelta");
+  const elRRSpeed = document.getElementById("mRR_speed");
+  if (elRRCmd) elRRCmd.innerText = rrCmd;
+  if (elRRAct) elRRAct.innerText = rrAct;
+  if (elRRDelta) {
+    elRRDelta.innerText = `Δ ${rrDelta >= 0 ? '+' : ''}${rrDelta}`;
+    elRRDelta.style.background = Math.abs(rrDelta) > 150 ? '#8b000044' : '#1c212c';
+    elRRDelta.style.color = Math.abs(rrDelta) > 150 ? 'var(--accent-red)' : 'var(--text-secondary)';
+  }
+  if (elRRSpeed) elRRSpeed.innerText = (rrAct * rpmToMps).toFixed(2);
+
+  // Pipeline Topology Health Nodes
+  const stmFrontOnline = Boolean(flags.stm32_front);
+  const stmRearOnline = Boolean(flags.stm32_rear);
+  const isBench = Boolean(flags.fake_data);
+
+  const bFront = document.getElementById("badgeStmFront");
+  if (bFront) {
+    bFront.innerText = stmFrontOnline ? "ONLINE" : "OFFLINE";
+    bFront.className = `pipe-node-badge ${stmFrontOnline ? 'badge-online' : 'badge-offline'}`;
+  }
+  const pFront = document.getElementById("pipeFrontRpm");
+  if (pFront) pFront.innerText = `FL: ${flAct} | FR: ${frAct} RPM`;
+
+  const bRear = document.getElementById("badgeStmRear");
+  if (bRear) {
+    bRear.innerText = stmRearOnline ? "ONLINE" : "OFFLINE";
+    bRear.className = `pipe-node-badge ${stmRearOnline ? 'badge-online' : 'badge-offline'}`;
+  }
+  const pRear = document.getElementById("pipeRearRpm");
+  if (pRear) pRear.innerText = `RL: ${rlAct} | RR: ${rrAct} RPM`;
+
+  const bEsp = document.getElementById("badgeEsp32");
+  if (bEsp) {
+    bEsp.innerText = isBench ? "BENCH" : "LIVE 400Hz";
+    bEsp.className = `pipe-node-badge ${isBench ? 'badge-bench' : 'badge-online'}`;
+  }
+  const pEsp = document.getElementById("pipeEsp32Mode");
+  if (pEsp) pEsp.innerText = isBench ? "Synthetic Sweeps (Fake Mode)" : "Dual-Core RTOS 400 Hz";
+
+  // Global Header Toggle Button Sync
+  const fakeBtn = document.getElementById("btnToggleFakeData");
+  const fakeIcon = document.getElementById("fakeToggleIcon");
+  const fakeText = document.getElementById("fakeToggleText");
+  if (fakeBtn && fakeIcon && fakeText) {
+    if (isBench) {
+      fakeBtn.className = "badge btn-toggle-fake state-fake";
+      fakeIcon.innerText = "🧪";
+      fakeText.innerText = "FAKE DATA (BENCH)";
+      fakeBtn.title = "Currently running Synthetic Benchmark (Fake Data). Click to switch to Live Hardware Sensors.";
+    } else {
+      fakeBtn.className = "badge btn-toggle-fake state-live";
+      fakeIcon.innerText = "🟢";
+      fakeText.innerText = "LIVE SENSORS";
+      fakeBtn.title = "Currently using Live Hardware Sensors & Dual STM32 Encoders. Click to switch to Synthetic Benchmark.";
+    }
+  }
+
+  // Page 2 Action Bar Bench Button Sync
+  const benchBtn = document.getElementById("btnBenchToggle");
+  if (benchBtn) {
+    if (isBench) {
+      benchBtn.innerText = "🧪 FAKE DATA: ON";
+      benchBtn.style.background = "#4f2870";
+      benchBtn.style.borderColor = "var(--accent-purple)";
+    } else {
+      benchBtn.innerText = "🟢 FAKE DATA: OFF";
+      benchBtn.style.background = "#003d1c";
+      benchBtn.style.borderColor = "var(--accent-green)";
+    }
+  }
+
+  // Differential Split
+  const leftAvg = (flAct + rlAct) * 0.5;
+  const rightAvg = (frAct + rrAct) * 0.5;
+  const totalAvg = Math.abs(leftAvg) + Math.abs(rightAvg);
+  const leftPct = totalAvg > 1 ? Math.round((Math.abs(leftAvg) / totalAvg) * 100) : 50;
+  const rightPct = 100 - leftPct;
+  const diffDelta = Math.round(rightAvg - leftAvg);
+
+  const elDiffSplit = document.getElementById("diffSplitReadout");
+  if (elDiffSplit) elDiffSplit.innerText = `Split: ${leftPct}% L / ${rightPct}% R`;
+  const elLeftAvg = document.getElementById("diffLeftAvg");
+  if (elLeftAvg) elLeftAvg.innerText = Math.round(leftAvg);
+  const elRightAvg = document.getElementById("diffRightAvg");
+  if (elRightAvg) elRightAvg.innerText = Math.round(rightAvg);
+  const elDiffDelta = document.getElementById("diffDelta");
+  if (elDiffDelta) elDiffDelta.innerText = `${diffDelta >= 0 ? '+' : ''}${diffDelta} RPM`;
+
+  // MCU Logs / Responses
+  if (pkt.mcu_log && Array.isArray(pkt.mcu_log) && pkt.mcu_log.length > 0) {
+    const consoleBox = document.getElementById("mcuConsole");
+    const latestStr = pkt.mcu_log.join("\n");
+    if (consoleBox && consoleBox.dataset.lastLog !== latestStr) {
+      consoleBox.dataset.lastLog = latestStr;
+      consoleBox.innerText = latestStr;
+      consoleBox.scrollTop = consoleBox.scrollHeight;
+    }
+  }
+
+  // Draw chart if page is active
+  if (currentPage === 'motors') {
+    renderMotorChart();
+  }
 }
 
 // High-Speed Local Binary Ingestion & Real-Time Performance Profiler
