@@ -242,18 +242,27 @@ def physical_pin(gpio: int) -> int:
     return int(info["PhysicalPin"])
 
 
-def solve_pi_pinout(enable_hardware_tof_uart: bool = True):
+def solve_pi_pinout(use_usb_cables: bool = True, enable_hardware_tof_uart: bool = False):
     """Return a collision-free assignment for this Pi 4/5 hardware topology.
 
     Hardware Connections:
-      1. Primary High-Speed UART (/dev/ttyAMA0): Duplex link to ESP32-Main MCU (Chassis Telemetry @ 921,600 baud)
-      2. Handshake Interrupt: GPIO20 Input triggered by ESP32-Main batch-ready pulse
-      3. Secondary UART2 (/dev/ttyAMA2): Hardware UART to ESP32-ToF Hub (@ 921,600 baud)
-         (Alternative: USB-C cable to ESP32-ToF on /dev/ttyACM0)
+      Dual USB Cable Mode (Recommended / Default):
+        - ESP32-Main: Direct USB Cable to Pi 4 USB Port (/dev/ttyUSB0 or /dev/ttyACM0 @ 921,600 baud)
+        - ESP32-ToF:  Direct USB Cable to Pi 4 USB Port (/dev/ttyUSB1 or /dev/ttyACM1 @ 921,600 baud)
+        - Zero GPIO pins or flying wires consumed on the 40-pin header!
+
+      Legacy GPIO UART Mode:
+        1. Primary High-Speed UART (/dev/ttyAMA0): Duplex link to ESP32-Main MCU (Chassis Telemetry @ 921,600 baud)
+        2. Handshake Interrupt: GPIO20 Input triggered by ESP32-Main batch-ready pulse
+        3. Secondary UART2 (/dev/ttyAMA2): Hardware UART to ESP32-ToF Hub (@ 921,600 baud)
     """
 
     reserved = set()
     solver = PinoutSolver(HEADER_GPIOS, reserved)
+
+    if use_usb_cables:
+        # Dual USB cable mode: 0 header pins assigned to MCU comms
+        return {}
 
     fixed_requests = [
         # ESP32-Main Telemetry Highway (Primary UART0)
@@ -294,28 +303,41 @@ def solve_pi_pinout(enable_hardware_tof_uart: bool = True):
     }
 
 
-def print_report() -> None:
-    assignments = solve_pi_pinout(enable_hardware_tof_uart=True)
+def print_report(use_usb_cables: bool = True) -> None:
+    assignments = solve_pi_pinout(use_usb_cables=use_usb_cables, enable_hardware_tof_uart=not use_usb_cables)
     used = {gpio for gpio, _, _, _ in assignments.values()}
     free = sorted(set(HEADER_GPIOS) - used)
 
     print("\n" + "=" * 100)
     print("  RASPBERRY PI 4 / 5 PINOUT CSP - VERIFIED COLLISION-FREE ASSIGNMENT")
-    print("  MCU UART Telemetry Links (ESP32-Main + ESP32-ToF) [Pure ToF + Vision Architecture]")
+    mode_str = "DUAL USB CABLE ARCHITECTURE (ZERO HEADER PINS USED)" if use_usb_cables else "LEGACY GPIO UART WIRING"
+    print(f"  Topology Mode: {mode_str}")
     print("=" * 100)
-    print(f"  {'Signal':<21} | {'Physical pin':<14} | {'GPIO':<9} | {'Function':<12} | Description")
-    print("  " + "-" * 96)
-    for name, (gpio, pin, function, description) in sorted(assignments.items(), key=lambda item: item[1][1]):
-        print(f"  {name:<21} | Pin {pin:<10} | GPIO {gpio:<4} | {function:<12} | {description}")
-    print("  " + "-" * 96)
-    print(f"  Assigned GPIOs: {len(used)} unique pins - verified collision-free")
-    print("  Note: ESP32-ToF can use UART2 (Pins 27/28) or direct USB-C connection (/dev/ttyACM0).")
-    print(f"  Free Available GPIOs ({len(free)} pins): {free}")
+    if use_usb_cables:
+        print("  [USB SERIAL ARCHITECTURE]")
+        print("  * ESP32-Main : Connected via USB Cable -> /dev/ttyUSB0 or /dev/ttyACM0 (921,600 baud)")
+        print("  * ESP32-ToF  : Connected via USB Cable -> /dev/ttyUSB1 or /dev/ttyACM1 (921,600 baud)")
+        print("  * Header Pins: 0 jumper wires on 40-pin header. 100% plug-and-play.")
+        print("  " + "-" * 96)
+        print(f"  Assigned Header GPIOs: 0 pins")
+        print(f"  Free Available Header GPIOs ({len(free)}/28 pins): {free}")
+    else:
+        print(f"  {'Signal':<21} | {'Physical pin':<14} | {'GPIO':<9} | {'Function':<12} | Description")
+        print("  " + "-" * 96)
+        for name, (gpio, pin, function, description) in sorted(assignments.items(), key=lambda item: item[1][1]):
+            print(f"  {name:<21} | Pin {pin:<10} | GPIO {gpio:<4} | {function:<12} | {description}")
+        print("  " + "-" * 96)
+        print(f"  Assigned GPIOs: {len(used)} unique pins - verified collision-free")
+        print(f"  Free Available GPIOs ({len(free)} pins): {free}")
     print("=" * 100 + "\n")
 
 
 def main() -> None:
-    print_report()
+    import argparse
+    parser = argparse.ArgumentParser(description="Raspberry Pi 4 Pinout Solver")
+    parser.add_argument("--gpio-uart", action="store_true", help="Show legacy GPIO header UART wiring instead of USB cables")
+    args = parser.parse_args()
+    print_report(use_usb_cables=not args.gpio_uart)
 
 
 if __name__ == "__main__":

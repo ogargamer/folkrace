@@ -80,10 +80,10 @@ ALLOCATION = {
     "STM32_2_UART_TX":      {"gpio": 15, "dir": "OUT", "bus": "UART2",     "target": "STM32 #2 PA10 (RX)"},
     "STM32_2_UART_RX":      {"gpio": 16, "dir": "IN",  "bus": "UART2",     "target": "STM32 #2 PA9 (TX)"},
 
-    # Raspberry Pi 4 Telemetry Highway -- Header J3 Pins 2-4 (Directly below GND Pin 1)
-    "PI_UART_TX":           {"gpio": 43, "dir": "OUT", "bus": "UART0",     "target": "Pi 4 GPIO 15 (Pin 10 / RXD0)"},
-    "PI_UART_RX":           {"gpio": 44, "dir": "IN",  "bus": "UART0",     "target": "Pi 4 GPIO 14 (Pin 8 / TXD0)"},
-    "PI_DRDY_OUT":          {"gpio": 1,  "dir": "OUT", "bus": "GPIO",      "target": "Pi 4 GPIO 20 (Pin 38 / INT)"},
+    # Raspberry Pi 4 Host Telemetry Link (Via Direct USB Cable to Pi 4 USB Port)
+    # Onboard USB-to-UART bridge wires GPIO 43/44 internally to USB connector (0 header jumpers needed)
+    "HOST_USB_TX":          {"gpio": 43, "dir": "OUT", "bus": "UART0",     "target": "Pi 4 USB Port (Internal USB-UART TXD0)"},
+    "HOST_USB_RX":          {"gpio": 44, "dir": "IN",  "bus": "UART0",     "target": "Pi 4 USB Port (Internal USB-UART RXD0)"},
 }
 
 RESERVED_SYSTEM_PINS = {
@@ -200,7 +200,7 @@ def display_results():
     print(f"  * IMU SPI Ribbon Pin Pitch        : Row 15 to Row 20 contiguous header block on J1")
     print(f"  * Servo PWM to IMU Separation     : {metrics['servo_to_imu_pitch']:.2f} pin pitches ({metrics['servo_to_imu_mm']:.2f} mm across board)")
     print(f"  * Dual STM32 Links Physical Block : Row 8 to Row 11 on Header J1 (adjacent comms)")
-    print(f"  * Pi 4 Telemetry Physical Block   : Row 2 to Row 4 on Header J3 (directly below GND)")
+    print(f"  * Pi 4 Telemetry Connection       : Direct USB-C / micro-USB cable (0 header jumpers required)")
 
     def format_signal(sig, item):
         target = item.get("target", "")
@@ -247,9 +247,9 @@ def display_results():
         sig_str = format_signal(sig, item)
         print(f"  {sig_str:<56} | GPIO {item['gpio']:<4}")
 
-    # Raspberry Pi 4 Telemetry Highway
-    print("\n  [RASPBERRY PI 4 TELEMETRY HIGHWAY -- UART0 + DRDY]")
-    for sig in ["PI_UART_TX", "PI_UART_RX", "PI_DRDY_OUT"]:
+    # Raspberry Pi 4 Host Telemetry Link
+    print("\n  [RASPBERRY PI 4 TELEMETRY LINK -- DIRECT USB CABLE (UART0/SERIAL)]")
+    for sig in ["HOST_USB_TX", "HOST_USB_RX"]:
         item = ALLOCATION[sig]
         sig_str = format_signal(sig, item)
         print(f"  {sig_str:<56} | GPIO {item['gpio']:<4}")
@@ -292,11 +292,9 @@ def print_c_header():
     print(f"#define STM32_2_UART_TX_PIN      {ALLOCATION['STM32_2_UART_TX']['gpio']}")
     print(f"#define STM32_2_UART_RX_PIN      {ALLOCATION['STM32_2_UART_RX']['gpio']}")
     print()
-    print("// Raspberry Pi 4 Telemetry Highway (UART0)")
+    print("// Raspberry Pi 4 Telemetry Link (Direct USB Cable @ 921,600 Baud)")
     print("#define PI_UART_BAUD             921600")
-    print(f"#define PI_UART_TX_PIN           {ALLOCATION['PI_UART_TX']['gpio']}")
-    print(f"#define PI_UART_RX_PIN           {ALLOCATION['PI_UART_RX']['gpio']}")
-    print(f"#define PI_DRDY_PIN              {ALLOCATION['PI_DRDY_OUT']['gpio']}")
+    print("// Zero header wires required; host telemetry links over onboard USB Serial (Serial)")
     print("// =============================================================================")
 
 

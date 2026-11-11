@@ -79,7 +79,7 @@ static ServoController s_servo;
 static IMUEncoderFusion s_fusion;
 static STM32DualLink s_stm32Link;
 static BNO08xIMU s_imu;
-static HardwareSerial s_piSerial(PI_UART_NUM);
+#define s_piSerial Serial // Telemetry & Motion Commands routed directly over USB Serial cable
 
 // Global State
 static volatile bool s_fake_data_active = true; // Default to synthetic benchmark
@@ -352,8 +352,28 @@ static void ioTask(void *pvParameters) {
         inputs.rr_rpm = s_stm32Link.getRR_RPM();
         s_sensorInputs.commitWrite();
 
-        // 5. User Command Shell over USB Serial
+        // 5. Ingestion: Binary Motion Commands (Pi 4) & ASCII Shell Commands (USB)
         while (Serial.available() > 0) {
+            if (Serial.peek() == PI_UART_SYNC_1) {
+                if (Serial.available() >= (int)sizeof(MotionCommandPacket)) {
+                    uint8_t buf[sizeof(MotionCommandPacket)];
+                    Serial.readBytes(buf, sizeof(buf));
+                    if (buf[0] == PI_UART_SYNC_1 && buf[1] == PI_UART_SYNC_2 && buf[2] == MSG_ID_MOTION_CMD) {
+                        uint8_t chk = mcu_calc_checksum(buf, sizeof(buf) - 1);
+                        if (chk == buf[sizeof(buf) - 1]) {
+                            const MotionCommandPacket *cmd = (const MotionCommandPacket *)buf;
+                            s_manual_v = (float)cmd->target_v_mm_s / 1000.0f;
+                            s_manual_steer = (float)cmd->target_steer_mrad / 1000.0f;
+                            s_manual_override = (cmd->run_mode == 1);
+                            s_fake_data_active = false;
+                        }
+                    }
+                } else {
+                    break; // Wait for complete binary packet
+                }
+                continue;
+            }
+
             String line = Serial.readStringUntil('\n');
             line.trim();
             if (line.length() == 0) continue;
@@ -539,30 +559,10 @@ static void ioTask(void *pvParameters) {
             s_piSerial.write((const uint8_t *)&pkt, sizeof(pkt));
         }
 
-        // 7. Binary Motion Command Ingestion from Pi 4
-        while (s_piSerial.available() >= (int)sizeof(MotionCommandPacket)) {
-            if (s_piSerial.peek() == PI_UART_SYNC_1) {
-                uint8_t buf[sizeof(MotionCommandPacket)];
-                s_piSerial.readBytes(buf, sizeof(buf));
-                if (buf[0] == PI_UART_SYNC_1 && buf[1] == PI_UART_SYNC_2 && buf[2] == MSG_ID_MOTION_CMD) {
-                    uint8_t chk = mcu_calc_checksum(buf, sizeof(buf) - 1);
-                    if (chk == buf[sizeof(buf) - 1]) {
-                        const MotionCommandPacket *cmd = (const MotionCommandPacket *)buf;
-                        s_manual_v = (float)cmd->target_v_mm_s / 1000.0f;
-                        s_manual_steer = (float)cmd->target_steer_mrad / 1000.0f;
-                        s_manual_override = (cmd->run_mode == 1);
-                        s_fake_data_active = false;
-                    }
-                }
-            } else {
-                s_piSerial.read(); // advance stream
-            }
-        }
-
-        // 8. Periodic Benchmark Telemetry Stream to USB Serial (every 500 ms = 2 Hz, bench mode only)
+        // 7. Periodic Benchmark Telemetry to Serial (every 500 ms = 2 Hz, bench mode only)
         if (now - last_report_ms >= 500) {
             last_report_ms = now;
-            if (s_fake_data_active) {
+            if (s_fake_data_active && !s_manual_override) {
                 const SharedControlOutputs &c = s_controlOutputs.getReadBuffer();
                 float cpu_pct = (c.exec_us_avg / 2500.0f) * 100.0f;
 
@@ -570,27 +570,6 @@ static void ioTask(void *pvParameters) {
                               c.cycle_count, c.exec_us, c.exec_us_min, c.exec_us_max, c.exec_us_avg,
                               cpu_pct, c.overrun_count, c.v_est, c.steer_deg, c.servo_pulse_us);
             }
-        }
-
-        // 8b. High-Speed 100Hz IMU Binary Telemetry Stream to USB Serial for Mission Dashboard GUI
-        static uint32_t s_last_imu_usb_stream_ms = 0;
-        if (!s_fake_data_active && s_imu.isInitialized() && (now - s_last_imu_usb_stream_ms >= 10)) {
-            s_last_imu_usb_stream_ms = now;
-            const auto &d = s_imu.getData();
-            uint8_t binBuf[42];
-            binBuf[0] = 0xAA;
-            binBuf[1] = 0x55;
-            memcpy(&binBuf[2],  &d.quat_w, 4);
-            memcpy(&binBuf[6],  &d.quat_x, 4);
-            memcpy(&binBuf[10], &d.quat_y, 4);
-            memcpy(&binBuf[14], &d.quat_z, 4);
-            memcpy(&binBuf[18], &d.accel_x, 4);
-            memcpy(&binBuf[22], &d.accel_y, 4);
-            memcpy(&binBuf[26], &d.accel_z, 4);
-            memcpy(&binBuf[30], &d.gyro_x, 4);
-            memcpy(&binBuf[34], &d.gyro_y, 4);
-            memcpy(&binBuf[38], &d.gyro_z, 4);
-            Serial.write(binBuf, 42);
         }
 
         vTaskDelay(pdMS_TO_TICKS(2));
@@ -624,9 +603,8 @@ void setup() {
     );
     Serial.println(F("[+] Dual STM32 FOC UART Links Initialized (UART1 & UART2 @ 921.6k)."));
 
-    // 2b. Initialize Raspberry Pi 4 High-Speed Binary Telemetry Highway
-    s_piSerial.begin(PI_UART_BAUD, SERIAL_8N1, PI_UART_RX_PIN, PI_UART_TX_PIN);
-    Serial.println(F("[+] Raspberry Pi 4 Binary Telemetry Link Initialized (921.6k)."));
+    // 2b. Raspberry Pi 4 Direct USB Serial Link
+    Serial.println(F("[+] Raspberry Pi 4 Direct USB Link Online (Serial @ 921.6k)."));
 
     // 3. Initialize BNO086 IMU over SPI2 (CS=10, INT=9, SCK=12, MOSI=11, MISO=13, RST=14)
     if (s_imu.begin(IMU_SPI_CS_PIN, IMU_SPI_MISO_PIN, IMU_SPI_MOSI_PIN, IMU_SPI_SCK_PIN, IMU_INT_PIN, IMU_RST_PIN)) {

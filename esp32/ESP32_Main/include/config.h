@@ -34,12 +34,10 @@
 #define STM32_2_UART_TX_PIN      15  // ESP32 TX -> STM32 Rear PA10 RX
 #define STM32_2_UART_RX_PIN      16  // ESP32 RX <- STM32 Rear PA9 TX
 
-// --- Raspberry Pi 4 Telemetry Highway (UART0) ---
-#define PI_UART_NUM              0
-// (PI_UART_BAUD defined in vehicle_params.h)
-#define PI_UART_TX_PIN           43  // ESP32 TX -> Pi 4 RX (GPIO 15)
-#define PI_UART_RX_PIN           44  // ESP32 RX <- Pi 4 TX (GPIO 14)
-#define PI_DRDY_PIN              1   // Hardware Batch Ready Pulse -> Pi 4 GPIO
+// --- Raspberry Pi 4 Telemetry Link (Direct USB Serial Cable) ---
+#define PI_UART_BAUD             921600
+#define PI_USE_USB_SERIAL        1
+// Zero header wires required: Host link runs over onboard USB Serial directly to Pi 4 USB port.
 
 // Note: Real-time control loop frequencies, vehicle physical geometry, kinematics,
 // servo pulses, slip thresholds, and friction parameters are synchronized from

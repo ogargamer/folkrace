@@ -80,16 +80,18 @@ flowchart TD
 ### Hardware Pinout (ESP32-S3 DevKitC-1)
 | Function | GPIO Pin | Connected Device / Role | Notes |
 | :--- | :--- | :--- | :--- |
-| **STM32 UART TX** | GPIO 17 | STM32 USART RX | Motor target velocity packets (921,600 baud) |
-| **STM32 UART RX** | GPIO 18 | STM32 USART TX | Motor actual RPM telemetry packets |
-| **Pi 4 UART TX** | GPIO 47 | Pi 4 UART RX | 100 Hz IMU & chassis telemetry stream |
-| **Pi 4 UART RX** | GPIO 21 | Pi 4 UART TX | High-level speed & steering commands |
-| **IMU SPI SCK** | GPIO 12 | BNO08x SCK | Shared IMU SPI Clock |
-| **IMU SPI MOSI** | GPIO 11 | BNO08x MOSI / DI | IMU SPI Data In |
-| **IMU SPI MISO** | GPIO 13 | BNO08x MISO / DO | IMU SPI Data Out |
-| **IMU SPI CS** | GPIO 10 | BNO08x CSN | Active-Low Chip Select |
-| **IMU INT** | GPIO 9 | BNO08x HINTN | Data-Ready Host Interrupt |
-| **Steering PWM** | GPIO 22 | Front Steering Servo | 333 Hz high-rate digital PWM |
+| **STM32 UART 1 TX** | GPIO 17 | STM32 Front PA10 RX | Motor target velocity packets (921,600 baud) |
+| **STM32 UART 1 RX** | GPIO 18 | STM32 Front PA9 TX | Motor actual RPM telemetry packets |
+| **STM32 UART 2 TX** | GPIO 15 | STM32 Rear PA10 RX | Motor target velocity packets (921,600 baud) |
+| **STM32 UART 2 RX** | GPIO 16 | STM32 Rear PA9 TX | Motor actual RPM telemetry packets |
+| **Host Link (Pi 4)** | USB Port | Raspberry Pi 4 USB Port | Direct USB Cable (Serial CDC / UART0 @ 921.6k) |
+| **IMU SPI SCK** | GPIO 12 | BNO08x SCK | Dedicated IMU SPI Clock (Header J1 Pin 18) |
+| **IMU SPI MOSI** | GPIO 11 | BNO08x MOSI / DI | IMU SPI Data In (Header J1 Pin 17) |
+| **IMU SPI MISO** | GPIO 13 | BNO08x MISO / DO | IMU SPI Data Out (Header J1 Pin 19) |
+| **IMU SPI CS** | GPIO 10 | BNO08x CSN | Active-Low Chip Select (Header J1 Pin 16) |
+| **IMU INT** | GPIO 9 | BNO08x HINTN | Data-Ready Host Interrupt (Header J1 Pin 15) |
+| **IMU RST** | GPIO 14 | BNO08x NRST | Hardware Reset (Header J1 Pin 20) |
+| **Steering PWM** | GPIO 21 | Front Steering Servo | 333 Hz high-rate digital PWM (Header J3 Pin 18) |
 
 ---
 
@@ -126,8 +128,7 @@ flowchart TD
 | **ToF 4 LPN** | GPIO 39 | J3 Pin 9 | ToF 4 Power Enable / Reset |
 | **ToF 4 INT** | GPIO 38 | J3 Pin 10 | ToF 4 Data Ready Interrupt |
 | **ToF 4 CS** | GPIO 47 | J3 Pin 17 | ToF 4 Chip Select (Active LOW) |
-| **Host UART TX** | GPIO 43 | J3 Pin 2 | Output to Pi 4 (921,600 baud) |
-| **Host UART RX** | GPIO 44 | J3 Pin 3 | Input from Pi 4 / Debug |
+| **Host Link (Pi 4)** | USB Port | USB Cable to Pi 4 | Direct USB connection (/dev/ttyUSB1 or /dev/ttyACM1 @ 921.6k) |
 
 ---
 

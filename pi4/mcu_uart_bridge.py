@@ -19,7 +19,7 @@ import time
 import socket
 import json
 import threading
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 
 CURR_DIR = os.path.dirname(os.path.abspath(__file__))
 if CURR_DIR not in sys.path:
@@ -139,31 +139,86 @@ class BinaryStreamParser:
                     del self.buffer[:2]
 
 
-def resolve_serial_port(port: Optional[str], role: str = "tof", exclude: Optional[str] = None) -> Optional[str]:
-    """Auto-detects and verifies available serial port for MCU communication."""
-    if port and port != "auto" and os.path.exists(port):
-        return port
-    if role == "tof":
-        candidates = ["/dev/ttyACM0", "/dev/ttyUSB0", "/dev/ttyACM1", "/dev/ttyUSB1", "/dev/ttyAMA2", "/dev/ttyAMA1"]
-    else:
-        candidates = ["/dev/ttyAMA0", "/dev/ttyUSB1", "/dev/ttyUSB0"]
-    for c in candidates:
-        if c != exclude and os.path.exists(c):
-            return c
-    return port if port != "auto" else None
+def probe_port_role(port: str, baud: int = UART_BAUD) -> Optional[str]:
+    """Sniffs incoming bytes on port for 200 ms to identify ESP32 role."""
+    if not HAS_SERIAL or not os.path.exists(port):
+        return None
+    try:
+        with serial.Serial(port, baud, timeout=0.15) as ser:
+            ser.reset_input_buffer()
+            # Send PING in case MCU is waiting in shell mode
+            ser.write(b"PING\n")
+            time.sleep(0.05)
+            chunk = ser.read(256)
+            if b"PONG" in chunk:
+                return "main"
+            idx = chunk.find(MCU_SYNC)
+            if idx != -1 and len(chunk) > idx + 2:
+                msg_id = chunk[idx + 2]
+                if msg_id == MSG_ID_CHASSIS_TELEM:
+                    return "main"
+                elif 1 <= msg_id <= 4 or msg_id in (MSG_ID_TOF_TELEM, MSG_ID_TOF_SUB_TELEM):
+                    return "tof"
+    except Exception:
+        pass
+    return None
+
+
+def resolve_serial_ports(
+    main_port: Optional[str] = "auto",
+    tof_port: Optional[str] = "auto",
+    baud: int = UART_BAUD
+) -> Tuple[Optional[str], Optional[str]]:
+    """Auto-detects and binds USB / UART serial ports to ESP32 Main and ESP32 ToF."""
+    candidates = [
+        p for p in [
+            "/dev/ttyUSB0", "/dev/ttyUSB1", "/dev/ttyUSB2",
+            "/dev/ttyACM0", "/dev/ttyACM1", "/dev/ttyACM2",
+            "/dev/ttyAMA0", "/dev/ttyAMA2"
+        ] if os.path.exists(p)
+    ]
+
+    resolved_main = main_port if main_port and main_port != "auto" and os.path.exists(main_port) else None
+    resolved_tof = tof_port if tof_port and tof_port != "auto" and os.path.exists(tof_port) else None
+
+    # Filter out already explicitly claimed ports
+    available = [c for c in candidates if c not in (resolved_main, resolved_tof)]
+
+    # If both need detection, probe each available USB port
+    if (resolved_main is None or resolved_tof is None) and available:
+        probed_roles = {}
+        for p in available:
+            role = probe_port_role(p, baud)
+            if role:
+                probed_roles[p] = role
+
+        # Assign based on probe findings
+        for p, role in probed_roles.items():
+            if role == "main" and resolved_main is None:
+                resolved_main = p
+            elif role == "tof" and resolved_tof is None:
+                resolved_tof = p
+
+        # Fallback for remaining unprobed or unassigned ports
+        remaining = [p for p in available if p not in (resolved_main, resolved_tof)]
+        if resolved_main is None and remaining:
+            resolved_main = remaining.pop(0)
+        if resolved_tof is None and remaining:
+            resolved_tof = remaining.pop(0)
+
+    return resolved_main, resolved_tof
 
 
 class MCU_UART_Bridge:
     def __init__(
         self,
-        main_port: Optional[str] = None,
-        tof_port: Optional[str] = None,
+        main_port: Optional[str] = "auto",
+        tof_port: Optional[str] = "auto",
         baud: int = UART_BAUD,
         udp_host: str = UDP_DISPATCH_HOST,
         udp_port: int = UDP_DISPATCH_PORT,
     ):
-        self.tof_port = resolve_serial_port(tof_port, role="tof")
-        self.main_port = resolve_serial_port(main_port, role="main", exclude=self.tof_port)
+        self.main_port, self.tof_port = resolve_serial_ports(main_port, tof_port, baud)
         self.baud = baud
         self.udp_host = udp_host
         self.udp_target = (udp_host, udp_port)
@@ -284,8 +339,8 @@ class MCU_UART_Bridge:
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Folkrace MCU Binary UART Bridge")
-    parser.add_argument("--main", default="/dev/ttyAMA0", help="ESP32 Main serial device (or auto)")
-    parser.add_argument("--tof", default="auto", help="ESP32 ToF Hub serial device (auto-detects /dev/ttyACM0, /dev/ttyUSB0, /dev/ttyAMA2, etc.)")
+    parser.add_argument("--main", default="auto", help="ESP32 Main serial device (auto-detects /dev/ttyUSB0, /dev/ttyACM0, etc.)")
+    parser.add_argument("--tof", default="auto", help="ESP32 ToF Hub serial device (auto-detects /dev/ttyUSB1, /dev/ttyACM1, etc.)")
     parser.add_argument("--baud", type=int, default=UART_BAUD, help="UART baud rate")
     args = parser.parse_args()
 
