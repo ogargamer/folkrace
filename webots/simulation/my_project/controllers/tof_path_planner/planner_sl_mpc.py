@@ -328,12 +328,12 @@ class CppCurvilinearSLMPC:
         if not self._handle:
             raise RuntimeError("Failed to create C++ CurvilinearSLMPCNative instance")
 
-        # Deterministic 60 Hz iteration caps (prevents tail latency overruns)
+        # Deterministic 60 Hz iteration caps (prevents tail latency overruns on ARM Cortex-A72)
         if hasattr(_lib, "sl_mpc_set_max_iter"):
             if self._handle:
-                _lib.sl_mpc_set_max_iter(self._handle, 25)
+                _lib.sl_mpc_set_max_iter(self._handle, 14)
             if self._handle_alt:
-                _lib.sl_mpc_set_max_iter(self._handle_alt, 20)
+                _lib.sl_mpc_set_max_iter(self._handle_alt, 6)
 
     def reset_active_target(self) -> None:
         """Resets the currently tracked active corridor/target line and OSQP solver warm-start."""
@@ -477,6 +477,23 @@ class CppCurvilinearSLMPC:
         # ----------------------------------------------------------------------
         # 1. SOLVE INCUMBENT (PRIMARY) RACING LINE
         # ----------------------------------------------------------------------
+        # Dynamic Primary OSQP Iteration Scaling based on whole-pipeline budget elapsed so far:
+        # Prevents tail-latency overruns when perception (costmap + gap scout) took longer.
+        if hasattr(_lib, "sl_mpc_set_max_iter") and self._handle:
+            if t_frame_start is not None:
+                elapsed_prior_ms = (time.perf_counter() - t_frame_start) * 1000.0
+                target_deadline_ms = min(float(frame_budget_ms), 13.2)
+                budget_for_prim_ms = target_deadline_ms - elapsed_prior_ms - 0.5  # Reserve 0.5ms for shield
+                if budget_for_prim_ms >= 8.0:
+                    max_iter_prim = 14
+                elif budget_for_prim_ms >= 4.5:
+                    max_iter_prim = 10
+                else:
+                    max_iter_prim = 6
+            else:
+                max_iter_prim = 14
+            _lib.sl_mpc_set_max_iter(self._handle, max_iter_prim)
+
         t_prim_0 = time.perf_counter()
         if hasattr(_lib, "sl_mpc_plan_projected"):
             success_prim = _lib.sl_mpc_plan_projected(
@@ -533,9 +550,9 @@ class CppCurvilinearSLMPC:
 
         # Budget-conscious challenger solve with at least 1 iteration:
         # When distinct alternative target exists (has_sep):
-        # - Full iteration budget (20 iters) if primary was fast (< 3.2ms, <= 15 iters) or primary is compromised.
-        # - Fallback to single iteration (max_iter = 1) when primary exceeds budget, ensuring 2nd line still evaluates
-        #   without blowing the strict 60 Hz real-time deadline.
+        # - Capped iteration budget (8 iters) if remaining frame budget >= 5.5 ms.
+        # - Fallback to single iteration (max_iter = 1) when budget is tight (>= 3.2 ms).
+        # - Hard skip challenger if remaining budget < 3.2 ms to guarantee strict 60 Hz compliance.
         if alt_target is not None and hasattr(self, "_handle_alt") and self._handle_alt:
             tx_alt, ty_alt, ap_alt = alt_target[:3]
             is_clear_alt = bool(alt_target[3]) if len(alt_target) >= 4 else (math.hypot(tx_alt, ty_alt) >= 1.60)
@@ -548,17 +565,17 @@ class CppCurvilinearSLMPC:
                 # (perception + motion latency comp + costmap update + gap scout + primary MPC solve)
                 t_check = time.perf_counter()
                 elapsed_so_far_ms = ((t_check - t_frame_start) * 1000.0) if t_frame_start is not None else t_prim_ms
-                target_deadline_ms = min(float(frame_budget_ms), 14.8)
+                target_deadline_ms = min(float(frame_budget_ms), 13.2)
                 budget_remaining_ms = target_deadline_ms - elapsed_so_far_ms
 
                 # Hard budget allocation (calibrated to ARM64 Cortex-A72 execution profile):
-                # - Full budget (20 iters, ~5.2 ms + 0.5 ms shield): ONLY IF budget_remaining >= 7.2 ms
-                # - Single iter (1 iter, ~3.2 ms + 0.5 ms shield): IF budget_remaining >= 4.5 ms
-                # - Under 4.5 ms: HARD SKIP challenger to guarantee worst-case frame strictly < 16.6 ms!
-                if budget_remaining_ms >= 7.2:
+                # - High budget (6 iters, ~2.5 ms + 0.5 ms shield): ONLY IF budget_remaining >= 6.5 ms
+                # - Single iter (1 iter, ~1.2 ms + 0.5 ms shield): IF budget_remaining >= 4.8 ms
+                # - Under 4.8 ms: HARD SKIP challenger to guarantee worst-case frame strictly < 16.6 ms!
+                if budget_remaining_ms >= 6.5:
                     has_challenger = True
-                    max_iter_alt = 20
-                elif budget_remaining_ms >= 4.5:
+                    max_iter_alt = 6
+                elif budget_remaining_ms >= 4.8:
                     has_challenger = True
                     max_iter_alt = 1
                 else:

@@ -59,8 +59,8 @@ class TelemetryFlightRecorder:
         max_driving_seconds: float = 1800.0,       # 30-minute running buffer of active driving
         prune_interval_driving_s: float = 30.0,    # Lazy prune check every 30s of driving
         min_free_space_bytes: int = 5 * 1024 * 1024 * 1024,  # 5 GB safety reserve
-        batch_size: int = 60,
-        commit_interval_s: float = 2.0,
+        batch_size: int = 20,
+        commit_interval_s: float = 1.0,
     ):
         self.output_dir = output_dir
         os.makedirs(self.output_dir, exist_ok=True)

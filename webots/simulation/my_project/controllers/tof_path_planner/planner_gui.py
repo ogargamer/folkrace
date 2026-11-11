@@ -1002,6 +1002,114 @@ class PlannerCostmapCanvas(QtWidgets.QWidget):
             lx += 66
 
 
+def parse_binary_packet(data: bytes) -> Optional[dict]:
+    """Decodes compact binary telemetry packet received from Pi 4 or Webots streaming bridge."""
+    if len(data) < 232 or data[:4] != b"FOLK":
+        return None
+    header_fmt = "<4s I I d 16f 4f 4f 16f 3f 2H 4f 5I"
+    try:
+        fields = struct.unpack_from(header_fmt, data, 0)
+    except Exception:
+        return None
+
+    time_step = fields[2]
+    ts = fields[3]
+    sim_time = fields[4]
+    v_cmd = fields[5]
+    v_real = fields[6]
+    steer_cmd_deg = fields[7]
+    steer_actual_deg = fields[8]
+    yaw_deg = fields[9]
+    pitch_deg = fields[10]
+    roll_deg = fields[11]
+    gyro_z = fields[12]
+    accel_fwd = fields[13]
+    accel_lat = fields[14]
+    slip_ratio = fields[15]
+    f_tof = fields[16]
+    plan_ms = fields[17]
+    map_ms = fields[18]
+    scout_ms = fields[19]
+    rpms_cmd = list(fields[20:24])
+    rpms_act = list(fields[24:28])
+    tof_ranges = list(fields[28:44])
+    gap = list(fields[44:47])
+    rows = fields[47]
+    cols = fields[48]
+    grid_bounds = list(fields[49:53])
+    prob_comp_len = fields[53]
+    prob_raw_len = fields[54]
+    haz_comp_len = fields[55]
+    haz_raw_len = fields[56]
+    meta_len = fields[57]
+
+    header_end = 232
+    meta = {}
+    if meta_len > 0 and len(data) >= header_end + prob_comp_len + haz_comp_len + meta_len:
+        try:
+            meta_raw = data[header_end + prob_comp_len + haz_comp_len : header_end + prob_comp_len + haz_comp_len + meta_len]
+            meta = json.loads(meta_raw.decode("utf-8"))
+        except Exception:
+            pass
+
+    pkt = {
+        "time_step": time_step,
+        "timestamp": ts,
+        "sim_time": sim_time,
+        "v_cmd": v_cmd,
+        "v_tgt": v_cmd,
+        "v_real": v_real,
+        "v_est": v_real,
+        "steer_cmd_deg": steer_cmd_deg,
+        "steer_deg": steer_cmd_deg,
+        "steer_actual_deg": steer_actual_deg,
+        "yaw_deg": yaw_deg,
+        "pitch_deg": pitch_deg,
+        "roll_deg": roll_deg,
+        "gyro_z": gyro_z,
+        "accel_fwd": accel_fwd,
+        "accel_lat": accel_lat,
+        "slip_ratio": slip_ratio,
+        "f_tof": f_tof,
+        "plan_ms": plan_ms,
+        "map_ms": map_ms,
+        "scout_ms": scout_ms,
+        "rpms_cmd": rpms_cmd,
+        "rpms_act": rpms_act,
+        "tof_ranges": tof_ranges,
+        "tof": {FRONT_TOF_SENSOR_RIG[i][0]: tof_ranges[i] for i in range(min(len(FRONT_TOF_SENSOR_RIG), len(tof_ranges)))},
+        "gap": gap,
+        "grid_shape": [rows, cols],
+        "grid_bounds": grid_bounds,
+    }
+    if prob_comp_len > 0 and rows > 0 and cols > 0 and len(data) >= header_end + prob_comp_len:
+        prob_slice = data[header_end : header_end + prob_comp_len]
+        if prob_comp_len < prob_raw_len:
+            try:
+                prob_raw = zlib.decompress(prob_slice)
+            except Exception:
+                prob_raw = prob_slice
+        else:
+            prob_raw = prob_slice
+        prob_u8 = np.frombuffer(prob_raw, dtype=np.uint8).reshape((rows, cols))
+        pkt["prob_map"] = prob_u8.astype(np.float32) / 255.0
+
+    if haz_comp_len > 0 and rows > 0 and cols > 0 and len(data) >= header_end + prob_comp_len + haz_comp_len:
+        haz_slice = data[header_end + prob_comp_len : header_end + prob_comp_len + haz_comp_len]
+        if haz_comp_len < haz_raw_len:
+            try:
+                haz_raw = zlib.decompress(haz_slice)
+            except Exception:
+                haz_raw = haz_slice
+        else:
+            haz_raw = haz_slice
+        haz_u8 = np.frombuffer(haz_raw, dtype=np.uint8).reshape((rows, cols))
+        pkt["hazard_mask"] = haz_u8
+
+    pkt.update(meta)
+    return pkt
+
+
 # ==============================================================================
 # 2. MAIN COMPREHENSIVE GUI WINDOW & TUNER
 # ==============================================================================
@@ -1540,114 +1648,6 @@ class ComprehensivePlannerGUI(QMainWindow):
             if min_overall < 900.0:
                 format_card(self.lbl_card_min, min_overall)
 
-def parse_binary_packet(data: bytes) -> Optional[dict]:
-    """Decodes compact binary telemetry packet received from Pi 4 or Webots streaming bridge."""
-    if len(data) < 232 or data[:4] != b"FOLK":
-        return None
-    header_fmt = "<4s I I d 16f 4f 4f 16f 3f 2H 4f 5I"
-    try:
-        fields = struct.unpack_from(header_fmt, data, 0)
-    except Exception:
-        return None
-
-    time_step = fields[2]
-    ts = fields[3]
-    sim_time = fields[4]
-    v_cmd = fields[5]
-    v_real = fields[6]
-    steer_cmd_deg = fields[7]
-    steer_actual_deg = fields[8]
-    yaw_deg = fields[9]
-    pitch_deg = fields[10]
-    roll_deg = fields[11]
-    gyro_z = fields[12]
-    accel_fwd = fields[13]
-    accel_lat = fields[14]
-    slip_ratio = fields[15]
-    f_tof = fields[16]
-    plan_ms = fields[17]
-    map_ms = fields[18]
-    scout_ms = fields[19]
-    rpms_cmd = list(fields[20:24])
-    rpms_act = list(fields[24:28])
-    tof_ranges = list(fields[28:44])
-    gap = list(fields[44:47])
-    rows = fields[47]
-    cols = fields[48]
-    grid_bounds = list(fields[49:53])
-    prob_comp_len = fields[53]
-    prob_raw_len = fields[54]
-    haz_comp_len = fields[55]
-    haz_raw_len = fields[56]
-    meta_len = fields[57]
-
-    header_end = 232
-    meta = {}
-    if meta_len > 0 and len(data) >= header_end + prob_comp_len + haz_comp_len + meta_len:
-        try:
-            meta_raw = data[header_end + prob_comp_len + haz_comp_len : header_end + prob_comp_len + haz_comp_len + meta_len]
-            meta = json.loads(meta_raw.decode("utf-8"))
-        except Exception:
-            pass
-
-    pkt = {
-        "time_step": time_step,
-        "timestamp": ts,
-        "sim_time": sim_time,
-        "v_cmd": v_cmd,
-        "v_tgt": v_cmd,
-        "v_real": v_real,
-        "v_est": v_real,
-        "steer_cmd_deg": steer_cmd_deg,
-        "steer_deg": steer_cmd_deg,
-        "steer_actual_deg": steer_actual_deg,
-        "yaw_deg": yaw_deg,
-        "pitch_deg": pitch_deg,
-        "roll_deg": roll_deg,
-        "gyro_z": gyro_z,
-        "accel_fwd": accel_fwd,
-        "accel_lat": accel_lat,
-        "slip_ratio": slip_ratio,
-        "f_tof": f_tof,
-        "plan_ms": plan_ms,
-        "map_ms": map_ms,
-        "scout_ms": scout_ms,
-        "rpms_cmd": rpms_cmd,
-        "rpms_act": rpms_act,
-        "tof_ranges": tof_ranges,
-        "tof": {FRONT_TOF_SENSOR_RIG[i][0]: tof_ranges[i] for i in range(min(len(FRONT_TOF_SENSOR_RIG), len(tof_ranges)))},
-        "gap": gap,
-        "grid_shape": [rows, cols],
-        "grid_bounds": grid_bounds,
-    }
-    if prob_comp_len > 0 and rows > 0 and cols > 0 and len(data) >= header_end + prob_comp_len:
-        prob_slice = data[header_end : header_end + prob_comp_len]
-        if prob_comp_len < prob_raw_len:
-            try:
-                prob_raw = zlib.decompress(prob_slice)
-            except Exception:
-                prob_raw = prob_slice
-        else:
-            prob_raw = prob_slice
-        prob_u8 = np.frombuffer(prob_raw, dtype=np.uint8).reshape((rows, cols))
-        pkt["prob_map"] = prob_u8.astype(np.float32) / 255.0
-
-    if haz_comp_len > 0 and rows > 0 and cols > 0 and len(data) >= header_end + prob_comp_len + haz_comp_len:
-        haz_slice = data[header_end + prob_comp_len : header_end + prob_comp_len + haz_comp_len]
-        if haz_comp_len < haz_raw_len:
-            try:
-                haz_raw = zlib.decompress(haz_slice)
-            except Exception:
-                haz_raw = haz_slice
-        else:
-            haz_raw = haz_slice
-        haz_u8 = np.frombuffer(haz_raw, dtype=np.uint8).reshape((rows, cols))
-        pkt["hazard_mask"] = haz_u8
-
-    pkt.update(meta)
-    return pkt
-
-
     def _udp_worker(self):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -1862,7 +1862,7 @@ def parse_binary_packet(data: bytes) -> Optional[dict]:
                 if self._local_costmap is not None:
                     try:
                         tof_data = pkt.get("tof") or pkt.get("tof_ranges")
-                        prob_map, hazard_mask, _ = self._local_costmap.process_tof_frame(tof_data)
+                        prob_map, hazard_mask, _ = self._local_costmap.update(tof_data)
                     except Exception:
                         pass
 

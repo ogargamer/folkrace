@@ -28,6 +28,7 @@ import socket
 import struct
 import shutil
 import threading
+import queue
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from typing import Dict, List, Optional, Any, Set, Tuple
@@ -79,10 +80,24 @@ class DebugServerState:
         # Persistent WebSocket streaming clients
         self.ws_clients: Set[socket.socket] = set()
         self.ws_lock = threading.Lock()
+        self.ws_queue: queue.Queue = queue.Queue(maxsize=15)
+        # Dedicated WebSocket broadcast thread offloads all TCP client I/O from UDP telemetry ingestion
+        self._ws_thread = threading.Thread(target=self._ws_broadcast_worker, daemon=True, name="WSBroadcaster")
+        self._ws_thread.start()
         # Disk stats cache (avoid blocking on SD card stat every 2s)
         self._last_disk_check: float = 0.0
         self._cached_disk_free: float = 0.0
         self._cached_db_size: float = 0.0
+
+    def _ws_broadcast_worker(self):
+        while True:
+            try:
+                payload = self.ws_queue.get()
+                if payload is None:
+                    break
+                self._send_ws_payload(payload)
+            except Exception:
+                pass
 
     def register_client_target(self, target: Tuple[str, int]):
         with self.lock:
@@ -97,6 +112,15 @@ class DebugServerState:
             self.ws_clients.discard(sock)
 
     def broadcast_ws_binary(self, payload: bytes):
+        """Asynchronously dispatches live binary frame without stalling UDP listener."""
+        try:
+            if self.ws_queue.full():
+                _ = self.ws_queue.get_nowait()
+            self.ws_queue.put_nowait(payload)
+        except Exception:
+            pass
+
+    def _send_ws_payload(self, payload: bytes):
         with self.ws_lock:
             if not self.ws_clients:
                 return
@@ -114,8 +138,12 @@ class DebugServerState:
         dead = []
         for s in clients:
             try:
+                s.settimeout(0.20)  # 200ms ceiling tolerates temporary Wi-Fi retries
                 s.sendall(frame)
-            except Exception:
+            except (socket.timeout, TimeoutError):
+                # Temporary Wi-Fi lag; don't disconnect the client
+                pass
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
                 dead.append(s)
 
         if dead:
@@ -431,6 +459,7 @@ class DebugHTTPRequestHandler(BaseHTTPRequestHandler):
         )
         sock = self.connection
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        sock.settimeout(0.2)
         sock.sendall(handshake.encode("utf-8"))
 
         STATE.register_ws_client(sock)
@@ -442,17 +471,21 @@ class DebugHTTPRequestHandler(BaseHTTPRequestHandler):
 
         try:
             while True:
-                data = sock.recv(1024)
-                if not data:
-                    break
-                # Close frame
-                if (data[0] & 0x0F) == 0x08:
-                    break
-                # Ping frame -> reply pong
-                elif (data[0] & 0x0F) == 0x09:
-                    pong = bytearray(data)
-                    pong[0] = (pong[0] & 0xF0) | 0x0A
-                    sock.sendall(pong)
+                try:
+                    data = sock.recv(1024)
+                    if not data:
+                        break
+                    # Close frame
+                    if (data[0] & 0x0F) == 0x08:
+                        break
+                    # Ping frame -> reply pong
+                    elif (data[0] & 0x0F) == 0x09:
+                        pong = bytearray(data)
+                        pong[0] = (pong[0] & 0xF0) | 0x0A
+                        sock.sendall(pong)
+                except (socket.timeout, TimeoutError):
+                    # Telemetry clients stream downlink; lack of uplink frames is normal
+                    continue
         except Exception:
             pass
         finally:
@@ -608,6 +641,11 @@ def udp_listener_worker():
     """
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    # 2 MB socket receive buffer prevents kernel drops during peak burst traffic
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 2097152)
+    except Exception:
+        pass
 
     try:
         sock.bind((HOST_BIND, PORT_UDP_RECV))

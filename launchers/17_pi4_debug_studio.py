@@ -13,11 +13,12 @@
       terminal telemetry monitoring (--stream), and log downloading (--download).
 
   Usage:
-    python launchers/17_pi4_debug_studio.py              # Connects, shows status & opens Web GUI
+    python launchers/17_pi4_debug_studio.py              # Connects, registers UDP & launches native PyQt5 GUI
+    python launchers/17_pi4_debug_studio.py --browser    # Opens browser-based Tactical Mission Control
+    python launchers/17_pi4_debug_studio.py --measure-browser # Measures client browser latency & stream jitter
     python launchers/17_pi4_debug_studio.py --verify     # Tests all Pi server endpoints
     python launchers/17_pi4_debug_studio.py --stream     # Live terminal telemetry dashboard
     python launchers/17_pi4_debug_studio.py --download   # Downloads active SQLite flight log
-    python launchers/17_pi4_debug_studio.py --desktop    # Launches native desktop PyQt5 GUI
     python launchers/17_pi4_debug_studio.py --restart    # Restarts remote Folkrace service
     python launchers/17_pi4_debug_studio.py --sync       # Syncs pi4 code to robot before launch
 ================================================================================
@@ -351,12 +352,14 @@ def main():
     parser.add_argument("--verify", action="store_true", help="Run full automated verification of all server endpoints")
     parser.add_argument("--stream", action="store_true", help="Stream live telemetry dashboard in terminal")
     parser.add_argument("--download", action="store_true", help="Download current SQLite black box flight database")
-    parser.add_argument("--desktop", action="store_true", help="Launch native PyQt5 desktop GUI")
+    parser.add_argument("--desktop", action="store_true", help="Launch native PyQt5 desktop GUI (default)")
+    parser.add_argument("--browser", "--web", dest="browser", action="store_true", help="Open browser Tactical Mission Control instead of native PyQt5 GUI")
     parser.add_argument("--profile", action="store_true", help="Run GUI & telemetry performance profiler and benchmark")
+    parser.add_argument("--measure-browser", action="store_true", help="Run browser latency and stream jitter benchmark")
     parser.add_argument("--restart", action="store_true", help="Restart remote folkrace systemd service via SSH")
     parser.add_argument("--stop", action="store_true", help="Stop remote folkrace service")
     parser.add_argument("--sync", action="store_true", help="Sync latest code to Pi 4")
-    parser.add_argument("--no-browser", action="store_true", help="Do not automatically open web browser")
+    parser.add_argument("--no-browser", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
 
     print("=" * 75)
@@ -415,12 +418,14 @@ def main():
         run_full_verification(base_url, ssh_host=active_host if "robot" in active_host else "robot")
         return
 
-    if args.profile:
+    if args.profile or args.measure_browser:
         tools_dir = os.path.join(ROOT_DIR, "tools")
         if tools_dir not in sys.path:
             sys.path.insert(0, tools_dir)
-        from gui_profiler import profile_pi4_studio
-        profile_pi4_studio(host=active_host)
+        import measure_browser_latency
+        ws_res = measure_browser_latency.benchmark_websocket_stream(host=active_host, duration_s=8.0)
+        http_res = measure_browser_latency.benchmark_http_polling(base_url=base_url, duration_s=5.0)
+        measure_browser_latency.print_comparison_report(ws_res, http_res)
         return
 
     if args.download:
@@ -431,26 +436,29 @@ def main():
         stream_telemetry_console(base_url)
         return
 
-    if args.desktop:
-        if not os.path.exists(PLANNER_GUI_SCRIPT):
-            print(f"[Error] Desktop GUI not found at: {PLANNER_GUI_SCRIPT}")
-            sys.exit(1)
-        if base_url:
-            try:
-                reg_resp = query_api_json(base_url, "/api/register_client", timeout_s=1.5)
-                if reg_resp:
-                    print(f"[Launcher] Registered this workstation for direct 60 Hz UDP telemetry from {active_host}")
-            except Exception:
-                pass
-        print("[Launcher] Launching native PyQt5 Desktop GUI...")
-        cmd = [sys.executable, PLANNER_GUI_SCRIPT]
-        sys.exit(subprocess.run(cmd, cwd=CONTROLLERS_DIR).returncode)
-
-    # Default action: Open browser
-    if not args.no_browser:
+    if args.browser:
         print(f"[Launcher] Opening Web Tactical Debugger in browser: {base_url}")
         webbrowser.open(base_url)
+        print("=" * 75)
+        return
+
+    # Default action: Launch native PyQt5 Desktop GUI
+    if not os.path.exists(PLANNER_GUI_SCRIPT):
+        print(f"[Error] Desktop GUI not found at: {PLANNER_GUI_SCRIPT}")
+        sys.exit(1)
+
+    if base_url:
+        try:
+            reg_resp = query_api_json(base_url, "/api/register_client", timeout_s=1.5)
+            if reg_resp:
+                print(f"[Launcher] Registered this workstation for direct binary UDP telemetry from {active_host}")
+        except Exception:
+            pass
+
+    print("[Launcher] Launching native PyQt5 Desktop GUI (hardware-accelerated, zero-overhead UDP)...")
     print("=" * 75)
+    cmd = [sys.executable, PLANNER_GUI_SCRIPT]
+    sys.exit(subprocess.run(cmd, cwd=CONTROLLERS_DIR).returncode)
 
 
 if __name__ == "__main__":

@@ -24,8 +24,12 @@ import socket
 import csv
 import queue
 import threading
+import gc
 from typing import Dict, List, Optional, Any
 import numpy as np
+
+# Tune Python GC to prevent mid-frame garbage collection pauses on Core 1
+gc.set_threshold(50000, 50, 50)
 
 # Ensure pi4 folder is in sys.path
 CURR_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -51,6 +55,8 @@ from planner_config import (
 
 TARGET_HZ = 60.0
 DT_STEP = 1.0 / TARGET_HZ
+TELEM_HZ = 20.0
+TELEM_DECIMATION = int(round(TARGET_HZ / TELEM_HZ))  # Exactly 20 Hz (1 frame per 3 control steps)
 DEBUG_UDP_PORT = int(os.environ.get("DEBUG_UDP_PORT", 9876))
 DEBUG_UDP_HOST = os.environ.get("DEBUG_UDP_HOST", "127.0.0.1")
 SENSOR_UDP_PORT = int(os.environ.get("SENSOR_UDP_PORT", 9875))
@@ -96,11 +102,10 @@ def run_path_planner():
     planner.costmap = costmap
 
     # 3. Setup Non-Blocking UDP Telemetry Dispatcher & Live Sensor Receiver
-    telem_sock = create_nonblocking_udp_socket()
     target_addr = (DEBUG_UDP_HOST, DEBUG_UDP_PORT)
 
     # Lightweight Telemetry Dispatch Worker: offloads JSON dumping and UDP socket I/O to Core 2/3
-    telem_queue = queue.Queue(maxsize=2)
+    telem_queue = queue.Queue(maxsize=30)
 
     def telemetry_worker():
         try:
@@ -108,13 +113,21 @@ def run_path_planner():
         except Exception:
             pass
 
+        # Dedicated background sender socket with 2MB send buffer and safe timeout
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 2097152)
+        except Exception:
+            pass
+        sock.settimeout(0.05)
+
         while True:
             try:
                 telem_dict = telem_queue.get()
                 if telem_dict is None:
                     break
                 pkt_bytes = json.dumps(telem_dict).encode("utf-8")
-                telem_sock.sendto(pkt_bytes, target_addr)
+                sock.sendto(pkt_bytes, target_addr)
             except Exception:
                 pass
 
@@ -138,6 +151,14 @@ def run_path_planner():
 
     step_counter = 0
     sim_time = 0.0
+
+    # Windowed metrics accumulation for consistent 20 Hz telemetry reporting
+    win_step_ms_max = 0.0
+    win_plan_ms_max = 0.0
+    win_map_ms_max = 0.0
+    win_scout_ms_max = 0.0
+    win_step_ms_sum = 0.0
+    win_count = 0
 
     # Kinematic tracking states
     v_actual = 0.0
@@ -215,7 +236,7 @@ def run_path_planner():
                 yaw_rate_current=yaw_rate_current,
                 extra_targets=getattr(gap_scout, "last_targets", None),
                 t_frame_start=t_step_start,
-                frame_budget_ms=15.5,
+                frame_budget_ms=13.0,
             )
             t_plan_ms = (time.perf_counter() - t0) * 1000.0
 
@@ -231,6 +252,9 @@ def run_path_planner():
             rpm_fr_cmd = base_rpm * (1.0 + ackermann_factor)
             rpm_rl_cmd = base_rpm * (1.0 - ackermann_factor * 0.5)
             rpm_rr_cmd = base_rpm * (1.0 + ackermann_factor * 0.5)
+
+            # True closed-loop control actuation latency (from ToF receipt to motor commands)
+            t_ctrl_ms = (time.perf_counter() - t_step_start) * 1000.0
 
             # Ingest MCU feedback (prefer latest frame, fallback to last valid hardware frame)
             active_mcu = latest_mcu_pkt or last_mcu_pkt
@@ -272,76 +296,99 @@ def run_path_planner():
                 pitch_deg_val = 0.0
                 roll_deg_val = 0.0
 
-            # 5. Extract target coordinates for telemetry
-            g_targets = [
-                [round(float(tgt[0]), 3), round(float(tgt[1]), 3), round(float(tgt[2]), 3)]
-                for tgt in (getattr(gap_scout, "last_targets", []) or [])
-                if isinstance(tgt, (list, tuple)) and len(tgt) >= 3
-            ]
+            # 5. Measure computational step latency & accumulate window metrics
+            t_total_ms = t_ctrl_ms
 
-            # 6. Compose Real-Time Telemetry Packet (True computational step latency)
-            t_total_ms = (time.perf_counter() - t_step_start) * 1000.0
+            win_step_ms_max = max(win_step_ms_max, t_ctrl_ms)
+            win_plan_ms_max = max(win_plan_ms_max, t_plan_ms)
+            win_map_ms_max = max(win_map_ms_max, t_map_ms)
+            win_scout_ms_max = max(win_scout_ms_max, t_scout_ms)
+            win_step_ms_sum += t_ctrl_ms
+            win_count += 1
 
-            telemetry = {
-                "time_step": step_counter,
-                "timestamp": time.time(),
-                "sim_time": round(sim_time, 3),
-                "mode": "DRIVE",
-                "recovery_state": "DRIVE",
-                "escape_state": "NORMAL",
-                "status": opt_res.get("status", "OK"),
-                "v_cmd": round(v_cmd, 2),
-                "v_tgt": round(v_cmd, 2),
-                "v_real": round(v_actual, 2),
-                "v_est": round(v_actual, 2),
-                "steer_cmd_deg": round(steer_cmd_deg, 1),
-                "steer_deg": round(steer_cmd_deg, 1),
-                "steer_actual_deg": round(steer_actual_deg, 1),
-                "rpms_cmd": [round(rpm_fl_cmd, 1), round(rpm_fr_cmd, 1), round(rpm_rl_cmd, 1), round(rpm_rr_cmd, 1)],
-                "rpms_act": [round(rpm_fl_act, 1), round(rpm_fr_act, 1), round(rpm_rl_act, 1), round(rpm_rr_act, 1)],
-                "yaw_deg": round(yaw_deg_val, 1),
-                "pitch_deg": round(pitch_deg_val, 1),
-                "roll_deg": round(roll_deg_val, 1),
-                "gyro_z": round(gyro_z, 3),
-                "accel_fwd": round(accel_fwd, 2),
-                "accel_lat": round(accel_lat, 2),
-                "slip_state": slip_state_str,
-                "slip_ratio": round(slip_ratio_val, 2),
-                "flags": mcu_flags,
-                "mcu_msg": latest_mcu_pkt.get("mcu_msg", "") if latest_mcu_pkt else "",
-                "mcu_log": latest_mcu_pkt.get("mcu_log", []) if latest_mcu_pkt else [],
-                "f_tof": round(float(min(comp_tof.values())), 3),
-                "tof": {k: round(v, 3) for k, v in comp_tof.items()},
-                "tof_ranges": [round(comp_tof.get(k, 1.8), 3) for k in SENSOR_NAMES],
-                "tof_ranges_raw": [round(raw_tof.get(k, 1.8), 3) for k in SENSOR_NAMES],
-                "gap": [round(xg, 3), round(yg, 3), round(width, 3)],
-                "targets": g_targets,
-                "best_line": opt_res.get("best_line", []),
-                "candidate_lines": opt_res.get("candidate_lines", [])[:16],
-                "guide_line": opt_res.get("guide_line", []),
-                "corridor_left": opt_res.get("corridor_left", []),
-                "corridor_right": opt_res.get("corridor_right", []),
-                "shield": opt_res.get("shield", {}),
-                "plan_ms": round(t_plan_ms, 2),
-                "map_ms": round(t_map_ms, 2),
-                "scout_ms": round(t_scout_ms, 2),
-                "opt_prim_ms": round(float(opt_res.get("opt_prim_ms", 0.0)), 2),
-                "opt_alt_ms": round(float(opt_res.get("opt_alt_ms", 0.0)), 2),
-                "opt_shield_ms": round(float(opt_res.get("opt_shield_ms", 0.0)), 2),
-                "step_ms": round(t_total_ms, 2),
-                "iters_prim": int(opt_res.get("osqp_iters", 12)),
-                "iters_alt": int(opt_res.get("osqp_iters_alt", 0)),
-                "grid_shape": [int(s) for s in costmap.shape],
-                "grid_bounds": [GRID_X_MIN, GRID_X_MAX, GRID_Y_MIN, GRID_Y_MAX],
-            }
+            # 6. Compose & Dispatch Telemetry at exact 20 Hz (every 3rd 60 Hz step)
+            if step_counter % TELEM_DECIMATION == 0:
+                g_targets = [
+                    [round(float(tgt[0]), 3), round(float(tgt[1]), 3), round(float(tgt[2]), 3)]
+                    for tgt in (getattr(gap_scout, "last_targets", []) or [])
+                    if isinstance(tgt, (list, tuple)) and len(tgt) >= 3
+                ]
 
-            # 7. Non-blocking handoff to background worker (<0.005ms latency, never stalls Core 1)
-            try:
-                if telem_queue.full():
-                    _ = telem_queue.get_nowait()
-                telem_queue.put_nowait(telemetry)
-            except Exception:
-                pass
+                avg_step_ms = win_step_ms_sum / max(1, win_count)
+
+                telemetry = {
+                    "time_step": step_counter,
+                    "timestamp": time.time(),
+                    "sim_time": round(sim_time, 3),
+                    "mode": "DRIVE",
+                    "recovery_state": "DRIVE",
+                    "escape_state": "NORMAL",
+                    "status": opt_res.get("status", "OK"),
+                    "v_cmd": round(v_cmd, 2),
+                    "v_tgt": round(v_cmd, 2),
+                    "v_real": round(v_actual, 2),
+                    "v_est": round(v_actual, 2),
+                    "steer_cmd_deg": round(steer_cmd_deg, 1),
+                    "steer_deg": round(steer_cmd_deg, 1),
+                    "steer_actual_deg": round(steer_actual_deg, 1),
+                    "rpms_cmd": [round(rpm_fl_cmd, 1), round(rpm_fr_cmd, 1), round(rpm_rl_cmd, 1), round(rpm_rr_cmd, 1)],
+                    "rpms_act": [round(rpm_fl_act, 1), round(rpm_fr_act, 1), round(rpm_rl_act, 1), round(rpm_rr_act, 1)],
+                    "yaw_deg": round(yaw_deg_val, 1),
+                    "pitch_deg": round(pitch_deg_val, 1),
+                    "roll_deg": round(roll_deg_val, 1),
+                    "gyro_z": round(gyro_z, 3),
+                    "accel_fwd": round(accel_fwd, 2),
+                    "accel_lat": round(accel_lat, 2),
+                    "slip_state": slip_state_str,
+                    "slip_ratio": round(slip_ratio_val, 2),
+                    "flags": mcu_flags,
+                    "mcu_msg": latest_mcu_pkt.get("mcu_msg", "") if latest_mcu_pkt else "",
+                    "mcu_log": latest_mcu_pkt.get("mcu_log", []) if latest_mcu_pkt else [],
+                    "f_tof": round(float(min(comp_tof.values())), 3),
+                    "tof": {k: round(v, 3) for k, v in comp_tof.items()},
+                    "tof_ranges": [round(comp_tof.get(k, 1.8), 3) for k in SENSOR_NAMES],
+                    "tof_ranges_raw": [round(raw_tof.get(k, 1.8), 3) for k in SENSOR_NAMES],
+                    "gap": [round(xg, 3), round(yg, 3), round(width, 3)],
+                    "targets": g_targets,
+                    "best_line": opt_res.get("best_line", []),
+                    "candidate_lines": opt_res.get("candidate_lines", [])[:16],
+                    "guide_line": opt_res.get("guide_line", []),
+                    "corridor_left": opt_res.get("corridor_left", []),
+                    "corridor_right": opt_res.get("corridor_right", []),
+                    "shield": opt_res.get("shield", {}),
+                    "plan_ms": round(t_plan_ms, 2),
+                    "map_ms": round(t_map_ms, 2),
+                    "scout_ms": round(t_scout_ms, 2),
+                    "plan_ms_max": round(win_plan_ms_max, 2),
+                    "map_ms_max": round(win_map_ms_max, 2),
+                    "scout_ms_max": round(win_scout_ms_max, 2),
+                    "opt_prim_ms": round(float(opt_res.get("opt_prim_ms", 0.0)), 2),
+                    "opt_alt_ms": round(float(opt_res.get("opt_alt_ms", 0.0)), 2),
+                    "opt_shield_ms": round(float(opt_res.get("opt_shield_ms", 0.0)), 2),
+                    "step_ms": round(t_total_ms, 2),
+                    "step_ms_avg": round(avg_step_ms, 2),
+                    "step_ms_max": round(win_step_ms_max, 2),
+                    "iters_prim": int(opt_res.get("osqp_iters", 12)),
+                    "iters_alt": int(opt_res.get("osqp_iters_alt", 0)),
+                    "grid_shape": [int(s) for s in costmap.shape],
+                    "grid_bounds": [GRID_X_MIN, GRID_X_MAX, GRID_Y_MIN, GRID_Y_MAX],
+                }
+
+                # Reset window metrics
+                win_step_ms_max = 0.0
+                win_plan_ms_max = 0.0
+                win_map_ms_max = 0.0
+                win_scout_ms_max = 0.0
+                win_step_ms_sum = 0.0
+                win_count = 0
+
+                # 7. Non-blocking handoff to background worker (<0.005ms latency, never stalls Core 1)
+                try:
+                    if telem_queue.full():
+                        _ = telem_queue.get_nowait()
+                    telem_queue.put_nowait(telemetry)
+                except Exception:
+                    pass
 
             # 8. Deterministic 60 Hz Rate Keeper
             t_loop_next += DT_STEP
