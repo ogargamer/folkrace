@@ -418,6 +418,8 @@ class CppCurvilinearSLMPC:
         x0: float = 0.0,
         y0: float = 0.0,
         psi0: float = 0.0,
+        t_frame_start: Optional[float] = None,
+        frame_budget_ms: float = 15.5,
     ) -> Dict[str, any]:
         """
         Solves the Curvilinear SL-MPC QP using high-speed native C++ core.
@@ -541,48 +543,65 @@ class CppCurvilinearSLMPC:
             has_sep = (math.hypot(tx_alt - tx_prim, ty_alt - ty_prim) >= min_sep or abs(tx_alt - tx_prim) >= (min_sep * 0.7))
 
             if has_sep:
-                has_challenger = True
-                full_budget = (
-                    (status_prim not in (0, 1)) or
-                    (is_clear_alt and not is_clear_prim) or
-                    (t_prim_ms < 3.2 and iters_prim <= 15)
-                )
-                max_iter_alt = 20 if full_budget else 1
-                if hasattr(_lib, "sl_mpc_set_max_iter"):
-                    _lib.sl_mpc_set_max_iter(self._handle_alt, max_iter_alt)
-                t_alt_0 = time.perf_counter()
-                theta_alt = math.atan2(tx_alt - x0, max(0.20, ty_alt - y0))
-                if hasattr(_lib, "sl_mpc_plan_projected"):
-                    _lib.sl_mpc_plan_projected(
-                        self._handle_alt,
-                        float(tx_alt), float(ty_alt), float(theta_alt), float(ap_alt),
-                        float(v_current), float(steer_current), float(yaw_rate_current),
-                        float(x0), float(y0), float(psi0),
-                        ctypes.byref(self._out_steer),
-                        ctypes.byref(self._out_speed),
-                        ctypes.byref(self._out_best_cost),
-                        ctypes.byref(self._out_osqp_iters),
-                        ctypes.byref(self._out_status_code),
-                    )
+                # Real-time budget tracking: measure total time elapsed since frame began (perception + costmap + scout + prim MPC)
+                # Calling time.perf_counter() on ARM64 Linux vDSO takes ~40ns (zero measurable overhead).
+                t_check = time.perf_counter()
+                elapsed_so_far_ms = ((t_check - t_frame_start) * 1000.0) if t_frame_start is not None else t_prim_ms
+                budget_remaining_ms = frame_budget_ms - elapsed_so_far_ms
+
+                # Emergency override: if primary failed/compromised, challenger must evaluate to prevent a collision
+                primary_compromised = (status_prim not in (0, 1))
+                tactical_bypass = (is_clear_alt and not is_clear_prim)
+
+                # Challenger requires ~4.0ms entry fee (7,729 corridor probes) + OSQP solve time:
+                # - Full budget (20 iters, ~4.8ms): if budget_remaining >= 5.5ms or tactical bypass
+                # - Single iter (1 iter, ~4.0ms): if budget_remaining >= 4.2ms or emergency
+                # - If budget_remaining < 4.2ms: SKIP challenger to protect 60 Hz deadline!
+                if budget_remaining_ms >= 5.5 or tactical_bypass:
+                    has_challenger = True
+                    max_iter_alt = 20
+                elif budget_remaining_ms >= 4.2 or primary_compromised:
+                    has_challenger = True
+                    max_iter_alt = 1
                 else:
-                    _lib.sl_mpc_plan(
-                        self._handle_alt,
-                        float(tx_alt), float(ty_alt), float(theta_alt), float(ap_alt),
-                        float(v_current), float(steer_current), float(yaw_rate_current),
-                        ctypes.byref(self._out_steer),
-                        ctypes.byref(self._out_speed),
-                        ctypes.byref(self._out_best_cost),
-                        ctypes.byref(self._out_osqp_iters),
-                        ctypes.byref(self._out_status_code),
-                    )
-                status_alt = self._out_status_code.value
-                iters_alt = int(self._out_osqp_iters.value)
-                cmd_steer_alt = float(self._out_steer.value)
-                cmd_speed_alt = float(self._out_speed.value)
-                cost_alt = float(self._out_best_cost.value)
-                n_best_alt = _lib.sl_mpc_get_best_line(self._handle_alt, self._buf_xs1, self._buf_ys1, self._max_pts)
-                best_line_alt = [[float(self._buf_xs1[i]), float(self._buf_ys1[i])] for i in range(n_best_alt)]
-                t_alt_ms = (time.perf_counter() - t_alt_0) * 1000.0
+                    has_challenger = False
+
+                if has_challenger:
+                    if hasattr(_lib, "sl_mpc_set_max_iter"):
+                        _lib.sl_mpc_set_max_iter(self._handle_alt, max_iter_alt)
+                    t_alt_0 = time.perf_counter()
+                    theta_alt = math.atan2(tx_alt - x0, max(0.20, ty_alt - y0))
+                    if hasattr(_lib, "sl_mpc_plan_projected"):
+                        _lib.sl_mpc_plan_projected(
+                            self._handle_alt,
+                            float(tx_alt), float(ty_alt), float(theta_alt), float(ap_alt),
+                            float(v_current), float(steer_current), float(yaw_rate_current),
+                            float(x0), float(y0), float(psi0),
+                            ctypes.byref(self._out_steer),
+                            ctypes.byref(self._out_speed),
+                            ctypes.byref(self._out_best_cost),
+                            ctypes.byref(self._out_osqp_iters),
+                            ctypes.byref(self._out_status_code),
+                        )
+                    else:
+                        _lib.sl_mpc_plan(
+                            self._handle_alt,
+                            float(tx_alt), float(ty_alt), float(theta_alt), float(ap_alt),
+                            float(v_current), float(steer_current), float(yaw_rate_current),
+                            ctypes.byref(self._out_steer),
+                            ctypes.byref(self._out_speed),
+                            ctypes.byref(self._out_best_cost),
+                            ctypes.byref(self._out_osqp_iters),
+                            ctypes.byref(self._out_status_code),
+                        )
+                    status_alt = self._out_status_code.value
+                    iters_alt = int(self._out_osqp_iters.value)
+                    cmd_steer_alt = float(self._out_steer.value)
+                    cmd_speed_alt = float(self._out_speed.value)
+                    cost_alt = float(self._out_best_cost.value)
+                    n_best_alt = _lib.sl_mpc_get_best_line(self._handle_alt, self._buf_xs1, self._buf_ys1, self._max_pts)
+                    best_line_alt = [[float(self._buf_xs1[i]), float(self._buf_ys1[i])] for i in range(n_best_alt)]
+                    t_alt_ms = (time.perf_counter() - t_alt_0) * 1000.0
 
         # ----------------------------------------------------------------------
         # 3. ARBITRATION BETWEEN INCUMBENT AND CHALLENGER

@@ -242,6 +242,8 @@ def run_physical_pi_benchmark():
             steer_current=steer_curr,
             yaw_rate_current=yaw_rate_curr,
             extra_targets=getattr(gap_scout, "last_targets", None),
+            t_frame_start=time.perf_counter(),
+            frame_budget_ms=15.5,
         )
 
     # Benchmark Measurement across all frames
@@ -282,6 +284,8 @@ def run_physical_pi_benchmark():
             steer_current=steer_curr,
             yaw_rate_current=yaw_rate_curr,
             extra_targets=getattr(gap_scout, "last_targets", None),
+            t_frame_start=t_start_total / 1e9,
+            frame_budget_ms=15.5,
         )
         t_sl_mpc_us = (time.perf_counter_ns() - t0) / 1000.0
 

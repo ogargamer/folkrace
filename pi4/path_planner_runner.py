@@ -212,6 +212,8 @@ def run_path_planner():
                 steer_current=steer_rad,
                 yaw_rate_current=yaw_rate_current,
                 extra_targets=getattr(gap_scout, "last_targets", None),
+                t_frame_start=t_step_start,
+                frame_budget_ms=15.5,
             )
             t_plan_ms = (time.perf_counter() - t0) * 1000.0
 
