@@ -82,7 +82,7 @@ static BNO08xIMU s_imu;
 #define s_piSerial Serial // Telemetry & Motion Commands routed directly over USB Serial cable
 
 // Global State
-static volatile bool s_fake_data_active = true; // Default to synthetic benchmark
+static volatile bool s_fake_data_active = false; // Default to live sensors (manual toggle only)
 static volatile float s_manual_v = 0.0f;
 static volatile float s_manual_steer = 0.0f;
 static volatile bool s_manual_override = false;
@@ -609,9 +609,8 @@ void setup() {
     // 3. Initialize BNO086 IMU over SPI2 (CS=10, INT=9, SCK=12, MOSI=11, MISO=13, RST=14)
     if (s_imu.begin(IMU_SPI_CS_PIN, IMU_SPI_MISO_PIN, IMU_SPI_MOSI_PIN, IMU_SPI_SCK_PIN, IMU_INT_PIN, IMU_RST_PIN)) {
         Serial.println(F("[+] BNO086 9-DOF IMU Connected over SPI2 Master."));
-        s_fake_data_active = false; // Real IMU online: engage live sensor pipeline
     } else {
-        Serial.println(F("[!] BNO086 IMU not detected. Running synthetic benchmark mode."));
+        Serial.println(F("[!] BNO086 IMU not detected. Operating in live mode without IMU."));
     }
 
     // 4. Pin Core 1 Task: Deterministic 400 Hz Real-Time Control & Kinematics (Priority 24)

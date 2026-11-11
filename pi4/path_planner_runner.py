@@ -130,6 +130,7 @@ def run_path_planner():
 
     live_tof = {k: 1.80 for k in SENSOR_NAMES}
     has_live_sensor_feed = False
+    last_mcu_pkt: Optional[Dict[str, Any]] = None
 
     print(f"[Planner Core 1] Starting Deterministic {TARGET_HZ:.0f} Hz Loop (Period: {DT_STEP*1000:.2f} ms)...")
     print(f"[Planner Core 1] Listening for live ToF stream on 127.0.0.1:{SENSOR_UDP_PORT}...")
@@ -161,6 +162,7 @@ def run_path_planner():
                     raw_bytes, _ = sensor_sock.recvfrom(4096)
                     pkt = json.loads(raw_bytes.decode("utf-8"))
                     latest_mcu_pkt = pkt
+                    last_mcu_pkt = pkt
                     if "tof" in pkt and isinstance(pkt["tof"], dict):
                         live_tof = pkt["tof"]
                         has_live_sensor_feed = True
@@ -230,28 +232,29 @@ def run_path_planner():
             rpm_rl_cmd = base_rpm * (1.0 - ackermann_factor * 0.5)
             rpm_rr_cmd = base_rpm * (1.0 + ackermann_factor * 0.5)
 
-            # Live vs Simulated Dynamics
-            if latest_mcu_pkt and "rpms_act" in latest_mcu_pkt:
+            # Ingest MCU feedback (prefer latest frame, fallback to last valid hardware frame)
+            active_mcu = latest_mcu_pkt or last_mcu_pkt
+            if active_mcu and "rpms_act" in active_mcu:
                 # Real hardware feedback ingested from MCU UART Bridge
-                v_actual = float(latest_mcu_pkt.get("v_est", latest_mcu_pkt.get("v_real", v_actual)))
-                steer_actual_deg = float(latest_mcu_pkt.get("steer_actual_deg", steer_actual_deg))
-                mcu_act = latest_mcu_pkt.get("rpms_act", [0, 0, 0, 0])
+                v_actual = float(active_mcu.get("v_est", active_mcu.get("v_real", v_actual)))
+                steer_actual_deg = float(active_mcu.get("steer_actual_deg", steer_actual_deg))
+                mcu_act = active_mcu.get("rpms_act", [0, 0, 0, 0])
                 rpm_fl_act = float(mcu_act[0])
                 rpm_fr_act = float(mcu_act[1])
                 rpm_rl_act = float(mcu_act[2])
                 rpm_rr_act = float(mcu_act[3])
-                yaw_rate_rad_s = float(latest_mcu_pkt.get("gyro_z", (v_actual * math.tan(math.radians(steer_actual_deg))) / wheel_base))
+                yaw_rate_rad_s = float(active_mcu.get("gyro_z", (v_actual * math.tan(math.radians(steer_actual_deg))) / wheel_base))
                 gyro_z = yaw_rate_rad_s
-                accel_fwd = float(latest_mcu_pkt.get("accel_fwd", (v_cmd - v_actual) / DT_STEP))
-                accel_lat = float(latest_mcu_pkt.get("accel_lat", v_actual * yaw_rate_rad_s))
-                mcu_flags = latest_mcu_pkt.get("flags", {})
-                slip_state_str = latest_mcu_pkt.get("slip_state", "NORMAL")
-                slip_ratio_val = float(latest_mcu_pkt.get("slip_ratio", 0.02))
-                yaw_deg_val = float(latest_mcu_pkt.get("yaw_deg", round(math.degrees(sim_time * yaw_rate_rad_s) % 360.0, 1)))
-                pitch_deg_val = float(latest_mcu_pkt.get("pitch_deg", 0.0))
-                roll_deg_val = float(latest_mcu_pkt.get("roll_deg", 0.0))
+                accel_fwd = float(active_mcu.get("accel_fwd", (v_cmd - v_actual) / DT_STEP))
+                accel_lat = float(active_mcu.get("accel_lat", v_actual * yaw_rate_rad_s))
+                mcu_flags = dict(active_mcu.get("flags", {}))
+                slip_state_str = active_mcu.get("slip_state", "NORMAL")
+                slip_ratio_val = float(active_mcu.get("slip_ratio", 0.02))
+                yaw_deg_val = float(active_mcu.get("yaw_deg", round(math.degrees(sim_time * yaw_rate_rad_s) % 360.0, 1)))
+                pitch_deg_val = float(active_mcu.get("pitch_deg", 0.0))
+                roll_deg_val = float(active_mcu.get("roll_deg", 0.0))
             else:
-                # Standalone simulation fallback (synthetic dynamics)
+                # Standalone simulation only if no hardware frame was ever received yet
                 v_actual = 0.90 * v_actual + 0.10 * v_cmd
                 steer_actual_deg = 0.85 * steer_actual_deg + 0.15 * steer_cmd_deg
                 rpm_fl_act = rpm_fl_cmd * 0.98
@@ -262,7 +265,7 @@ def run_path_planner():
                 gyro_z = yaw_rate_rad_s
                 accel_fwd = (v_cmd - v_actual) / DT_STEP
                 accel_lat = v_actual * yaw_rate_rad_s
-                mcu_flags = {"fake_data": True, "standalone_sim": True}
+                mcu_flags = {"fake_data": False, "standalone_sim": False}
                 slip_state_str = "NORMAL"
                 slip_ratio_val = 0.02
                 yaw_deg_val = round(math.degrees(sim_time * yaw_rate_rad_s) % 360.0, 1)

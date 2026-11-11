@@ -90,7 +90,7 @@ class BinaryStreamParser:
                         text_str = text_bytes.decode("utf-8", errors="ignore")
                         for line in text_str.splitlines():
                             line = line.strip()
-                            if line:
+                            if line and len(line) >= 3 and all(c.isprintable() or c in "\r\n\t" for c in line):
                                 yield ("TEXT", line)
                     except Exception:
                         pass
@@ -107,7 +107,7 @@ class BinaryStreamParser:
                             text_str = prefix.decode("utf-8", errors="ignore")
                             for line in text_str.splitlines():
                                 line = line.strip()
-                                if line:
+                                if line and len(line) >= 3 and all(c.isprintable() or c in "\r\n\t" for c in line):
                                     yield ("TEXT", line)
                         except Exception:
                             pass
@@ -170,20 +170,31 @@ def probe_port_role(port: str, baud: int = UART_BAUD) -> Optional[str]:
     if not HAS_SERIAL or not os.path.exists(port):
         return None
     try:
-        with serial.Serial(port, baud, timeout=0.15) as ser:
+        with serial.Serial(port, baud, timeout=0.2) as ser:
             ser.reset_input_buffer()
             # Send PING in case MCU is waiting in shell mode
             ser.write(b"PING\n")
-            time.sleep(0.05)
-            chunk = ser.read(256)
+            time.sleep(0.06)
+            chunk = ser.read(512)
             if b"PONG" in chunk:
                 return "main"
+            if b"FOLKRACE ESP32-S3" in chunk or b"STATUS REPORT" in chunk:
+                return "main"
+            if b"VL53L8CX" in chunk or b"RANGING" in chunk:
+                return "tof"
+
             idx = chunk.find(MCU_SYNC)
             if idx != -1 and len(chunk) > idx + 2:
                 msg_id = chunk[idx + 2]
-                if msg_id == MSG_ID_CHASSIS_TELEM:
-                    return "main"
-                elif 1 <= msg_id <= 4 or msg_id in (MSG_ID_TOF_TELEM, MSG_ID_TOF_SUB_TELEM):
+                if msg_id in (2, 3, 4) or msg_id in (MSG_ID_TOF_TELEM, MSG_ID_TOF_SUB_TELEM):
+                    return "tof"
+                elif msg_id == MSG_ID_CHASSIS_TELEM:
+                    # msg_id == 0x01 can be Chassis or ToF Sensor 1; query status to verify
+                    ser.write(b"STATUS\n")
+                    time.sleep(0.06)
+                    resp = ser.read(256)
+                    if b"FOLKRACE" in resp or b"STATUS" in resp or b"PONG" in resp:
+                        return "main"
                     return "tof"
     except Exception:
         pass

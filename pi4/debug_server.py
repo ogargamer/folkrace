@@ -650,13 +650,21 @@ def udp_listener_worker():
                 STATE._hz_counter = 0
                 STATE._last_hz_calc = now
 
-            is_planner = ("best_line" in pkt) or ("grid_data" in pkt) or ("v_cmd" in pkt)
+            is_planner = ("best_line" in pkt) or ("plan_ms" in pkt) or ("corridor_left" in pkt)
 
             with STATE.lock:
-                if is_planner or (now - STATE.last_planner_pkt_time > 1.0):
+                if is_planner:
                     STATE.latest_pkt = pkt
-                    if is_planner:
-                        STATE.last_planner_pkt_time = now
+                    STATE.last_planner_pkt_time = now
+                elif now - STATE.last_planner_pkt_time > 1.0:
+                    # Planner is offline: show direct MCU / bridge telemetry
+                    STATE.latest_pkt = pkt
+                else:
+                    # Planner is active: non-destructively merge fresh MCU telemetry fields
+                    for k in ("rpms_act", "flags", "mcu_msg", "mcu_log", "slip_state", "slip_ratio", "tof", "tof_ranges", "tof_ranges_raw", "f_tof"):
+                        if k in pkt:
+                            STATE.latest_pkt[k] = pkt[k]
+
                 STATE.last_pkt_time = now
                 STATE.invalidate_caches()
                 bin_data = STATE.get_cached_bin() if is_planner else None
