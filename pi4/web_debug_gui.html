@@ -1412,6 +1412,100 @@ function renderRadar(pkt) {
       }
       costmapCtx.putImageData(cachedCostmapImgData, 0, 0);
       rendered = true;
+    } else if (!rendered && (pkt.tof_ranges || pkt.tof)) {
+      // Fast Path C: Local 1:1 Vector Costmap Reconstruction from 16-ch ToF Ranges (Zero Pi Overhead!)
+      // Reconstructs free space drivable floor, obstacle hit surfaces, and C-space safety inflation locally on laptop
+      const ranges = pkt.tof_ranges || [];
+      const showHazard = isLayerOn("chkHazard");
+
+      ctx.save();
+      // 1. Drivable Free Space Cones (Clear dark navy #0e1622)
+      ctx.fillStyle = "rgba(14, 22, 34, 0.85)";
+      for (let i = 0; i < FRONT_TOF_SENSOR_RIG.length; i++) {
+        const s = FRONT_TOF_SENSOR_RIG[i];
+        let r = 1.80;
+        if (ranges.length > i) {
+          r = parseFloat(ranges[i]);
+        } else if (pkt.tof && s.name in pkt.tof) {
+          r = parseFloat(pkt.tof[s.name]);
+        }
+        if (isNaN(r) || r <= 0.02) r = 1.80;
+        const freeR = Math.max(0.05, r - 0.04);
+        const [sxPix, syPix] = toPixel(s.sx, s.sy);
+        const halfFov = 0.09817; // 11.25 deg total cone FOV (0.1963 / 2)
+
+        ctx.beginPath();
+        ctx.moveTo(sxPix, syPix);
+        const nSteps = 5;
+        for (let j = 0; j <= nSteps; j++) {
+          const ang = (s.heading - halfFov) + (2.0 * halfFov * j) / nSteps;
+          const wx = s.sx + freeR * Math.cos(ang);
+          const wy = s.sy + freeR * Math.sin(ang);
+          const [px, py] = toPixel(wx, wy);
+          ctx.lineTo(px, py);
+        }
+        ctx.closePath();
+        ctx.fill();
+      }
+
+      // Robot Chassis Footprint Origin Clearance
+      const [chX0, chY0] = toPixel(-0.08, 0.095);
+      const [chX1, chY1] = toPixel(0.08, 0.0);
+      ctx.fillRect(chX0, chY0, chX1 - chX0, chY1 - chY0);
+
+      // 2. Inflated C-Space Hazard Margin (Coral Red rgba(255, 42, 64, 0.35))
+      if (showHazard) {
+        ctx.fillStyle = "rgba(255, 42, 64, 0.35)";
+        ctx.strokeStyle = "rgba(255, 42, 64, 0.60)";
+        ctx.lineWidth = 1.5;
+        const rInflation = 0.12; // 12 cm C-space inflation
+        for (let i = 0; i < FRONT_TOF_SENSOR_RIG.length; i++) {
+          const s = FRONT_TOF_SENSOR_RIG[i];
+          let r = 1.80;
+          if (ranges.length > i) r = parseFloat(ranges[i]);
+          else if (pkt.tof && s.name in pkt.tof) r = parseFloat(pkt.tof[s.name]);
+          if (r < 1.76) {
+            const halfFov = 0.09817;
+            const rMinHaz = Math.max(0.05, r - rInflation * 0.5);
+            const rMaxHaz = r + rInflation;
+            ctx.beginPath();
+            for (let j = 0; j <= 6; j++) {
+              const ang = (s.heading - halfFov) + (2.0 * halfFov * j) / 6;
+              const [px, py] = toPixel(s.sx + rMaxHaz * Math.cos(ang), s.sy + rMaxHaz * Math.sin(ang));
+              if (j === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+            }
+            for (let j = 6; j >= 0; j--) {
+              const ang = (s.heading - halfFov) + (2.0 * halfFov * j) / 6;
+              const [px, py] = toPixel(s.sx + rMinHaz * Math.cos(ang), s.sy + rMinHaz * Math.sin(ang));
+              ctx.lineTo(px, py);
+            }
+            ctx.closePath();
+            ctx.fill();
+          }
+        }
+      }
+
+      // 3. Confirmed Obstacle Surface Hits (Solid Red #ff1e1e)
+      ctx.strokeStyle = "rgb(255, 30, 30)";
+      ctx.lineWidth = 4;
+      for (let i = 0; i < FRONT_TOF_SENSOR_RIG.length; i++) {
+        const s = FRONT_TOF_SENSOR_RIG[i];
+        let r = 1.80;
+        if (ranges.length > i) r = parseFloat(ranges[i]);
+        else if (pkt.tof && s.name in pkt.tof) r = parseFloat(pkt.tof[s.name]);
+        if (r < 1.76) {
+          const halfFov = 0.09817;
+          ctx.beginPath();
+          for (let j = 0; j <= 6; j++) {
+            const ang = (s.heading - halfFov) + (2.0 * halfFov * j) / 6;
+            const [px, py] = toPixel(s.sx + r * Math.cos(ang), s.sy + r * Math.sin(ang));
+            if (j === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+          }
+          ctx.stroke();
+        }
+      }
+      ctx.restore();
+      rendered = true;
     }
 
     if (rendered) {
@@ -1420,10 +1514,12 @@ function renderRadar(pkt) {
       const rectW = brX - tlX;
       const rectH = brY - tlY;
 
-      ctx.save();
-      ctx.imageSmoothingEnabled = false;
-      ctx.drawImage(costmapOffscreen, tlX, tlY, rectW, rectH);
-      ctx.restore();
+      if (pkt.prob_bytes || pkt.grid_unpacked) {
+        ctx.save();
+        ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(costmapOffscreen, tlX, tlY, rectW, rectH);
+        ctx.restore();
+      }
 
       // Dotted border around costmap bounds: QColor(80, 120, 160, 90)
       ctx.save();

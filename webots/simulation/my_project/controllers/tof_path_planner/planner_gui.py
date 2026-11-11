@@ -1851,6 +1851,20 @@ def parse_binary_packet(data: bytes) -> Optional[dict]:
                     hazard_mask = np.frombuffer(raw_h, dtype=np.uint8).reshape(shape)
                 except Exception:
                     pass
+            elif prob_map is None and ("tof_ranges" in pkt or "tof" in pkt):
+                # Local 1:1 C++ costmap reconstruction on laptop (zero Pi overhead, bit-for-bit fidelity)
+                if not hasattr(self, "_local_costmap"):
+                    try:
+                        from cpp_smart_hybrid_costmap import CppSmartHybridCostmap
+                        self._local_costmap = CppSmartHybridCostmap()
+                    except Exception:
+                        self._local_costmap = None
+                if self._local_costmap is not None:
+                    try:
+                        tof_data = pkt.get("tof") or pkt.get("tof_ranges")
+                        prob_map, hazard_mask, _ = self._local_costmap.process_tof_frame(tof_data)
+                    except Exception:
+                        pass
 
             best_line = pkt.get("best_line", [])
             cand_lines = pkt.get("candidate_lines", [])

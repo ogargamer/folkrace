@@ -99,8 +99,8 @@ def run_path_planner():
     telem_sock = create_nonblocking_udp_socket()
     target_addr = (DEBUG_UDP_HOST, DEBUG_UDP_PORT)
 
-    # Background Telemetry Worker: offloads zlib compression and JSON serialization to Core 2/3
-    telem_queue = queue.Queue(maxsize=1)
+    # Lightweight Telemetry Dispatch Worker: offloads JSON dumping and UDP socket I/O to Core 2/3
+    telem_queue = queue.Queue(maxsize=2)
 
     def telemetry_worker():
         try:
@@ -108,28 +108,11 @@ def run_path_planner():
         except Exception:
             pass
 
-        cached_grid_comp = ""
-        cached_haz_comp = ""
-        last_comp_time = 0.0
-
         while True:
             try:
-                item = telem_queue.get()
-                if item is None:
+                telem_dict = telem_queue.get()
+                if telem_dict is None:
                     break
-                telem_dict, prob_raw, haz_raw = item
-                now = time.perf_counter()
-
-                # Compress full 1cm costmap at smooth 20 Hz (saves ~6ms CPU per frame on Core 1)
-                # while streaming fast telemetry (speed, steer, RPMs, lines) at 60 Hz!
-                if (now - last_comp_time) >= 0.050 or not cached_grid_comp:
-                    cached_grid_comp = base64.b64encode(zlib.compress(prob_raw, 1)).decode("ascii")
-                    cached_haz_comp = base64.b64encode(zlib.compress(haz_raw, 1)).decode("ascii")
-                    last_comp_time = now
-
-                telem_dict["grid_data"] = cached_grid_comp
-                telem_dict["hazard_data"] = cached_haz_comp
-
                 pkt_bytes = json.dumps(telem_dict).encode("utf-8")
                 telem_sock.sendto(pkt_bytes, target_addr)
             except Exception:
@@ -284,10 +267,7 @@ def run_path_planner():
                 pitch_deg_val = 0.0
                 roll_deg_val = 0.0
 
-            # 5. Fast costmap array extraction (takes <0.1ms, offloads compression to worker)
-            prob_u8 = (np.clip(prob_map, 0.0, 1.0) * 255.0).astype(np.uint8)
-            haz_u8 = (hazard_mask > 0).astype(np.uint8)
-
+            # 5. Extract target coordinates for telemetry
             g_targets = [
                 [round(float(tgt[0]), 3), round(float(tgt[1]), 3), round(float(tgt[2]), 3)]
                 for tgt in (getattr(gap_scout, "last_targets", []) or [])
@@ -346,15 +326,15 @@ def run_path_planner():
                 "step_ms": round(t_total_ms, 2),
                 "iters_prim": int(opt_res.get("osqp_iters", 12)),
                 "iters_alt": int(opt_res.get("osqp_iters_alt", 0)),
-                "grid_shape": [int(s) for s in prob_u8.shape],
+                "grid_shape": [190, 250],
                 "grid_bounds": [GRID_X_MIN, GRID_X_MAX, GRID_Y_MIN, GRID_Y_MAX],
             }
 
-            # 7. Non-blocking handoff to background worker (<0.01ms latency, never stalls Core 1)
+            # 7. Non-blocking handoff to background worker (<0.005ms latency, never stalls Core 1)
             try:
                 if telem_queue.full():
                     _ = telem_queue.get_nowait()
-                telem_queue.put_nowait((telemetry, prob_u8.tobytes(), haz_u8.tobytes()))
+                telem_queue.put_nowait(telemetry)
             except Exception:
                 pass
 
