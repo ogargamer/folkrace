@@ -167,7 +167,7 @@ class CppSmartHybridCostmap:
     def __init__(
         self,
         grid_bounds: Tuple[float, float, float, float] = (-1.25, 1.25, 0.0, 1.90),
-        resolution: float = 0.010,
+        resolution: float = 0.015,
         r_inflation_m: float = 0.075,
     ):
         self.x_min, self.x_max, self.y_min, self.y_max = grid_bounds

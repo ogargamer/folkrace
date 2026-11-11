@@ -3,8 +3,12 @@ set -e
 
 # Compile C++ Native engines on Raspberry Pi 4 ARM64
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-CPP_DIR="$REPO_ROOT/webots/simulation/my_project/controllers/tof_path_planner/cpp"
+if [ -d "$SCRIPT_DIR/cpp" ]; then
+    CPP_DIR="$SCRIPT_DIR/cpp"
+else
+    REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+    CPP_DIR="$REPO_ROOT/webots/simulation/my_project/controllers/tof_path_planner/cpp"
+fi
 
 cd "$SCRIPT_DIR"
 

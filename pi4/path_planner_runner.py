@@ -328,7 +328,7 @@ def run_path_planner():
                 "step_ms": round(t_total_ms, 2),
                 "iters_prim": int(opt_res.get("osqp_iters", 12)),
                 "iters_alt": int(opt_res.get("osqp_iters_alt", 0)),
-                "grid_shape": [190, 250],
+                "grid_shape": [int(s) for s in costmap.shape],
                 "grid_bounds": [GRID_X_MIN, GRID_X_MAX, GRID_Y_MIN, GRID_Y_MAX],
             }
 

@@ -45,7 +45,7 @@
     "grid_x_min": -1.25,
     "grid_y_min": 0.00,
     "grid_y_max": 1.90,
-    "grid_res": 0.010,
+    "grid_res": 0.015,
     "r_inflation_m": 0.075
   }
 }

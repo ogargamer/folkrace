@@ -224,15 +224,15 @@ public:
   void find_corridor_bounds(double gx, double gy, double nx_left,
                             double ny_left, double pref_side, double &out_d_min,
                             double &out_d_max) {
-    // High-density lateral probing: d_vals from -0.65 to 0.65 step 0.010 (131
-    // samples, 10 mm resolution)
-    constexpr int N_PROBE = 131;
+    // High-density lateral probing: d_vals from -0.65 to 0.655 step 0.015 (88
+    // samples, 15 mm resolution)
+    constexpr int N_PROBE = 88;
     float pxs[N_PROBE];
     float pys[N_PROBE];
     float d_vals[N_PROBE];
 
     for (int i = 0; i < N_PROBE; ++i) {
-      float d = -0.65f + i * 0.010f;
+      float d = -0.65f + i * 0.015f;
       d_vals[i] = d;
       pxs[i] = static_cast<float>(gx + d * nx_left);
       pys[i] = static_cast<float>(gy + d * ny_left);
