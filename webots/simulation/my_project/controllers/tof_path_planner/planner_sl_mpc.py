@@ -529,27 +529,25 @@ class CppCurvilinearSLMPC:
         t_alt_ms = 0.0
         iters_alt = 0
 
-        # Smart budget-conscious challenger solve (Strict 60 Hz / 16.67ms deadline):
-        # Challenger QP is executed ONLY IF:
-        # 1. Primary path is infeasible or collision-compromised (status_prim not in (0, 1)) -> Emergency avoidance!
-        # 2. Challenger reaches open horizon while primary is obstructed (is_clear_alt and not is_clear_prim) -> Tactical bypass!
-        # 3. Primary solve was fast (< 3.2ms, <= 15 iters) leaving sufficient real-time headroom.
-        # Otherwise, skipping the challenger saves ~4-5ms and guarantees strict >= 60 Hz execution.
+        # Budget-conscious challenger solve with at least 1 iteration:
+        # When distinct alternative target exists (has_sep):
+        # - Full iteration budget (20 iters) if primary was fast (< 3.2ms, <= 15 iters) or primary is compromised.
+        # - Fallback to single iteration (max_iter = 1) when primary exceeds budget, ensuring 2nd line still evaluates
+        #   without blowing the strict 60 Hz real-time deadline.
         if alt_target is not None and hasattr(self, "_handle_alt") and self._handle_alt:
             tx_alt, ty_alt, ap_alt = alt_target[:3]
             is_clear_alt = bool(alt_target[3]) if len(alt_target) >= 4 else (math.hypot(tx_alt, ty_alt) >= 1.60)
             min_sep = getattr(self, "alt_min_separation_m", 0.06)
             has_sep = (math.hypot(tx_alt - tx_prim, ty_alt - ty_prim) >= min_sep or abs(tx_alt - tx_prim) >= (min_sep * 0.7))
 
-            alt_worthy = has_sep and (
-                (status_prim not in (0, 1)) or
-                (is_clear_alt and not is_clear_prim) or
-                (t_prim_ms < 3.2 and iters_prim <= 15)
-            )
-
-            if alt_worthy:
+            if has_sep:
                 has_challenger = True
-                max_iter_alt = 20
+                full_budget = (
+                    (status_prim not in (0, 1)) or
+                    (is_clear_alt and not is_clear_prim) or
+                    (t_prim_ms < 3.2 and iters_prim <= 15)
+                )
+                max_iter_alt = 20 if full_budget else 1
                 if hasattr(_lib, "sl_mpc_set_max_iter"):
                     _lib.sl_mpc_set_max_iter(self._handle_alt, max_iter_alt)
                 t_alt_0 = time.perf_counter()
