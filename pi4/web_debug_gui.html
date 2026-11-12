@@ -928,6 +928,7 @@
     <button class="btn-motor-action btn-dfu" onclick="enterDfu()">🔧 DFU REBOOT</button>
     <button class="btn-motor-action btn-reset" onclick="resetControllers()">🔄 RESET</button>
     <button class="btn-motor-action btn-reconnect" style="background:#1e3a5f;color:#38bdf8;border:1px solid #0284c7;" onclick="reconnectMcu()">🔌 RECONNECT ESP32</button>
+    <button class="btn-motor-action" id="btnS10Toggle" style="background:#134e4a;color:#2dd4bf;border:1px solid #0d9488;" onclick="toggleS10()">🎯 S10: ON</button>
     <span id="motorActionStatus" style="font-size:11px;color:var(--accent-cyan);font-family:Consolas, monospace;margin-left:auto;">Pipeline ready</span>
   </div>
 
@@ -2663,6 +2664,24 @@ function resetControllers() {
 function reconnectMcu() {
   appendMcuConsole("[ACTION] Re-detecting and reconnecting ESP32 serial ports...");
   sendMcuCommand({ action: "reconnect" });
+}
+
+let g_s10_enabled = true;
+function toggleS10(enable) {
+  if (typeof enable === "boolean") {
+    g_s10_enabled = enable;
+  } else {
+    g_s10_enabled = !g_s10_enabled;
+  }
+  const btn = document.getElementById("btnS10Toggle");
+  if (btn) {
+    btn.innerText = g_s10_enabled ? "🎯 S10: ON" : "🎯 S10: OFF";
+    btn.style.background = g_s10_enabled ? "#134e4a" : "#451a03";
+    btn.style.color = g_s10_enabled ? "#2dd4bf" : "#fb923c";
+    btn.style.borderColor = g_s10_enabled ? "#0d9488" : "#c2410c";
+  }
+  appendMcuConsole(`[ACTION] ESP32 ToF Status 10 (Valid No Prev) set to: ${g_s10_enabled ? "ACCEPTED (ON)" : "REJECTED (OFF)"}`);
+  sendMcuCommand({ action: "s10", enable: g_s10_enabled });
 }
 
 function setSpeed(v) {
