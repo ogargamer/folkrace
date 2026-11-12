@@ -503,31 +503,53 @@ static const uint8_t SENSOR_ZONES[4][4] = {
 };
 
 #pragma pack(push, 1)
-struct ToF_Binary_Packet {
-  uint8_t header[2]; // 0xAA, 0x55
-  uint8_t sensor_id; // 1, 2, 3, 4
-  uint32_t seq;      // Frame sequence counter
-  uint32_t ts_ms;    // ESP32 millis() timestamp
-  // 4 closest distances (uint16_t mm) for the 4 active zones of this ToF
-  uint16_t dist_mm[4];
-  uint8_t checksum;  // XOR checksum of bytes from header up to checksum
+// 20-byte lean frame for Raspberry Pi 4 (dist_mm only)
+struct ToF_Binary_Packet_20 {
+  uint8_t header[2];          // 0xAA, 0x55
+  uint8_t sensor_id;          // 1, 2, 3, 4
+  uint32_t seq;               // Frame sequence counter
+  uint32_t ts_ms;             // ESP32 millis() timestamp
+  uint16_t dist_mm[4];        // Resolved / chosen distance (mm, >= 30mm)
+  uint8_t checksum;           // XOR checksum
+};
+
+// 52-byte multi-target debug frame for PC GUI
+struct ToF_Binary_Packet_52 {
+  uint8_t header[2];          // 0xAA, 0x55
+  uint8_t sensor_id;          // 1, 2, 3, 4
+  uint32_t seq;               // Frame sequence counter
+  uint32_t ts_ms;             // ESP32 millis() timestamp
+  uint16_t dist_mm[4];        // Resolved / chosen distance (mm, >= 30mm)
+  uint16_t target0_mm[4];     // Main target distance (mm)
+  uint16_t target1_mm[4];     // 2nd target distance (mm)
+  uint8_t  target0_status[4]; // Main target status (ST table 4)
+  uint8_t  target1_status[4]; // 2nd target status (ST table 4)
+  uint16_t spad_count[4];     // Active SPAD count
+  uint8_t checksum;           // XOR checksum
 };
 #pragma pack(pop)
 
+static bool g_accept_s10 = true;
+static bool g_packet_mode_52 = false; // Default: 20-byte lean mode for Pi
+
 static inline bool is_valid_target_status(uint8_t st) {
-  return (st == 5 || st == 6 || st == 9 || st == 10);
+  if (g_accept_s10) {
+    return (st == 5 || st == 6 || st == 9 || st == 10);
+  } else {
+    return (st == 5 || st == 6 || st == 9);
+  }
 }
 
 void send_binary_telemetry(uint8_t sensor_id, VL53L8CX_ResultsData *p_res,
                            unsigned long f_count) {
   if (sensor_id < 1 || sensor_id > 4) return;
 
-  ToF_Binary_Packet pkt;
-  pkt.header[0] = 0xAA;
-  pkt.header[1] = 0x55;
-  pkt.sensor_id = sensor_id;
-  pkt.seq = (uint32_t)f_count;
-  pkt.ts_ms = (uint32_t)millis();
+  uint16_t dist_mm[4];
+  uint16_t target0_mm[4];
+  uint16_t target1_mm[4];
+  uint8_t  target0_status[4];
+  uint8_t  target1_status[4];
+  uint16_t spad_count[4];
 
   const uint8_t *zones = SENSOR_ZONES[sensor_id - 1];
 
@@ -543,32 +565,94 @@ void send_binary_telemetry(uint8_t sensor_id, VL53L8CX_ResultsData *p_res,
     int16_t d0 = p_res->distance_mm[src0];
     int16_t d1 = p_res->distance_mm[src1];
 
+    target0_mm[i] = (d0 > 0) ? (uint16_t)d0 : 0;
+    target1_mm[i] = (d1 > 0) ? (uint16_t)d1 : 0;
+    target0_status[i] = st0;
+    target1_status[i] = st1;
+    spad_count[i] = (spad > 65535) ? 65535 : (uint16_t)spad;
+
     bool valid0 = (is_valid_target_status(st0) && d0 > 0);
     bool valid1 = (is_valid_target_status(st1) && d1 > 0);
 
+    bool near0 = (st0 != 0 && st0 != 255 && d0 >= 1 && d0 <= 30);
+    bool near1 = (st1 != 0 && st1 != 255 && d1 >= 1 && d1 <= 30);
+
     if (valid0 && valid1) {
       // Both valid: choose the closer (shortest) distance
-      pkt.dist_mm[i] = (uint16_t)(d0 <= d1 ? d0 : d1);
+      dist_mm[i] = (uint16_t)(d0 <= d1 ? d0 : d1);
     } else if (valid0) {
-      pkt.dist_mm[i] = (uint16_t)d0;
+      dist_mm[i] = (uint16_t)d0;
     } else if (valid1) {
-      pkt.dist_mm[i] = (uint16_t)d1;
+      dist_mm[i] = (uint16_t)d1;
     } else {
       // 0 valid targets: fallback logic
-      // 0mm when active SPADs == 1024 (lens contact / saturation error), otherwise 3000mm open space
-      pkt.dist_mm[i] = (spad == 1024) ? 0 : 3000;
+      // Never trigger 3000mm open space if either target reports 0-30mm even if error!
+      if (near0 && near1) {
+        dist_mm[i] = (uint16_t)(d0 <= d1 ? d0 : d1);
+      } else if (near0) {
+        dist_mm[i] = (uint16_t)d0;
+      } else if (near1) {
+        dist_mm[i] = (uint16_t)d1;
+      } else if (spad == 1024) {
+        dist_mm[i] = 30; // Lens contact / saturation error
+      } else {
+        dist_mm[i] = 3000; // Open space fallback
+      }
+    }
+
+    // Every reading below 30mm is reported as 30mm to Pi
+    if (dist_mm[i] < 30) {
+      dist_mm[i] = 30;
     }
   }
 
-  uint8_t *raw = (uint8_t *)&pkt;
-  uint8_t chk = 0;
-  for (size_t b = 0; b < sizeof(ToF_Binary_Packet) - 1; b++) {
-    chk ^= raw[b];
-  }
-  pkt.checksum = chk;
+  uint32_t now_ms = (uint32_t)millis();
 
-  if (Serial.availableForWrite() >= (int)sizeof(ToF_Binary_Packet)) {
-    Serial.write(raw, sizeof(ToF_Binary_Packet));
+  if (g_packet_mode_52) {
+    ToF_Binary_Packet_52 pkt;
+    pkt.header[0] = 0xAA;
+    pkt.header[1] = 0x55;
+    pkt.sensor_id = sensor_id;
+    pkt.seq = (uint32_t)f_count;
+    pkt.ts_ms = now_ms;
+    for (int i = 0; i < 4; i++) {
+      pkt.dist_mm[i] = dist_mm[i];
+      pkt.target0_mm[i] = target0_mm[i];
+      pkt.target1_mm[i] = target1_mm[i];
+      pkt.target0_status[i] = target0_status[i];
+      pkt.target1_status[i] = target1_status[i];
+      pkt.spad_count[i] = spad_count[i];
+    }
+    uint8_t *raw = (uint8_t *)&pkt;
+    uint8_t chk = 0;
+    for (size_t b = 0; b < sizeof(ToF_Binary_Packet_52) - 1; b++) {
+      chk ^= raw[b];
+    }
+    pkt.checksum = chk;
+
+    if (Serial.availableForWrite() >= (int)sizeof(ToF_Binary_Packet_52)) {
+      Serial.write(raw, sizeof(ToF_Binary_Packet_52));
+    }
+  } else {
+    ToF_Binary_Packet_20 pkt;
+    pkt.header[0] = 0xAA;
+    pkt.header[1] = 0x55;
+    pkt.sensor_id = sensor_id;
+    pkt.seq = (uint32_t)f_count;
+    pkt.ts_ms = now_ms;
+    for (int i = 0; i < 4; i++) {
+      pkt.dist_mm[i] = dist_mm[i];
+    }
+    uint8_t *raw = (uint8_t *)&pkt;
+    uint8_t chk = 0;
+    for (size_t b = 0; b < sizeof(ToF_Binary_Packet_20) - 1; b++) {
+      chk ^= raw[b];
+    }
+    pkt.checksum = chk;
+
+    if (Serial.availableForWrite() >= (int)sizeof(ToF_Binary_Packet_20)) {
+      Serial.write(raw, sizeof(ToF_Binary_Packet_20));
+    }
   }
 }
 
@@ -691,6 +775,14 @@ void setup() {
 // =========================================================================
 
 void loop() {
+  while (Serial.available() > 0) {
+    char c = Serial.read();
+    if (c == '0' || c == '-') g_accept_s10 = false;
+    else if (c == '1' || c == '+') g_accept_s10 = true;
+    else if (c == 'D' || c == 'd' || c == 'M' || c == 'm') g_packet_mode_52 = true;  // Debug mode: 52B multi-target
+    else if (c == 'L' || c == 'l' || c == 'N' || c == 'n') g_packet_mode_52 = false; // Lean mode: 20B (default for Pi)
+  }
+
   for (int i = 0; i < NUM_SENSORS; i++) {
     ToF_Device_Context *ctx = &ctxs[i];
     if (!ctx->enabled)

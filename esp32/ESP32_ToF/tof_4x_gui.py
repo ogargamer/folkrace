@@ -43,6 +43,8 @@ if hasattr(Qt, "HighDpiScaleFactorRoundingPolicy"):
 PACKET_MAGIC = b"\xaa\x55"
 PACKET_FMT = "<2B B I I 4H B"
 PACKET_SIZE = struct.calcsize(PACKET_FMT)  # 20 bytes
+PACKET_52_FMT = "<2s B I I 4H 4H 4H 4B 4B 4H B"
+PACKET_52_SIZE = struct.calcsize(PACKET_52_FMT)  # 52 bytes
 
 # Dedicated 4 zones per sensor matching 2D LiDAR ray projection (from center forward to side):
 SENSOR_ZONES = {
@@ -253,24 +255,41 @@ class ToFStreamReader(QThread):
                             ascii_buf.extend(stray)
                         del buf[:idx]
 
-                    if len(buf) < PACKET_SIZE:
-                        break
+                    # Handle 52-byte multi-target frames
+                    if len(buf) >= PACKET_52_SIZE:
+                        pkt_bytes = bytes(buf[:PACKET_52_SIZE])
+                        chk = functools.reduce(operator.xor, pkt_bytes[:-1])
+                        if chk == pkt_bytes[-1] and 1 <= pkt_bytes[2] <= 4:
+                            unpacked = struct.unpack(PACKET_52_FMT, pkt_bytes)
+                            sensor_id = unpacked[1]
+                            seq = unpacked[2]
+                            ts_ms = unpacked[3]
+                            dists = list(unpacked[4:8])
+                            self._record_packet(sensor_id, seq, ts_ms, dists)
+                            del buf[:PACKET_52_SIZE]
+                            continue
 
-                    pkt_bytes = bytes(buf[:PACKET_SIZE])
-                    chk = functools.reduce(operator.xor, pkt_bytes[:-1])
+                    # Handle 20-byte legacy frames
+                    if len(buf) >= PACKET_SIZE:
+                        pkt_bytes = bytes(buf[:PACKET_SIZE])
+                        chk = functools.reduce(operator.xor, pkt_bytes[:-1])
+                        if chk == pkt_bytes[-1] and 1 <= pkt_bytes[2] <= 4:
+                            unpacked = struct.unpack(PACKET_FMT, pkt_bytes)
+                            sensor_id = unpacked[2]
+                            seq = unpacked[3]
+                            ts_ms = unpacked[4]
+                            dists = list(unpacked[5:9])
+                            self._record_packet(sensor_id, seq, ts_ms, dists)
+                            del buf[:PACKET_SIZE]
+                            continue
 
-                    if chk == pkt_bytes[-1] and 1 <= pkt_bytes[2] <= 4:
-                        unpacked = struct.unpack(PACKET_FMT, pkt_bytes)
-                        sensor_id = unpacked[2]
-                        seq = unpacked[3]
-                        ts_ms = unpacked[4]
-                        dists = list(unpacked[5:9])
-                        self._record_packet(sensor_id, seq, ts_ms, dists)
-                        del buf[:PACKET_SIZE]
-                    else:
+                    if len(buf) >= PACKET_52_SIZE:
                         with self._lock:
                             self.bad_checksums += 1
                         del buf[:2]
+                        continue
+                    else:
+                        break
 
                 # Flush any accumulated ASCII boot/init lines (strictly valid printable ASCII)
                 while b"\n" in ascii_buf:

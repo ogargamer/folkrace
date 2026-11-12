@@ -1,12 +1,18 @@
 """
 ================================================================================
-  3. LAUNCHER: ESP32 VL53L8CX 16-CHANNEL TOF LIVE VIEWER & TUNING GUI
+  3. LAUNCHER: ESP32 QUAD VL53L8CX 4-ZONE MULTI-TARGET TELEMETRY GUI
 ================================================================================
-  Connects over USB serial to the ESP32 sensor rig, visualizes live 16-channel
-  multizone distance matrices, targets, thresholds, and sensor health.
+  Connects over USB serial (921600 baud) to the ESP32 ToF Hub, displaying
+  complete multi-target telemetry on one screen for the 4 dedicated zones
+  streamed to Raspberry Pi 4:
+    - Main Target (Target 0) Distance + ST Table 4 Target Status
+    - 2nd Target  (Target 1) Distance + ST Table 4 Target Status
+    - Active SPAD Count & Saturation / Lens Contact Alert (1024 SPADs)
+    - Resolved Navigation Distance + Target Selection Badge
+    - Live 2D Vehicle Tactical Radar with 16 Ray Projections
 
   Usage:
-    python 3_esp32_tof_gui.py
+    python launchers/3_esp32_tof_gui.py
 ================================================================================
 """
 

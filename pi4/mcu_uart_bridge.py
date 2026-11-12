@@ -33,6 +33,7 @@ from mcu_telemetry_protocol import (
     CHASSIS_SIZE,
     TOF_SIZE,
     TOF_SUB_SIZE,
+    TOF_SUB52_SIZE,
     TOF_SUB60_SIZE,
     decode_chassis_packet,
     decode_tof_packet,
@@ -68,8 +69,9 @@ UART_BAUD = 921600
 class BinaryStreamParser:
     """Zero-allocation rolling stream parser for binary UART packets."""
 
-    def __init__(self, is_tof_port: bool = False):
+    def __init__(self, is_tof_port: bool = False, accept_s10: bool = True):
         self.is_tof_port = is_tof_port
+        self.accept_s10 = accept_s10
         self.buffer = bytearray()
 
     def feed(self, chunk: bytes):
@@ -131,28 +133,29 @@ class BinaryStreamParser:
                 else:
                     del self.buffer[:2]
             else:
-                # ESP32-ToF Port (supports 60-byte multi-target, 20-byte per-sensor, and 78-byte full array)
+                # ESP32-ToF Port (supports 52-byte multi-target 4-zone, 60-byte multi-target, 20-byte per-sensor, and 78-byte full array)
                 if 1 <= msg_type_or_sensor_id <= 4:
-                    if len(self.buffer) >= TOF_SUB60_SIZE:
-                        raw_pkt = bytes(self.buffer[:TOF_SUB60_SIZE])
-                        decoded = decode_tof_sub_packet(raw_pkt)
-                        if decoded:
-                            del self.buffer[:TOF_SUB60_SIZE]
+                    if len(self.buffer) >= TOF_SUB52_SIZE:
+                        raw_pkt = bytes(self.buffer[:TOF_SUB52_SIZE])
+                        decoded = decode_tof_sub_packet(raw_pkt, accept_s10=self.accept_s10)
+                        if decoded and decoded.get("dist_mm") is not None:
+                            del self.buffer[:TOF_SUB52_SIZE]
                             yield (MSG_ID_TOF_SUB_TELEM, decoded)
                             continue
 
-                    if len(self.buffer) >= TOF_SUB_SIZE and len(self.buffer) < TOF_SUB60_SIZE:
+                    if len(self.buffer) >= TOF_SUB_SIZE:
                         raw_pkt = bytes(self.buffer[:TOF_SUB_SIZE])
-                        decoded = decode_tof_sub_packet(raw_pkt)
+                        decoded = decode_tof_sub_packet(raw_pkt, accept_s10=self.accept_s10)
                         if decoded:
                             del self.buffer[:TOF_SUB_SIZE]
                             yield (MSG_ID_TOF_SUB_TELEM, decoded)
                             continue
 
-                    if len(self.buffer) < TOF_SUB60_SIZE:
+                    if len(self.buffer) >= TOF_SUB52_SIZE:
+                        del self.buffer[:2]
+                        continue
+                    else:
                         break
-
-                    del self.buffer[:2]
                 elif msg_type_or_sensor_id == MSG_ID_TOF_TELEM:
                     if len(self.buffer) < TOF_SIZE:
                         break
@@ -254,11 +257,13 @@ class MCU_UART_Bridge:
         baud: int = UART_BAUD,
         udp_host: str = UDP_DISPATCH_HOST,
         udp_port: int = UDP_DISPATCH_PORT,
+        accept_s10: bool = True,
     ):
         self.main_port, self.tof_port = resolve_serial_ports(main_port, tof_port, baud)
         self.baud = baud
         self.udp_host = udp_host
         self.udp_target = (udp_host, udp_port)
+        self.accept_s10 = accept_s10
         self.running = False
 
         self.udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -266,6 +271,7 @@ class MCU_UART_Bridge:
 
         self.serial_lock = threading.Lock()
         self.main_serial: Optional[Any] = None
+        self.tof_serial: Optional[Any] = None
         self.latest_mcu_msg: str = ""
         self.mcu_log: list = []
 
@@ -319,6 +325,21 @@ class MCU_UART_Bridge:
             try:
                 data, _ = sock.recvfrom(2048)
                 if data:
+                    # Intercept S10 toggle commands for ESP32 ToF Hub
+                    d_strip = data.strip()
+                    if d_strip in (b"S10_1", b"S10_ON", b"SET_S10_1"):
+                        self.set_s10(True)
+                        continue
+                    elif d_strip in (b"S10_0", b"S10_OFF", b"SET_S10_0"):
+                        self.set_s10(False)
+                        continue
+                    try:
+                        cmd_obj = json.loads(data.decode("utf-8", errors="ignore"))
+                        if isinstance(cmd_obj, dict) and "s10" in cmd_obj:
+                            self.set_s10(bool(cmd_obj["s10"]))
+                            continue
+                    except Exception:
+                        pass
                     self.send_to_main_mcu(data)
             except socket.timeout:
                 continue
@@ -328,6 +349,22 @@ class MCU_UART_Bridge:
             sock.close()
         except Exception:
             pass
+
+    def send_to_tof_mcu(self, data: bytes):
+        """Thread-safe transmission to ESP32 ToF Hub over USB Serial."""
+        with self.serial_lock:
+            if self.tof_serial and getattr(self.tof_serial, "is_open", False):
+                try:
+                    self.tof_serial.write(data)
+                    self.tof_serial.flush()
+                except Exception as e:
+                    print(f"[MCU Bridge ERROR] Failed writing to ESP32 ToF: {e}")
+
+    def set_s10(self, accept: bool):
+        """Sets S10 acceptance and commands ESP32 ToF onboard processing via serial."""
+        self.accept_s10 = accept
+        self.send_to_tof_mcu(b"1\n" if accept else b"0\n")
+        print(f"[MCU Bridge] ESP32 ToF S10 acceptance set to: {accept}")
 
     def send_to_main_mcu(self, data: bytes):
         """Thread-safe transmission to ESP32 Main over USB Serial."""
@@ -346,7 +383,7 @@ class MCU_UART_Bridge:
     def _uart_worker(self, port_name: str, label: str):
         print(f"[MCU Bridge] Connecting to {label} on {port_name} @ {self.baud} baud...")
         is_tof = (label == "ESP32_ToF")
-        parser = BinaryStreamParser(is_tof_port=is_tof)
+        parser = BinaryStreamParser(is_tof_port=is_tof, accept_s10=self.accept_s10)
 
         while self.running:
             try:
@@ -355,6 +392,16 @@ class MCU_UART_Bridge:
                     if label == "ESP32_Main":
                         with self.serial_lock:
                             self.main_serial = ser
+                    elif label == "ESP32_ToF":
+                        with self.serial_lock:
+                            self.tof_serial = ser
+                        # Ensure ESP32 ToF Hub is in lean 20-byte mode for Pi and send S10 state
+                        try:
+                            ser.write(b"L\n")
+                            ser.write(b"1\n" if self.accept_s10 else b"0\n")
+                            ser.flush()
+                        except Exception:
+                            pass
                     try:
                         while self.running:
                             data = ser.read(256)
@@ -366,6 +413,9 @@ class MCU_UART_Bridge:
                         if label == "ESP32_Main":
                             with self.serial_lock:
                                 self.main_serial = None
+                        elif label == "ESP32_ToF":
+                            with self.serial_lock:
+                                self.tof_serial = None
             except Exception as e:
                 print(f"[MCU Bridge] Error on {label} ({port_name}): {e}")
                 time.sleep(1.0)
@@ -448,9 +498,11 @@ if __name__ == "__main__":
     parser.add_argument("--main", default="auto", help="ESP32 Main serial device (auto-detects /dev/ttyUSB0, /dev/ttyACM0, etc.)")
     parser.add_argument("--tof", default="auto", help="ESP32 ToF Hub serial device (auto-detects /dev/ttyUSB1, /dev/ttyACM1, etc.)")
     parser.add_argument("--baud", type=int, default=UART_BAUD, help="UART baud rate")
+    parser.add_argument("--no-s10", dest="accept_s10", action="store_false", help="Reject ST Status 10 (Valid No Prev) in ToF arbitration")
+    parser.set_defaults(accept_s10=True)
     args = parser.parse_args()
 
-    bridge = MCU_UART_Bridge(main_port=args.main, tof_port=args.tof, baud=args.baud)
+    bridge = MCU_UART_Bridge(main_port=args.main, tof_port=args.tof, baud=args.baud, accept_s10=args.accept_s10)
     bridge.start()
 
     print("[MCU Bridge] Active. Press Ctrl+C to terminate.")
