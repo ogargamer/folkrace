@@ -206,10 +206,14 @@ def run_path_planner():
                 v_actual = float(active_mcu.get("v_est", active_mcu.get("v_real", v_actual)))
                 steer_actual_deg = float(active_mcu.get("steer_actual_deg", steer_actual_deg))
                 gyro_z = float(active_mcu.get("gyro_z", 0.0))
+                pitch_deg = float(active_mcu.get("pitch_deg", 0.0))
+                roll_deg = float(active_mcu.get("roll_deg", 0.0))
             else:
                 v_actual = 0.0
                 steer_actual_deg = 0.0
                 gyro_z = 0.0
+                pitch_deg = 0.0
+                roll_deg = 0.0
 
             # 2. Execute Shared Autonomous Brain Step
             if has_live_sensor_feed:
@@ -223,6 +227,8 @@ def run_path_planner():
                     dt=DT_STEP,
                     sim_time_s=sim_time,
                     full_telemetry=need_full_telem,
+                    pitch_rad=math.radians(pitch_deg),
+                    roll_rad=math.radians(roll_deg),
                 )
                 steer_cmd_deg = math.degrees(steer_cmd_rad)
                 run_mode_val = 1

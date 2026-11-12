@@ -50,7 +50,7 @@ PI_LOOP_HZ: float = 60.0
 DT_PI_LOOP: float = 0.016666666666666666
 CONTROL_LOOP_FREQ_HZ: int = 400
 CONTROL_LOOP_DT_S: float = 0.0025
-SIM_TIME_STEP_MS: int = 8
+SIM_TIME_STEP_MS: float = 8.333333
 UART_BAUD: int = 921600
 
 # ============================================================================== #

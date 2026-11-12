@@ -36,6 +36,7 @@ from tof_gap_scout import ToFGapScout
 from planner_sl_mpc import CurvilinearSLMPC
 from stuck_recovery_manager import StuckRecoveryManager, StuckRecoveryState
 from anti_wrong_way_watchdog import AntiWrongWayWatchdog
+from ramp_detector import RampDetector
 
 try:
     from .planner_config import (
@@ -122,6 +123,7 @@ class AutonomousBrain:
             arc_lookahead_m=RECOVERY_ARC_LOOKAHEAD_M,
         )
         self.watchdog = AntiWrongWayWatchdog()
+        self.ramp_detector = RampDetector()
 
         # 3. Dynamic Tuning Parameters
         self.base_mu = 0.817
@@ -244,6 +246,7 @@ class AutonomousBrain:
         self.pose_tracker.reset(start_pose[0], start_pose[1], start_pose[2])
         self.recovery_manager.reset()
         self.watchdog.reset()
+        self.ramp_detector.reset()
         self.last_aww_status = None
         if hasattr(self.planner, "reset_active_target"):
             self.planner.reset_active_target()
@@ -265,6 +268,8 @@ class AutonomousBrain:
         sim_time_s: float = 0.0,
         ground_truth_pose: Optional[Tuple[float, float, float]] = None,
         full_telemetry: bool = True,
+        pitch_rad: float = 0.0,
+        roll_rad: float = 0.0,
     ) -> Tuple[float, float, Dict[str, Any]]:
         """
         Executes one full autonomous perception and trajectory optimization step (typically @ 60 Hz).
@@ -542,6 +547,17 @@ class AutonomousBrain:
                     )
                     self.mode_desc = "SL_MPC"
 
+        # 10b. Ramp Detection & Speed Governance (Unified Hardware & Sim Safety)
+        ramp_res = self.ramp_detector.update(pitch_rad=pitch_rad, roll_rad=roll_rad, dt=dt)
+        if ramp_res["is_on_ramp"]:
+            ramp_cap = float(ramp_res["speed_limit"])
+            if target_speed > 0.0:
+                target_speed = min(target_speed, ramp_cap)
+            elif target_speed < 0.0:
+                target_speed = max(target_speed, -ramp_cap)
+            if "RAMP" not in self.mode_desc:
+                self.mode_desc = f"RAMP_{self.mode_desc}"
+
         self.cached_target_speed = target_speed
         self.cached_target_steer = self.active_steer
         t_total_ms = (time.perf_counter() - t_start) * 1000.0
@@ -583,6 +599,10 @@ class AutonomousBrain:
                 "step_ms": round(float(t_total_ms), 2),
                 "recovery_state": str(self.recovery_manager.state),
                 "is_wrong_way": bool(self.last_aww_status.is_wrong_way) if self.last_aww_status else False,
+                "is_on_ramp": bool(ramp_res["is_on_ramp"]),
+                "ramp_speed_limit": float(ramp_res["speed_limit"]),
+                "pitch_deg": float(ramp_res["pitch_deg"]),
+                "roll_deg": float(ramp_res["roll_deg"]),
             }
         else:
             telemetry = {
@@ -606,6 +626,10 @@ class AutonomousBrain:
                 "step_ms": round(float(t_total_ms), 2),
                 "recovery_state": str(self.recovery_manager.state),
                 "is_wrong_way": bool(self.last_aww_status.is_wrong_way) if self.last_aww_status else False,
+                "is_on_ramp": bool(ramp_res["is_on_ramp"]),
+                "ramp_speed_limit": float(ramp_res["speed_limit"]),
+                "pitch_deg": float(ramp_res["pitch_deg"]),
+                "roll_deg": float(ramp_res["roll_deg"]),
             }
 
         return (target_speed, self.active_steer, telemetry)

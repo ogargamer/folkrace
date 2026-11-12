@@ -37,7 +37,7 @@
     "tof_hz": 60.0,
     "pi_loop_hz": 60.0,
     "control_loop_freq_hz": 400,
-    "sim_time_step_ms": 8,
+    "sim_time_step_ms": 8.333333,
     "uart_baud": 921600
   },
   "costmap": {

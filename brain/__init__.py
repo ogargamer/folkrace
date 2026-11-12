@@ -14,6 +14,7 @@ from .tof_gap_scout import ToFGapScout
 from .planner_sl_mpc import CurvilinearSLMPC
 from .stuck_recovery_manager import StuckRecoveryManager, StuckRecoveryState
 from .anti_wrong_way_watchdog import AntiWrongWayWatchdog
+from .ramp_detector import RampDetector
 
 __all__ = [
     "AutonomousBrain",
@@ -25,5 +26,6 @@ __all__ = [
     "StuckRecoveryManager",
     "StuckRecoveryState",
     "AntiWrongWayWatchdog",
+    "RampDetector",
 ]
 

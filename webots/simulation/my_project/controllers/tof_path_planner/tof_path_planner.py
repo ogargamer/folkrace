@@ -56,6 +56,8 @@ from planner_config import (
     V_MAX_CRUISE,
 )
 
+STEP_MS_INT = int(round(TIME_STEP_MS))
+
 
 def find_trajectory_csv() -> str:
     """Finds canonical cyan champion trajectory CSV path."""
@@ -180,11 +182,11 @@ def run_racing_studio(robot: any, vehicle: FolkraceVehicle) -> None:
     keyboard = robot.getKeyboard() if hasattr(robot, "getKeyboard") else None
     if keyboard:
         try:
-            keyboard.enable(TIME_STEP_MS)
+            keyboard.enable(STEP_MS_INT)
         except Exception:
             pass
 
-    while robot.step(TIME_STEP_MS) != -1:
+    while robot.step(STEP_MS_INT) != -1:
         wall_start_t = time.perf_counter()
         sim_time += DT
 
@@ -482,7 +484,7 @@ def run_champion_preview(robot: any, vehicle: FolkraceVehicle) -> None:
     keyboard = robot.getKeyboard() if hasattr(robot, "getKeyboard") else None
     if keyboard:
         try:
-            keyboard.enable(TIME_STEP_MS)
+            keyboard.enable(STEP_MS_INT)
         except Exception:
             pass
 
@@ -494,7 +496,7 @@ def run_champion_preview(robot: any, vehicle: FolkraceVehicle) -> None:
     telemetry_hz = max(1, min(60, int(os.environ.get("WEBOTS_TELEMETRY_HZ", 60))))
     last_telemetry_time = -1.0
 
-    while robot.step(TIME_STEP_MS) != -1:
+    while robot.step(STEP_MS_INT) != -1:
         wall_start_t = time.perf_counter()
         sim_time += DT
 
@@ -534,7 +536,7 @@ def run_champion_preview(robot: any, vehicle: FolkraceVehicle) -> None:
                             if s:
                                 s.setPosition(0.0)
                         for _ in range(3):
-                            robot.step(TIME_STEP_MS)
+                            robot.step(STEP_MS_INT)
                         track_tracker.reset(start_pos[:2])
                         print("\n>>> [KEYBOARD] ROBOT POSE RESET TO TRACK START", flush=True)
                     k = keyboard.getKey()
@@ -792,7 +794,7 @@ def run_fast_champion_drive(robot: any, vehicle: FolkraceVehicle) -> None:
 
     print("[Fast Drive] Simulation started. Real-time driving active.", flush=True)
 
-    while robot.step(TIME_STEP_MS) != -1:
+    while robot.step(STEP_MS_INT) != -1:
         sim_time += DT
         obs_manager.update(sim_time)
         telemetry, planner_ran = vehicle.step(dt=DT, full_telemetry=False)
@@ -906,7 +908,7 @@ def run_ga_worker(robot: any, vehicle: FolkraceVehicle) -> None:
 
         # Step 3 frames to flush physics and settle contact points
         for _ in range(3):
-            robot.step(TIME_STEP_MS)
+            robot.step(STEP_MS_INT)
 
         track_tracker = WebotsTrackProgressTracker(traj_csv)
         track_tracker.reset(start_pos[:2])
@@ -921,7 +923,7 @@ def run_ga_worker(robot: any, vehicle: FolkraceVehicle) -> None:
         total_steps = int(math.ceil(duration_s / DT))
 
         for _ in range(total_steps):
-            if robot.step(TIME_STEP_MS) == -1:
+            if robot.step(STEP_MS_INT) == -1:
                 crashed = True
                 crash_reason = "sim_terminated"
                 break
@@ -1044,7 +1046,7 @@ def run_ga_worker(robot: any, vehicle: FolkraceVehicle) -> None:
         try:
             conn, _ = server_sock.accept()
         except (BlockingIOError, socket.error):
-            if robot.step(TIME_STEP_MS) == -1:
+            if robot.step(STEP_MS_INT) == -1:
                 break
             time.sleep(0.002)
             continue

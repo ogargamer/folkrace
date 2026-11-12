@@ -19,6 +19,8 @@ try:
         SERVO_MAX_SPEED_RAD_S,
         TOF_LATENCY_STEPS,
         ACTUATOR_LATENCY_STEPS,
+        TOF_LATENCY_S,
+        ACTUATOR_LATENCY_S,
     )
 except ImportError:
     from planner_config import (
@@ -27,6 +29,8 @@ except ImportError:
         SERVO_MAX_SPEED_RAD_S,
         TOF_LATENCY_STEPS,
         ACTUATOR_LATENCY_STEPS,
+        TOF_LATENCY_S,
+        ACTUATOR_LATENCY_S,
     )
 
 
@@ -49,8 +53,12 @@ class PoseTracker:
         actuator_latency_steps: int = ACTUATOR_LATENCY_STEPS,
         max_steer_rad: float = MAX_STEERING_RAD,
         servo_max_speed: float = SERVO_MAX_SPEED_RAD_S,
+        tof_latency_s: float = TOF_LATENCY_S,
+        actuator_latency_s: float = ACTUATOR_LATENCY_S,
     ):
         self.wheelbase = wheelbase
+        self.tof_latency_s = float(tof_latency_s)
+        self.actuator_latency_s = float(actuator_latency_s)
         self.tof_latency_steps = max(1, int(tof_latency_steps))
         self.actuator_latency_steps = max(1, int(actuator_latency_steps))
         self.max_steer_rad = max_steer_rad
@@ -92,11 +100,24 @@ class PoseTracker:
         Integrates forward velocity and yaw rate into local Cartesian coordinates.
         Robot Body convention: +Y is Forward, +X is Right, +Z is Up (turning Left is CCW / positive).
         Uses second-order midpoint heading for curvature accuracy.
+        Dynamically adapts past pose history buffer to active timestep dt (time-based parity).
         """
         if math.isnan(v_est) or math.isinf(v_est):
             v_est = 0.0
         if math.isnan(yaw_rate) or math.isinf(yaw_rate):
             yaw_rate = 0.0
+
+        # Dynamically adapt history depth based on active dt (time-based lookahead parity)
+        if dt > 0.001:
+            req_steps = max(1, int(round(self.tof_latency_s / dt)))
+            if req_steps != self.tof_latency_steps:
+                self.tof_latency_steps = req_steps
+                target_len = req_steps + 1
+                if self.pose_history.maxlen != target_len:
+                    current_poses = list(self.pose_history)
+                    while len(current_poses) < target_len:
+                        current_poses.insert(0, current_poses[0] if current_poses else (self.x, self.y, self.yaw))
+                    self.pose_history = collections.deque(current_poses[-target_len:], maxlen=target_len)
 
         yaw_mid = self.yaw + 0.5 * yaw_rate * dt
         dx = -v_est * math.sin(yaw_mid) * dt
@@ -138,9 +159,9 @@ class PoseTracker:
         dx_past = cos_p * dx_w + sin_p * dy_w
         dy_past = -sin_p * dx_w + cos_p * dy_w
 
-        # 2. Future Motion via single-track bicycle model
+        # 2. Future Motion via single-track bicycle model (time-based actuator latency)
         v_k = v_current if is_reversing else max(0.0, v_current)
-        dt_act = self.actuator_latency_steps * dt
+        dt_act = self.actuator_latency_s if hasattr(self, "actuator_latency_s") else (self.actuator_latency_steps * dt)
         delta_yaw_future = (v_k / self.wheelbase) * math.tan(steer_current) * dt_act
         yaw_future_mid = 0.5 * delta_yaw_future
         dx_future = -v_k * math.sin(yaw_future_mid) * dt_act

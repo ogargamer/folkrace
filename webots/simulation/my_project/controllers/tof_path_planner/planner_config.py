@@ -80,19 +80,24 @@ PLANNER_TYPE: str = "SL_MPC"
 # ==============================================================================
 
 # Simulation Physics & Actuator Step Timing
-TIME_STEP_MS: int = SIM_TIME_STEP_MS    # Webots basicTimeStep in ms (matches world file: 8 ms)
-DT: float = TIME_STEP_MS / 1000.0      # Physics & fast actuator/IMU step duration (0.008 s = 8 ms)
-SIM_HZ: float = 1000.0 / TIME_STEP_MS  # Simulation physics, 4WD motors, steering, and IMU rate (125.0 Hz)
+TIME_STEP_MS: float = float(SIM_TIME_STEP_MS)  # Webots basicTimeStep in ms (matches world file: 8.333333 ms = 120.0 Hz)
+DT: float = TIME_STEP_MS / 1000.0              # Physics & fast actuator/IMU step duration (0.00833333 s = 1/120 s)
+SIM_HZ: float = 1000.0 / TIME_STEP_MS          # Simulation physics, 4WD motors, steering, and IMU rate (120.0 Hz)
 
-PLANNER_DECIMATION: int = 1            # Run planner every physics step in simulation
-TOF_TIME_STEP_MS: int = TIME_STEP_MS * PLANNER_DECIMATION  # Sim ToF sampling interval in ms
-DT_PLANNER: float = DT_PI_LOOP         # Canonical planner cycle duration (0.0166667 s = 60.0 Hz)
-PLANNER_HZ: float = PI_LOOP_HZ         # ToF scan processing & trajectory planning rate (60.0 Hz)
+PLANNER_DECIMATION: int = 1                    # Run planner every physics step in simulation
+TOF_TIME_STEP_MS: float = TIME_STEP_MS * PLANNER_DECIMATION  # Sim ToF sampling interval in ms
+DT_PLANNER: float = DT_PI_LOOP                 # Canonical planner cycle duration (0.0166667 s = 60.0 Hz)
+PLANNER_HZ: float = PI_LOOP_HZ                 # ToF scan processing & trajectory planning rate (60.0 Hz)
 
-# Realistic Hardware Latency & Lookahead Compensation
-TOF_LATENCY_STEPS: int = 2              # 2 simulation steps = 16 ms ToF integration & transport delay
-ACTUATOR_LATENCY_STEPS: int = 1         # 1 simulation step = 8 ms intrinsic Webots ODE physics integration delay
-TOTAL_LATENCY_STEPS: int = TOF_LATENCY_STEPS + ACTUATOR_LATENCY_STEPS  # 3 simulation steps = 24 ms total latency compensated by SE(2) lookahead projection
+# Realistic Hardware Latency & Lookahead Compensation (Time-Based)
+TOF_LATENCY_S: float = 0.01667          # 16.67 ms (nominal 1 frame @ 60 Hz ToF integration & transport delay)
+ACTUATOR_LATENCY_S: float = 0.00800     # 8.0 ms (UART transmission + servo physical response lag)
+TOTAL_LATENCY_S: float = TOF_LATENCY_S + ACTUATOR_LATENCY_S  # 24.67 ms total latency
+
+# Discrete step counts at current DT (120 Hz in simulation = 8.333 ms):
+TOF_LATENCY_STEPS: int = max(1, int(round(TOF_LATENCY_S / DT)))        # 2 steps = 16.67 ms
+ACTUATOR_LATENCY_STEPS: int = max(1, int(round(ACTUATOR_LATENCY_S / DT))) # 1 step = 8.33 ms
+TOTAL_LATENCY_STEPS: int = TOF_LATENCY_STEPS + ACTUATOR_LATENCY_STEPS      # 3 steps = 25.0 ms
 
 # 3.3 Sensor Device Names & Measurement Limits (16-Channel Front Rig: only_front_tofs.proto)
 TOF_SENSOR_NAMES: List[str] = [

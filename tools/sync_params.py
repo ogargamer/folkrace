@@ -135,7 +135,7 @@ def generate_python(cfg: dict, derived: dict) -> str:
         f'DT_PI_LOOP: float = {1.0 / t["pi_loop_hz"]}',
         f'CONTROL_LOOP_FREQ_HZ: int = {t["control_loop_freq_hz"]}',
         f'CONTROL_LOOP_DT_S: float = {derived["ctrl_dt_s"]}',
-        f'SIM_TIME_STEP_MS: int = {t["sim_time_step_ms"]}',
+        f'SIM_TIME_STEP_MS: float = {t["sim_time_step_ms"]}',
         f'UART_BAUD: int = {t["uart_baud"]}',
         '',
         '# ============================================================================== #',

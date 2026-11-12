@@ -245,8 +245,10 @@ class FolkraceVehicle:
             if dev is None:
                 short_name = name.replace("tof_front_", "tof_")
                 dev = robot.getDevice(short_name)
+            step_ms_int = int(round(TIME_STEP_MS))
+            tof_step_ms_int = int(round(TOF_TIME_STEP_MS))
             if dev is not None:
-                dev.enable(TOF_TIME_STEP_MS)
+                dev.enable(tof_step_ms_int)
                 self.tofs[name] = dev
                 self.tof_devices.append(dev)
             else:
@@ -259,27 +261,27 @@ class FolkraceVehicle:
             or robot.getDevice("inertial unit")
         )
         if self.imu_dev:
-            self.imu_dev.enable(TIME_STEP_MS)
+            self.imu_dev.enable(step_ms_int)
 
         self.gyro = (
             robot.getDevice("gyro")
             or robot.getDevice("bno08x_gyro")
         )
         if self.gyro:
-            self.gyro.enable(TIME_STEP_MS)
+            self.gyro.enable(step_ms_int)
 
         self.accel = (
             robot.getDevice("accelerometer")
             or robot.getDevice("bno08x_accel")
         )
         if self.accel:
-            self.accel.enable(TIME_STEP_MS)
+            self.accel.enable(step_ms_int)
 
         self.encoders = {}
         for wheel, dev_name in ENCODER_NAMES.items():
             enc = robot.getDevice(dev_name)
             if enc:
-                enc.enable(TIME_STEP_MS)
+                enc.enable(step_ms_int)
                 self.encoders[wheel] = enc
 
         # 3. Core Vehicle Modules
@@ -750,8 +752,10 @@ class FolkraceVehicle:
                 gyro_z_rad_s=self.cached_yaw_rate,
                 dt=dt * PLANNER_DECIMATION,
                 sim_time_s=sim_time,
-                ground_truth_pose=(gx_curr, gy_curr, gyaw_curr),
+                ground_truth_pose=None,  # Zero ground truth: test watchdog on dead-reckoned odometry matching Pi 4
                 full_telemetry=full_telemetry,
+                pitch_rad=self.fusion.pitch,
+                roll_rad=self.fusion.roll,
             )
 
             is_recovering = (self.recovery_manager.state != StuckRecoveryState.NORMAL_DRIVE)

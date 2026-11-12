@@ -214,6 +214,17 @@ static void IRAM_ATTR realTimeControlTask(void *pvParameters) {
             fr_rpm = inputs.fr_rpm;
             rl_rpm = inputs.rl_rpm;
             rr_rpm = inputs.rr_rpm;
+
+            // Hardware Ramp Speed Governor (Safety speed ceiling on incline/pitch)
+            const float ramp_pitch_threshold_deg = 8.0f;
+            const float ramp_speed_ceiling_mps = 2.0f;
+            if (fabsf(inputs.pitch_deg) >= ramp_pitch_threshold_deg) {
+                if (target_v > 0.0f) {
+                    target_v = fminf(target_v, ramp_speed_ceiling_mps);
+                } else if (target_v < 0.0f) {
+                    target_v = fmaxf(target_v, -ramp_speed_ceiling_mps);
+                }
+            }
         }
 
         // 2. Execute 4WD Electronic Differential & Ackermann Kinematics

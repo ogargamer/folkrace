@@ -11,7 +11,7 @@ WorldInfo {
     "Coordinate System: ENU (East-North-Up Standard, Z is Elevation)"
   ]
   title "Folkrace Track World"
-  basicTimeStep 8
+  basicTimeStep 8.333333
   contactProperties [
     ContactProperties {
       material1 "tire"

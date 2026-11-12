@@ -236,6 +236,22 @@ ElectronicDiffOutputs IRAM_ATTR ElectronicDifferential4WD::update(
         }
     }
 
+    // -------------------------------------------------------------------------
+    // 10. Active IMU-Based Countersteering & Stabilization Intervention
+    // -------------------------------------------------------------------------
+    if (out.slip_state == SLIP_OVERSTEER) {
+        // Apply closed-loop countersteer proportional to excess yaw rate error (K_yaw_rate = 0.06 rad/(rad/s))
+        const float k_yaw_rate = 0.06f;
+        float delta_counter = -k_yaw_rate * out.yaw_error;
+        float stabilized_steer = fmaxf(-max_steer_rad_, fminf(max_steer_rad_, current_steer_rad_ + delta_counter));
+
+        out.steer_rad = stabilized_steer;
+        out.steer_deg = stabilized_steer * (180.0f / PI_F);
+
+        float pulse_offset = (stabilized_steer / (PI_F * 0.5f)) * 1000.0f;
+        out.servo_pulse_us = fmaxf(SERVO_PULSE_MIN_US, fminf(SERVO_PULSE_MAX_US, SERVO_PULSE_NEUTRAL_US + pulse_offset));
+    }
+
     return out;
 }
 
