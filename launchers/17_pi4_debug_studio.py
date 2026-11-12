@@ -197,28 +197,6 @@ def trigger_mcu_reconnect(base_url: str) -> bool:
         return False
 
 
-def set_s10_mode(base_url: str, enable: bool) -> bool:
-    """Commands ESP32 ToF Hub to accept or reject ST Table 4 Status 10 (Valid No Prev)."""
-    url = f"{base_url}/api/mcu/command"
-    payload = json.dumps({"action": "s10", "enable": enable}).encode("utf-8")
-    status_str = "ACCEPT (ON)" if enable else "REJECT (OFF)"
-    print(f"[Launcher] Commanding ESP32 ToF Hub Status 10 to: {status_str}...")
-    try:
-        req = urllib.request.Request(
-            url,
-            data=payload,
-            headers={"Content-Type": "application/json", "User-Agent": "FolkraceLauncher/1.0"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=4.0) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            print(f"[Launcher] ESP32 ToF S10 update status: {data.get('status', 'OK')}")
-            return True
-    except Exception as e:
-        print(f"[Launcher ERROR] Failed updating S10 mode: {e}")
-        return False
-
-
 def download_database(base_url: str, output_path: Optional[str] = None) -> bool:
     """Downloads the active flight recorder SQLite database."""
     status = query_api_json(base_url, "/api/status")
@@ -431,8 +409,6 @@ def main():
     parser.add_argument("--stream", action="store_true", help="Stream live telemetry dashboard in terminal")
     parser.add_argument("--download", action="store_true", help="Download current SQLite black box flight database")
     parser.add_argument("--reconnect", "--reconnect-mcu", dest="reconnect", action="store_true", help="Trigger remote ESP32 serial re-probe & reconnection")
-    parser.add_argument("--s10", choices=["on", "off", "1", "0"], default=None, help="Command ESP32 ToF Hub to accept ('on') or reject ('off') ST Status 10")
-    parser.add_argument("--no-s10", dest="no_s10", action="store_true", help="Command ESP32 ToF Hub to reject ST Status 10 (Valid No Prev)")
     parser.add_argument("--tab", "--browser-tab", "--browser", "--web", dest="browser_tab", action="store_true", help="Open Tactical Mission Control in standard browser tab instead of standalone app window")
     parser.add_argument("--desktop", "--pyqt", "--planner-gui", dest="desktop", action="store_true", help="Launch native PyQt5 desktop planner GUI instead of Tactical Mission Control")
     parser.add_argument("--profile", action="store_true", help="Run GUI & telemetry performance profiler and benchmark")
@@ -495,14 +471,6 @@ def main():
     print("-" * 75)
 
     # 5. Execute sub-modes
-    if args.s10 is not None:
-        set_s10_mode(base_url, args.s10 in ("on", "1"))
-        return
-
-    if args.no_s10:
-        set_s10_mode(base_url, False)
-        return
-
     if args.reconnect:
         trigger_mcu_reconnect(base_url)
         return

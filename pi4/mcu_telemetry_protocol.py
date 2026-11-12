@@ -157,7 +157,10 @@ def decode_tof_packet(data: bytes) -> Optional[Dict[str, Any]]:
     }
 
 
-def decode_tof_sub_packet(data: bytes, accept_s10: bool = True) -> Optional[Dict[str, Any]]:
+VALID_TOF_STATUSES = {5, 6, 9}  # ST Table 4 valid statuses (Status 10 is treated as an error/invalid)
+
+
+def decode_tof_sub_packet(data: bytes) -> Optional[Dict[str, Any]]:
     """Decodes per-sensor binary ToF packet (20-byte lean frame or 52-byte multi-target frame)."""
     # 1. Check exact 20-byte lean frame (default for Pi)
     if len(data) == TOF_SUB_SIZE:
@@ -230,7 +233,7 @@ def decode_tof_sub_packet(data: bytes, accept_s10: bool = True) -> Optional[Dict
 
         dist_raw = unpacked[4:20]
         status_raw = unpacked[20:36]
-        valid_statuses = {5, 6, 9, 10} if accept_s10 else {5, 6, 9}
+        valid_statuses = VALID_TOF_STATUSES
 
         primary_distances_m = []
         for i in range(4):

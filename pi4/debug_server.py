@@ -417,9 +417,6 @@ class DebugHTTPRequestHandler(BaseHTTPRequestHandler):
                 cmd_str = "RESET\n"
             elif action in ("reconnect", "reset_ports"):
                 cmd_str = "RECONNECT\n"
-            elif action == "s10":
-                enable = bool(data.get("enable", data.get("accept", True)))
-                cmd_str = "S10_1\n" if enable else "S10_0\n"
             elif action == "status":
                 cmd_str = "STATUS\n"
             elif action == "raw":

@@ -529,15 +529,12 @@ struct ToF_Binary_Packet_52 {
 };
 #pragma pack(pop)
 
-static bool g_accept_s10 = true;
 static bool g_packet_mode_52 = false; // Default: 20-byte lean mode for Pi
 
 static inline bool is_valid_target_status(uint8_t st) {
-  if (g_accept_s10) {
-    return (st == 5 || st == 6 || st == 9 || st == 10);
-  } else {
-    return (st == 5 || st == 6 || st == 9);
-  }
+  // Only ST Table 4 status 5 (100% valid), 6 (wrap around 50%), and 9 (large pulse 50%) are valid.
+  // Status 10 (Valid without previous history) is treated as an error/invalid with the rest of errors.
+  return (st == 5 || st == 6 || st == 9);
 }
 
 void send_binary_telemetry(uint8_t sensor_id, VL53L8CX_ResultsData *p_res,
@@ -777,9 +774,7 @@ void setup() {
 void loop() {
   while (Serial.available() > 0) {
     char c = Serial.read();
-    if (c == '0' || c == '-') g_accept_s10 = false;
-    else if (c == '1' || c == '+') g_accept_s10 = true;
-    else if (c == 'D' || c == 'd' || c == 'M' || c == 'm') g_packet_mode_52 = true;  // Debug mode: 52B multi-target
+    if (c == 'D' || c == 'd' || c == 'M' || c == 'm') g_packet_mode_52 = true;  // Debug mode: 52B multi-target
     else if (c == 'L' || c == 'l' || c == 'N' || c == 'n') g_packet_mode_52 = false; // Lean mode: 20B (default for Pi)
   }
 

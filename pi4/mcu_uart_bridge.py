@@ -70,9 +70,8 @@ UART_BAUD = 921600
 class BinaryStreamParser:
     """Zero-allocation rolling stream parser for binary UART packets."""
 
-    def __init__(self, is_tof_port: bool = False, accept_s10: bool = True):
+    def __init__(self, is_tof_port: bool = False):
         self.is_tof_port = is_tof_port
-        self.accept_s10 = accept_s10
         self.buffer = bytearray()
 
     def feed(self, chunk: bytes):
@@ -144,7 +143,7 @@ class BinaryStreamParser:
                         if chk_calc == self.buffer[TOF_SUB_SIZE - 1]:
                             raw_pkt = bytes(self.buffer[:TOF_SUB_SIZE])
                             del self.buffer[:TOF_SUB_SIZE]
-                            decoded = decode_tof_sub_packet(raw_pkt, accept_s10=self.accept_s10)
+                            decoded = decode_tof_sub_packet(raw_pkt)
                             if decoded:
                                 yield (MSG_ID_TOF_SUB_TELEM, decoded)
                                 continue
@@ -157,7 +156,7 @@ class BinaryStreamParser:
                         if chk_calc == self.buffer[TOF_SUB52_SIZE - 1]:
                             raw_pkt = bytes(self.buffer[:TOF_SUB52_SIZE])
                             del self.buffer[:TOF_SUB52_SIZE]
-                            decoded = decode_tof_sub_packet(raw_pkt, accept_s10=self.accept_s10)
+                            decoded = decode_tof_sub_packet(raw_pkt)
                             if decoded:
                                 yield (MSG_ID_TOF_SUB_TELEM, decoded)
                                 continue
@@ -289,14 +288,12 @@ class MCU_UART_Bridge:
         baud: int = UART_BAUD,
         udp_host: str = UDP_DISPATCH_HOST,
         udp_port: int = UDP_DISPATCH_PORT,
-        accept_s10: bool = True,
     ):
         self.main_port_arg = main_port
         self.tof_port_arg = tof_port
         self.baud = baud
         self.udp_host = udp_host
         self.udp_target = (udp_host, udp_port)
-        self.accept_s10 = accept_s10
         self.running = False
 
         self.assigned_ports: Dict[str, Optional[str]] = {"ESP32_Main": None, "ESP32_ToF": None}
@@ -404,21 +401,11 @@ class MCU_UART_Bridge:
                     if d_strip in (b"RECONNECT", b"RESET_PORTS", b"RESTART_BRIDGE"):
                         self.trigger_reconnect()
                         continue
-                    # Intercept S10 toggle commands for ESP32 ToF Hub
-                    if d_strip in (b"S10_1", b"S10_ON", b"SET_S10_1"):
-                        self.set_s10(True)
-                        continue
-                    elif d_strip in (b"S10_0", b"S10_OFF", b"SET_S10_0"):
-                        self.set_s10(False)
-                        continue
                     try:
                         cmd_obj = json.loads(data.decode("utf-8", errors="ignore"))
                         if isinstance(cmd_obj, dict):
                             if "action" in cmd_obj and cmd_obj["action"] in ("reconnect", "reset_ports"):
                                 self.trigger_reconnect()
-                                continue
-                            if "s10" in cmd_obj:
-                                self.set_s10(bool(cmd_obj["s10"]))
                                 continue
                     except Exception:
                         pass
@@ -441,12 +428,6 @@ class MCU_UART_Bridge:
                     self.tof_serial.flush()
                 except Exception as e:
                     print(f"[MCU Bridge ERROR] Failed writing to ESP32 ToF: {e}")
-
-    def set_s10(self, accept: bool):
-        """Sets S10 acceptance and commands ESP32 ToF onboard processing via serial."""
-        self.accept_s10 = accept
-        self.send_to_tof_mcu(b"1\n" if accept else b"0\n")
-        print(f"[MCU Bridge] ESP32 ToF S10 acceptance set to: {accept}")
 
     def send_to_main_mcu(self, data: bytes):
         """Thread-safe transmission to ESP32 Main over USB Serial."""
@@ -496,7 +477,7 @@ class MCU_UART_Bridge:
             print(f"[MCU Bridge] Connecting to {label} on {port} @ {self.baud} baud...")
 
             # 2. Connection and Streaming Phase
-            parser = BinaryStreamParser(is_tof_port=is_tof, accept_s10=self.accept_s10)
+            parser = BinaryStreamParser(is_tof_port=is_tof)
             try:
                 with serial.Serial(port, self.baud, timeout=0.2) as ser:
                     ser.reset_input_buffer()
@@ -511,9 +492,7 @@ class MCU_UART_Bridge:
                     # Initialize MCU parameters
                     if is_tof:
                         try:
-                            ser.write(b"L\n")
-                            time.sleep(0.04)
-                            ser.write(b"1\n" if self.accept_s10 else b"0\n")
+                            ser.write(b"L\n")  # Lean mode: 20B
                             ser.flush()
                         except Exception:
                             pass
@@ -650,11 +629,9 @@ if __name__ == "__main__":
     parser.add_argument("--main", default="auto", help="ESP32 Main serial device (auto-detects /dev/ttyUSB0, /dev/ttyACM0, etc.)")
     parser.add_argument("--tof", default="auto", help="ESP32 ToF Hub serial device (auto-detects /dev/ttyUSB1, /dev/ttyACM1, etc.)")
     parser.add_argument("--baud", type=int, default=UART_BAUD, help="UART baud rate")
-    parser.add_argument("--no-s10", dest="accept_s10", action="store_false", help="Reject ST Status 10 (Valid No Prev) in ToF arbitration")
-    parser.set_defaults(accept_s10=True)
     args = parser.parse_args()
 
-    bridge = MCU_UART_Bridge(main_port=args.main, tof_port=args.tof, baud=args.baud, accept_s10=args.accept_s10)
+    bridge = MCU_UART_Bridge(main_port=args.main, tof_port=args.tof, baud=args.baud)
     bridge.start()
 
     print("[MCU Bridge] Active. Press Ctrl+C to terminate.")

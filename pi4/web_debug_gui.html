@@ -306,42 +306,6 @@
     background: #4f287088;
     box-shadow: 0 0 12px rgba(224, 64, 251, 0.55);
   }
-  /* S10 Status Toggle Button */
-  .btn-toggle-s10 {
-    cursor: pointer;
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    font-size: 11px;
-    font-weight: 700;
-    padding: 4px 10px;
-    border-radius: 4px;
-    border: 1px solid;
-    transition: all 0.2s ease;
-    user-select: none;
-    font-family: inherit;
-    outline: none;
-  }
-  .btn-toggle-s10.state-s10-on {
-    color: #2dd4bf;
-    border-color: #0d9488;
-    background: #134e4a44;
-    box-shadow: 0 0 8px rgba(45, 212, 191, 0.25);
-  }
-  .btn-toggle-s10.state-s10-on:hover {
-    background: #134e4a88;
-    box-shadow: 0 0 12px rgba(45, 212, 191, 0.45);
-  }
-  .btn-toggle-s10.state-s10-off {
-    color: #fb923c;
-    border-color: #c2410c;
-    background: #451a0344;
-    box-shadow: 0 0 8px rgba(251, 146, 60, 0.25);
-  }
-  .btn-toggle-s10.state-s10-off:hover {
-    background: #451a0388;
-    box-shadow: 0 0 12px rgba(251, 146, 60, 0.45);
-  }
   .tab-page {
     display: flex;
     flex: 1;
@@ -774,10 +738,6 @@
       <span id="fakeToggleIcon">🟢</span>
       <span id="fakeToggleText">LIVE SENSORS</span>
     </button>
-    <button id="btnHeaderS10" class="badge btn-toggle-s10 state-s10-on" onclick="toggleS10()" title="Toggle VL53L5CX Status 10 (Valid Without History) Filter on ESP32 ToF Hub">
-      <span id="headerS10Icon">🎯</span>
-      <span id="headerS10Text">S10: ON</span>
-    </button>
     <span id="cpuTempBadge" class="badge">Temp: --°C</span>
     <span id="freqBadge" class="badge">-- Hz</span>
     <div id="perfHudBadge" class="badge" title="Laptop GUI &amp; Network Performance: FPS | RTT | Render | Payload" style="color:#00e5ff; border-color:#00897b; background:#0d1821; font-family:Consolas, monospace; display:flex; gap:6px; align-items:center;">
@@ -968,7 +928,6 @@
     <button class="btn-motor-action btn-dfu" onclick="enterDfu()">🔧 DFU REBOOT</button>
     <button class="btn-motor-action btn-reset" onclick="resetControllers()">🔄 RESET</button>
     <button class="btn-motor-action btn-reconnect" style="background:#1e3a5f;color:#38bdf8;border:1px solid #0284c7;" onclick="reconnectMcu()">🔌 RECONNECT ESP32</button>
-    <button class="btn-motor-action" id="btnS10Toggle" style="background:#134e4a;color:#2dd4bf;border:1px solid #0d9488;" onclick="toggleS10()">🎯 S10: ON</button>
     <span id="motorActionStatus" style="font-size:11px;color:var(--accent-cyan);font-family:Consolas, monospace;margin-left:auto;">Pipeline ready</span>
   </div>
 
@@ -2704,35 +2663,6 @@ function resetControllers() {
 function reconnectMcu() {
   appendMcuConsole("[ACTION] Re-detecting and reconnecting ESP32 serial ports...");
   sendMcuCommand({ action: "reconnect" });
-}
-
-let g_s10_enabled = true;
-function toggleS10(enable) {
-  if (typeof enable === "boolean") {
-    g_s10_enabled = enable;
-  } else {
-    g_s10_enabled = !g_s10_enabled;
-  }
-  // 1. Sync header button
-  const headerBtn = document.getElementById("btnHeaderS10");
-  const headerText = document.getElementById("headerS10Text");
-  if (headerBtn && headerText) {
-    headerBtn.className = g_s10_enabled ? "badge btn-toggle-s10 state-s10-on" : "badge btn-toggle-s10 state-s10-off";
-    headerText.innerText = g_s10_enabled ? "S10: ON" : "S10: OFF";
-    headerBtn.title = g_s10_enabled
-      ? "ESP32 ToF Status 10 (Valid No History) is ACCEPTED. Click to reject."
-      : "ESP32 ToF Status 10 (Valid No History) is REJECTED. Click to accept.";
-  }
-  // 2. Sync powertrain action bar button
-  const btn = document.getElementById("btnS10Toggle");
-  if (btn) {
-    btn.innerText = g_s10_enabled ? "🎯 S10: ON" : "🎯 S10: OFF";
-    btn.style.background = g_s10_enabled ? "#134e4a" : "#451a03";
-    btn.style.color = g_s10_enabled ? "#2dd4bf" : "#fb923c";
-    btn.style.borderColor = g_s10_enabled ? "#0d9488" : "#c2410c";
-  }
-  appendMcuConsole(`[ACTION] ESP32 ToF Status 10 (Valid No Prev) set to: ${g_s10_enabled ? "ACCEPTED (ON)" : "REJECTED (OFF)"}`);
-  sendMcuCommand({ action: "s10", enable: g_s10_enabled });
 }
 
 function setSpeed(v) {

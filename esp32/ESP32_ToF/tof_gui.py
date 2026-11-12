@@ -70,14 +70,14 @@ STATUS_MAP = {
     7: ("Rate Consistency", "#EF4444", False),
     8: ("Low Signal (Target)", "#F43F5E", False),
     9: ("Large Pulse (50%)", "#EAB308", True),
-    10: ("Valid (No Prev)", "#14B8A6", True),
+    10: ("No History (Error)", "#EF4444", False),
     11: ("Measurement Fail", "#DC2626", False),
     12: ("Blurred (Sharpener)", "#8B5CF6", False),
     13: ("Secondary Inconsistent", "#A1A1AA", False),
     255: ("No Target", "#475569", False),
 }
 
-VALID_STATUS_CODES = {5, 6, 9, 10}
+VALID_STATUS_CODES = {5, 6, 9}
 
 def get_status_info(st: int):
     return STATUS_MAP.get(st, (f"Status {st}", "#64748B", False))
@@ -525,9 +525,9 @@ class ZoneTelemetryCard(QFrame):
         layout.addLayout(spad_row)
 
     def set_data(self, dist_mm: int, t0_mm: int, t1_mm: int,
-                 t0_st: int, t1_st: int, spad_cnt: int, is_52: bool = True, accept_s10: bool = True):
-        # 1. Resolve distance dynamically based on accept_s10 setting
-        valid_statuses = {5, 6, 9, 10} if accept_s10 else {5, 6, 9}
+                 t0_st: int, t1_st: int, spad_cnt: int, is_52: bool = True):
+        # 1. Resolve distance dynamically based on valid status codes
+        valid_statuses = VALID_STATUS_CODES
         v0 = (t0_st in valid_statuses and t0_mm > 0)
         v1 = (t1_st in valid_statuses and t1_mm > 0)
         near0 = (t0_st != 0 and t0_st != 255 and 1 <= t0_mm <= 30)
@@ -599,12 +599,10 @@ class ZoneTelemetryCard(QFrame):
                 self.lbl_reason.setText("T2 CHOSEN (CLOSER)")
                 self.lbl_reason.setStyleSheet("font-size: 10px; font-weight: bold; color: #EAB308; background-color: #713F12; border-radius: 4px; padding: 3px 7px;")
         elif v0:
-            tag = "T1 VALID (S10)" if t0_st == 10 else "T1 VALID"
-            self.lbl_reason.setText(tag)
+            self.lbl_reason.setText("T1 VALID")
             self.lbl_reason.setStyleSheet("font-size: 10px; font-weight: bold; color: #22C55E; background-color: #14532D; border-radius: 4px; padding: 3px 7px;")
         elif v1:
-            tag = "T2 VALID (S10)" if t1_st == 10 else "T2 VALID"
-            self.lbl_reason.setText(tag)
+            self.lbl_reason.setText("T2 VALID")
             self.lbl_reason.setStyleSheet("font-size: 10px; font-weight: bold; color: #EAB308; background-color: #713F12; border-radius: 4px; padding: 3px 7px;")
 
         # 3. Target 0 / Target 1 Details
@@ -613,22 +611,6 @@ class ZoneTelemetryCard(QFrame):
 
         st0_text, st0_color, _ = get_status_info(t0_st)
         st1_text, st1_color, _ = get_status_info(t1_st)
-
-        if t0_st == 10:
-            if accept_s10:
-                st0_text = "Valid (No Prev)"
-                st0_color = "#14B8A6"
-            else:
-                st0_text = "Ignored (S10 OFF)"
-                st0_color = "#F59E0B"
-
-        if t1_st == 10:
-            if accept_s10:
-                st1_text = "Valid (No Prev)"
-                st1_color = "#14B8A6"
-            else:
-                st1_text = "Ignored (S10 OFF)"
-                st1_color = "#F59E0B"
 
         self.lbl_t0_status.setText(f"{t0_st}: {st0_text}")
         self.lbl_t0_status.setStyleSheet(f"font-size: 10px; font-weight: bold; color: {st0_color};")
@@ -721,7 +703,7 @@ class SensorTelemetryColumn(QFrame):
             self.cards.append(card)
             layout.addWidget(card, 1)
 
-    def update_sensor_data(self, sdata: dict, accept_s10: bool = True):
+    def update_sensor_data(self, sdata: dict):
         hz = sdata.get("hz", 0.0)
         rx = sdata.get("rx_count", 0)
         active = sdata.get("active", False)
@@ -757,7 +739,6 @@ class SensorTelemetryColumn(QFrame):
                     t1_st=t1_st[i] if i < len(t1_st) else 0,
                     spad_cnt=spad_cnt[i] if i < len(spad_cnt) else 0,
                     is_52=is_52,
-                    accept_s10=accept_s10
                 )
 
 
@@ -835,7 +816,6 @@ class ToFMultiTargetMainWindow(QMainWindow):
         self.setMinimumSize(1100, 720)
 
         self.receiver = None
-        self.accept_s10 = True
 
         # Root Dark Theme
         self.setStyleSheet("""
@@ -964,13 +944,6 @@ class ToFMultiTargetMainWindow(QMainWindow):
         self.btn_flash.clicked.connect(self.open_flash_dialog)
         layout.addWidget(self.btn_flash)
 
-        # S10 Acceptance Toggle Button
-        self.btn_s10 = QPushButton("S10: ACCEPTED")
-        self.btn_s10.setStyleSheet("background-color: #16A34A; color: white; padding: 6px 12px; border-radius: 6px; font-weight: bold; font-size: 11px;")
-        self.btn_s10.setToolTip("Toggle ST Table 4 Status 10 (Valid without previous history)")
-        self.btn_s10.clicked.connect(self.toggle_s10)
-        layout.addWidget(self.btn_s10)
-
         layout.addStretch()
 
         # Telemetry Status Labels
@@ -1036,26 +1009,13 @@ class ToFMultiTargetMainWindow(QMainWindow):
             self.btn_connect.setText("Disconnect")
             self.btn_connect.setStyleSheet("background-color: #DC2626;")
 
-    def toggle_s10(self):
-        self.accept_s10 = not self.accept_s10
-        if self.accept_s10:
-            self.btn_s10.setText("S10: ACCEPTED")
-            self.btn_s10.setStyleSheet("background-color: #16A34A; color: white; padding: 6px 12px; border-radius: 6px; font-weight: bold; font-size: 11px;")
-            if self.receiver and self.receiver.isRunning():
-                self.receiver.send_bytes(b"1\n")
-        else:
-            self.btn_s10.setText("S10: REJECTED")
-            self.btn_s10.setStyleSheet("background-color: #D97706; color: white; padding: 6px 12px; border-radius: 6px; font-weight: bold; font-size: 11px;")
-            if self.receiver and self.receiver.isRunning():
-                self.receiver.send_bytes(b"0\n")
-
     def on_connection_changed(self, connected: bool, msg: str):
         if connected:
             self.lbl_status.setText(msg)
             self.lbl_status.setStyleSheet("font-size: 11px; color: #22C55E; font-weight: bold;")
             if self.receiver and self.receiver.isRunning():
-                # Switch ESP32 to 52-byte multi-target debug stream for GUI and send S10 mode
-                self.receiver.send_bytes(b"D\n" + (b"1\n" if self.accept_s10 else b"0\n"))
+                # Switch ESP32 to 52-byte multi-target debug stream for GUI
+                self.receiver.send_bytes(b"D\n")
         else:
             self.lbl_status.setText(msg)
             self.lbl_status.setStyleSheet("font-size: 11px; color: #EF4444; font-weight: bold;")
@@ -1099,7 +1059,7 @@ class ToFMultiTargetMainWindow(QMainWindow):
         # Update columns
         for sid in SENSOR_ORDER:
             if sid in self.columns and sid in snap:
-                self.columns[sid].update_sensor_data(snap[sid], accept_s10=self.accept_s10)
+                self.columns[sid].update_sensor_data(snap[sid])
 
     def closeEvent(self, event):
         if self.receiver:
