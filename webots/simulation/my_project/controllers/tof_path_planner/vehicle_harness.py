@@ -39,11 +39,13 @@ gc.set_threshold(50000, 20, 20)
 CURR_DIR = os.path.dirname(os.path.abspath(__file__))
 CONTROLLERS_DIR = os.path.dirname(CURR_DIR)
 MY_PROJECT_DIR = os.path.dirname(CONTROLLERS_DIR)
+REPO_ROOT = os.path.abspath(os.path.join(CURR_DIR, "..", "..", "..", "..", ".."))
 
-for p in [CURR_DIR, CONTROLLERS_DIR, MY_PROJECT_DIR]:
+for p in [CURR_DIR, CONTROLLERS_DIR, MY_PROJECT_DIR, REPO_ROOT]:
     if p not in sys.path and os.path.exists(p):
         sys.path.insert(0, p)
 
+from brain import AutonomousBrain
 from electronic_diff_4wd import ElectronicDifferential4WD
 from traction_drift_controller import TractionDriftController
 from cpp_smart_hybrid_costmap import CppSmartHybridCostmap
@@ -290,15 +292,17 @@ class FolkraceVehicle:
         )
         self.fusion.attach_devices(self.encoders, imu_dev=self.imu_dev, gyro_dev=self.gyro, accel_dev=self.accel)
 
-        self.costmap = CppSmartHybridCostmap(
-            grid_bounds=(GRID_X_MIN, GRID_X_MAX, GRID_Y_MIN, GRID_Y_MAX),
-            resolution=GRID_RES,
-            r_inflation_m=R_INFLATION_M,
-        )
+        # 3. Core Perception & Autonomous Trajectory Planner (Shared Brain)
+        self.brain = AutonomousBrain(genes=genes)
 
-        self.gap_scout = ToFGapScout()
-        self.planner = CurvilinearSLMPC(costmap_engine=self.costmap)
-        self.planner.costmap = self.costmap
+        # Expose sub-modules for backwards compatibility & telemetry
+        self.costmap = self.brain.costmap
+        self.gap_scout = self.brain.gap_scout
+        self.planner = self.brain.planner
+        self.recovery_manager = self.brain.recovery_manager
+        self.watchdog = self.brain.watchdog
+        self.pose_tracker = self.brain.pose_tracker
+
         self.ediff = ElectronicDifferential4WD(
             wheelbase=WHEELBASE,
             track_rear=TRACK_REAR,
@@ -310,17 +314,6 @@ class FolkraceVehicle:
             ackermann_percent=ACKERMANN_PERCENT,
             motor_dir=MOTOR_DIR,
             v_max=V_MAX_WHEEL,
-        )
-        self.recovery_manager = StuckRecoveryManager(
-            reverse_speed_m_s=RECOVERY_REVERSE_SPEED_MPS,
-            forward_speed_m_s=V_MIN_CRUISE,
-            steer_angle_rad=RECOVERY_STEER_ANGLE_RAD,
-            clearance_exit_m=RECOVERY_CLEARANCE_EXIT_M,
-            any_tof_exit_m=RECOVERY_ANY_TOF_EXIT_M,
-            servo_slew_rad_s=SERVO_MAX_SPEED_RAD_S,
-            brake_decel_max=BRAKE_DECEL_MAX,
-            accel_fwd_max=ACCEL_FWD_MAX,
-            arc_lookahead_m=RECOVERY_ARC_LOOKAHEAD_M,
         )
         self.drift_controller = TractionDriftController(
             wheelbase=WHEELBASE,
@@ -399,8 +392,6 @@ class FolkraceVehicle:
         self.proj_v = 0.0
         self.proj_steer = 0.0
 
-        # Anti-Wrong-Way Watchdog
-        self.watchdog = AntiWrongWayWatchdog()
         self.last_aww_status = None
 
         # Apply genes if provided
@@ -412,86 +403,28 @@ class FolkraceVehicle:
         if not genes:
             return
 
-        self.base_mu = float(genes.get("mu_friction", 0.817))
-        self.mu_val = self.base_mu
-        self.r_infl = float(genes.get("r_inflation_m", R_INFLATION_M))
-        self.target_lookahead_m = float(genes.get("target_lookahead_m", 2.40))
-        self.aggr_dist_far = float(genes.get("aggr_dist_far_m", 2.40))
-        self.aggr_dist_close = float(genes.get("aggr_dist_close_m", 1.00))
-        self.aggr_min_scale = float(genes.get("aggr_min_scale", 0.30))
-        self.steer_deadband = float(genes.get("steer_deadband_rad", 0.002))
-        self.straight_lock_dist = float(genes.get("straight_lock_dist", STRAIGHT_LOCK_DIST_M))
-        self.straight_lock_speed = float(genes.get("straight_lock_speed", 5.00))
-        self.v_cruise_min = float(genes.get("v_cruise_min", V_MIN_CRUISE))
-        self.v_cruise_max = float(genes.get("v_cruise_max", V_MAX_CRUISE))
+        self.brain.configure(genes)
+
+        self.costmap = self.brain.costmap
+        self.gap_scout = self.brain.gap_scout
+        self.planner = self.brain.planner
+        self.recovery_manager = self.brain.recovery_manager
+        self.watchdog = self.brain.watchdog
+        self.pose_tracker = self.brain.pose_tracker
+
+        self.base_mu = self.brain.base_mu
+        self.mu_val = self.brain.mu_val
+        self.r_infl = self.brain.r_infl
+        self.target_lookahead_m = self.brain.target_lookahead_m
+        self.aggr_dist_far = self.brain.aggr_dist_far
+        self.aggr_dist_close = self.brain.aggr_dist_close
+        self.aggr_min_scale = self.brain.aggr_min_scale
+        self.steer_deadband = self.brain.steer_deadband
+        self.straight_lock_dist = self.brain.straight_lock_dist
+        self.straight_lock_speed = self.brain.straight_lock_speed
+        self.v_cruise_min = self.brain.v_cruise_min
+        self.v_cruise_max = self.brain.v_cruise_max
         self.cached_target_speed = self.v_cruise_min
-
-        self.costmap = CppSmartHybridCostmap(
-            grid_bounds=(GRID_X_MIN, GRID_X_MAX, GRID_Y_MIN, GRID_Y_MAX),
-            resolution=GRID_RES,
-            r_inflation_m=self.r_infl,
-        )
-
-        self.gap_scout = ToFGapScout(
-            w_gap_distance=float(genes.get("w_gap_distance", 3.50)),
-            w_gap_width=float(genes.get("w_gap_width", 2.00)),
-            w_align_steer=float(genes.get("w_gap_steer", 0.80)),
-            w_align_straight=float(genes.get("w_gap_straight", 0.40)),
-            w_side_clearance=float(genes.get("w_side_clearance", 2.80)),
-            gap_dist_exp_k=float(genes.get("gap_dist_exp_k", 0.60)),
-            gap_dist_thresh_m=float(genes.get("gap_dist_thresh_m", 1.00 + genes.get("gap_progress_margin_m", 0.0) if "gap_progress_margin_m" in genes else 0.95)),
-            alt_min_separation_m=float(genes.get("alt_min_separation_m", 0.25)),
-            alt_aperture_bias=float(genes.get("alt_aperture_bias", 1.80)),
-            scout_obs_width_m=float(genes.get("scout_obs_width_m", 0.22)),
-            scout_block_dist_m=float(genes.get("scout_block_dist_m", genes.get("target_lookahead_m", 2.40))),
-            scout_straight_pen_k=float(genes.get("scout_straight_pen_k", 2.50)),
-            scout_straight_exp_k=float(genes.get("scout_straight_exp_k", 1.50)),
-            ray_origin_offset_m=float(genes.get("ray_origin_offset_m", 0.0575)),
-            w_gap_clear=float(genes.get("w_gap_clear", genes.get("alt_lookahead_depth_weight", 3.00))),
-        )
-
-        self.planner = CurvilinearSLMPC(
-            costmap_engine=self.costmap,
-            horizon_N=int(genes.get("horizon_N", 30)),
-            dt=float(genes.get("dt", 0.016667)),
-            q_progress=float(genes.get("q_progress", 8.00)),
-            q_cte=float(genes.get("q_cte", 18.00)),
-            q_heading=float(genes.get("q_heading", 8.00)),
-            r_steer=float(genes.get("r_steer", 5.00)),
-            r_accel=float(genes.get("r_accel", 2.00)),
-            r_steer_rate=float(genes.get("r_steer_rate", 10.00)),
-            mu_friction=self.mu_val,
-            v_corner_factor=float(genes.get("v_corner_factor", 0.95)),
-            v_cruise_max=self.v_cruise_max,
-            v_cruise_min=self.v_cruise_min,
-            straight_lock_dist_m=self.straight_lock_dist,
-            straight_lock_speed_mps=self.straight_lock_speed,
-            alt_switch_hysteresis=float(genes.get("alt_switch_hysteresis", 15.00)),
-            alt_min_separation_m=float(genes.get("alt_min_separation_m", 0.25)),
-            alt_aperture_bias=float(genes.get("alt_aperture_bias", 1.80)),
-            w_gap_clear=float(genes.get("w_gap_clear", genes.get("alt_lookahead_depth_weight", 5.00))),
-        )
-        self.planner.costmap = self.costmap
-
-        rec_steer = float(genes.get("recovery_steer_angle_rad", RECOVERY_STEER_ANGLE_RAD))
-        # Compute maximum traction-stable reverse velocity governed by tire friction:
-        # v_rev = sqrt(mu * g * (WHEELBASE / tan(steer_angle)))
-        rec_speed = float(
-            math.sqrt(max(0.01, self.mu_val * 9.81 * (WHEELBASE / max(0.01, math.tan(abs(rec_steer))))))
-        )
-        if "recovery_reverse_speed" in genes:
-            rec_speed = float(genes["recovery_reverse_speed"])
-
-        self.recovery_manager = StuckRecoveryManager(
-            reverse_speed_m_s=rec_speed,
-            steer_angle_rad=rec_steer,
-            clearance_exit_m=float(genes.get("recovery_clearance_exit_m", RECOVERY_CLEARANCE_EXIT_M)),
-            any_tof_exit_m=float(genes.get("recovery_any_tof_exit_m", RECOVERY_ANY_TOF_EXIT_M)),
-            servo_slew_rad_s=SERVO_MAX_SPEED_RAD_S,
-            brake_decel_max=BRAKE_DECEL_MAX,
-            accel_fwd_max=ACCEL_FWD_MAX,
-            arc_lookahead_m=float(genes.get("recovery_arc_lookahead_m", RECOVERY_ARC_LOOKAHEAD_M)),
-        )
 
     def reset(self, start_pos: Optional[List[float]] = None, start_rot: Optional[List[float]] = None) -> None:
         """Resets vehicle physics state, odometry, costmap, and controller memories."""
@@ -528,13 +461,19 @@ class FolkraceVehicle:
                 s.setPosition(0.0)
 
         self.fusion.reset()
-        self.costmap.clear()
-        self.watchdog.reset()
+        start_x = float(start_pos[0]) if start_pos else 0.0
+        start_y = float(start_pos[1]) if start_pos else 0.0
+        self.brain.reset(start_pose=(start_x, start_y, 0.0))
+        self.costmap = self.brain.costmap
+        self.gap_scout = self.brain.gap_scout
+        self.planner = self.brain.planner
+        self.recovery_manager = self.brain.recovery_manager
+        self.watchdog = self.brain.watchdog
+        self.pose_tracker = self.brain.pose_tracker
+
         self.drift_controller.reset()
         self.ramp_detector.reset()
         self.last_aww_status = None
-        if hasattr(self, "planner") and hasattr(self.planner, "reset_active_target"):
-            self.planner.reset_active_target()
         self.step_counter = 0
         self.active_steer = 0.0
         self.cached_target_steer = 0.0
@@ -802,314 +741,58 @@ class FolkraceVehicle:
         self.cached_f_tof = f_tof
 
         if self.step_counter % PLANNER_DECIMATION == 0:
-            prob_map, hazard_mask, map_ms = self.costmap.process_tof_frame(tof_readings)
-            self.cached_map_ms = map_ms
-
-            # ------------------------------------------------------------------
-            # 3-STEP SE(2) FORWARD LOOKAHEAD PROJECTION
-            # Cancels 2-step ToF integration delay + 1-step actuator execution lag
-            # ------------------------------------------------------------------
-            # 1. Past Motion (step k-2 -> step k, 16 ms elapsed in F_sens)
-            x_past, y_past, yaw_past = self.pose_history[0]
-            x_curr, y_curr, yaw_curr = self.pose_history[-1]
-
-            delta_yaw_past = wrap_to_pi(yaw_curr - yaw_past)
-            dx_w = x_curr - x_past
-            dy_w = y_curr - y_past
-            cos_p = math.cos(yaw_past)
-            sin_p = math.sin(yaw_past)
-            dx_past = cos_p * dx_w + sin_p * dy_w
-            dy_past = -sin_p * dx_w + cos_p * dy_w
-
-            # 2. Future Motion (step k -> step k+1, 8 ms future via bicycle model)
-            v_k = self.v_est if self.recovery_manager.state != StuckRecoveryState.NORMAL_DRIVE else max(0.0, self.v_est)
-            dt_act = ACTUATOR_LATENCY_STEPS * dt
-            current_physical_steer = float(self.ediff.current_steer_rad)
-            delta_yaw_future = (v_k / WHEELBASE) * math.tan(current_physical_steer) * dt_act
-            yaw_future_mid = 0.5 * delta_yaw_future
-            dx_future = -v_k * math.sin(yaw_future_mid) * dt_act
-            dy_future =  v_k * math.cos(yaw_future_mid) * dt_act
-
-            # 3. Composite 3-step projected anchor pose in F_sens
-            delta_yaw_3 = wrap_to_pi(delta_yaw_past + delta_yaw_future)
-            cos_dp = math.cos(delta_yaw_past)
-            sin_dp = math.sin(delta_yaw_past)
-            dx_3 = dx_past + (cos_dp * dx_future - sin_dp * dy_future)
-            dy_3 = dy_past + (sin_dp * dx_future + cos_dp * dy_future)
-
-            # 4. Projected actuator state (speed v_3 and steering servo angle delta_3)
-            v_3 = v_k
-            steer_cmd = float(self.cached_target_steer)
-            max_steer_delta = SERVO_MAX_SPEED_RAD_S * dt_act
-            delta_steer = max(-max_steer_delta, min(max_steer_delta, steer_cmd - current_physical_steer))
-            steer_3 = max(-MAX_STEERING_RAD, min(MAX_STEERING_RAD, current_physical_steer + delta_steer))
-
-            self.proj_anchor = (dx_3, dy_3, delta_yaw_3)
-            self.proj_v = v_3
-            self.proj_steer = steer_3
-
-            # Scout Forward Gaps using projected anchor pose in F_sens
-            t_scout_0 = time.perf_counter()
-            xg, yg, width, theta_g = self.gap_scout.scout_gap(
+            gx_curr, gy_curr, gyaw_curr = self.get_ground_truth_pose()
+            current_physical_steer = float(getattr(self.ediff, "current_steer_rad", self.active_steer))
+            target_speed, target_steer, brain_telem = self.brain.step(
                 tof_readings=tof_readings,
-                hazard_mask=hazard_mask,
-                costmap_obj=self.costmap,
-                target_lookahead_m=self.target_lookahead_m,
-                steer_current=steer_3,
-                prob_map=prob_map,
-                anchor_x=dx_3,
-                anchor_y=dy_3,
-                anchor_yaw=delta_yaw_3,
+                v_est=self.v_est,
+                steer_actual_rad=current_physical_steer,
+                gyro_z_rad_s=self.cached_yaw_rate,
+                dt=dt * PLANNER_DECIMATION,
+                sim_time_s=sim_time,
+                ground_truth_pose=(gx_curr, gy_curr, gyaw_curr),
+                full_telemetry=full_telemetry,
             )
-            self.cached_scout_ms = (time.perf_counter() - t_scout_0) * 1000.0
-            self.last_gap_info = (xg, yg, width, theta_g)
 
-            # Curvilinear SL-MPC Trajectory Optimization anchored at projected state
-            t_plan_0 = time.perf_counter()
-            plan_res = self.planner.plan(
-                xg=xg,
-                yg=yg,
-                theta_g=theta_g,
-                aperture_width=width,
-                v_current=v_3,
-                steer_current=steer_3,
-                yaw_rate_current=self.cached_yaw_rate,
-                extra_targets=getattr(self.gap_scout, "last_targets", None),
-                x0=dx_3,
-                y0=dy_3,
-                psi0=delta_yaw_3,
-            )
-            self.cached_plan_ms = (time.perf_counter() - t_plan_0) * 1000.0
-            self.cached_plan_cpu_ms = plan_res.get("opt_cpu_ms", 0.0)
-            self.cached_opt_ms = plan_res.get("opt_ms", self.cached_plan_ms)
-            self.cached_opt_prim_ms = plan_res.get("opt_prim_ms", 0.0)
-            self.cached_opt_alt_ms = plan_res.get("opt_alt_ms", 0.0)
-            self.cached_opt_shield_ms = plan_res.get("opt_shield_ms", 0.0)
-            self.cached_osqp_iters = plan_res.get("osqp_iters", 0)
-            self.cached_osqp_iters_alt = plan_res.get("osqp_iters_alt", 0)
-            self.last_plan_res = plan_res
-
-            raw_target_steer = float(plan_res.get("cmd_steer_rad", 0.0))
-            raw_target_speed = float(plan_res.get("cmd_speed_mps", self.v_cruise_min))
-
-            min_fwd_dist = min(
-                tof_readings.get("tof_front_left_4.1deg", 1.0),
-                tof_readings.get("tof_front_right_4.1deg", 1.0),
-            ) if tof_readings else 1.0
-
-            # Candidate Gap Scout Targets for Early Exit Evaluation (Only when front is open!)
-            candidate_gaps = []
-            if min_fwd_dist >= 0.50:
-                for tgt in (getattr(self.gap_scout, "last_targets", []) or []):
-                    if isinstance(tgt, (list, tuple)) and len(tgt) >= 2:
-                        candidate_gaps.append((float(tgt[0]), float(tgt[1])))
-
-            # Anti-Wrong-Way Watchdog (only if enabled)
-            if getattr(self.watchdog, "mode", "DISABLED") != "DISABLED":
-                gx_curr, gy_curr, gyaw_curr = self.get_ground_truth_pose()
-                aww_status = self.watchdog.update(
-                    x=gx_curr,
-                    y=gy_curr,
-                    yaw=gyaw_curr,
-                    v_est=self.v_est,
-                    yaw_rate=self.cached_yaw_rate,
-                    cached_tofs=tof_readings,
-                    now_s=sim_time,
-                    hazard_mask=hazard_mask,
-                    state=self.recovery_manager.state,
-                    candidate_gaps=candidate_gaps,
-                )
-                self.last_aww_status = aww_status
-
-                # Early Gap Exit: abort U-turn ONLY if in CORRECTIVE_180 with open front (never cancel PIVOT_REVERSE!)
-                if (
-                    aww_status.early_exit_found
-                    and self.recovery_manager.state == StuckRecoveryState.CORRECTIVE_180
-                    and getattr(self.recovery_manager, "corrective_substate", "") == "FORWARD"
-                    and min_fwd_dist >= 0.80
-                ):
-                    self.recovery_manager.finish_recovery_early()
-
-                # Trigger CORRECTIVE_180 if in NORMAL_DRIVE and wrong-way is confirmed.
-                # Chooses to do the 180 towards the more open side (costmap escape arcs + ToFs).
-                # Supported by reverse logic if front clearance is tight (< 0.22m) or obstacle hit.
-                if (
-                    aww_status.is_wrong_way
-                    and self.recovery_manager.state == StuckRecoveryState.NORMAL_DRIVE
-                ):
-                    tgt_yaw = aww_status.target_recovery_yaw if aww_status.target_recovery_yaw is not None else wrap_to_pi(gyaw_curr + math.pi)
-                    yaw_diff = wrap_to_pi(tgt_yaw - gyaw_curr)
-                    arc_cl = self.recovery_manager.evaluate_costmap_escape_arcs(hazard_mask, self.costmap)
-                    is_l_pin, is_r_pin = self.recovery_manager.evaluate_pinned_state(hazard_mask, self.costmap, tof_readings)
-                    open_side = self.recovery_manager.resolve_open_side(
-                        arc_clearance=arc_cl,
-                        cached_tofs=tof_readings,
-                        heading_err=yaw_diff,
-                        is_left_pinned=is_l_pin,
-                        is_right_pinned=is_r_pin,
-                    )
-                    min_fwd_clearance = min_fwd_dist
-                    self.recovery_manager.trigger_corrective_180(
-                        target_yaw=tgt_yaw,
-                        steer_sign=open_side,
-                        current_yaw=gyaw_curr,
-                        arc_clearance=arc_cl,
-                        cached_tofs=tof_readings,
-                        front_clearance_m=min_fwd_clearance,
-                    )
+            is_recovering = (self.recovery_manager.state != StuckRecoveryState.NORMAL_DRIVE)
+            if is_recovering:
+                if not self.was_recovering:
+                    self.rate_limited_speed = min(self.rate_limited_speed, self.v_est)
+                self.was_recovering = True
             else:
-                gx_curr, gy_curr, gyaw_curr = self.get_ground_truth_pose()
-                self.last_aww_status = None
-
-            # Shield Reverse or Physical Wall Contact / Stall Trigger:
-            # 1) All 5-step evasion arcs blocked (reverse_suggested == True)
-            # 2) Physical front bumper wall collision (min_fwd_dist <= 0.05m)
-            # 3) Front obstructed (< 0.20m) while stalled against obstacle (v_est < 0.35 m/s while commanding forward)
-            _shield_cur = plan_res.get("shield", {})
-            is_stall = (min_fwd_dist < 0.20 and self.v_est < 0.35 and raw_target_speed > 0.5)
-            is_wall_contact = (min_fwd_dist <= 0.05)
-            shield_reverse = bool(_shield_cur.get("reverse_suggested", False))
-            should_reverse = (shield_reverse or is_wall_contact or is_stall)
-
-            if (
-                should_reverse
-                and self.recovery_manager.state == StuckRecoveryState.NORMAL_DRIVE
-            ):
-                _arc_cl = self.recovery_manager.evaluate_costmap_escape_arcs(hazard_mask, self.costmap)
-                _is_l_pin, _is_r_pin = self.recovery_manager.evaluate_pinned_state(hazard_mask, self.costmap, tof_readings)
-                _side = self.recovery_manager.resolve_escape_steer_dir(
-                    arc_clearance=_arc_cl, heading_err=float(theta_g),
-                    is_left_pinned=_is_l_pin, is_right_pinned=_is_r_pin,
-                )
-                _target_bc_yaw = self.last_aww_status.target_recovery_yaw if self.last_aww_status else None
-                self.recovery_manager.trigger_emergency_recovery(
-                    heading_err=float(theta_g),
-                    steer_dir=_side,
-                    current_v=self.v_est,
-                    current_steer=current_physical_steer,
-                    instant_reverse=True,
-                    target_breadcrumb_yaw=_target_bc_yaw,
-                    current_yaw=gyaw_curr,
-                    front_clearance_m=min_fwd_dist,
-                    hazard_mask=hazard_mask,
-                    costmap_obj=self.costmap,
-                    cached_tofs=tof_readings,
-                    is_left_pinned=_is_l_pin,
-                    is_right_pinned=_is_r_pin,
-                )
-
-            # Recovery Manager at 60 Hz (Kinematic Escape Arc Costmap Evaluation & CORRECTIVE_180)
-            target_breadcrumb_yaw = self.last_aww_status.target_recovery_yaw if self.last_aww_status else None
-            is_early_exit = bool(
-                self.last_aww_status
-                and self.last_aww_status.early_exit_found
-                and self.recovery_manager.state == StuckRecoveryState.CORRECTIVE_180
-                and min_fwd_dist >= 0.80
-            )
-            is_recovering, rec_v, rec_steer = self.recovery_manager.update(
-                dt=DT_PLANNER,
-                current_v=self.v_est,
-                commanded_v=raw_target_speed,
-                cached_tofs=tof_readings,
-                heading_err=float(theta_g),
-                active_steer=current_physical_steer,
-                hazard_mask=hazard_mask,
-                costmap_obj=self.costmap,
-                current_yaw=gyaw_curr,
-                target_breadcrumb_yaw=target_breadcrumb_yaw,
-                early_exit_available=is_early_exit,
-            )
+                if self.was_recovering:
+                    self.was_recovering = False
+                    self.rate_limited_speed = self.v_est
 
             if override_speed is not None:
                 target_speed = float(override_speed)
                 target_steer = float(override_steer) if override_steer is not None else 0.0
                 self.active_steer = target_steer
+                self.cached_target_speed = target_speed
+                self.cached_target_steer = target_steer
                 self.mode_desc = "OVERRIDE_TEST"
-            elif is_recovering:
-                if not self.was_recovering:
-                    self.rate_limited_speed = min(self.rate_limited_speed, self.v_est)
-                target_speed = rec_v
-                target_steer = rec_steer
-                self.active_steer = rec_steer
-                rec_state = getattr(self.recovery_manager.state, 'name', self.recovery_manager.state)
-                if rec_state == "CORRECTIVE_180":
-                    sub = getattr(self.recovery_manager, "corrective_substate", "FORWARD")
-                    self.mode_desc = f"PIVOT_180_{sub}"
-                elif rec_state == "PIVOT_REVERSE":
-                    self.mode_desc = "PIVOT_REVERSE"
-                elif rec_state == "DECEL_AND_CENTER":
-                    self.mode_desc = "DECEL_CENTER"
-                else:
-                    self.mode_desc = f"ESCAPE_{rec_state}"
-                self.was_recovering = True
-                if hasattr(self.planner, "reset_active_target"):
-                    self.planner.reset_active_target()
             else:
-                if self.was_recovering:
-                    self.was_recovering = False
-                    self.active_steer = current_physical_steer
-                    self.rate_limited_speed = self.v_est
+                self.active_steer = target_steer
+                self.cached_target_speed = target_speed
+                self.cached_target_steer = target_steer
+                self.mode_desc = brain_telem.get("mode", "SL_MPC")
 
-                # Fast Straight-Line Lock (only engage when forward is clear AND chassis is not sliding sideways)
-                d_fl_lock = tof_readings.get("tof_front_left_4.1deg", tof_readings.get("tof_fl_3", 0.0))
-                d_fr_lock = tof_readings.get("tof_front_right_4.1deg", tof_readings.get("tof_fr_3", 0.0))
-                is_straight_locked = (
-                    d_fl_lock >= 1.79 and
-                    d_fr_lock >= 1.79
-                )
-
-                if is_straight_locked:
-                    target_speed = self.straight_lock_speed
-                    target_steer = 0.0
-                    self.active_steer = 0.0
-                    self.mode_desc = "STRAIGHT_LOCK"
-                else:
-                    target_speed = raw_target_speed
-                    target_steer = raw_target_steer
-
-                    is_shield_active = bool(_shield_cur.get("active", False))
-                    if is_shield_active:
-                        # Direct emergency evasive steering without progressive rate lag or deadbands
-                        self.active_steer = max(
-                            -MAX_STEERING_RAD,
-                            min(MAX_STEERING_RAD, target_steer),
-                        )
-                        c_name = _shield_cur.get("chosen_name", "ACTIVE").replace("_", " ").upper()
-                        self.mode_desc = f"SHIELD_{c_name}"
-                    else:
-                        steer_delta = target_steer - self.active_steer
-
-                        # Progressive distance & small-offset steering aggressiveness
-                        cached_d_straight = min(
-                            tof_readings.get("tof_front_left_4.1deg", tof_readings.get("tof_fl_3", TOF_MAX_RANGE_M)),
-                            tof_readings.get("tof_front_right_4.1deg", tof_readings.get("tof_fr_3", TOF_MAX_RANGE_M)),
-                        )
-                        if cached_d_straight >= self.aggr_dist_far:
-                            dist_scale = self.aggr_min_scale
-                        elif cached_d_straight <= self.aggr_dist_close:
-                            dist_scale = 1.0
-                        else:
-                            frac = (self.aggr_dist_far - cached_d_straight) / max(0.001, (self.aggr_dist_far - self.aggr_dist_close))
-                            dist_scale = float(self.aggr_min_scale + (frac ** 1.5) * (1.0 - self.aggr_min_scale))
-
-                        err_mag = abs(steer_delta)
-                        if err_mag <= self.steer_deadband:
-                            err_scale = 0.90
-                        elif err_mag >= 0.05:
-                            err_scale = 1.0
-                        else:
-                            err_frac = (err_mag - self.steer_deadband) / max(0.001, (0.05 - self.steer_deadband))
-                            err_scale = float(0.90 + err_frac * (1.0 - 0.90))
-
-                        steer_aggressiveness = float(max(0.85, min(1.0, dist_scale * err_scale)))
-                        self.active_steer = max(
-                            -MAX_STEERING_RAD,
-                            min(MAX_STEERING_RAD, self.active_steer + steer_aggressiveness * steer_delta),
-                        )
-                        self.mode_desc = "SL_MPC"
-
-            self.cached_target_speed = target_speed
-            self.cached_target_steer = self.active_steer
+            self.cached_plan_ms = brain_telem.get("plan_ms", 0.0)
+            self.cached_plan_cpu_ms = self.brain.last_plan_res.get("opt_cpu_ms", 0.0)
+            self.cached_map_ms = brain_telem.get("map_ms", 0.0)
+            self.cached_scout_ms = brain_telem.get("scout_ms", 0.0)
+            self.cached_opt_ms = self.brain.last_plan_res.get("opt_ms", self.cached_plan_ms)
+            self.cached_opt_prim_ms = brain_telem.get("opt_prim_ms", 0.0)
+            self.cached_opt_alt_ms = brain_telem.get("opt_alt_ms", 0.0)
+            self.cached_opt_shield_ms = self.brain.last_plan_res.get("opt_shield_ms", 0.0)
+            self.cached_osqp_iters = self.brain.last_plan_res.get("osqp_iters", 0)
+            self.cached_osqp_iters_alt = self.brain.last_plan_res.get("osqp_iters_alt", 0)
+            self.last_plan_res = self.brain.last_plan_res
+            self.last_gap_info = self.brain.last_gap_info
+            self.last_aww_status = self.brain.last_aww_status
+            self.proj_anchor = self.brain.pose_tracker.proj_anchor
+            self.proj_v = self.brain.pose_tracker.proj_v
+            self.proj_steer = self.brain.pose_tracker.proj_steer
 
         # 4. Drift, Traction & Stability Control Execution
         rear_flow = self.get_ground_truth_rear_axle_flow()
@@ -1128,6 +811,8 @@ class FolkraceVehicle:
         self.mu_val = float(drift_res["effective_mu"])
         if hasattr(self.planner, "set_dynamic_mu"):
             self.planner.set_dynamic_mu(self.mu_val)
+        if hasattr(self.brain, "set_dynamic_mu"):
+            self.brain.set_dynamic_mu(self.mu_val)
 
         # 4b. Ramp Detection & Speed Governance
         ramp_res = self.ramp_detector.update(

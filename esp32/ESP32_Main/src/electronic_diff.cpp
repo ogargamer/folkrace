@@ -42,7 +42,8 @@ ElectronicDiffOutputs IRAM_ATTR ElectronicDifferential4WD::update(
     float target_steer_rad,
     float gyro_z_rad_s,
     float dt,
-    float mu
+    float mu,
+    float v_curr
 ) {
     ElectronicDiffOutputs out;
 
@@ -69,7 +70,7 @@ ElectronicDiffOutputs IRAM_ATTR ElectronicDifferential4WD::update(
     out.servo_pulse_us = fmaxf(SERVO_PULSE_MIN_US, fminf(SERVO_PULSE_MAX_US, SERVO_PULSE_NEUTRAL_US + pulse_offset));
 
     // -------------------------------------------------------------------------
-    // 2. Dynamic Traction & Acceleration Rate Limiter (from Webots Harness)
+    // 2. Dynamic Traction Rate Limiter with Instant Crash Resynchronization
     // -------------------------------------------------------------------------
     float steer_mag = fabsf(current_steer_rad_);
     float lateral_fraction = fminf(0.80f, fabsf(sinf(steer_mag)));
@@ -79,6 +80,37 @@ ElectronicDiffOutputs IRAM_ATTR ElectronicDifferential4WD::update(
     float a_limit = fminf(ACCEL_FWD_MAX, ACCEL_FWD_RATIO * mu * 9.80665f);
     float d_limit = fminf(BRAKE_DECEL_MAX, BRAKE_DECEL_RATIO * mu * 9.80665f * max_longitudinal_fraction);
 
+    // Dynamic Slip Envelope referencing physical latency (~24ms) & peak tire slip
+    const float dt_lag = 0.024f;
+    float slip_ratio_accel = fminf(0.30f, fmaxf(0.08f, 0.10f * (a_limit / 9.80665f)));
+    float max_slip_lead = (a_limit * dt_lag) + (slip_ratio_accel * fabsf(v_curr));
+
+    // Harmonized Instant Wall Hit / Collision Resync:
+    // Preserves motor acceleration lead within tractive slip envelope, snapping immediately to v_curr
+    // only if vehicle collides and decelerates abruptly below its dynamic slip envelope.
+    float collision_threshold = max_slip_lead + 0.15f;
+    if (rate_limited_speed_ >= 0.0f) {
+        if (v_curr < (rate_limited_speed_ - collision_threshold)) {
+            rate_limited_speed_ = v_curr;
+        }
+    } else {
+        if (v_curr > (rate_limited_speed_ + collision_threshold)) {
+            rate_limited_speed_ = v_curr;
+        }
+    }
+
+    // When requesting deceleration or reverse, command must not stay higher than actual speed
+    if (target_v <= v_curr) {
+        if (rate_limited_speed_ > v_curr) {
+            rate_limited_speed_ = v_curr;
+        }
+    // When requesting acceleration forward, command must not stay lower than actual speed
+    } else if (target_v >= v_curr) {
+        if (rate_limited_speed_ < v_curr) {
+            rate_limited_speed_ = v_curr;
+        }
+    }
+
     float speed_err = target_v - rate_limited_speed_;
     bool is_accel = (rate_limited_speed_ >= 0.0f && speed_err > 0.0f) || (rate_limited_speed_ <= 0.0f && speed_err < 0.0f);
     float max_dv = (is_accel ? a_limit : d_limit) * dt;
@@ -87,6 +119,13 @@ ElectronicDiffOutputs IRAM_ATTR ElectronicDifferential4WD::update(
         rate_limited_speed_ = target_v;
     } else {
         rate_limited_speed_ += copysignf(max_dv, speed_err);
+    }
+
+    // Dynamic Traction Slip Envelope Clamping
+    if (rate_limited_speed_ > 0.0f) {
+        rate_limited_speed_ = fminf(rate_limited_speed_, fmaxf(0.0f, v_curr) + max_slip_lead);
+    } else if (rate_limited_speed_ < 0.0f) {
+        rate_limited_speed_ = fmaxf(rate_limited_speed_, fminf(0.0f, v_curr) - max_slip_lead);
     }
     out.rate_limited_v = rate_limited_speed_;
 

@@ -27,4 +27,8 @@ g++ -O3 -shared -fPIC -std=c++17 -mcpu=cortex-a72 -fno-math-errno \
     -o curvilinear_sl_mpc.so "$CPP_DIR/curvilinear_sl_mpc.cpp" "$CPP_DIR/osqp_codegen_sl_mpc/libosqp.a" -lm
 
 echo "=== All shared libraries compiled successfully ==="
+if [ -d "$REPO_ROOT/brain" ]; then
+    cp *.so "$REPO_ROOT/brain/"
+    echo "=== Copied .so libraries to brain/ ==="
+fi
 ls -lh *.so

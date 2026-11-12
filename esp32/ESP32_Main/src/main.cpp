@@ -217,12 +217,14 @@ static void IRAM_ATTR realTimeControlTask(void *pvParameters) {
         }
 
         // 2. Execute 4WD Electronic Differential & Ackermann Kinematics
+        static float s_last_v_est = 0.0f;
         ElectronicDiffOutputs diff = s_ediff.update(
             target_v,
             target_steer,
             gyro_z,
             CONTROL_LOOP_DT_S,
-            DEFAULT_ROAD_MU
+            DEFAULT_ROAD_MU,
+            s_last_v_est
         );
 
         // 3. Command Single Steering Servo on LEDC PWM (GPIO 21 @ 333 Hz)
@@ -243,6 +245,7 @@ static void IRAM_ATTR realTimeControlTask(void *pvParameters) {
             diff.steer_rad,
             CONTROL_LOOP_DT_S
         );
+        s_last_v_est = fusion.v_est;
 
         // 5. Measure Compute Latency (Cycles -> Microseconds @ 240 MHz)
         uint32_t t_exec_cycles = esp_cpu_get_ccount() - t_start_cycles;
@@ -329,6 +332,14 @@ static void ioTask(void *pvParameters) {
             );
         }
 
+        // Command Loss Watchdog (Dead-Man Switch @ 100 ms timeout)
+        static uint32_t s_last_cmd_time_ms = 0;
+        if (s_manual_override && (millis() - s_last_cmd_time_ms > 100)) {
+            s_manual_v = 0.0f;
+            s_manual_steer = 0.0f;
+            s_manual_override = false;
+        }
+
         // 4. Update Shared Sensor Inputs for Core 1
         SharedSensorInputs &inputs = s_sensorInputs.getWriteBuffer();
         inputs.fake_data_mode = s_fake_data_active;
@@ -374,6 +385,7 @@ static void ioTask(void *pvParameters) {
                             s_manual_v = (float)cmd->target_v_mm_s / 1000.0f;
                             s_manual_steer = (float)cmd->target_steer_mrad / 1000.0f;
                             s_manual_override = (cmd->run_mode == 1);
+                            s_last_cmd_time_ms = millis();
                             s_fake_data_active = false;
                         }
                     }

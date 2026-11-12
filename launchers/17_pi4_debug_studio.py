@@ -120,7 +120,13 @@ def sync_pi_stack(host: str = "robot"):
 
     core_dir = os.path.join(ROOT_DIR, "core")
     if os.path.exists(core_dir):
+        subprocess.run(["ssh", host, f"mkdir -p {REMOTE_DIR}/core"], check=True)
         subprocess.run(["scp", "-r", f"{core_dir}/*", f"{host}:{REMOTE_DIR}/core/"], check=True)
+
+    brain_dir = os.path.join(ROOT_DIR, "brain")
+    if os.path.exists(brain_dir):
+        subprocess.run(["ssh", host, f"mkdir -p {REMOTE_DIR}/brain"], check=True)
+        subprocess.run(["scp", "-r", f"{brain_dir}/*", f"{host}:{REMOTE_DIR}/brain/"], check=True)
 
     print("[Sync] Files synced successfully.")
 

@@ -71,7 +71,8 @@ public:
         float target_steer_rad,
         float gyro_z_rad_s,
         float dt = CONTROL_LOOP_DT_S,
-        float mu = DEFAULT_ROAD_MU
+        float mu = DEFAULT_ROAD_MU,
+        float v_curr = 0.0f
     );
 
     float getCurrentSteerRad() const { return current_steer_rad_; }
