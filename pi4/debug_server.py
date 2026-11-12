@@ -64,7 +64,46 @@ def send_mcu_cmd(cmd_bytes: bytes) -> bool:
 class DebugServerState:
     def __init__(self):
         self.lock = threading.Lock()
-        self.latest_pkt: Dict[str, Any] = {}
+        self.fake_data_active: bool = False
+        self._bench_t0: float = time.time()
+        self.latest_pkt: Dict[str, Any] = {
+            "time_step": 0,
+            "timestamp": time.time(),
+            "sim_time": 0.0,
+            "mode": "STANDBY",
+            "recovery_state": "STANDBY",
+            "escape_state": "NORMAL",
+            "status": "OFFLINE",
+            "v_cmd": 0.0,
+            "v_real": 0.0,
+            "v_est": 0.0,
+            "steer_cmd_deg": 0.0,
+            "steer_actual_deg": 0.0,
+            "rpms_cmd": [0.0, 0.0, 0.0, 0.0],
+            "rpms_act": [0.0, 0.0, 0.0, 0.0],
+            "yaw_deg": 0.0,
+            "pitch_deg": 0.0,
+            "roll_deg": 0.0,
+            "gyro_z": 0.0,
+            "accel_fwd": 0.0,
+            "accel_lat": 0.0,
+            "slip_state": "OFFLINE",
+            "slip_ratio": 0.0,
+            "flags": {
+                "fake_data": False,
+                "stm32_front": False,
+                "stm32_rear": False,
+                "imu": False,
+            },
+            "tof_ranges": [0.0] * 16,
+            "tof_ranges_raw": [0.0] * 16,
+            "f_tof": 0.0,
+            "gap": [0.0, 0.0, 0.0],
+            "targets": [],
+            "best_line": [],
+            "grid_bounds": [-1.25, 1.25, 0.0, 1.90],
+            "grid_shape": [0, 0],
+        }
         self.total_frames_received = 0
         self.last_pkt_time = 0.0
         self.last_planner_pkt_time = 0.0
@@ -88,6 +127,53 @@ class DebugServerState:
         self._last_disk_check: float = 0.0
         self._cached_disk_free: float = 0.0
         self._cached_db_size: float = 0.0
+
+    def _generate_synthetic_benchmark_packet(self, now: float) -> Dict[str, Any]:
+        """Generates dynamic synthetic sweep telemetry when benchmark mode is explicitly enabled."""
+        t_sec = now - getattr(self, "_bench_t0", now)
+        v_sim = 1.5 + 1.5 * math.sin(t_sec * 0.8)
+        steer_sim = 20.0 * math.sin(t_sec * 1.2)
+        wheel_r = 0.0275
+        rpm_sim = (v_sim / wheel_r) * (60.0 / (2.0 * math.pi))
+        sim_tof = [round(max(0.05, 1.2 + 0.5 * math.sin(t_sec + i * 0.3)), 3) for i in range(16)]
+        return {
+            "time_step": int(t_sec * 60),
+            "timestamp": now,
+            "sim_time": round(t_sec, 3),
+            "mode": "DRIVE",
+            "recovery_state": "DRIVE",
+            "escape_state": "NORMAL",
+            "status": "BENCHMARK",
+            "v_cmd": round(v_sim, 2),
+            "v_real": round(v_sim * 0.98, 2),
+            "v_est": round(v_sim * 0.98, 2),
+            "steer_cmd_deg": round(steer_sim, 1),
+            "steer_actual_deg": round(steer_sim * 0.95, 1),
+            "rpms_cmd": [round(rpm_sim, 1)] * 4,
+            "rpms_act": [round(rpm_sim * 0.99, 1), round(rpm_sim * 1.01, 1), round(rpm_sim * 0.98, 1), round(rpm_sim * 1.00, 1)],
+            "yaw_deg": round(math.degrees(t_sec * 0.5) % 360.0, 1),
+            "pitch_deg": 0.0,
+            "roll_deg": 0.0,
+            "gyro_z": round(0.45 * math.sin(t_sec * 1.2), 3),
+            "accel_fwd": round(1.2 * math.cos(t_sec * 0.8), 2),
+            "accel_lat": round(0.5 * math.sin(t_sec * 1.0), 2),
+            "slip_state": "NORMAL",
+            "slip_ratio": 0.02,
+            "flags": {
+                "fake_data": True,
+                "stm32_front": True,
+                "stm32_rear": True,
+                "imu": True,
+            },
+            "tof_ranges": sim_tof,
+            "tof_ranges_raw": sim_tof,
+            "f_tof": min(sim_tof),
+            "gap": [0.0, 1.2, 0.45],
+            "targets": [[0.0, 1.2, 0.45]],
+            "best_line": [[0.0, 0.0], [0.0, 0.6], [round(0.2 * math.sin(t_sec), 2), 1.2]],
+            "grid_bounds": [-1.25, 1.25, 0.0, 1.90],
+            "grid_shape": [127, 167],
+        }
 
     def _ws_broadcast_worker(self):
         while True:
@@ -159,14 +245,45 @@ class DebugServerState:
         self._cached_bin = None
         self._cached_json = None
 
+    def _get_current_effective_packet(self) -> Dict[str, Any]:
+        now = time.time()
+        if self.fake_data_active and (now - self.last_pkt_time > 1.0):
+            return self._generate_synthetic_benchmark_packet(now)
+        elif (not self.fake_data_active) and (self.last_pkt_time > 0 and now - self.last_pkt_time > 1.0):
+            # Hardware disconnected or timed out: strictly 0 fake data
+            pkt = dict(self.latest_pkt)
+            pkt["v_cmd"] = 0.0
+            pkt["v_real"] = 0.0
+            pkt["v_est"] = 0.0
+            pkt["steer_cmd_deg"] = 0.0
+            pkt["steer_actual_deg"] = 0.0
+            pkt["rpms_cmd"] = [0.0, 0.0, 0.0, 0.0]
+            pkt["rpms_act"] = [0.0, 0.0, 0.0, 0.0]
+            pkt["tof_ranges"] = [0.0] * 16
+            pkt["tof_ranges_raw"] = [0.0] * 16
+            pkt["f_tof"] = 0.0
+            pkt["gyro_z"] = 0.0
+            pkt["accel_fwd"] = 0.0
+            pkt["accel_lat"] = 0.0
+            pkt["yaw_deg"] = 0.0
+            pkt["pitch_deg"] = 0.0
+            pkt["roll_deg"] = 0.0
+            pkt["status"] = "OFFLINE"
+            pkt["mode"] = "STANDBY"
+            pkt["slip_state"] = "OFFLINE"
+            pkt["flags"] = {"fake_data": False, "stm32_front": False, "stm32_rear": False, "imu": False}
+            return pkt
+        else:
+            return self.latest_pkt
+
     def get_cached_bin(self) -> bytes:
         if self._cached_bin is None:
-            self._cached_bin = build_live_binary_packet(self.latest_pkt)
+            self._cached_bin = build_live_binary_packet(self._get_current_effective_packet())
         return self._cached_bin
 
     def get_cached_json(self) -> bytes:
         if self._cached_json is None:
-            pkt = dict(self.latest_pkt)
+            pkt = dict(self._get_current_effective_packet())
             pkt["_total_frames"] = self.recorder.total_frames_recorded if self.recorder else self.total_frames_received
             self._cached_json = json.dumps(pkt).encode("utf-8")
         return self._cached_json
@@ -227,9 +344,9 @@ def build_live_binary_packet(pkt: Dict[str, Any]) -> bytes:
 
     rpms_cmd = pkt.get("rpms_cmd", [0.0, 0.0, 0.0, 0.0])
     rpms_act = pkt.get("rpms_act", [0.0, 0.0, 0.0, 0.0])
-    tof_ranges = pkt.get("tof_ranges", [1.8] * 16)
+    tof_ranges = pkt.get("tof_ranges", [0.0] * 16)
     if len(tof_ranges) < 16:
-        tof_ranges = list(tof_ranges) + [1.8] * (16 - len(tof_ranges))
+        tof_ranges = list(tof_ranges) + [0.0] * (16 - len(tof_ranges))
     gap = pkt.get("gap") or [0.0, 0.0, 0.0]
     bounds = pkt.get("grid_bounds") or [-1.25, 1.25, 0.0, 1.90]
 
@@ -255,7 +372,7 @@ def build_live_binary_packet(pkt: Dict[str, Any]) -> bytes:
         float(pkt.get("accel_fwd", 0.0)),
         float(pkt.get("accel_lat", 0.0)),
         float(pkt.get("slip_ratio", 0.0)),
-        float(pkt.get("f_tof", 1.8)),
+        float(pkt.get("f_tof", 0.0)),
         float(pkt.get("plan_ms", 0.0)),
         float(pkt.get("map_ms", 0.0)),
         float(pkt.get("scout_ms", 0.0)),
@@ -412,6 +529,10 @@ class DebugHTTPRequestHandler(BaseHTTPRequestHandler):
                 pulse = float(data.get("pulse", 1520.0))
                 cmd_str = f"P {pulse:.0f}\n"
             elif action == "bench":
+                if "enabled" in data:
+                    STATE.fake_data_active = bool(data["enabled"])
+                else:
+                    STATE.fake_data_active = not STATE.fake_data_active
                 cmd_str = "BENCH\n"
             elif action == "reset":
                 cmd_str = "RESET\n"
@@ -438,6 +559,11 @@ class DebugHTTPRequestHandler(BaseHTTPRequestHandler):
                     STATE.latest_pkt["mode"] = "ESTOP"
                 elif action == "motors":
                     STATE.latest_pkt["mode"] = "DRIVE" if data.get("enable", True) else "IDLE"
+                elif action == "bench":
+                    if "flags" not in STATE.latest_pkt:
+                        STATE.latest_pkt["flags"] = {}
+                    STATE.latest_pkt["flags"]["fake_data"] = STATE.fake_data_active
+                    STATE.invalidate_caches()
                 STATE.latest_pkt["last_action"] = action
                 STATE.latest_pkt["last_cmd_sent"] = cmd_str.strip()
 
@@ -445,6 +571,7 @@ class DebugHTTPRequestHandler(BaseHTTPRequestHandler):
                 "status": "dispatched" if ok else "failed",
                 "action": action,
                 "cmd": cmd_str.strip(),
+                "fake_data": STATE.fake_data_active,
                 "pipe": "pi4 -> esp32 -> stm32"
             })
         else:

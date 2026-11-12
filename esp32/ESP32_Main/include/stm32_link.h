@@ -26,10 +26,10 @@ public:
     // High-Speed 400 Hz Feedback Ingestion
     bool update();
 
-    float getM1RPM() const { return m1_actual_rpm_; }
-    float getM2RPM() const { return m2_actual_rpm_; }
-    uint8_t getStatusFlags() const { return status_flags_; }
-    uint8_t getCalibProgress() const { return calib_progress_; }
+    float getM1RPM() const { return isConnected() ? m1_actual_rpm_ : 0.0f; }
+    float getM2RPM() const { return isConnected() ? m2_actual_rpm_ : 0.0f; }
+    uint8_t getStatusFlags() const { return isConnected() ? status_flags_ : 0; }
+    uint8_t getCalibProgress() const { return isConnected() ? calib_progress_ : 0; }
 
     bool isM1Enabled() const { return (status_flags_ & STM32_STATUS_M1_ENABLED) != 0; }
     bool isM2Enabled() const { return (status_flags_ & STM32_STATUS_M2_ENABLED) != 0; }

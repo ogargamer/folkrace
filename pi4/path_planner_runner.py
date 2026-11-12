@@ -36,6 +36,13 @@ CURR_DIR = os.path.dirname(os.path.abspath(__file__))
 if CURR_DIR not in sys.path:
     sys.path.insert(0, CURR_DIR)
 
+ROOT_DIR = os.path.dirname(CURR_DIR)
+CONTROLLERS_DIR = os.path.join(ROOT_DIR, "webots", "simulation", "my_project", "controllers", "tof_path_planner")
+CORE_DIR = os.path.join(ROOT_DIR, "core")
+for d in (CONTROLLERS_DIR, CORE_DIR):
+    if os.path.exists(d) and d not in sys.path:
+        sys.path.insert(0, d)
+
 from core_manager import set_core_affinity, set_process_priority, get_core_affinity
 from cpp_smart_hybrid_costmap import CppSmartHybridCostmap, SENSOR_NAMES
 from tof_gap_scout import ToFGapScout
@@ -141,8 +148,10 @@ def run_path_planner():
     except Exception as e:
         print(f"[Planner Core 1] Note on sensor socket: {e}")
 
-    live_tof = {k: 1.80 for k in SENSOR_NAMES}
+    live_tof = {k: 0.0 for k in SENSOR_NAMES}
     has_live_sensor_feed = False
+    last_sensor_time = 0.0
+    last_mcu_time = 0.0
     last_mcu_pkt: Optional[Dict[str, Any]] = None
 
     print(f"[Planner Core 1] Starting Deterministic {TARGET_HZ:.0f} Hz Loop (Period: {DT_STEP*1000:.2f} ms)...")
@@ -178,86 +187,111 @@ def run_path_planner():
 
             # 1. Perception Ingestion: Drain sensor UDP socket to receive latest real-time frame
             latest_mcu_pkt = None
+            now_mono = time.time()
             while True:
                 try:
                     raw_bytes, _ = sensor_sock.recvfrom(4096)
                     pkt = json.loads(raw_bytes.decode("utf-8"))
                     latest_mcu_pkt = pkt
                     last_mcu_pkt = pkt
+                    last_mcu_time = now_mono
                     if "tof" in pkt and isinstance(pkt["tof"], dict):
                         live_tof = pkt["tof"]
                         has_live_sensor_feed = True
+                        last_sensor_time = now_mono
                     elif "tof_ranges_raw" in pkt:
                         live_tof = {
                             SENSOR_NAMES[i]: pkt["tof_ranges_raw"][i]
                             for i in range(min(16, len(pkt["tof_ranges_raw"])))
                         }
                         has_live_sensor_feed = True
+                        last_sensor_time = now_mono
                 except (BlockingIOError, socket.error):
                     break
                 except Exception:
                     break
 
+            if has_live_sensor_feed and (now_mono - last_sensor_time > 1.0):
+                has_live_sensor_feed = False
+                live_tof = {k: 0.0 for k in SENSOR_NAMES}
+
             raw_tof = live_tof
 
-            # Option 1: Instantaneous Forward Extrapolation (Ego-Motion Latency Compensation)
-            steer_rad = math.radians(steer_actual_deg)
-            yaw_rate_current = (v_actual * math.tan(steer_rad)) / wheel_base
-            comp_tof = compensator.compensate_dict(
-                raw_tof, v_est=v_actual, gyro_z=yaw_rate_current, dt=DT_STEP
-            )
+            if has_live_sensor_feed:
+                # Option 1: Instantaneous Forward Extrapolation (Ego-Motion Latency Compensation)
+                steer_rad = math.radians(steer_actual_deg)
+                yaw_rate_current = (v_actual * math.tan(steer_rad)) / wheel_base
+                comp_tof = compensator.compensate_dict(
+                    raw_tof, v_est=v_actual, gyro_z=yaw_rate_current, dt=DT_STEP
+                )
 
-            # 2. C++ Smart Hybrid Costmap (evaluated on motion-compensated readings)
-            t0 = time.perf_counter()
-            prob_map, hazard_mask, _ = costmap.process_tof_frame(comp_tof)
-            t_map_ms = (time.perf_counter() - t0) * 1000.0
+                # 2. C++ Smart Hybrid Costmap (evaluated on motion-compensated readings)
+                t0 = time.perf_counter()
+                prob_map, hazard_mask, _ = costmap.process_tof_frame(comp_tof)
+                t_map_ms = (time.perf_counter() - t0) * 1000.0
 
-            # 3. ToF Gap Scout
-            t0 = time.perf_counter()
-            xg, yg, width, theta_g = gap_scout.scout_gap(
-                tof_readings=comp_tof,
-                hazard_mask=hazard_mask,
-                costmap_obj=costmap,
-                target_lookahead_m=GAP_MAX_LOOKAHEAD_M,
-                steer_current=steer_rad,
-                prob_map=prob_map,
-            )
-            t_scout_ms = (time.perf_counter() - t0) * 1000.0
+                # 3. ToF Gap Scout
+                t0 = time.perf_counter()
+                xg, yg, width, theta_g = gap_scout.scout_gap(
+                    tof_readings=comp_tof,
+                    hazard_mask=hazard_mask,
+                    costmap_obj=costmap,
+                    target_lookahead_m=GAP_MAX_LOOKAHEAD_M,
+                    steer_current=steer_rad,
+                    prob_map=prob_map,
+                )
+                t_scout_ms = (time.perf_counter() - t0) * 1000.0
 
-            # 4. Curvilinear SL-MPC Optimization (OSQP)
-            t0 = time.perf_counter()
-            opt_res = planner.plan(
-                xg=xg,
-                yg=yg,
-                theta_g=theta_g,
-                aperture_width=width,
-                v_current=v_actual,
-                steer_current=steer_rad,
-                yaw_rate_current=yaw_rate_current,
-                extra_targets=getattr(gap_scout, "last_targets", None),
-                t_frame_start=t_step_start,
-                frame_budget_ms=13.0,
-            )
-            t_plan_ms = (time.perf_counter() - t0) * 1000.0
+                # 4. Curvilinear SL-MPC Optimization (OSQP)
+                t0 = time.perf_counter()
+                opt_res = planner.plan(
+                    xg=xg,
+                    yg=yg,
+                    theta_g=theta_g,
+                    aperture_width=width,
+                    v_current=v_actual,
+                    steer_current=steer_rad,
+                    yaw_rate_current=yaw_rate_current,
+                    extra_targets=getattr(gap_scout, "last_targets", None),
+                    t_frame_start=t_step_start,
+                    frame_budget_ms=13.0,
+                )
+                t_plan_ms = (time.perf_counter() - t0) * 1000.0
 
-            # Commanded outputs
-            v_cmd = float(opt_res.get("cmd_speed_mps", 3.0))
-            steer_cmd_rad = float(opt_res.get("cmd_steer_rad", 0.0))
-            steer_cmd_deg = math.degrees(steer_cmd_rad)
+                # Commanded outputs
+                v_cmd = float(opt_res.get("cmd_speed_mps", 0.0))
+                steer_cmd_rad = float(opt_res.get("cmd_steer_rad", 0.0))
+                steer_cmd_deg = math.degrees(steer_cmd_rad)
 
-            # Commanded 4-Wheel RPMs
-            base_rpm = (v_cmd / wheel_radius) * rad_to_rpm * (-wheel_dir)
-            ackermann_factor = math.tan(steer_cmd_rad) * (0.09 / (2.0 * wheel_base))
-            rpm_fl_cmd = base_rpm * (1.0 - ackermann_factor)
-            rpm_fr_cmd = base_rpm * (1.0 + ackermann_factor)
-            rpm_rl_cmd = base_rpm * (1.0 - ackermann_factor * 0.5)
-            rpm_rr_cmd = base_rpm * (1.0 + ackermann_factor * 0.5)
+                # Commanded 4-Wheel RPMs
+                base_rpm = (v_cmd / wheel_radius) * rad_to_rpm * (-wheel_dir)
+                ackermann_factor = math.tan(steer_cmd_rad) * (0.09 / (2.0 * wheel_base))
+                rpm_fl_cmd = base_rpm * (1.0 - ackermann_factor)
+                rpm_fr_cmd = base_rpm * (1.0 + ackermann_factor)
+                rpm_rl_cmd = base_rpm * (1.0 - ackermann_factor * 0.5)
+                rpm_rr_cmd = base_rpm * (1.0 + ackermann_factor * 0.5)
+            else:
+                prob_map = None
+                hazard_mask = None
+                t_map_ms = 0.0
+                t_scout_ms = 0.0
+                t_plan_ms = 0.0
+                v_cmd = 0.0
+                steer_cmd_rad = 0.0
+                steer_cmd_deg = 0.0
+                rpm_fl_cmd = 0.0
+                rpm_fr_cmd = 0.0
+                rpm_rl_cmd = 0.0
+                rpm_rr_cmd = 0.0
+                xg, yg, width = 0.0, 0.0, 0.0
+                opt_res = {"status": "NO SENSORS", "cmd_speed_mps": 0.0, "cmd_steer_rad": 0.0, "best_line": []}
+                comp_tof = raw_tof
 
             # True closed-loop control actuation latency (from ToF receipt to motor commands)
             t_ctrl_ms = (time.perf_counter() - t_step_start) * 1000.0
 
-            # Ingest MCU feedback (prefer latest frame, fallback to last valid hardware frame)
-            active_mcu = latest_mcu_pkt or last_mcu_pkt
+            # Ingest MCU feedback (prefer latest frame, fallback to last valid hardware frame within 1.0s)
+            active_mcu = latest_mcu_pkt or (last_mcu_pkt if (now_mono - last_mcu_time < 1.0) else None)
             if active_mcu and "rpms_act" in active_mcu:
                 # Real hardware feedback ingested from MCU UART Bridge
                 v_actual = float(active_mcu.get("v_est", active_mcu.get("v_real", v_actual)))
@@ -273,26 +307,26 @@ def run_path_planner():
                 accel_lat = float(active_mcu.get("accel_lat", v_actual * yaw_rate_rad_s))
                 mcu_flags = dict(active_mcu.get("flags", {}))
                 slip_state_str = active_mcu.get("slip_state", "NORMAL")
-                slip_ratio_val = float(active_mcu.get("slip_ratio", 0.02))
+                slip_ratio_val = float(active_mcu.get("slip_ratio", 0.0))
                 yaw_deg_val = float(active_mcu.get("yaw_deg", round(math.degrees(sim_time * yaw_rate_rad_s) % 360.0, 1)))
                 pitch_deg_val = float(active_mcu.get("pitch_deg", 0.0))
                 roll_deg_val = float(active_mcu.get("roll_deg", 0.0))
             else:
-                # Standalone simulation only if no hardware frame was ever received yet
-                v_actual = 0.90 * v_actual + 0.10 * v_cmd
-                steer_actual_deg = 0.85 * steer_actual_deg + 0.15 * steer_cmd_deg
-                rpm_fl_act = rpm_fl_cmd * 0.98
-                rpm_fr_act = rpm_fr_cmd * 0.99
-                rpm_rl_act = rpm_rl_cmd * 1.01
-                rpm_rr_act = rpm_rr_cmd * 1.00
-                yaw_rate_rad_s = (v_actual * math.tan(math.radians(steer_actual_deg))) / wheel_base
-                gyro_z = yaw_rate_rad_s
-                accel_fwd = (v_cmd - v_actual) / DT_STEP
-                accel_lat = v_actual * yaw_rate_rad_s
+                # No controller connected: ZERO data (no fake motion / simulation)
+                v_actual = 0.0
+                steer_actual_deg = 0.0
+                rpm_fl_act = 0.0
+                rpm_fr_act = 0.0
+                rpm_rl_act = 0.0
+                rpm_rr_act = 0.0
+                yaw_rate_rad_s = 0.0
+                gyro_z = 0.0
+                accel_fwd = 0.0
+                accel_lat = 0.0
                 mcu_flags = {"fake_data": False, "standalone_sim": False}
-                slip_state_str = "NORMAL"
-                slip_ratio_val = 0.02
-                yaw_deg_val = round(math.degrees(sim_time * yaw_rate_rad_s) % 360.0, 1)
+                slip_state_str = "OFFLINE"
+                slip_ratio_val = 0.0
+                yaw_deg_val = 0.0
                 pitch_deg_val = 0.0
                 roll_deg_val = 0.0
 
@@ -320,10 +354,10 @@ def run_path_planner():
                     "time_step": step_counter,
                     "timestamp": time.time(),
                     "sim_time": round(sim_time, 3),
-                    "mode": "DRIVE",
-                    "recovery_state": "DRIVE",
+                    "mode": "DRIVE" if has_live_sensor_feed else "STANDBY",
+                    "recovery_state": "DRIVE" if has_live_sensor_feed else "STANDBY",
                     "escape_state": "NORMAL",
-                    "status": opt_res.get("status", "OK"),
+                    "status": opt_res.get("status", "OK" if has_live_sensor_feed else "OFFLINE"),
                     "v_cmd": round(v_cmd, 2),
                     "v_tgt": round(v_cmd, 2),
                     "v_real": round(v_actual, 2),
@@ -344,10 +378,10 @@ def run_path_planner():
                     "flags": mcu_flags,
                     "mcu_msg": latest_mcu_pkt.get("mcu_msg", "") if latest_mcu_pkt else "",
                     "mcu_log": latest_mcu_pkt.get("mcu_log", []) if latest_mcu_pkt else [],
-                    "f_tof": round(float(min(comp_tof.values())), 3),
-                    "tof": {k: round(v, 3) for k, v in comp_tof.items()},
-                    "tof_ranges": [round(comp_tof.get(k, 1.8), 3) for k in SENSOR_NAMES],
-                    "tof_ranges_raw": [round(raw_tof.get(k, 1.8), 3) for k in SENSOR_NAMES],
+                    "f_tof": round(float(min(comp_tof.values())), 3) if comp_tof and has_live_sensor_feed else 0.0,
+                    "tof": {k: round(v, 3) for k, v in comp_tof.items()} if has_live_sensor_feed else {k: 0.0 for k in SENSOR_NAMES},
+                    "tof_ranges": [round(comp_tof.get(k, 0.0), 3) for k in SENSOR_NAMES] if has_live_sensor_feed else [0.0] * 16,
+                    "tof_ranges_raw": [round(raw_tof.get(k, 0.0), 3) for k in SENSOR_NAMES] if has_live_sensor_feed else [0.0] * 16,
                     "gap": [round(xg, 3), round(yg, 3), round(width, 3)],
                     "targets": g_targets,
                     "best_line": opt_res.get("best_line", []),

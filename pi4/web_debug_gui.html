@@ -1419,13 +1419,13 @@ function extract16Ranges(pkt) {
   const ranges = new Float32Array(16);
   for (let i = 0; i < 16; i++) {
     const sName = FRONT_TOF_SENSOR_RIG[i].name;
-    let r = 1.80;
+    let r = 0.0;
     if (pkt.tof && pkt.tof[sName] !== undefined) {
       r = parseFloat(pkt.tof[sName]);
     } else if (pkt.tof_ranges && pkt.tof_ranges[i] !== undefined) {
       r = parseFloat(pkt.tof_ranges[i]);
     }
-    ranges[i] = (isNaN(r) || r <= 0.001) ? 1.80 : r;
+    ranges[i] = (isNaN(r) || r <= 0.001) ? 0.0 : r;
   }
   return ranges;
 }
@@ -1433,6 +1433,15 @@ function extract16Ranges(pkt) {
 function computeLocalSmartHybridCostmap(ranges) {
   // Step 1: Flat buffer reset (<0.01ms)
   cmLogOdds.fill(0.0);
+  cmHazardMask.fill(0);
+
+  // If all ranges are zero (no sensors connected / 0 data), do not carve false free space
+  let hasValid = false;
+  for (let i = 0; i < ranges.length; i++) {
+    if (ranges[i] > 0.001) { hasValid = true; break; }
+  }
+  if (!hasValid) return;
+
   const L_FREE = -2.5;
 
   // Origin launch clearance (under bumper)
@@ -1751,7 +1760,7 @@ function renderRadar(pkt) {
       } else if (pkt.tof_ranges && pkt.tof_ranges.length > i) {
         rng = parseFloat(pkt.tof_ranges[i]);
       }
-      if (rng === null || isNaN(rng)) continue;
+      if (rng === null || isNaN(rng) || rng <= 0.001) continue;
 
       const dispR = Math.min(Math.max(rng, 0.02), 1.80);
       const isHit = rng < 1.78;
@@ -2602,9 +2611,11 @@ async function sendMcuCommand(payload) {
     const data = await res.json();
     appendMcuConsole(`[SENT -> STM32] ${JSON.stringify(payload)} => status: ${data.status}`);
     if (statusEl) statusEl.innerText = `Dispatched: ${data.action} (${data.cmd || 'OK'})`;
+    return data;
   } catch (err) {
     appendMcuConsole(`[ERROR] Network fault: ${err.message}`);
     if (statusEl) statusEl.innerText = `Error: ${err.message}`;
+    return null;
   }
 }
 
@@ -2640,12 +2651,72 @@ function enterDfu() {
   }
 }
 
+let fakeDataActive = false;
+
+function syncFakeDataButtons(isBench) {
+  const fakeBtn = document.getElementById("btnToggleFakeData");
+  const fakeIcon = document.getElementById("fakeToggleIcon");
+  const fakeText = document.getElementById("fakeToggleText");
+  if (fakeBtn && fakeIcon && fakeText) {
+    if (isBench) {
+      fakeBtn.className = "badge btn-toggle-fake state-fake";
+      fakeIcon.innerText = "🧪";
+      fakeText.innerText = "FAKE DATA (BENCH)";
+      fakeBtn.title = "Currently running Synthetic Benchmark (Fake Data). Click to switch to Live Hardware Sensors.";
+    } else {
+      fakeBtn.className = "badge btn-toggle-fake state-live";
+      fakeIcon.innerText = "🟢";
+      fakeText.innerText = "LIVE SENSORS";
+      fakeBtn.title = "Currently using Live Hardware Sensors & Dual STM32 Encoders. Click to switch to Synthetic Benchmark.";
+    }
+  }
+
+  const benchBtn = document.getElementById("btnBenchToggle");
+  if (benchBtn) {
+    if (isBench) {
+      benchBtn.innerText = "🧪 FAKE DATA: ON";
+      benchBtn.style.background = "#4f2870";
+      benchBtn.style.borderColor = "var(--accent-purple)";
+    } else {
+      benchBtn.innerText = "🟢 FAKE DATA: OFF";
+      benchBtn.style.background = "#003d1c";
+      benchBtn.style.borderColor = "var(--accent-green)";
+    }
+  }
+}
+
 async function toggleFakeData() {
   const btn = document.getElementById("btnToggleFakeData");
+  const benchBtn = document.getElementById("btnBenchToggle");
   if (btn) btn.style.opacity = "0.5";
-  appendMcuConsole(">>> Toggling Synthetic Fake Data / Live Sensors mode (BENCH)...");
-  await sendMcuCommand({ action: "bench" });
+  if (benchBtn) benchBtn.style.opacity = "0.5";
+
+  fakeDataActive = !fakeDataActive;
+  syncFakeDataButtons(fakeDataActive);
+  appendMcuConsole(`>>> Toggling Synthetic Fake Data / Live Sensors mode: ${fakeDataActive ? "FAKE DATA (BENCH)" : "LIVE SENSORS"}...`);
+
+  try {
+    const res = await sendMcuCommand({ action: "bench", enabled: fakeDataActive });
+    if (res && typeof res.fake_data === "boolean") {
+      fakeDataActive = res.fake_data;
+      syncFakeDataButtons(fakeDataActive);
+    }
+  } catch (e) {
+    appendMcuConsole(`[WARN] Fake data toggle error: ${e.message}`);
+  }
+
+  // If switched back to LIVE and controller isn't connected, immediately wipe any leftover fake data to 0
+  if (!fakeDataActive) {
+    const hasHardware = currentPkt && currentPkt.flags && (currentPkt.flags.stm32_front || currentPkt.flags.stm32_rear || currentPkt.flags.imu);
+    if (!hasHardware) {
+      currentPkt = { ...defaultPkt };
+      updateHUD(currentPkt);
+      scheduleRender(currentPkt);
+    }
+  }
+
   if (btn) setTimeout(() => { btn.style.opacity = "1.0"; }, 250);
+  if (benchBtn) setTimeout(() => { benchBtn.style.opacity = "1.0"; }, 250);
 }
 
 function toggleBench() {
@@ -2825,45 +2896,34 @@ function updateMotorPage(pkt) {
   const pRear = document.getElementById("pipeRearRpm");
   if (pRear) pRear.innerText = `RL: ${rlAct} | RR: ${rrAct} RPM`;
 
+  const espOnline = Boolean(flags.imu || flags.stm32_front || flags.stm32_rear || isBench);
   const bEsp = document.getElementById("badgeEsp32");
   if (bEsp) {
-    bEsp.innerText = isBench ? "BENCH" : "LIVE 400Hz";
-    bEsp.className = `pipe-node-badge ${isBench ? 'badge-bench' : 'badge-online'}`;
+    if (isBench) {
+      bEsp.innerText = "BENCH";
+      bEsp.className = "pipe-node-badge badge-bench";
+    } else if (espOnline) {
+      bEsp.innerText = "LIVE 400Hz";
+      bEsp.className = "pipe-node-badge badge-online";
+    } else {
+      bEsp.innerText = "OFFLINE";
+      bEsp.className = "pipe-node-badge badge-offline";
+    }
   }
   const pEsp = document.getElementById("pipeEsp32Mode");
-  if (pEsp) pEsp.innerText = isBench ? "Synthetic Sweeps (Fake Mode)" : "Dual-Core RTOS 400 Hz";
-
-  // Global Header Toggle Button Sync
-  const fakeBtn = document.getElementById("btnToggleFakeData");
-  const fakeIcon = document.getElementById("fakeToggleIcon");
-  const fakeText = document.getElementById("fakeToggleText");
-  if (fakeBtn && fakeIcon && fakeText) {
+  if (pEsp) {
     if (isBench) {
-      fakeBtn.className = "badge btn-toggle-fake state-fake";
-      fakeIcon.innerText = "🧪";
-      fakeText.innerText = "FAKE DATA (BENCH)";
-      fakeBtn.title = "Currently running Synthetic Benchmark (Fake Data). Click to switch to Live Hardware Sensors.";
+      pEsp.innerText = "Synthetic Sweeps (Fake Mode)";
+    } else if (espOnline) {
+      pEsp.innerText = "Dual-Core RTOS 400 Hz";
     } else {
-      fakeBtn.className = "badge btn-toggle-fake state-live";
-      fakeIcon.innerText = "🟢";
-      fakeText.innerText = "LIVE SENSORS";
-      fakeBtn.title = "Currently using Live Hardware Sensors & Dual STM32 Encoders. Click to switch to Synthetic Benchmark.";
+      pEsp.innerText = "Controller Disconnected (0 Data)";
     }
   }
 
-  // Page 2 Action Bar Bench Button Sync
-  const benchBtn = document.getElementById("btnBenchToggle");
-  if (benchBtn) {
-    if (isBench) {
-      benchBtn.innerText = "🧪 FAKE DATA: ON";
-      benchBtn.style.background = "#4f2870";
-      benchBtn.style.borderColor = "var(--accent-purple)";
-    } else {
-      benchBtn.innerText = "🟢 FAKE DATA: OFF";
-      benchBtn.style.background = "#003d1c";
-      benchBtn.style.borderColor = "var(--accent-green)";
-    }
-  }
+  // Global Header and Page 2 Button Sync
+  fakeDataActive = isBench;
+  syncFakeDataButtons(isBench);
 
   // Differential Split
   const leftAvg = (flAct + rlAct) * 0.5;
@@ -3244,21 +3304,42 @@ async function fetchLive() {
     }
   }
 }
-// Initial render with default 16-channel max range (renders full Webots costmap canvas immediately)
+// Initial render with default zero telemetry state (strictly 0 fake data if controller is not connected)
 const defaultPkt = {
   time_step: 0,
   sim_time: 0.0,
   mode: "STANDBY",
-  recovery_state: "DRIVE",
-  status: "READY",
+  recovery_state: "STANDBY",
+  status: "OFFLINE",
   v_cmd: 0.0,
   v_real: 0.0,
+  v_est: 0.0,
+  steer_cmd_deg: 0.0,
   steer_deg: 0.0,
-  tof_ranges: new Array(16).fill(1.80),
+  steer_actual_deg: 0.0,
+  rpms_cmd: [0, 0, 0, 0],
+  rpms_act: [0, 0, 0, 0],
+  yaw_deg: 0.0,
+  pitch_deg: 0.0,
+  roll_deg: 0.0,
+  gyro_z: 0.0,
+  accel_fwd: 0.0,
+  accel_lat: 0.0,
+  slip_state: "OFFLINE",
+  slip_ratio: 0.0,
+  flags: { fake_data: false, stm32_front: false, stm32_rear: false, imu: false },
+  tof_ranges: new Array(16).fill(0.0),
+  tof_ranges_raw: new Array(16).fill(0.0),
+  f_tof: 0.0,
+  gap: [0.0, 0.0, 0.0],
+  targets: [],
+  best_line: [],
   grid_bounds: [CM_X_MIN, CM_X_MAX, CM_Y_MIN, CM_Y_MAX],
 };
 currentPkt = defaultPkt;
 renderRadar(defaultPkt);
+updateHUD(defaultPkt);
+syncFakeDataButtons(false);
 
 initLiveWebSocket();
 setTimeout(fetchLive, 50);

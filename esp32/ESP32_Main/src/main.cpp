@@ -336,14 +336,23 @@ static void ioTask(void *pvParameters) {
         inputs.target_v = s_manual_v;
         inputs.target_steer_rad = s_manual_steer;
 
-        if (!s_fake_data_active && s_imu.isInitialized()) {
-            const auto &imu_data = s_imu.getData();
-            inputs.gyro_z    = imu_data.gyro_z;
-            inputs.accel_fwd = imu_data.lin_accel_x; // local body forward
-            inputs.accel_lat = imu_data.lin_accel_y;
-            inputs.roll_deg  = imu_data.roll_deg;
-            inputs.pitch_deg = imu_data.pitch_deg;
-            inputs.yaw_deg   = imu_data.yaw_deg;
+        if (!s_fake_data_active) {
+            if (s_imu.isInitialized()) {
+                const auto &imu_data = s_imu.getData();
+                inputs.gyro_z    = imu_data.gyro_z;
+                inputs.accel_fwd = imu_data.lin_accel_x; // local body forward
+                inputs.accel_lat = imu_data.lin_accel_y;
+                inputs.roll_deg  = imu_data.roll_deg;
+                inputs.pitch_deg = imu_data.pitch_deg;
+                inputs.yaw_deg   = imu_data.yaw_deg;
+            } else {
+                inputs.gyro_z    = 0.0f;
+                inputs.accel_fwd = 0.0f;
+                inputs.accel_lat = 0.0f;
+                inputs.roll_deg  = 0.0f;
+                inputs.pitch_deg = 0.0f;
+                inputs.yaw_deg   = 0.0f;
+            }
         }
 
         inputs.fl_rpm = s_stm32Link.getFL_RPM();
