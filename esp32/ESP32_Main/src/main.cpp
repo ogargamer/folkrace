@@ -572,7 +572,8 @@ static void ioTask(void *pvParameters) {
             }
         }
 
-        vTaskDelay(pdMS_TO_TICKS(2));
+        // Low-latency 1ms polling cadence for dual STM32 UART link and Pi USB telemetry
+        vTaskDelay(pdMS_TO_TICKS(1));
     }
 }
 

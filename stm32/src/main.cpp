@@ -41,7 +41,8 @@ static_assert(sizeof(TelemetryPacket) == 26, "TelemetryPacket must be exactly 26
 // ----------------------------------------------------------------------------
 // ESP32 High-Speed 400 Hz UART Protocol Definitions
 // ----------------------------------------------------------------------------
-#define STM32_CMD_SYNC_BYTE        0xAA
+#define STM32_CMD_SYNC_1           0xAA
+#define STM32_CMD_SYNC_2           0x55
 #define STM32_FEEDBACK_SYNC_1      0xAA
 #define STM32_FEEDBACK_SYNC_2      0x55
 
@@ -57,13 +58,13 @@ enum STM32CommandMode : uint8_t {
 };
 
 struct __attribute__((packed)) STM32MotorCommandPacket {
-    uint8_t sync;       // 0xAA (STM32_CMD_SYNC_BYTE)
+    uint8_t header[2];  // 0xAA, 0x55 (STM32_CMD_SYNC_1, STM32_CMD_SYNC_2)
     uint8_t cmd_mode;   // STM32CommandMode
     float   param1;     // m1 target RPM / Kp / align_voltage
     float   param2;     // m2 target RPM / Ki
-    uint8_t checksum;   // XOR of bytes 1..9 (cmd_mode, param1, param2)
+    uint8_t checksum;   // XOR of bytes 2..10 (cmd_mode, param1, param2)
 };
-static_assert(sizeof(STM32MotorCommandPacket) == 11, "STM32MotorCommandPacket must be 11 bytes");
+static_assert(sizeof(STM32MotorCommandPacket) == 12, "STM32MotorCommandPacket must be 12 bytes");
 
 #define STM32_STATUS_M1_ENABLED     (1 << 0)
 #define STM32_STATUS_M2_ENABLED     (1 << 1)
@@ -2958,22 +2959,31 @@ void sendESP32Feedback() {
 void processESP32Link() {
     static uint8_t rx_buf[sizeof(STM32MotorCommandPacket)];
     static uint8_t rx_idx = 0;
+    static bool sync_found = false;
 
     while (SerialESP.available() > 0) {
         uint8_t b = SerialESP.read();
 
-        if (rx_idx == 0) {
-            if (b == STM32_CMD_SYNC_BYTE) {
-                rx_buf[0] = b;
+        if (!sync_found) {
+            if (b == STM32_CMD_SYNC_1) {
+                rx_buf[0] = STM32_CMD_SYNC_1;
                 rx_idx = 1;
+            } else if (rx_idx == 1 && b == STM32_CMD_SYNC_2) {
+                rx_buf[1] = STM32_CMD_SYNC_2;
+                rx_idx = 2;
+                sync_found = true;
+            } else {
+                rx_idx = 0;
             }
         } else {
             rx_buf[rx_idx++] = b;
-            if (rx_idx == sizeof(STM32MotorCommandPacket)) {
+            if (rx_idx >= sizeof(STM32MotorCommandPacket)) {
+                sync_found = false;
                 rx_idx = 0;
-                // Verify XOR checksum over bytes [1 .. 9]
+
+                // Verify XOR checksum over bytes [2 .. 10]
                 uint8_t chk = 0;
-                for (size_t i = 1; i < sizeof(STM32MotorCommandPacket) - 1; i++) {
+                for (size_t i = 2; i < sizeof(STM32MotorCommandPacket) - 1; i++) {
                     chk ^= rx_buf[i];
                 }
                 if (chk == rx_buf[sizeof(STM32MotorCommandPacket) - 1]) {

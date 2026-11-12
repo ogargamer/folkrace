@@ -28,14 +28,15 @@ void STM32Channel::sendPacket(uint8_t mode, float param1, float param2) {
     }
 
     STM32MotorCommandPacket pkt;
-    pkt.sync = STM32_CMD_SYNC_BYTE;
+    pkt.header[0] = STM32_CMD_SYNC_1;
+    pkt.header[1] = STM32_CMD_SYNC_2;
     pkt.cmd_mode = mode;
     pkt.param1 = param1;
     pkt.param2 = param2;
 
     uint8_t chk = 0;
     const uint8_t *p = (const uint8_t *)&pkt;
-    for (size_t i = 1; i < sizeof(pkt) - 1; i++) {
+    for (size_t i = 2; i < sizeof(pkt) - 1; i++) {
         chk ^= p[i];
     }
     pkt.checksum = chk;

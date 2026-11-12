@@ -46,7 +46,8 @@
 // =============================================================================
 // STM32 FOC Dual-Motor Real-Time 400 Hz Protocol
 // =============================================================================
-#define STM32_CMD_SYNC_BYTE        0xAA
+#define STM32_CMD_SYNC_1           0xAA
+#define STM32_CMD_SYNC_2           0x55
 #define STM32_FEEDBACK_SYNC_1      0xAA
 #define STM32_FEEDBACK_SYNC_2      0x55
 
@@ -61,15 +62,15 @@ enum STM32CommandMode : uint8_t {
     STM32_CMD_ENTER_DFU  = 0xDF  // Reboot into ROM DFU bootloader
 };
 
-// 11-Byte Command Packet (transmitted from ESP32 to each STM32 at 400 Hz)
+// 12-Byte Robust Command Packet (transmitted from ESP32 to each STM32 at 400 Hz)
 struct __attribute__((__packed__)) STM32MotorCommandPacket {
-    uint8_t sync;       // 0xAA (STM32_CMD_SYNC_BYTE)
+    uint8_t header[2];  // 0xAA, 0x55 (STM32_CMD_SYNC_1, STM32_CMD_SYNC_2)
     uint8_t cmd_mode;   // STM32CommandMode
     float   param1;     // m1 target RPM / Kp / align_voltage
     float   param2;     // m2 target RPM / Ki
-    uint8_t checksum;   // XOR of bytes 1..9 (cmd_mode, param1, param2)
+    uint8_t checksum;   // XOR of bytes 2..10 (cmd_mode, param1, param2)
 };
-static_assert(sizeof(STM32MotorCommandPacket) == 11, "STM32MotorCommandPacket must be 11 bytes");
+static_assert(sizeof(STM32MotorCommandPacket) == 12, "STM32MotorCommandPacket must be 12 bytes");
 
 // Status Flags Bitfield (from STM32)
 #define STM32_STATUS_M1_ENABLED     (1 << 0)
