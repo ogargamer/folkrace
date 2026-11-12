@@ -4,18 +4,18 @@
 ================================================================================
   Connects to Raspberry Pi 4 ('robot'):
     - Auto-detects and connects to Pi debug server over HTTP port 8080.
-    - Verifies Path Planner is hard pinned to CPU Core 1.
-    - Verifies Debug Server & SQLite Black Box are hard pinned to CPU Core 2.
+    - Launches Tactical Mission Control (same rich GUI as the browser server)
+      in a dedicated standalone window (Edge/Chrome app mode) or browser tab.
     - Displays live telemetry status, driving buffer metrics, and SD card space.
-    - Opens browser-based Tactical Mission Control (http://robot.local:8080)
-      OR connects native desktop PyQt5 2D Telemetry GUI to live stream.
+    - Self-healing ESP32 reconnection watchdog and remote reconnect trigger.
     - Supports full automated endpoint verification (--verify), real-time
       terminal telemetry monitoring (--stream), and log downloading (--download).
 
   Usage:
-    python launchers/17_pi4_debug_studio.py              # Connects, registers UDP & launches native PyQt5 GUI
-    python launchers/17_pi4_debug_studio.py --browser    # Opens browser-based Tactical Mission Control
-    python launchers/17_pi4_debug_studio.py --measure-browser # Measures client browser latency & stream jitter
+    python launchers/17_pi4_debug_studio.py              # Opens Tactical Mission Control standalone GUI (default)
+    python launchers/17_pi4_debug_studio.py --tab        # Opens Tactical Mission Control in standard browser tab
+    python launchers/17_pi4_debug_studio.py --reconnect  # Triggers remote ESP32 USB serial re-probe & reconnect
+    python launchers/17_pi4_debug_studio.py --desktop    # Launches legacy PyQt5 simulation planner GUI
     python launchers/17_pi4_debug_studio.py --verify     # Tests all Pi server endpoints
     python launchers/17_pi4_debug_studio.py --stream     # Live terminal telemetry dashboard
     python launchers/17_pi4_debug_studio.py --download   # Downloads active SQLite flight log
@@ -29,6 +29,7 @@ import sys
 import time
 import json
 import socket
+import shutil
 import urllib.request
 import urllib.error
 import argparse
@@ -139,6 +140,61 @@ def stop_remote_service(host: str = "robot"):
     cmd = ["ssh", host, "echo l | sudo -S systemctl stop folkrace"]
     subprocess.run(cmd, check=True)
     print("[Remote] Service stopped.")
+
+
+def launch_tactical_gui(base_url: str, prefer_app_window: bool = True):
+    """
+    Launches the Tactical Mission Control GUI (same as browser server).
+    If prefer_app_window is True, attempts to launch Edge or Chrome in standalone
+    app window mode (--app=http://...) for a borderless native application window
+    without browser tabs or URL bars. Falls back to default web browser.
+    """
+    if prefer_app_window:
+        candidates = [
+            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+            r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+            shutil.which("msedge") or "",
+            shutil.which("google-chrome") or "",
+            shutil.which("chrome") or "",
+            shutil.which("chromium") or "",
+        ]
+        for c in candidates:
+            if c and os.path.exists(c):
+                try:
+                    subprocess.Popen([c, f"--app={base_url}"])
+                    print(f"[Launcher] Tactical Mission Control opened in standalone app window ({os.path.basename(c)})")
+                    print(f"  URL: {base_url}")
+                    print("=" * 75)
+                    return
+                except Exception:
+                    pass
+
+    print(f"[Launcher] Opening Tactical Mission Control in default browser: {base_url}")
+    webbrowser.open(base_url)
+    print("=" * 75)
+
+
+def trigger_mcu_reconnect(base_url: str) -> bool:
+    """Tells the Pi debug server to re-detect and reconnect to all ESP32 USB serial ports."""
+    url = f"{base_url}/api/mcu/command"
+    payload = json.dumps({"action": "reconnect"}).encode("utf-8")
+    print(f"[Launcher] Triggering remote ESP32 serial re-probe & reconnect on {base_url}...")
+    try:
+        req = urllib.request.Request(
+            url,
+            data=payload,
+            headers={"Content-Type": "application/json", "User-Agent": "FolkraceLauncher/1.0"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=4.0) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            print(f"[Launcher] ESP32 Reconnect Status: {data.get('status', 'OK')} ({data.get('msg', 'reconnected')})")
+            return True
+    except Exception as e:
+        print(f"[Launcher ERROR] Failed triggering ESP32 reconnect: {e}")
+        return False
 
 
 def download_database(base_url: str, output_path: Optional[str] = None) -> bool:
@@ -352,8 +408,9 @@ def main():
     parser.add_argument("--verify", action="store_true", help="Run full automated verification of all server endpoints")
     parser.add_argument("--stream", action="store_true", help="Stream live telemetry dashboard in terminal")
     parser.add_argument("--download", action="store_true", help="Download current SQLite black box flight database")
-    parser.add_argument("--desktop", action="store_true", help="Launch native PyQt5 desktop GUI (default)")
-    parser.add_argument("--browser", "--web", dest="browser", action="store_true", help="Open browser Tactical Mission Control instead of native PyQt5 GUI")
+    parser.add_argument("--reconnect", "--reconnect-mcu", dest="reconnect", action="store_true", help="Trigger remote ESP32 serial re-probe & reconnection")
+    parser.add_argument("--tab", "--browser-tab", "--browser", "--web", dest="browser_tab", action="store_true", help="Open Tactical Mission Control in standard browser tab instead of standalone app window")
+    parser.add_argument("--desktop", "--pyqt", "--planner-gui", dest="desktop", action="store_true", help="Launch native PyQt5 desktop planner GUI instead of Tactical Mission Control")
     parser.add_argument("--profile", action="store_true", help="Run GUI & telemetry performance profiler and benchmark")
     parser.add_argument("--measure-browser", action="store_true", help="Run browser latency and stream jitter benchmark")
     parser.add_argument("--restart", action="store_true", help="Restart remote folkrace systemd service via SSH")
@@ -414,6 +471,10 @@ def main():
     print("-" * 75)
 
     # 5. Execute sub-modes
+    if args.reconnect:
+        trigger_mcu_reconnect(base_url)
+        return
+
     if args.verify:
         run_full_verification(base_url, ssh_host=active_host if "robot" in active_host else "robot")
         return
@@ -436,29 +497,32 @@ def main():
         stream_telemetry_console(base_url)
         return
 
-    if args.browser:
-        print(f"[Launcher] Opening Web Tactical Debugger in browser: {base_url}")
-        webbrowser.open(base_url)
+    if args.desktop:
+        if not os.path.exists(PLANNER_GUI_SCRIPT):
+            print(f"[Error] Desktop GUI not found at: {PLANNER_GUI_SCRIPT}")
+            sys.exit(1)
+
+        if base_url:
+            try:
+                reg_resp = query_api_json(base_url, "/api/register_client", timeout_s=1.5)
+                if reg_resp:
+                    print(f"[Launcher] Registered this workstation for direct binary UDP telemetry from {active_host}")
+            except Exception:
+                pass
+
+        print("[Launcher] Launching native PyQt5 Desktop GUI (hardware-accelerated, zero-overhead UDP)...")
         print("=" * 75)
-        return
+        cmd = [sys.executable, PLANNER_GUI_SCRIPT]
+        sys.exit(subprocess.run(cmd, cwd=CONTROLLERS_DIR).returncode)
 
-    # Default action: Launch native PyQt5 Desktop GUI
-    if not os.path.exists(PLANNER_GUI_SCRIPT):
-        print(f"[Error] Desktop GUI not found at: {PLANNER_GUI_SCRIPT}")
-        sys.exit(1)
-
+    # Default action: Launch Tactical Mission Control GUI (same GUI as browser server)
     if base_url:
         try:
-            reg_resp = query_api_json(base_url, "/api/register_client", timeout_s=1.5)
-            if reg_resp:
-                print(f"[Launcher] Registered this workstation for direct binary UDP telemetry from {active_host}")
+            query_api_json(base_url, "/api/register_client", timeout_s=1.0)
         except Exception:
             pass
 
-    print("[Launcher] Launching native PyQt5 Desktop GUI (hardware-accelerated, zero-overhead UDP)...")
-    print("=" * 75)
-    cmd = [sys.executable, PLANNER_GUI_SCRIPT]
-    sys.exit(subprocess.run(cmd, cwd=CONTROLLERS_DIR).returncode)
+    launch_tactical_gui(base_url, prefer_app_window=not args.browser_tab)
 
 
 if __name__ == "__main__":

@@ -415,6 +415,8 @@ class DebugHTTPRequestHandler(BaseHTTPRequestHandler):
                 cmd_str = "BENCH\n"
             elif action == "reset":
                 cmd_str = "RESET\n"
+            elif action in ("reconnect", "reset_ports"):
+                cmd_str = "RECONNECT\n"
             elif action == "status":
                 cmd_str = "STATUS\n"
             elif action == "raw":

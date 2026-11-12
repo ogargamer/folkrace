@@ -927,6 +927,7 @@
     <button class="btn-motor-action btn-bench" id="btnBenchToggle" onclick="toggleFakeData()">🧪 FAKE DATA: OFF</button>
     <button class="btn-motor-action btn-dfu" onclick="enterDfu()">🔧 DFU REBOOT</button>
     <button class="btn-motor-action btn-reset" onclick="resetControllers()">🔄 RESET</button>
+    <button class="btn-motor-action btn-reconnect" style="background:#1e3a5f;color:#38bdf8;border:1px solid #0284c7;" onclick="reconnectMcu()">🔌 RECONNECT ESP32</button>
     <span id="motorActionStatus" style="font-size:11px;color:var(--accent-cyan);font-family:Consolas, monospace;margin-left:auto;">Pipeline ready</span>
   </div>
 
@@ -2657,6 +2658,11 @@ function resetControllers() {
   document.getElementById("steerSlider").value = 0.0;
   document.getElementById("steerSliderVal").innerText = "0.0°";
   sendMcuCommand({ action: "reset" });
+}
+
+function reconnectMcu() {
+  appendMcuConsole("[ACTION] Re-detecting and reconnecting ESP32 serial ports...");
+  sendMcuCommand({ action: "reconnect" });
 }
 
 function setSpeed(v) {

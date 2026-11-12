@@ -18,8 +18,9 @@ import sys
 import time
 import socket
 import json
+import glob
 import threading
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any, Tuple, List, Set
 
 CURR_DIR = os.path.dirname(os.path.abspath(__file__))
 if CURR_DIR not in sys.path:
@@ -133,23 +134,33 @@ class BinaryStreamParser:
                 else:
                     del self.buffer[:2]
             else:
-                # ESP32-ToF Port (supports 52-byte multi-target 4-zone, 60-byte multi-target, 20-byte per-sensor, and 78-byte full array)
+                # ESP32-ToF Port (supports 20-byte lean frame, 52-byte multi-target, and 78-byte full array)
                 if 1 <= msg_type_or_sensor_id <= 4:
-                    if len(self.buffer) >= TOF_SUB52_SIZE:
-                        raw_pkt = bytes(self.buffer[:TOF_SUB52_SIZE])
-                        decoded = decode_tof_sub_packet(raw_pkt, accept_s10=self.accept_s10)
-                        if decoded and decoded.get("dist_mm") is not None:
-                            del self.buffer[:TOF_SUB52_SIZE]
-                            yield (MSG_ID_TOF_SUB_TELEM, decoded)
-                            continue
-
+                    # 1. Check for 20-byte lean frame first (primary mode for Pi)
                     if len(self.buffer) >= TOF_SUB_SIZE:
-                        raw_pkt = bytes(self.buffer[:TOF_SUB_SIZE])
-                        decoded = decode_tof_sub_packet(raw_pkt, accept_s10=self.accept_s10)
-                        if decoded:
+                        chk_calc = 0
+                        for b in self.buffer[: TOF_SUB_SIZE - 1]:
+                            chk_calc ^= b
+                        if chk_calc == self.buffer[TOF_SUB_SIZE - 1]:
+                            raw_pkt = bytes(self.buffer[:TOF_SUB_SIZE])
                             del self.buffer[:TOF_SUB_SIZE]
-                            yield (MSG_ID_TOF_SUB_TELEM, decoded)
-                            continue
+                            decoded = decode_tof_sub_packet(raw_pkt, accept_s10=self.accept_s10)
+                            if decoded:
+                                yield (MSG_ID_TOF_SUB_TELEM, decoded)
+                                continue
+
+                    # 2. Check for 52-byte multi-target frame
+                    if len(self.buffer) >= TOF_SUB52_SIZE:
+                        chk_calc = 0
+                        for b in self.buffer[: TOF_SUB52_SIZE - 1]:
+                            chk_calc ^= b
+                        if chk_calc == self.buffer[TOF_SUB52_SIZE - 1]:
+                            raw_pkt = bytes(self.buffer[:TOF_SUB52_SIZE])
+                            del self.buffer[:TOF_SUB52_SIZE]
+                            decoded = decode_tof_sub_packet(raw_pkt, accept_s10=self.accept_s10)
+                            if decoded:
+                                yield (MSG_ID_TOF_SUB_TELEM, decoded)
+                                continue
 
                     if len(self.buffer) >= TOF_SUB52_SIZE:
                         del self.buffer[:2]
@@ -168,12 +179,39 @@ class BinaryStreamParser:
                     del self.buffer[:2]
 
 
+def get_available_serial_ports() -> List[str]:
+    """Returns sorted list of currently available serial port paths."""
+    ports = []
+    if HAS_SERIAL:
+        try:
+            import serial.tools.list_ports
+            for p in serial.tools.list_ports.comports():
+                if p.device and p.device not in ports:
+                    ports.append(p.device)
+        except Exception:
+            pass
+
+    for pattern in ["/dev/ttyUSB*", "/dev/ttyACM*", "/dev/ttyAMA*", "/dev/serial/by-id/*"]:
+        for p in glob.glob(pattern):
+            try:
+                real_p = os.path.realpath(p)
+                if real_p not in ports:
+                    ports.append(real_p)
+                elif p not in ports:
+                    ports.append(p)
+            except Exception:
+                if p not in ports:
+                    ports.append(p)
+
+    return sorted(ports)
+
+
 def probe_port_role(port: str, baud: int = UART_BAUD) -> Optional[str]:
     """Sniffs incoming bytes on port for 200 ms to identify ESP32 role."""
     if not HAS_SERIAL or not os.path.exists(port):
         return None
     try:
-        with serial.Serial(port, baud, timeout=0.2) as ser:
+        with serial.Serial(port, baud, timeout=0.25) as ser:
             ser.reset_input_buffer()
             # Send PING in case MCU is waiting in shell mode
             ser.write(b"PING\n")
@@ -210,19 +248,13 @@ def resolve_serial_ports(
     baud: int = UART_BAUD
 ) -> Tuple[Optional[str], Optional[str]]:
     """Auto-detects and binds USB / UART serial ports to ESP32 Main and ESP32 ToF."""
-    candidates = [
-        p for p in [
-            "/dev/ttyUSB0", "/dev/ttyUSB1", "/dev/ttyUSB2",
-            "/dev/ttyACM0", "/dev/ttyACM1", "/dev/ttyACM2",
-            "/dev/ttyAMA0", "/dev/ttyAMA2"
-        ] if os.path.exists(p)
-    ]
+    candidates = get_available_serial_ports()
 
     resolved_main = main_port if main_port and main_port != "auto" and os.path.exists(main_port) else None
     resolved_tof = tof_port if tof_port and tof_port != "auto" and os.path.exists(tof_port) else None
 
     # Filter out already explicitly claimed ports
-    available = [c for c in candidates if c not in (resolved_main, resolved_tof)]
+    available = [c for c in candidates if c not in (resolved_main, resolved_tof) and os.path.exists(c)]
 
     # If both need detection, probe each available USB port
     if (resolved_main is None or resolved_tof is None) and available:
@@ -259,12 +291,19 @@ class MCU_UART_Bridge:
         udp_port: int = UDP_DISPATCH_PORT,
         accept_s10: bool = True,
     ):
-        self.main_port, self.tof_port = resolve_serial_ports(main_port, tof_port, baud)
+        self.main_port_arg = main_port
+        self.tof_port_arg = tof_port
         self.baud = baud
         self.udp_host = udp_host
         self.udp_target = (udp_host, udp_port)
         self.accept_s10 = accept_s10
         self.running = False
+
+        self.assigned_ports: Dict[str, Optional[str]] = {"ESP32_Main": None, "ESP32_ToF": None}
+        self.link_active: Dict[str, bool] = {"ESP32_Main": False, "ESP32_ToF": False}
+        self.last_rx_timestamp: Dict[str, float] = {"ESP32_Main": 0.0, "ESP32_ToF": 0.0}
+        self.force_reconnect_flag = False
+        self.discovery_lock = threading.Lock()
 
         self.udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.udp_sock.setblocking(False)
@@ -283,6 +322,46 @@ class MCU_UART_Bridge:
         self.latest_tof_ranges_raw = [1.8] * 16
         self._last_debug_dispatch = 0.0
 
+    @property
+    def main_port(self) -> Optional[str]:
+        return self.assigned_ports.get("ESP32_Main")
+
+    @property
+    def tof_port(self) -> Optional[str]:
+        return self.assigned_ports.get("ESP32_ToF")
+
+    def trigger_reconnect(self):
+        """Forces immediate re-probe and reconnect across all MCU serial links."""
+        print("[MCU Bridge] Manual reconnect command received. Re-detecting all MCU links...")
+        self.force_reconnect_flag = True
+        def _clear():
+            time.sleep(1.0)
+            self.force_reconnect_flag = False
+        threading.Thread(target=_clear, daemon=True).start()
+
+    def find_matching_port(self, target_role: str, excluded_ports: Set[Optional[str]]) -> Optional[str]:
+        """
+        Dynamically searches available serial ports for a matching MCU role ('main' or 'tof').
+        Excludes ports actively assigned to other workers.
+        """
+        candidates = get_available_serial_ports()
+        available = [p for p in candidates if p and p not in excluded_ports and os.path.exists(p)]
+        if not available:
+            return None
+
+        # 1. Probe roles
+        for p in available:
+            role = probe_port_role(p, self.baud)
+            if role == target_role:
+                return p
+
+        # 2. Check explicit configured arg if it exists and wasn't claimed
+        configured = self.tof_port_arg if target_role == "tof" else self.main_port_arg
+        if configured and configured != "auto" and configured in available:
+            return configured
+
+        return None
+
     def start(self):
         if not HAS_SERIAL:
             print("[MCU Bridge ERROR] pyserial is not installed on this system!")
@@ -294,17 +373,12 @@ class MCU_UART_Bridge:
         t_cmd = threading.Thread(target=self._command_listener_worker, name="MCUCommandWorker", daemon=True)
         t_cmd.start()
 
-        if self.main_port and os.path.exists(self.main_port):
-            t_main = threading.Thread(target=self._uart_worker, args=(self.main_port, "ESP32_Main"), daemon=True)
-            t_main.start()
-        else:
-            print(f"[MCU Bridge] ESP32 Main port not specified or offline: {self.main_port}")
+        # Start resilient supervisor workers for both ESP32 Main and ESP32 ToF Hub
+        t_main = threading.Thread(target=self._mcu_worker, args=("ESP32_Main",), name="Worker_ESP32_Main", daemon=True)
+        t_main.start()
 
-        if self.tof_port and os.path.exists(self.tof_port):
-            t_tof = threading.Thread(target=self._uart_worker, args=(self.tof_port, "ESP32_ToF"), daemon=True)
-            t_tof.start()
-        else:
-            print(f"[MCU Bridge] ESP32 ToF port not specified or offline: {self.tof_port}")
+        t_tof = threading.Thread(target=self._mcu_worker, args=("ESP32_ToF",), name="Worker_ESP32_ToF", daemon=True)
+        t_tof.start()
 
     def stop(self):
         self.running = False
@@ -325,8 +399,12 @@ class MCU_UART_Bridge:
             try:
                 data, _ = sock.recvfrom(2048)
                 if data:
-                    # Intercept S10 toggle commands for ESP32 ToF Hub
                     d_strip = data.strip()
+                    # Reconnect / Reset command
+                    if d_strip in (b"RECONNECT", b"RESET_PORTS", b"RESTART_BRIDGE"):
+                        self.trigger_reconnect()
+                        continue
+                    # Intercept S10 toggle commands for ESP32 ToF Hub
                     if d_strip in (b"S10_1", b"S10_ON", b"SET_S10_1"):
                         self.set_s10(True)
                         continue
@@ -335,15 +413,19 @@ class MCU_UART_Bridge:
                         continue
                     try:
                         cmd_obj = json.loads(data.decode("utf-8", errors="ignore"))
-                        if isinstance(cmd_obj, dict) and "s10" in cmd_obj:
-                            self.set_s10(bool(cmd_obj["s10"]))
-                            continue
+                        if isinstance(cmd_obj, dict):
+                            if "action" in cmd_obj and cmd_obj["action"] in ("reconnect", "reset_ports"):
+                                self.trigger_reconnect()
+                                continue
+                            if "s10" in cmd_obj:
+                                self.set_s10(bool(cmd_obj["s10"]))
+                                continue
                     except Exception:
                         pass
                     self.send_to_main_mcu(data)
             except socket.timeout:
                 continue
-            except Exception as e:
+            except Exception:
                 pass
         try:
             sock.close()
@@ -380,45 +462,111 @@ class MCU_UART_Bridge:
             else:
                 print(f"[MCU Bridge WARN] Cannot dispatch command (ESP32 serial offline)")
 
-    def _uart_worker(self, port_name: str, label: str):
-        print(f"[MCU Bridge] Connecting to {label} on {port_name} @ {self.baud} baud...")
+    def _mcu_worker(self, label: str):
+        """
+        Self-healing worker for an MCU connection.
+        Continuously attempts connection, supervises live data flow,
+        detects disconnects or silent lockups, and cleanly reconnects.
+        """
         is_tof = (label == "ESP32_ToF")
-        parser = BinaryStreamParser(is_tof_port=is_tof, accept_s10=self.accept_s10)
+        role_target = "tof" if is_tof else "main"
+        configured_port = self.tof_port_arg if is_tof else self.main_port_arg
 
         while self.running:
+            # 1. Port Acquisition Phase
+            port = None
+            if configured_port and configured_port != "auto" and os.path.exists(configured_port):
+                with self.discovery_lock:
+                    other_label = "ESP32_ToF" if label == "ESP32_Main" else "ESP32_Main"
+                    if configured_port != self.assigned_ports.get(other_label):
+                        port = configured_port
+            else:
+                with self.discovery_lock:
+                    other_label = "ESP32_ToF" if label == "ESP32_Main" else "ESP32_Main"
+                    excluded = {self.assigned_ports.get(other_label)}
+                    port = self.find_matching_port(role_target, excluded)
+
+            if not port:
+                self.link_active[label] = False
+                self.assigned_ports[label] = None
+                time.sleep(2.0)  # Reliable 2.0s scan period
+                continue
+
+            self.assigned_ports[label] = port
+            print(f"[MCU Bridge] Connecting to {label} on {port} @ {self.baud} baud...")
+
+            # 2. Connection and Streaming Phase
+            parser = BinaryStreamParser(is_tof_port=is_tof, accept_s10=self.accept_s10)
             try:
-                with serial.Serial(port_name, self.baud, timeout=0.1) as ser:
-                    print(f"[MCU Bridge] Connected to {label} ({port_name})")
-                    if label == "ESP32_Main":
-                        with self.serial_lock:
-                            self.main_serial = ser
-                    elif label == "ESP32_ToF":
-                        with self.serial_lock:
+                with serial.Serial(port, self.baud, timeout=0.2) as ser:
+                    ser.reset_input_buffer()
+                    ser.reset_output_buffer()
+
+                    with self.serial_lock:
+                        if is_tof:
                             self.tof_serial = ser
-                        # Ensure ESP32 ToF Hub is in lean 20-byte mode for Pi and send S10 state
+                        else:
+                            self.main_serial = ser
+
+                    # Initialize MCU parameters
+                    if is_tof:
                         try:
                             ser.write(b"L\n")
+                            time.sleep(0.04)
                             ser.write(b"1\n" if self.accept_s10 else b"0\n")
                             ser.flush()
                         except Exception:
                             pass
-                    try:
-                        while self.running:
-                            data = ser.read(256)
-                            if data:
-                                parser.feed(data)
-                                for msg_type, decoded in parser.extract_packets():
-                                    self._handle_packet(msg_type, decoded)
-                    finally:
-                        if label == "ESP32_Main":
-                            with self.serial_lock:
-                                self.main_serial = None
-                        elif label == "ESP32_ToF":
-                            with self.serial_lock:
-                                self.tof_serial = None
+                    else:
+                        try:
+                            ser.write(b"STATUS\n")
+                            ser.flush()
+                        except Exception:
+                            pass
+
+                    print(f"[MCU Bridge] Connected to {label} ({port}). Live streaming active.")
+                    self.link_active[label] = True
+                    last_pkt_time = time.time()
+                    self.last_rx_timestamp[label] = last_pkt_time
+
+                    while self.running:
+                        if self.force_reconnect_flag:
+                            print(f"[MCU Bridge] Force reconnect requested for {label}. Closing link...")
+                            break
+
+                        data = ser.read(256)
+                        now = time.time()
+                        if data:
+                            parser.feed(data)
+                            had_valid_packet = False
+                            for msg_type, decoded in parser.extract_packets():
+                                self._handle_packet(msg_type, decoded)
+                                had_valid_packet = True
+
+                            if had_valid_packet:
+                                last_pkt_time = now
+                                self.last_rx_timestamp[label] = now
+                                self.link_active[label] = True
+
+                        # Watchdog: Silence detection (3.0 seconds with no valid telemetry packets)
+                        if now - last_pkt_time > 3.0:
+                            print(f"[MCU Bridge] Watchdog: No telemetry from {label} on {port} for 3.0s (link lost or MCU reset). Reconnecting...")
+                            break
+
+            except (serial.SerialException, OSError) as e:
+                print(f"[MCU Bridge] Connection lost on {label} ({port}): {e}")
             except Exception as e:
-                print(f"[MCU Bridge] Error on {label} ({port_name}): {e}")
-                time.sleep(1.0)
+                print(f"[MCU Bridge] Error in {label} worker ({port}): {e}")
+            finally:
+                with self.serial_lock:
+                    if is_tof:
+                        self.tof_serial = None
+                    else:
+                        self.main_serial = None
+                self.link_active[label] = False
+                self.assigned_ports[label] = None
+                print(f"[MCU Bridge] {label} disconnected. Waiting 2.0s before re-detecting port...")
+                time.sleep(2.0)  # Grace period for USB bus & ESP32 boot
 
     def _handle_packet(self, msg_type: Any, pkt: Any):
         with self.lock:
@@ -479,6 +627,10 @@ class MCU_UART_Bridge:
             telemetry["tof_anchor_proj"] = list(self.compensator.compute_projected_anchor(v_curr, w_curr, 0.01667))
             telemetry["mcu_msg"] = self.latest_mcu_msg
             telemetry["mcu_log"] = list(self.mcu_log[-10:])
+            telemetry["mcu_main_connected"] = bool(self.link_active.get("ESP32_Main", False))
+            telemetry["mcu_tof_connected"] = bool(self.link_active.get("ESP32_ToF", False))
+            telemetry["mcu_main_port"] = self.assigned_ports.get("ESP32_Main") or "Offline"
+            telemetry["mcu_tof_port"] = self.assigned_ports.get("ESP32_ToF") or "Offline"
 
         try:
             raw = json.dumps(telemetry).encode("utf-8")

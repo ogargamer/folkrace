@@ -158,92 +158,9 @@ def decode_tof_packet(data: bytes) -> Optional[Dict[str, Any]]:
 
 
 def decode_tof_sub_packet(data: bytes, accept_s10: bool = True) -> Optional[Dict[str, Any]]:
-    """Decodes per-sensor binary ToF packet (52-byte multi-target 4-zone, 60-byte multi-target, and 20-byte legacy frames)."""
-    if len(data) >= TOF_SUB52_SIZE:
-        unpacked = struct.unpack_from(TOF_SUB52_FORMAT, data)
-        sync, sensor_id, seq, ts_ms = unpacked[0:4]
-        if sync == MCU_SYNC and 1 <= sensor_id <= 4:
-            expected_chk = unpacked[-1]
-            actual_chk = calc_checksum(data[: TOF_SUB52_SIZE - 1])
-            if actual_chk == expected_chk:
-                dist_mm = unpacked[4:8]
-                target0_mm = unpacked[8:12]
-                target1_mm = unpacked[12:16]
-                target0_status = unpacked[16:20]
-                target1_status = unpacked[20:24]
-                spad_count = unpacked[24:28]
-
-                return {
-                    "sensor_id": sensor_id,
-                    "seq": seq,
-                    "ts_ms": ts_ms,
-                    "mcu_timestamp_us": ts_ms * 1000,
-                    "distances_m": [round(d / 1000.0, 3) for d in dist_mm],
-                    "dist_mm": list(dist_mm),
-                    "target0_mm": list(target0_mm),
-                    "target1_mm": list(target1_mm),
-                    "target0_status": list(target0_status),
-                    "target1_status": list(target1_status),
-                    "spad_count": list(spad_count),
-                }
-
-    if len(data) >= TOF_SUB60_SIZE:
-        unpacked = struct.unpack_from(TOF_SUB60_FORMAT, data)
-        sync, sensor_id, seq, ts_ms = unpacked[0:4]
-        if sync != MCU_SYNC or not (1 <= sensor_id <= 4):
-            return None
-        expected_chk = unpacked[-1]
-        actual_chk = calc_checksum(data[: TOF_SUB60_SIZE - 1])
-        if actual_chk != expected_chk:
-            return None
-
-        dist_raw = unpacked[4:20]
-        status_raw = unpacked[20:36]
-
-        # Resolve closest valid target for the 4 primary horizontal zones
-        primary_distances_m = []
-        for i in range(4):
-            d0, d1 = dist_raw[2 * i], dist_raw[2 * i + 1]
-            s0, s1 = status_raw[2 * i], status_raw[2 * i + 1]
-            v0 = (s0 in valid_statuses and d0 > 0)
-            v1 = (s1 in valid_statuses and d1 > 0)
-
-            near0 = (s0 != 0 and s0 != 255 and 1 <= d0 <= 30)
-            near1 = (s1 != 0 and s1 != 255 and 1 <= d1 <= 30)
-
-            if v0 and v1:
-                chosen = min(d0, d1)
-            elif v0:
-                chosen = d0
-            elif v1:
-                chosen = d1
-            else:
-                # 0 valid targets: fallback logic
-                # Never trigger 3000mm open space if either target reports 1-30mm even if error!
-                if near0 and near1:
-                    chosen = min(d0, d1)
-                elif near0:
-                    chosen = d0
-                elif near1:
-                    chosen = d1
-                else:
-                    chosen = 3000
-
-            if chosen < 30:
-                chosen = 30
-            primary_distances_m.append(round(chosen / 1000.0, 3))
-
-        return {
-            "sensor_id": sensor_id,
-            "seq": seq,
-            "ts_ms": ts_ms,
-            "mcu_timestamp_us": ts_ms * 1000,
-            "distances_m": primary_distances_m,
-            "distances_raw_mm": list(dist_raw),
-            "status_raw": list(status_raw),
-        }
-
-    if len(data) >= TOF_SUB_SIZE:
+    """Decodes per-sensor binary ToF packet (20-byte lean frame or 52-byte multi-target frame)."""
+    # 1. Check exact 20-byte lean frame (default for Pi)
+    if len(data) == TOF_SUB_SIZE:
         unpacked = struct.unpack_from(TOF_SUB_FORMAT, data)
         sync, sensor_id, seq, ts_ms = unpacked[0:4]
         dist_mm = unpacked[4:8]
@@ -263,7 +180,94 @@ def decode_tof_sub_packet(data: bytes, accept_s10: bool = True) -> Optional[Dict
             "ts_ms": ts_ms,
             "mcu_timestamp_us": ts_ms * 1000,
             "distances_m": [round(d / 1000.0, 3) for d in clamped_mm],
-            "dist_mm": clamped_mm,
+            "dist_mm": list(clamped_mm),
+        }
+
+    # 2. Check exact 52-byte multi-target frame
+    if len(data) == TOF_SUB52_SIZE:
+        unpacked = struct.unpack_from(TOF_SUB52_FORMAT, data)
+        sync, sensor_id, seq, ts_ms = unpacked[0:4]
+        if sync != MCU_SYNC or not (1 <= sensor_id <= 4):
+            return None
+
+        expected_chk = unpacked[-1]
+        actual_chk = calc_checksum(data[: TOF_SUB52_SIZE - 1])
+        if actual_chk != expected_chk:
+            return None
+
+        dist_mm = unpacked[4:8]
+        target0_mm = unpacked[8:12]
+        target1_mm = unpacked[12:16]
+        target0_status = unpacked[16:20]
+        target1_status = unpacked[20:24]
+        spad_count = unpacked[24:28]
+
+        clamped_mm = [max(30, d) if d < 30 else d for d in dist_mm]
+        return {
+            "sensor_id": sensor_id,
+            "seq": seq,
+            "ts_ms": ts_ms,
+            "mcu_timestamp_us": ts_ms * 1000,
+            "distances_m": [round(d / 1000.0, 3) for d in clamped_mm],
+            "dist_mm": list(clamped_mm),
+            "target0_mm": list(target0_mm),
+            "target1_mm": list(target1_mm),
+            "target0_status": list(target0_status),
+            "target1_status": list(target1_status),
+            "spad_count": list(spad_count),
+        }
+
+    # 3. Check exact 60-byte legacy frame
+    if len(data) == TOF_SUB60_SIZE:
+        unpacked = struct.unpack_from(TOF_SUB60_FORMAT, data)
+        sync, sensor_id, seq, ts_ms = unpacked[0:4]
+        if sync != MCU_SYNC or not (1 <= sensor_id <= 4):
+            return None
+        expected_chk = unpacked[-1]
+        actual_chk = calc_checksum(data[: TOF_SUB60_SIZE - 1])
+        if actual_chk != expected_chk:
+            return None
+
+        dist_raw = unpacked[4:20]
+        status_raw = unpacked[20:36]
+        valid_statuses = {5, 6, 9, 10} if accept_s10 else {5, 6, 9}
+
+        primary_distances_m = []
+        for i in range(4):
+            d0, d1 = dist_raw[2 * i], dist_raw[2 * i + 1]
+            s0, s1 = status_raw[2 * i], status_raw[2 * i + 1]
+            v0 = (s0 in valid_statuses and d0 > 0)
+            v1 = (s1 in valid_statuses and d1 > 0)
+            near0 = (s0 != 0 and s0 != 255 and 1 <= d0 <= 30)
+            near1 = (s1 != 0 and s1 != 255 and 1 <= d1 <= 30)
+
+            if v0 and v1:
+                chosen = min(d0, d1)
+            elif v0:
+                chosen = d0
+            elif v1:
+                chosen = d1
+            elif near0 and near1:
+                chosen = min(d0, d1)
+            elif near0:
+                chosen = d0
+            elif near1:
+                chosen = d1
+            else:
+                chosen = 3000
+
+            if chosen < 30:
+                chosen = 30
+            primary_distances_m.append(round(chosen / 1000.0, 3))
+
+        return {
+            "sensor_id": sensor_id,
+            "seq": seq,
+            "ts_ms": ts_ms,
+            "mcu_timestamp_us": ts_ms * 1000,
+            "distances_m": primary_distances_m,
+            "distances_raw_mm": list(dist_raw),
+            "status_raw": list(status_raw),
         }
 
     return None

@@ -101,13 +101,29 @@ def main():
 
     try:
         while True:
-            # Check if any process died unexpectedly
+            # Self-healing supervisor: restart background workers if terminated unexpectedly
             if p_bridge and p_bridge.poll() is not None:
-                print(f"[Launcher] MCU UART bridge exited with code {p_bridge.returncode}")
-                break
+                ret = p_bridge.returncode
+                print(f"[Launcher WARNING] MCU UART bridge exited with code {ret}. Restarting in 2.0s...")
+                time.sleep(2.0)
+                if has_taskset:
+                    cmd_bridge = ["taskset", "-c", "3", sys.executable, BRIDGE_SCRIPT]
+                else:
+                    cmd_bridge = [sys.executable, BRIDGE_SCRIPT]
+                p_bridge = subprocess.Popen(cmd_bridge, cwd=CURR_DIR)
+                print(f"      [Auto-Restart] Respawned MCU UART Bridge (PID: {p_bridge.pid})")
+
             if p_debug.poll() is not None:
-                print(f"[Launcher] Debug server exited with code {p_debug.returncode}")
-                break
+                ret = p_debug.returncode
+                print(f"[Launcher WARNING] Debug server exited with code {ret}. Restarting in 2.0s...")
+                time.sleep(2.0)
+                if has_taskset:
+                    cmd_debug = ["taskset", "-c", "2", sys.executable, DEBUG_SERVER_SCRIPT]
+                else:
+                    cmd_debug = [sys.executable, DEBUG_SERVER_SCRIPT]
+                p_debug = subprocess.Popen(cmd_debug, cwd=CURR_DIR)
+                print(f"      [Auto-Restart] Respawned Debug Server (PID: {p_debug.pid})")
+
             if p_planner.poll() is not None:
                 print(f"[Launcher] Path planner exited with code {p_planner.returncode}")
                 break
