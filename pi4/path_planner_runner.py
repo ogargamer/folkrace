@@ -40,7 +40,7 @@ ROOT_DIR = os.path.dirname(CURR_DIR)
 BRAIN_DIR = os.path.join(ROOT_DIR, "brain")
 CORE_DIR = os.path.join(ROOT_DIR, "core")
 CONTROLLERS_DIR = os.path.join(ROOT_DIR, "webots", "simulation", "my_project", "controllers", "tof_path_planner")
-for d in (BRAIN_DIR, CORE_DIR, CONTROLLERS_DIR):
+for d in (BRAIN_DIR, CORE_DIR, CONTROLLERS_DIR, os.path.join(CURR_DIR, "brain"), os.path.join(CURR_DIR, "core")):
     if os.path.exists(d) and d not in sys.path:
         sys.path.insert(0, d)
 
@@ -175,9 +175,13 @@ def run_path_planner():
                 try:
                     raw_bytes, _ = sensor_sock.recvfrom(4096)
                     pkt = json.loads(raw_bytes.decode("utf-8"))
-                    latest_mcu_pkt = pkt
-                    last_mcu_pkt = pkt
-                    last_mcu_time = now_mono
+                    # Only chassis/MCU telemetry (carries rpms_act + STM32 flags) may become the MCU
+                    # snapshot. ToF-only packets share this socket and would otherwise clobber it,
+                    # making STM32 flags drop out intermittently (online/offline flicker).
+                    if "rpms_act" in pkt:
+                        latest_mcu_pkt = pkt
+                        last_mcu_pkt = pkt
+                        last_mcu_time = now_mono
                     if "tof_ranges_raw" in pkt:
                         live_tof = {
                             SENSOR_NAMES[i]: pkt["tof_ranges_raw"][i]
@@ -237,6 +241,8 @@ def run_path_planner():
                 steer_cmd_rad = 0.0
                 steer_cmd_deg = 0.0
                 run_mode_val = 0
+                brain.rate_limited_speed = 0.0
+                brain.cached_target_speed = 0.0
                 brain_telem = {
                     "mode": "STANDBY",
                     "status": "OFFLINE",

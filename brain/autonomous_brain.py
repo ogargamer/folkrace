@@ -59,6 +59,9 @@ try:
         RECOVERY_ARC_LOOKAHEAD_M,
         BRAKE_DECEL_MAX,
         ACCEL_FWD_MAX,
+        ACCEL_FWD_RATIO,
+        BRAKE_DECEL_RATIO,
+        GRAVITY_G,
         TOF_MAX_RANGE_M,
         WHEELBASE,
     )
@@ -83,6 +86,9 @@ except ImportError:
         RECOVERY_ARC_LOOKAHEAD_M,
         BRAKE_DECEL_MAX,
         ACCEL_FWD_MAX,
+        ACCEL_FWD_RATIO,
+        BRAKE_DECEL_RATIO,
+        GRAVITY_G,
         TOF_MAX_RANGE_M,
         WHEELBASE,
     )
@@ -142,7 +148,8 @@ class AutonomousBrain:
         self.step_counter = 0
         self.active_steer = 0.0
         self.cached_target_steer = 0.0
-        self.cached_target_speed = self.v_cruise_min
+        self.cached_target_speed = 0.0
+        self.rate_limited_speed = 0.0
         self.was_recovering = False
         self.mode_desc = "SL_MPC"
         self.last_aww_status = None
@@ -253,7 +260,8 @@ class AutonomousBrain:
         self.step_counter = 0
         self.active_steer = 0.0
         self.cached_target_steer = 0.0
-        self.cached_target_speed = self.v_cruise_min
+        self.cached_target_speed = 0.0
+        self.rate_limited_speed = 0.0
         self.was_recovering = False
         self.mode_desc = "SL_MPC"
         self.cached_f_tof = TOF_MAX_RANGE_M
@@ -558,6 +566,42 @@ class AutonomousBrain:
             if "RAMP" not in self.mode_desc:
                 self.mode_desc = f"RAMP_{self.mode_desc}"
 
+        # 10c. Unified Dynamic Speed Rate Limiter (Smooth takeoff, no 0 -> 400 RPM step shock)
+        if is_recovering:
+            # During reverse recovery, target_speed is negative (e.g. -1.2 m/s)
+            target_v = target_speed
+            d_limit = min(BRAKE_DECEL_MAX, BRAKE_DECEL_RATIO * self.mu_val * GRAVITY_G)
+            speed_err = target_v - self.rate_limited_speed
+            max_dv = d_limit * dt
+            if abs(speed_err) <= max_dv:
+                self.rate_limited_speed = target_v
+            else:
+                self.rate_limited_speed += math.copysign(max_dv, speed_err)
+        else:
+            target_v = target_speed
+            v_curr = v_est
+
+            a_limit = min(ACCEL_FWD_MAX, ACCEL_FWD_RATIO * self.mu_val * GRAVITY_G)
+            d_limit = min(BRAKE_DECEL_MAX, BRAKE_DECEL_RATIO * self.mu_val * GRAVITY_G)
+
+            # Instant crash/stop resync: if vehicle suddenly stopped against wall, resync rate_limited_speed
+            if self.rate_limited_speed >= 0.0:
+                if v_curr < (self.rate_limited_speed - 0.35):
+                    self.rate_limited_speed = max(0.0, v_curr)
+            else:
+                if v_curr > (self.rate_limited_speed + 0.35):
+                    self.rate_limited_speed = min(0.0, v_curr)
+
+            speed_err = target_v - self.rate_limited_speed
+            is_accel = (self.rate_limited_speed >= 0.0 and speed_err > 0.0) or (self.rate_limited_speed <= 0.0 and speed_err < 0.0)
+            max_dv = (a_limit if is_accel else d_limit) * dt
+
+            if abs(speed_err) <= max_dv:
+                self.rate_limited_speed = target_v
+            else:
+                self.rate_limited_speed += math.copysign(max_dv, speed_err)
+
+        target_speed = self.rate_limited_speed
         self.cached_target_speed = target_speed
         self.cached_target_steer = self.active_steer
         t_total_ms = (time.perf_counter() - t_start) * 1000.0

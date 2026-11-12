@@ -424,6 +424,14 @@
     border: 1px solid;
     transition: all 0.15s ease;
   }
+  .btn-motor-action:disabled,
+  .btn-preset:disabled,
+  button:disabled {
+    opacity: 0.55 !important;
+    cursor: not-allowed !important;
+    pointer-events: none !important;
+    filter: grayscale(0.5);
+  }
   .btn-arm {
     background: #003d1c;
     border-color: var(--accent-green);
@@ -2598,6 +2606,12 @@ function renderMotorChart() {
 }
 
 // REST Dispatcher to debug_server -> UDP 9877 -> MCU UART Bridge -> ESP32 -> STM32
+let mcuCommandInFlight = false;
+let lastButtonActionTime = 0;
+const BUTTON_DEBOUNCE_MS = 250;
+let throttleSendTimer = null;
+let steerSendTimer = null;
+
 async function sendMcuCommand(payload) {
   const statusEl = document.getElementById("motorActionStatus");
   if (statusEl) statusEl.innerText = `Dispatching ${payload.action || 'cmd'}...`;
@@ -2619,6 +2633,34 @@ async function sendMcuCommand(payload) {
   }
 }
 
+// Executes a button action safely with UI locking and time-based debounce protection
+async function executeButtonCommand(btnEl, payload) {
+  const now = performance.now();
+  if (mcuCommandInFlight || (now - lastButtonActionTime < BUTTON_DEBOUNCE_MS)) {
+    return;
+  }
+  mcuCommandInFlight = true;
+  lastButtonActionTime = now;
+
+  let btn = btnEl;
+  if (!btn && window.event && window.event.target) {
+    btn = window.event.target.closest("button");
+  }
+
+  // Temporarily disable all command buttons in UI to prevent burst multi-click queuing
+  const buttonsToLock = document.querySelectorAll(".btn-motor-action, .btn-preset");
+  buttonsToLock.forEach(b => { b.disabled = true; });
+
+  try {
+    return await sendMcuCommand(payload);
+  } finally {
+    setTimeout(() => {
+      buttonsToLock.forEach(b => { b.disabled = false; });
+      mcuCommandInFlight = false;
+    }, BUTTON_DEBOUNCE_MS);
+  }
+}
+
 function appendMcuConsole(text) {
   const c = document.getElementById("mcuConsole");
   if (!c) return;
@@ -2628,26 +2670,26 @@ function appendMcuConsole(text) {
 }
 
 function enableMotors(enable) {
-  sendMcuCommand({ action: "motors", enable: enable });
+  executeButtonCommand(null, { action: "motors", enable: enable });
 }
 
 function emergencyStop() {
   document.getElementById("throttleSlider").value = 0.0;
   document.getElementById("throttleVal").innerText = "0.00 m/s";
-  sendMcuCommand({ action: "estop" });
+  executeButtonCommand(null, { action: "estop" });
 }
 
 function queryStatus() {
-  sendMcuCommand({ action: "status" });
+  executeButtonCommand(null, { action: "status" });
 }
 
 function saveFlash() {
-  sendMcuCommand({ action: "save" });
+  executeButtonCommand(null, { action: "save" });
 }
 
 function enterDfu() {
   if (confirm("Reboot both Front and Rear STM32 controllers into System ROM DFU Bootloader for USB firmware flashing?")) {
-    sendMcuCommand({ action: "dfu" });
+    executeButtonCommand(null, { action: "dfu" });
   }
 }
 
@@ -2688,8 +2730,15 @@ function syncFakeDataButtons(isBench) {
 async function toggleFakeData() {
   const btn = document.getElementById("btnToggleFakeData");
   const benchBtn = document.getElementById("btnBenchToggle");
-  if (btn) btn.style.opacity = "0.5";
-  if (benchBtn) benchBtn.style.opacity = "0.5";
+  const now = performance.now();
+  if (mcuCommandInFlight || (now - lastButtonActionTime < BUTTON_DEBOUNCE_MS)) {
+    return;
+  }
+  mcuCommandInFlight = true;
+  lastButtonActionTime = now;
+
+  if (btn) { btn.disabled = true; btn.style.opacity = "0.5"; }
+  if (benchBtn) { benchBtn.disabled = true; benchBtn.style.opacity = "0.5"; }
 
   fakeDataActive = !fakeDataActive;
   syncFakeDataButtons(fakeDataActive);
@@ -2703,6 +2752,12 @@ async function toggleFakeData() {
     }
   } catch (e) {
     appendMcuConsole(`[WARN] Fake data toggle error: ${e.message}`);
+  } finally {
+    setTimeout(() => {
+      if (btn) { btn.disabled = false; btn.style.opacity = "1.0"; }
+      if (benchBtn) { benchBtn.disabled = false; benchBtn.style.opacity = "1.0"; }
+      mcuCommandInFlight = false;
+    }, BUTTON_DEBOUNCE_MS);
   }
 
   // If switched back to LIVE and controller isn't connected, immediately wipe any leftover fake data to 0
@@ -2714,9 +2769,6 @@ async function toggleFakeData() {
       scheduleRender(currentPkt);
     }
   }
-
-  if (btn) setTimeout(() => { btn.style.opacity = "1.0"; }, 250);
-  if (benchBtn) setTimeout(() => { benchBtn.style.opacity = "1.0"; }, 250);
 }
 
 function toggleBench() {
@@ -2728,34 +2780,40 @@ function resetControllers() {
   document.getElementById("throttleVal").innerText = "0.00 m/s";
   document.getElementById("steerSlider").value = 0.0;
   document.getElementById("steerSliderVal").innerText = "0.0°";
-  sendMcuCommand({ action: "reset" });
+  executeButtonCommand(null, { action: "reset" });
 }
 
 function reconnectMcu() {
   appendMcuConsole("[ACTION] Re-detecting and reconnecting ESP32 serial ports...");
-  sendMcuCommand({ action: "reconnect" });
+  executeButtonCommand(null, { action: "reconnect" });
 }
 
 function setSpeed(v) {
   document.getElementById("throttleSlider").value = v;
   document.getElementById("throttleVal").innerText = `${Number(v).toFixed(2)} m/s`;
-  sendMcuCommand({ action: "speed", v: v });
+  executeButtonCommand(null, { action: "speed", v: v });
 }
 
 function onThrottleInput(v) {
   document.getElementById("throttleVal").innerText = `${Number(v).toFixed(2)} m/s`;
-  sendMcuCommand({ action: "speed", v: parseFloat(v) });
+  if (throttleSendTimer) clearTimeout(throttleSendTimer);
+  throttleSendTimer = setTimeout(() => {
+    sendMcuCommand({ action: "speed", v: parseFloat(v) });
+  }, 100);
 }
 
 function setSteer(deg) {
   document.getElementById("steerSlider").value = deg;
   document.getElementById("steerSliderVal").innerText = `${Number(deg).toFixed(1)}°`;
-  sendMcuCommand({ action: "steer", deg: deg });
+  executeButtonCommand(null, { action: "steer", deg: deg });
 }
 
 function onSteerInput(deg) {
   document.getElementById("steerSliderVal").innerText = `${Number(deg).toFixed(1)}°`;
-  sendMcuCommand({ action: "steer", deg: parseFloat(deg) });
+  if (steerSendTimer) clearTimeout(steerSendTimer);
+  steerSendTimer = setTimeout(() => {
+    sendMcuCommand({ action: "steer", deg: parseFloat(deg) });
+  }, 100);
 }
 
 function setPidPreset(kp, ki) {
@@ -2766,21 +2824,21 @@ function setPidPreset(kp, ki) {
 function sendPidGains() {
   const kp = parseFloat(document.getElementById("pidKpInput").value) || 0.1;
   const ki = parseFloat(document.getElementById("pidKiInput").value) || 1.5;
-  sendMcuCommand({ action: "pid", kp: kp, ki: ki });
+  executeButtonCommand(null, { action: "pid", kp: kp, ki: ki });
 }
 
 function calibrateMotor(axle, motor) {
   const voltInput = document.getElementById(`calibVolt_${axle}_${motor}`);
   const voltage = voltInput ? parseFloat(voltInput.value) || 4.0 : 4.0;
   appendMcuConsole(`>>> Starting calibration on Axle ${axle} (0=Front, 1=Rear), Motor ${motor} @ ${voltage.toFixed(1)}V...`);
-  sendMcuCommand({ action: "calib", axle: axle, motor: motor, voltage: voltage });
+  executeButtonCommand(null, { action: "calib", axle: axle, motor: motor, voltage: voltage });
 }
 
 function sendRawCommand() {
   const input = document.getElementById("rawCmdInput");
   const cmd = input ? input.value.trim() : "";
   if (cmd) {
-    sendMcuCommand({ action: "raw", cmd: cmd });
+    executeButtonCommand(null, { action: "raw", cmd: cmd });
     input.value = "";
   }
 }
