@@ -337,6 +337,11 @@ def build_live_binary_packet(pkt: Dict[str, Any]) -> bytes:
         "servo_pulse_us": pkt.get("servo_pulse_us", 1520),
         "mcu_msg": pkt.get("mcu_msg", ""),
         "mcu_log": pkt.get("mcu_log", []),
+        "mcu_main_connected": pkt.get("mcu_main_connected", False),
+        "mcu_tof_connected": pkt.get("mcu_tof_connected", False),
+        "mcu_main_port": pkt.get("mcu_main_port", ""),
+        "mcu_tof_port": pkt.get("mcu_tof_port", ""),
+        "step_ms": pkt.get("step_ms", 0.0),
         "last_action": pkt.get("last_action", ""),
         "last_cmd_sent": pkt.get("last_cmd_sent", ""),
     }
@@ -828,7 +833,23 @@ def udp_listener_worker():
                     STATE.latest_pkt = pkt
                 else:
                     # Planner is active: non-destructively merge fresh MCU telemetry fields
-                    for k in ("rpms_act", "flags", "mcu_msg", "mcu_log", "slip_state", "slip_ratio", "tof", "tof_ranges", "tof_ranges_raw", "f_tof"):
+                    for k in (
+                        "rpms_act",
+                        "flags",
+                        "mcu_msg",
+                        "mcu_log",
+                        "slip_state",
+                        "slip_ratio",
+                        "servo_pulse_us",
+                        "mcu_main_connected",
+                        "mcu_tof_connected",
+                        "mcu_main_port",
+                        "mcu_tof_port",
+                        "tof",
+                        "tof_ranges",
+                        "tof_ranges_raw",
+                        "f_tof",
+                    ):
                         if k in pkt:
                             STATE.latest_pkt[k] = pkt[k]
 

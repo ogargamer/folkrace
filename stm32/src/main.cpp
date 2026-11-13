@@ -3062,6 +3062,26 @@ void processESP32Link() {
 
                     // Synchronous 400 Hz Ping-Pong Feedback Reply
                     sendESP32Feedback();
+                } else {
+                    // Checksum mismatch on false sync: rescan rx_buf[1..11] so real header isn't lost
+                    for (uint8_t shift = 1; shift < sizeof(STM32MotorCommandPacket); shift++) {
+                        if (rx_buf[shift] == STM32_CMD_SYNC_1) {
+                            if (shift + 1 < sizeof(STM32MotorCommandPacket)) {
+                                if (rx_buf[shift + 1] == STM32_CMD_SYNC_2) {
+                                    uint8_t rem = sizeof(STM32MotorCommandPacket) - shift;
+                                    memmove(rx_buf, &rx_buf[shift], rem);
+                                    rx_idx = rem;
+                                    sync_found = true;
+                                    break;
+                                }
+                            } else {
+                                rx_buf[0] = STM32_CMD_SYNC_1;
+                                rx_idx = 1;
+                                sync_found = false;
+                                break;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -3105,6 +3125,13 @@ void setup() {
     // 3. Serial Port Initialization (921600 Baud for Ultra High Speed Telemetry)
     Serial.begin(921600);
     SerialESP.begin(ESP_UART_BAUD);
+    // Enable STM32G474 8-byte hardware RX/TX FIFO on USART1 (SerialESP) so the 20 kHz
+    // Priority-0 FOC ISR never causes a 1-byte UART RX overrun (ORE) at 921,600 baud.
+    __disable_irq();
+    USART1->CR1 &= ~USART_CR1_UE;
+    USART1->CR1 |= USART_CR1_FIFOEN;
+    USART1->CR1 |= USART_CR1_UE;
+    __enable_irq();
 
     // 4. Initialize MT6816 Encoders on Independent Hardware SPI Buses (SPI1 & SPI2)
     encoder1.init();

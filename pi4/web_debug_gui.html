@@ -2954,7 +2954,7 @@ function updateMotorPage(pkt) {
   const pRear = document.getElementById("pipeRearRpm");
   if (pRear) pRear.innerText = `RL: ${rlAct} | RR: ${rrAct} RPM`;
 
-  const espOnline = Boolean(flags.imu || flags.stm32_front || flags.stm32_rear || isBench);
+  const espOnline = Boolean(pkt.mcu_main_connected || flags.imu_online || flags.imu || flags.stm32_front || flags.stm32_rear || isBench);
   const bEsp = document.getElementById("badgeEsp32");
   if (bEsp) {
     if (isBench) {
@@ -2973,7 +2973,8 @@ function updateMotorPage(pkt) {
     if (isBench) {
       pEsp.innerText = "Synthetic Sweeps (Fake Mode)";
     } else if (espOnline) {
-      pEsp.innerText = "Dual-Core RTOS 400 Hz";
+      const portTag = pkt.mcu_main_port ? ` (${pkt.mcu_main_port.replace('/dev/', '')})` : "";
+      pEsp.innerText = `Dual-Core RTOS 400 Hz${portTag}`;
     } else {
       pEsp.innerText = "Controller Disconnected (0 Data)";
     }

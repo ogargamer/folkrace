@@ -16,6 +16,7 @@ void STM32Channel::begin(HardwareSerial *serial, uint32_t baud, int rxPin, int t
     serial_ = serial;
     if (!serial_) return;
     serial_->setRxBufferSize(512);
+    serial_->setTxBufferSize(512);
     serial_->begin(baud, SERIAL_8N1, rxPin, txPin);
 }
 
@@ -89,6 +90,25 @@ bool STM32Channel::update() {
                     new_packet = true;
                 } else {
                     checksum_error_count_++;
+                    // Rescan buffered bytes [1..12] for a real 0xAA 0x55 header
+                    for (size_t shift = 1; shift < sizeof(STM32FeedbackPacket); shift++) {
+                        if (rx_buffer_[shift] == STM32_FEEDBACK_SYNC_1) {
+                            if (shift + 1 < sizeof(STM32FeedbackPacket)) {
+                                if (rx_buffer_[shift + 1] == STM32_FEEDBACK_SYNC_2) {
+                                    size_t rem = sizeof(STM32FeedbackPacket) - shift;
+                                    memmove(rx_buffer_, &rx_buffer_[shift], rem);
+                                    rx_index_ = (uint8_t)rem;
+                                    sync_found_ = true;
+                                    break;
+                                }
+                            } else {
+                                rx_buffer_[0] = STM32_FEEDBACK_SYNC_1;
+                                rx_index_ = 1;
+                                sync_found_ = false;
+                                break;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -97,7 +117,7 @@ bool STM32Channel::update() {
 }
 
 bool STM32Channel::isConnected() const {
-    return (last_packet_ms_ > 0) && (millis() - last_packet_ms_ < 100);
+    return (last_packet_ms_ > 0) && (millis() - last_packet_ms_ < 250);
 }
 
 // =============================================================================

@@ -62,12 +62,12 @@ except ImportError:
 
 CURR_DIR = os.path.dirname(os.path.abspath(__file__))
 DLL_PATH = None
+_ext = ".dll" if sys.platform == "win32" else ".so"
 candidates = [
-    os.path.join(CURR_DIR, "curvilinear_sl_mpc.dll"),
-    os.path.join(CURR_DIR, "curvilinear_sl_mpc.so"),
-    os.path.join(os.getcwd(), "curvilinear_sl_mpc.so"),
-    os.path.join(os.getcwd(), "curvilinear_sl_mpc.dll"),
-    os.path.abspath(os.path.join(CURR_DIR, "..", "..", "..", "..", "..", "pi4", "curvilinear_sl_mpc.so")),
+    os.path.join(CURR_DIR, f"curvilinear_sl_mpc{_ext}"),
+    os.path.join(os.getcwd(), f"curvilinear_sl_mpc{_ext}"),
+    os.path.abspath(os.path.join(CURR_DIR, "..", "pi4", f"curvilinear_sl_mpc{_ext}")),
+    os.path.abspath(os.path.join(CURR_DIR, "..", "..", "..", "..", "..", "pi4", f"curvilinear_sl_mpc{_ext}")),
 ]
 for _cand in candidates:
     if os.path.exists(_cand):

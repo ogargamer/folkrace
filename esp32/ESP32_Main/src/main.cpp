@@ -86,6 +86,7 @@ static volatile bool s_fake_data_active = false; // Default to live sensors (man
 static volatile float s_manual_v = 0.0f;
 static volatile float s_manual_steer = 0.0f;
 static volatile bool s_manual_override = false;
+static volatile bool s_cli_override_active = false;
 static volatile bool s_manual_servo_direct = false;
 static volatile float s_direct_servo_pulse = SERVO_PULSE_NEUTRAL_US;
 
@@ -199,7 +200,7 @@ static void IRAM_ATTR realTimeControlTask(void *pvParameters) {
 
             // Synthetic motor feedback matching commanded velocity
             float rad_to_rpm = 60.0f / (2.0f * 3.14159265f);
-            float sim_rpm = (target_v / VEHICLE_WHEEL_RADIUS_M) * rad_to_rpm * (-VEHICLE_MOTOR_DIR);
+            float sim_rpm = (target_v / VEHICLE_WHEEL_RADIUS_M) * rad_to_rpm * (VEHICLE_MOTOR_DIR);
             fl_rpm = sim_rpm;
             fr_rpm = sim_rpm;
             rl_rpm = sim_rpm;
@@ -313,39 +314,281 @@ static void IRAM_ATTR realTimeControlTask(void *pvParameters) {
 }
 
 // =============================================================================
+// Non-Blocking ASCII Command Handler (Zero Stream Timeout Stalls)
+// =============================================================================
+static void handleAsciiCommand(const char *raw_line) {
+    String line(raw_line);
+    line.trim();
+    if (line.length() == 0) return;
+
+    if (line.equalsIgnoreCase("PING")) {
+        Serial.println("PONG");
+    } else if (line.equalsIgnoreCase("D") || line.equalsIgnoreCase("DISABLE")) {
+        s_manual_v = 0.0f;
+        s_manual_override = false;
+        s_cli_override_active = false;
+        s_manual_servo_direct = true;
+        s_servo.disable();
+        sendServoTelemetry();
+    } else if (line.equalsIgnoreCase("E") || line.equalsIgnoreCase("ENABLE")) {
+        s_servo.enable();
+        sendServoTelemetry();
+    } else if (line.charAt(0) == 'P' || line.charAt(0) == 'p') {
+        String valStr = line.substring(1);
+        valStr.trim();
+        float us = valStr.toFloat();
+        if (us >= SERVO_PULSE_MIN_US && us <= SERVO_PULSE_MAX_US) {
+            s_direct_servo_pulse = us;
+            s_manual_servo_direct = true;
+            s_servo.enable();
+            s_servo.setPulseUs(us);
+            sendServoTelemetry();
+        } else {
+            Serial.printf("{\"error\":\"Pulse out of bounds (%.0f-%.0f us): %.1f\"}\n",
+                          SERVO_PULSE_MIN_US, SERVO_PULSE_MAX_US, us);
+        }
+    } else if (line.equalsIgnoreCase("BENCH") || line.equalsIgnoreCase("FAKE")) {
+        s_fake_data_active = !s_fake_data_active;
+        s_manual_servo_direct = false;
+        if (s_fake_data_active) {
+            s_cli_override_active = false;
+            s_manual_override = false;
+        }
+        Serial.printf("\n>>> [MODE] Synthetic 400Hz Benchmark Mode: %s\n",
+                      s_fake_data_active ? "ENABLED (Fake Data)" : "DISABLED (Live Sensors)");
+    } else if (line.equalsIgnoreCase("STATUS") || line.equalsIgnoreCase("S")) {
+        sendServoTelemetry();
+        const SharedControlOutputs &c = s_controlOutputs.getReadBuffer();
+        Serial.println(F("\n========================================================"));
+        Serial.println(F(" FOLKRACE ESP32-S3 REAL-TIME DUAL-CORE STATUS REPORT    "));
+        Serial.println(F("========================================================"));
+        Serial.printf(" Mode: %s | Core 1 Control Loop: 400.0 Hz (Period: 2500 us)\n",
+                      s_fake_data_active ? "BENCHMARK (SYNTHETIC)" : "LIVE SENSORS");
+        Serial.printf(" Compute Latency: Current: %.2f us | Min: %.2f us | Max: %.2f us | Avg: %.2f us\n",
+                      c.exec_us, c.exec_us_min, c.exec_us_max, c.exec_us_avg);
+        Serial.printf(" Core 1 CPU Utilization: %.2f%% (Headroom: %.2f%%)\n",
+                      (c.exec_us_avg / 2500.0f) * 100.0f,
+                      100.0f - (c.exec_us_avg / 2500.0f) * 100.0f);
+        Serial.printf(" Jitter: %.2f us | Deadline Overruns: %u / %u cycles\n",
+                      c.jitter_us, c.overrun_count, c.cycle_count);
+        Serial.printf(" Steering: %.2f deg (%.4f rad) | Servo PWM: %.1f us (GPIO %d)\n",
+                      c.steer_deg, c.steer_rad, c.servo_pulse_us, SERVO_STEER_PWM_PIN);
+        Serial.printf(" Speed Cmd: %.2f m/s (Rate-Limited: %.2f m/s) | Scale: %.2f\n",
+                      s_manual_v, c.rate_limited_v, c.scale_factor);
+        Serial.printf(" Motor Targets (RPM): FL: %+.1f | FR: %+.1f | RL: %+.1f | RR: %+.1f\n",
+                      c.fl_target_rpm, c.fr_target_rpm, c.rl_target_rpm, c.rr_target_rpm);
+        Serial.printf(" Fused Odometry: v_est = %.2f m/s | v_wheels = %.2f m/s | Dist = %.2f m\n",
+                      c.v_est, c.v_wheels, c.total_distance_m);
+        Serial.printf(" Slip State: %s (Slip Ratio: %.2f, Yaw Error: %+.2f rad/s)\n",
+                      c.slip_state == SLIP_OVERSTEER ? "OVERSTEER" : (c.slip_state == SLIP_UNDERSTEER ? "UNDERSTEER" : "NORMAL"),
+                      c.slip_ratio, c.yaw_error);
+        Serial.printf(" STM32 Front (FL/FR): %s | Actual RPM: %+.1f / %+.1f | Pkts: %u (Err: %u) | En: %d/%d | Prog: %u%%\n",
+                      s_stm32Link.isFrontConnected() ? "ONLINE" : "OFFLINE",
+                      s_stm32Link.getFL_RPM(), s_stm32Link.getFR_RPM(),
+                      s_stm32Link.getFront().getValidPacketCount(),
+                      s_stm32Link.getFront().getChecksumErrorCount(),
+                      s_stm32Link.getFront().isM1Enabled(), s_stm32Link.getFront().isM2Enabled(),
+                      s_stm32Link.getFront().getCalibProgress());
+        Serial.printf(" STM32 Rear  (RL/RR): %s | Actual RPM: %+.1f / %+.1f | Pkts: %u (Err: %u) | En: %d/%d | Prog: %u%%\n",
+                      s_stm32Link.isRearConnected() ? "ONLINE" : "OFFLINE",
+                      s_stm32Link.getRL_RPM(), s_stm32Link.getRR_RPM(),
+                      s_stm32Link.getRear().getValidPacketCount(),
+                      s_stm32Link.getRear().getChecksumErrorCount(),
+                      s_stm32Link.getRear().isM1Enabled(), s_stm32Link.getRear().isM2Enabled(),
+                      s_stm32Link.getRear().getCalibProgress());
+        Serial.println(F("========================================================\n"));
+    } else if (line.equalsIgnoreCase("ESTOP") || line.equalsIgnoreCase("STOP") || line.equalsIgnoreCase("X")) {
+        s_manual_v = 0.0f;
+        s_manual_override = false;
+        s_cli_override_active = false;
+        s_stm32Link.emergencyStop();
+        Serial.println(F(">>> 🛑 EMERGENCY STOP BROADCAST TO ALL STM32s!"));
+    } else if (line.equalsIgnoreCase("MOTORS") || line.equalsIgnoreCase("START")) {
+        s_stm32Link.enableDrivers();
+        Serial.println(F(">>> ⚡ MOTORS ENABLED ON ALL STM32s."));
+    } else if (line.startsWith("PID ") || line.startsWith("pid ")) {
+        float kp = 0.1f, ki = 1.5f;
+        sscanf(line.c_str() + 4, "%f %f", &kp, &ki);
+        s_stm32Link.setPID(kp, ki);
+        Serial.printf(">>> Velocity PID Dispatched to STM32s: Kp=%.3f, Ki=%.3f\n", kp, ki);
+    } else if (line.equalsIgnoreCase("SAVE")) {
+        s_stm32Link.saveFlash();
+        Serial.println(F(">>> 💾 FLASH SAVE DISPATCHED TO ALL STM32s."));
+    } else if (line.equalsIgnoreCase("DFU")) {
+        s_stm32Link.enterDFU(true, true);
+        Serial.println(F(">>> 🔄 DFU BOOTLOADER REBOOT DISPATCHED TO ALL STM32s."));
+    } else if (line.startsWith("CALIB ") || line.startsWith("calib ")) {
+        int axle = 0, motor = 1;
+        float v = 4.0f;
+        sscanf(line.c_str() + 6, "%d %d %f", &axle, &motor, &v);
+        s_stm32Link.startCalibration(axle, motor, v);
+        Serial.printf(">>> Calibration Dispatched: Axle %d, Motor %d @ %.1fV\n", axle, motor, v);
+    } else if (line.startsWith("V ") || line.startsWith("v ")) {
+        s_manual_v = line.substring(2).toFloat();
+        s_cli_override_active = (fabsf(s_manual_v) > 0.001f);
+        s_manual_override = s_cli_override_active;
+        s_fake_data_active = false;
+        Serial.printf(">>> Manual Speed Setpoint: %.2f m/s\n", s_manual_v);
+    } else if (line.charAt(0) == 'A' || line.charAt(0) == 'a') {
+        String valStr = line.substring(1);
+        valStr.trim();
+        float deg = valStr.toFloat();
+        if (deg >= 0.0f && deg <= 180.0f) {
+            s_direct_servo_pulse = servoAngleToPulse(deg);
+            s_manual_servo_direct = true;
+            s_servo.enable();
+            s_servo.setPulseUs(s_direct_servo_pulse);
+            s_manual_steer = (deg - 90.0f) * (3.14159265f / 180.0f);
+            s_cli_override_active = true;
+            s_manual_override = true;
+            sendServoTelemetry();
+        } else {
+            Serial.printf("{\"error\":\"Angle out of bounds (0-180 deg): %.1f\"}\n", deg);
+        }
+    } else if (line.equalsIgnoreCase("RESET")) {
+        s_manual_v = 0.0f;
+        s_manual_steer = 0.0f;
+        s_manual_override = false;
+        s_cli_override_active = false;
+        s_manual_servo_direct = false;
+        s_ediff.reset();
+        s_fusion.reset();
+        s_servo.setPulseUs(SERVO_PULSE_NEUTRAL_US);
+        Serial.println(F(">>> Controller & Sensor Fusion State Reset."));
+    } else if (line.length() == 1 && strchr("tTrR12345+-0mM", line[0])) {
+        s_imu.handleSerialCommand(line[0], Serial);
+    } else if (line.equalsIgnoreCase("IMU") || line.equalsIgnoreCase("I")) {
+        s_imu.printCurrentReadings(Serial);
+    }
+}
+
+// =============================================================================
 // CORE 0: Communications & Peripheral Task (Priority 15)
 // =============================================================================
 static void ioTask(void *pvParameters) {
     uint32_t last_report_ms = millis();
-    uint32_t last_imu_poll_ms = millis();
+    static uint32_t s_last_cmd_time_ms = 0;
+    static uint8_t s_rx_buf[256];
+    static size_t s_rx_len = 0;
+    static char s_ascii_buf[96];
+    static size_t s_ascii_len = 0;
 
     for (;;) {
         uint32_t now = millis();
 
-        // 1. Process BNO086 IMU over SPI2 (if not fake data)
+        // 1. Non-Blocking Ingestion: Binary Motion Commands (Pi 4) & ASCII Shell Commands
+        int avail = Serial.available();
+        if (avail > 0) {
+            size_t space = sizeof(s_rx_buf) - s_rx_len;
+            if (space == 0) {
+                // Buffer full of unparseable data; drop oldest half
+                memmove(s_rx_buf, s_rx_buf + 128, sizeof(s_rx_buf) - 128);
+                s_rx_len -= 128;
+                space = 128;
+            }
+            size_t to_read = ((size_t)avail < space) ? (size_t)avail : space;
+            for (size_t i = 0; i < to_read; i++) {
+                int c = Serial.read();
+                if (c < 0) break;
+                s_rx_buf[s_rx_len++] = (uint8_t)c;
+            }
+
+            size_t pos = 0;
+            while (pos < s_rx_len) {
+                uint8_t b0 = s_rx_buf[pos];
+                if (b0 == PI_UART_SYNC_1) {
+                    size_t rem = s_rx_len - pos;
+                    if (rem < 2) {
+                        break; // Need at least 2 bytes to verify 0x55 0xAA vs ASCII 'U'
+                    }
+                    if (s_rx_buf[pos + 1] == PI_UART_SYNC_2) {
+                        if (rem < 3) {
+                            break; // Wait for msg_type byte
+                        }
+                        if (s_rx_buf[pos + 2] == MSG_ID_MOTION_CMD) {
+                            if (rem < sizeof(MotionCommandPacket)) {
+                                break; // Wait for remaining bytes of 13-byte frame
+                            }
+                            const uint8_t *frame = &s_rx_buf[pos];
+                            uint8_t chk = mcu_calc_checksum(frame, sizeof(MotionCommandPacket) - 1);
+                            if (chk == frame[sizeof(MotionCommandPacket) - 1]) {
+                                const MotionCommandPacket *cmd = (const MotionCommandPacket *)frame;
+                                s_last_cmd_time_ms = millis();
+                                if (cmd->run_mode == 2) {
+                                    // Emergency brake
+                                    s_manual_v = 0.0f;
+                                    s_manual_override = false;
+                                    s_cli_override_active = false;
+                                    s_stm32Link.emergencyStop();
+                                } else if (!s_cli_override_active) {
+                                    if (cmd->run_mode == 1 || cmd->run_mode == 3) {
+                                        s_manual_v = (float)cmd->target_v_mm_s / 1000.0f;
+                                        s_manual_steer = (float)cmd->target_steer_mrad / 1000.0f;
+                                        s_manual_override = true;
+                                        s_manual_servo_direct = false;
+                                        s_fake_data_active = false;
+                                    } else {
+                                        s_manual_v = 0.0f;
+                                        s_manual_steer = 0.0f;
+                                        s_manual_override = false;
+                                    }
+                                }
+                                pos += sizeof(MotionCommandPacket);
+                                s_ascii_len = 0;
+                                continue;
+                            } else {
+                                // Checksum mismatch: advance past 0x55 0xAA so nested sync isn't missed
+                                pos += 2;
+                                continue;
+                            }
+                        } else {
+                            pos += 2;
+                            continue;
+                        }
+                    }
+                    // 0x55 not followed by 0xAA -> treat as ASCII 'U' (e.g. in "STATUS" or "IMU")
+                }
+
+                // Non-binary byte processing for ASCII commands
+                pos++;
+                if (b0 == '\n' || b0 == '\r') {
+                    if (s_ascii_len > 0) {
+                        s_ascii_buf[s_ascii_len] = '\0';
+                        handleAsciiCommand(s_ascii_buf);
+                        s_ascii_len = 0;
+                    }
+                } else if (b0 >= 32 && b0 <= 126) {
+                    if (s_ascii_len < sizeof(s_ascii_buf) - 1) {
+                        s_ascii_buf[s_ascii_len++] = (char)b0;
+                    } else {
+                        s_ascii_len = 0;
+                    }
+                } else {
+                    // Non-printable byte: clear ASCII accumulator
+                    s_ascii_len = 0;
+                }
+            }
+
+            if (pos > 0) {
+                if (pos < s_rx_len) {
+                    memmove(s_rx_buf, s_rx_buf + pos, s_rx_len - pos);
+                    s_rx_len -= pos;
+                } else {
+                    s_rx_len = 0;
+                }
+            }
+        }
+
+        // 2. Process BNO086 IMU over SPI2 (if not fake data)
         if (!s_fake_data_active && s_imu.isInitialized()) {
             s_imu.update();
         }
 
-        // 2. Process Dual STM32 UARTs
+        // 3. Process Dual STM32 UARTs
         s_stm32Link.update();
 
-        // 3. Receive latest control outputs from Core 1
-        if (s_controlOutputs.updateRead()) {
-            const SharedControlOutputs &ctrl = s_controlOutputs.getReadBuffer();
-
-            // Dispatch target RPMs to Front and Rear STM32s
-            s_stm32Link.sendCommands(
-                ctrl.fl_target_rpm,
-                ctrl.fr_target_rpm,
-                ctrl.rl_target_rpm,
-                ctrl.rr_target_rpm
-            );
-        }
-
-        // Command Loss Watchdog (Dead-Man Switch @ 100 ms timeout)
-        static uint32_t s_last_cmd_time_ms = 0;
-        if (s_manual_override && (millis() - s_last_cmd_time_ms > 100)) {
+        // Command Loss Watchdog (Dead-Man Switch @ 150 ms timeout for autonomous stream)
+        if (s_manual_override && !s_cli_override_active && (millis() - s_last_cmd_time_ms > 150)) {
             s_manual_v = 0.0f;
             s_manual_steer = 0.0f;
             s_manual_override = false;
@@ -377,168 +620,24 @@ static void ioTask(void *pvParameters) {
             }
         }
 
-        inputs.fl_rpm = s_stm32Link.getFL_RPM();
+        inputs.fl_rpm = -s_stm32Link.getFL_RPM();
         inputs.fr_rpm = s_stm32Link.getFR_RPM();
-        inputs.rl_rpm = s_stm32Link.getRL_RPM();
+        inputs.rl_rpm = -s_stm32Link.getRL_RPM();
         inputs.rr_rpm = s_stm32Link.getRR_RPM();
         s_sensorInputs.commitWrite();
 
-        // 5. Ingestion: Binary Motion Commands (Pi 4) & ASCII Shell Commands (USB)
-        while (Serial.available() > 0) {
-            if (Serial.peek() == PI_UART_SYNC_1) {
-                if (Serial.available() >= (int)sizeof(MotionCommandPacket)) {
-                    uint8_t buf[sizeof(MotionCommandPacket)];
-                    Serial.readBytes(buf, sizeof(buf));
-                    if (buf[0] == PI_UART_SYNC_1 && buf[1] == PI_UART_SYNC_2 && buf[2] == MSG_ID_MOTION_CMD) {
-                        uint8_t chk = mcu_calc_checksum(buf, sizeof(buf) - 1);
-                        if (chk == buf[sizeof(buf) - 1]) {
-                            const MotionCommandPacket *cmd = (const MotionCommandPacket *)buf;
-                            s_manual_v = (float)cmd->target_v_mm_s / 1000.0f;
-                            s_manual_steer = (float)cmd->target_steer_mrad / 1000.0f;
-                            s_manual_override = (cmd->run_mode == 1);
-                            s_last_cmd_time_ms = millis();
-                            s_fake_data_active = false;
-                        }
-                    }
-                } else {
-                    break; // Wait for complete binary packet
-                }
-                continue;
-            }
+        // 5. Receive latest control outputs from Core 1 and dispatch to STM32s @ 400 Hz
+        if (s_controlOutputs.updateRead()) {
+            const SharedControlOutputs &ctrl = s_controlOutputs.getReadBuffer();
 
-            String line = Serial.readStringUntil('\n');
-            line.trim();
-            if (line.length() == 0) continue;
-
-            if (line.equalsIgnoreCase("PING")) {
-                Serial.println("PONG");
-            } else if (line.equalsIgnoreCase("D") || line.equalsIgnoreCase("DISABLE")) {
-                s_manual_servo_direct = true;
-                s_servo.disable();
-                sendServoTelemetry();
-            } else if (line.equalsIgnoreCase("E") || line.equalsIgnoreCase("ENABLE")) {
-                s_servo.enable();
-                sendServoTelemetry();
-            } else if (line.charAt(0) == 'P' || line.charAt(0) == 'p') {
-                String valStr = line.substring(1);
-                valStr.trim();
-                float us = valStr.toFloat();
-                if (us >= SERVO_PULSE_MIN_US && us <= SERVO_PULSE_MAX_US) {
-                    s_direct_servo_pulse = us;
-                    s_manual_servo_direct = true;
-                    s_servo.enable();
-                    s_servo.setPulseUs(us);
-                    sendServoTelemetry();
-                } else {
-                    Serial.printf("{\"error\":\"Pulse out of bounds (%.0f-%.0f us): %.1f\"}\n",
-                                  SERVO_PULSE_MIN_US, SERVO_PULSE_MAX_US, us);
-                }
-            } else if (line.equalsIgnoreCase("BENCH") || line.equalsIgnoreCase("FAKE")) {
-                s_fake_data_active = !s_fake_data_active;
-                s_manual_servo_direct = false;
-                Serial.printf("\n>>> [MODE] Synthetic 400Hz Benchmark Mode: %s\n",
-                              s_fake_data_active ? "ENABLED (Fake Data)" : "DISABLED (Live Sensors)");
-            } else if (line.equalsIgnoreCase("STATUS") || line.equalsIgnoreCase("S")) {
-                sendServoTelemetry();
-                const SharedControlOutputs &c = s_controlOutputs.getReadBuffer();
-                Serial.println(F("\n========================================================"));
-                Serial.println(F(" FOLKRACE ESP32-S3 REAL-TIME DUAL-CORE STATUS REPORT    "));
-                Serial.println(F("========================================================"));
-                Serial.printf(" Mode: %s | Core 1 Control Loop: 400.0 Hz (Period: 2500 us)\n",
-                              s_fake_data_active ? "BENCHMARK (SYNTHETIC)" : "LIVE SENSORS");
-                Serial.printf(" Compute Latency: Current: %.2f us | Min: %.2f us | Max: %.2f us | Avg: %.2f us\n",
-                              c.exec_us, c.exec_us_min, c.exec_us_max, c.exec_us_avg);
-                Serial.printf(" Core 1 CPU Utilization: %.2f%% (Headroom: %.2f%%)\n",
-                              (c.exec_us_avg / 2500.0f) * 100.0f,
-                              100.0f - (c.exec_us_avg / 2500.0f) * 100.0f);
-                Serial.printf(" Jitter: %.2f us | Deadline Overruns: %u / %u cycles\n",
-                              c.jitter_us, c.overrun_count, c.cycle_count);
-                Serial.printf(" Steering: %.2f deg (%.4f rad) | Servo PWM: %.1f us (GPIO %d)\n",
-                              c.steer_deg, c.steer_rad, c.servo_pulse_us, SERVO_STEER_PWM_PIN);
-                Serial.printf(" Speed Cmd: %.2f m/s (Rate-Limited: %.2f m/s) | Scale: %.2f\n",
-                              s_manual_v, c.rate_limited_v, c.scale_factor);
-                Serial.printf(" Motor Targets (RPM): FL: %+.1f | FR: %+.1f | RL: %+.1f | RR: %+.1f\n",
-                              c.fl_target_rpm, c.fr_target_rpm, c.rl_target_rpm, c.rr_target_rpm);
-                Serial.printf(" Fused Odometry: v_est = %.2f m/s | v_wheels = %.2f m/s | Dist = %.2f m\n",
-                              c.v_est, c.v_wheels, c.total_distance_m);
-                Serial.printf(" Slip State: %s (Slip Ratio: %.2f, Yaw Error: %+.2f rad/s)\n",
-                              c.slip_state == SLIP_OVERSTEER ? "OVERSTEER" : (c.slip_state == SLIP_UNDERSTEER ? "UNDERSTEER" : "NORMAL"),
-                              c.slip_ratio, c.yaw_error);
-                Serial.printf(" STM32 Front (FL/FR): %s | Actual RPM: %+.1f / %+.1f | Pkts: %u (Err: %u) | En: %d/%d | Prog: %u%%\n",
-                              s_stm32Link.isFrontConnected() ? "ONLINE" : "OFFLINE",
-                              s_stm32Link.getFL_RPM(), s_stm32Link.getFR_RPM(),
-                              s_stm32Link.getFront().getValidPacketCount(),
-                              s_stm32Link.getFront().getChecksumErrorCount(),
-                              s_stm32Link.getFront().isM1Enabled(), s_stm32Link.getFront().isM2Enabled(),
-                              s_stm32Link.getFront().getCalibProgress());
-                Serial.printf(" STM32 Rear  (RL/RR): %s | Actual RPM: %+.1f / %+.1f | Pkts: %u (Err: %u) | En: %d/%d | Prog: %u%%\n",
-                              s_stm32Link.isRearConnected() ? "ONLINE" : "OFFLINE",
-                              s_stm32Link.getRL_RPM(), s_stm32Link.getRR_RPM(),
-                              s_stm32Link.getRear().getValidPacketCount(),
-                              s_stm32Link.getRear().getChecksumErrorCount(),
-                              s_stm32Link.getRear().isM1Enabled(), s_stm32Link.getRear().isM2Enabled(),
-                              s_stm32Link.getRear().getCalibProgress());
-                Serial.println(F("========================================================\n"));
-            } else if (line.equalsIgnoreCase("ESTOP") || line.equalsIgnoreCase("STOP") || line.equalsIgnoreCase("X")) {
-                s_manual_v = 0.0f;
-                s_stm32Link.emergencyStop();
-                Serial.println(F(">>> 🛑 EMERGENCY STOP BROADCAST TO ALL STM32s!"));
-            } else if (line.equalsIgnoreCase("MOTORS") || line.equalsIgnoreCase("START")) {
-                s_stm32Link.enableDrivers();
-                Serial.println(F(">>> ⚡ MOTORS ENABLED ON ALL STM32s."));
-            } else if (line.startsWith("PID ") || line.startsWith("pid ")) {
-                float kp = 0.1f, ki = 1.5f;
-                sscanf(line.c_str() + 4, "%f %f", &kp, &ki);
-                s_stm32Link.setPID(kp, ki);
-                Serial.printf(">>> Velocity PID Dispatched to STM32s: Kp=%.3f, Ki=%.3f\n", kp, ki);
-            } else if (line.equalsIgnoreCase("SAVE")) {
-                s_stm32Link.saveFlash();
-                Serial.println(F(">>> 💾 FLASH SAVE DISPATCHED TO ALL STM32s."));
-            } else if (line.equalsIgnoreCase("DFU")) {
-                s_stm32Link.enterDFU(true, true);
-                Serial.println(F(">>> 🔄 DFU BOOTLOADER REBOOT DISPATCHED TO ALL STM32s."));
-            } else if (line.startsWith("CALIB ") || line.startsWith("calib ")) {
-                int axle = 0, motor = 1;
-                float v = 4.0f;
-                sscanf(line.c_str() + 6, "%d %d %f", &axle, &motor, &v);
-                s_stm32Link.startCalibration(axle, motor, v);
-                Serial.printf(">>> Calibration Dispatched: Axle %d, Motor %d @ %.1fV\n", axle, motor, v);
-            } else if (line.startsWith("V ") || line.startsWith("v ")) {
-                s_manual_v = line.substring(2).toFloat();
-                s_manual_override = true;
-                s_fake_data_active = false;
-                Serial.printf(">>> Manual Speed Setpoint: %.2f m/s\n", s_manual_v);
-            } else if (line.charAt(0) == 'A' || line.charAt(0) == 'a') {
-                String valStr = line.substring(1);
-                valStr.trim();
-                float deg = valStr.toFloat();
-                if (deg >= 0.0f && deg <= 180.0f) {
-                    s_direct_servo_pulse = servoAngleToPulse(deg);
-                    s_manual_servo_direct = true;
-                    s_servo.enable();
-                    s_servo.setPulseUs(s_direct_servo_pulse);
-                    s_manual_steer = (deg - 90.0f) * (3.14159265f / 180.0f);
-                    s_manual_override = true;
-                    sendServoTelemetry();
-                } else {
-                    Serial.printf("{\"error\":\"Angle out of bounds (0-180 deg): %.1f\"}\n", deg);
-                }
-            } else if (line.equalsIgnoreCase("RESET")) {
-                s_manual_v = 0.0f;
-                s_manual_steer = 0.0f;
-                s_manual_override = false;
-                s_manual_servo_direct = false;
-                s_ediff.reset();
-                s_fusion.reset();
-                s_servo.setPulseUs(SERVO_PULSE_NEUTRAL_US);
-                Serial.println(F(">>> Controller & Sensor Fusion State Reset."));
-            } else if (line.length() == 1 && strchr("tTrR12345+-0mM", line[0])) {
-                s_imu.handleSerialCommand(line[0], Serial);
-            } else if (line.equalsIgnoreCase("IMU") || line.equalsIgnoreCase("I")) {
-                s_imu.printCurrentReadings(Serial);
-            } else {
-                Serial.println(F("Commands: STATUS | BENCH | IMU | V <m/s> | A <deg> | RESET"));
-            }
+            // Dispatch target RPMs to Front and Rear STM32s
+            // Note: Left motors (FL, RL) have inverted physical rotation compared to Right motors (FR, RR)
+            s_stm32Link.sendCommands(
+                -ctrl.fl_target_rpm,
+                ctrl.fr_target_rpm,
+                -ctrl.rl_target_rpm,
+                ctrl.rr_target_rpm
+            );
         }
 
         // 6. Periodic Binary Telemetry Dispatch to Pi 4 @ 100 Hz (10 ms period)
@@ -588,7 +687,9 @@ static void ioTask(void *pvParameters) {
                         (s_stm32Link.isRearConnected() ? FLAG_STM32_REAR_ONLINE : 0);
 
             pkt.checksum = mcu_calc_checksum((const uint8_t *)&pkt, sizeof(pkt) - 1);
-            s_piSerial.write((const uint8_t *)&pkt, sizeof(pkt));
+            if (s_piSerial.availableForWrite() >= (int)sizeof(pkt)) {
+                s_piSerial.write((const uint8_t *)&pkt, sizeof(pkt));
+            }
         }
 
         // 7. Periodic Benchmark Telemetry to Serial (every 500 ms = 2 Hz, bench mode only)
@@ -613,8 +714,11 @@ static void ioTask(void *pvParameters) {
 // Arduino Setup & Core Assignment
 // =============================================================================
 void setup() {
+    Serial.setRxBufferSize(2048);
+    Serial.setTxBufferSize(2048);
     Serial.begin(921600);
-    delay(500);
+    Serial.setTimeout(0);
+    delay(200);
 
     Serial.println(F("\n========================================================"));
     Serial.println(F("  FOLKRACE ESP32-S3 HIGH-PERFORMANCE MASTER CONTROLLER  "));

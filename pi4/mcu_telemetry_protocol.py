@@ -72,9 +72,9 @@ def decode_chassis_packet(data: bytes) -> Optional[Dict[str, Any]]:
         return None
 
     unpacked = struct.unpack_from(CHASSIS_FORMAT, data)
-    sync, msg_type, _, seq, ts_us = unpacked[0:5]
+    sync, msg_type, payload_len, seq, ts_us = unpacked[0:5]
 
-    if sync != MCU_SYNC or msg_type != MSG_ID_CHASSIS_TELEM:
+    if sync != MCU_SYNC or msg_type != MSG_ID_CHASSIS_TELEM or payload_len != (CHASSIS_SIZE - 5):
         return None
 
     expected_chk = unpacked[-1]

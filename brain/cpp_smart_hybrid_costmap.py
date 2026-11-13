@@ -15,15 +15,15 @@ import sys
 from typing import Dict, List, Optional, Tuple
 import numpy as np
 
-# Load the compiled shared library
+# Load the compiled shared library (platform-specific extension)
 CURR_DIR = os.path.dirname(os.path.abspath(__file__))
 DLL_PATH = None
+_ext = ".dll" if sys.platform == "win32" else ".so"
 candidates = [
-    os.path.join(CURR_DIR, "smart_hybrid_costmap_front.dll"),
-    os.path.join(CURR_DIR, "smart_hybrid_costmap_front.so"),
-    os.path.join(os.getcwd(), "smart_hybrid_costmap_front.so"),
-    os.path.join(os.getcwd(), "smart_hybrid_costmap_front.dll"),
-    os.path.abspath(os.path.join(CURR_DIR, "..", "..", "..", "..", "..", "pi4", "smart_hybrid_costmap_front.so")),
+    os.path.join(CURR_DIR, f"smart_hybrid_costmap_front{_ext}"),
+    os.path.join(os.getcwd(), f"smart_hybrid_costmap_front{_ext}"),
+    os.path.abspath(os.path.join(CURR_DIR, "..", "pi4", f"smart_hybrid_costmap_front{_ext}")),
+    os.path.abspath(os.path.join(CURR_DIR, "..", "..", "..", "..", "..", "pi4", f"smart_hybrid_costmap_front{_ext}")),
 ]
 for _cand in candidates:
     if os.path.exists(_cand):

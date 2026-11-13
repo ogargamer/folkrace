@@ -21,7 +21,7 @@ MAX_SERVO_RAD: float = 0.696386
 MAX_STEERING_RAD: float = 0.657137
 SERVO_MAX_SPEED_RAD_S: float = 16.89
 
-MOTOR_DIR: float = -1.0
+MOTOR_DIR: float = 1.0
 V_MAX_WHEEL: float = 5.0
 V_MAX_CRUISE: float = 5.0
 

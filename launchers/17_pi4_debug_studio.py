@@ -125,8 +125,14 @@ def sync_pi_stack(host: str = "robot"):
 
     brain_dir = os.path.join(ROOT_DIR, "brain")
     if os.path.exists(brain_dir):
-        subprocess.run(["ssh", host, f"mkdir -p {REMOTE_DIR}/brain"], check=True)
-        subprocess.run(["scp", "-r", f"{brain_dir}/*", f"{host}:{REMOTE_DIR}/brain/"], check=True)
+        subprocess.run(["ssh", host, f"mkdir -p {REMOTE_DIR}/brain && rm -f {REMOTE_DIR}/brain/*.dll"], check=True)
+        brain_files = [
+            os.path.join(brain_dir, f)
+            for f in os.listdir(brain_dir)
+            if os.path.isfile(os.path.join(brain_dir, f)) and not f.endswith((".dll", ".pyc", ".o", ".obj"))
+        ]
+        if brain_files:
+            subprocess.run(["scp"] + brain_files + [f"{host}:{REMOTE_DIR}/brain/"], check=True)
 
     print("[Sync] Files synced successfully.")
 

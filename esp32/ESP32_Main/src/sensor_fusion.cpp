@@ -44,8 +44,8 @@ FusionOutputs IRAM_ATTR IMUEncoderFusion::update(
     float step_dt = (dt > 0.0f) ? dt : dt_;
 
     // 1. Convert shaft RPM to linear rolling speeds (m/s)
-    // Motor direction convention: negative motor angle pushes vehicle forward
-    const float rpm_to_mps = (2.0f * PI_F / 60.0f) * R_w_ * (-motor_dir_);
+    // Motor direction convention: positive RPM moves vehicle forward with VEHICLE_MOTOR_DIR = 1.0
+    const float rpm_to_mps = (2.0f * PI_F / 60.0f) * R_w_ * motor_dir_;
     float v_fl = fl_rpm * rpm_to_mps;
     float v_fr = fr_rpm * rpm_to_mps;
     float v_rl = rl_rpm * rpm_to_mps;

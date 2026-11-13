@@ -142,11 +142,12 @@ def run_path_planner():
     except Exception as e:
         print(f"[Planner Core 1] Note on sensor socket: {e}")
 
-    live_tof = {k: 0.0 for k in SENSOR_NAMES}
+    live_tof_list: List[float] = [0.0] * 16
     has_live_sensor_feed = False
     last_sensor_time = 0.0
     last_mcu_time = 0.0
     last_mcu_pkt: Optional[Dict[str, Any]] = None
+    last_tof_pkt: Optional[Dict[str, Any]] = None
 
     print(f"[Planner Core 1] Starting Deterministic {TARGET_HZ:.0f} Hz Loop (Period: {DT_STEP*1000:.2f} ms)...")
     print(f"[Planner Core 1] Listening for live ToF stream on 127.0.0.1:{SENSOR_UDP_PORT}...")
@@ -168,41 +169,61 @@ def run_path_planner():
             sim_time += DT_STEP
             step_counter += 1
 
-            # 1. Perception Ingestion: Drain sensor UDP socket to receive latest real-time frame
+            # 1. Perception Ingestion: Drain sensor UDP socket to receive latest real-time frame.
+            # Coalesce raw datagrams before JSON decoding so bursty packets never waste Core 1 CPU.
             latest_mcu_pkt = None
+            raw_mcu_bytes = None
+            raw_tof_bytes = None
             now_mono = time.time()
             while True:
                 try:
                     raw_bytes, _ = sensor_sock.recvfrom(4096)
-                    pkt = json.loads(raw_bytes.decode("utf-8"))
-                    # Only chassis/MCU telemetry (carries rpms_act + STM32 flags) may become the MCU
-                    # snapshot. ToF-only packets share this socket and would otherwise clobber it,
-                    # making STM32 flags drop out intermittently (online/offline flicker).
-                    if "rpms_act" in pkt:
-                        latest_mcu_pkt = pkt
-                        last_mcu_pkt = pkt
-                        last_mcu_time = now_mono
-                    if "tof_ranges_raw" in pkt:
-                        live_tof = {
-                            SENSOR_NAMES[i]: pkt["tof_ranges_raw"][i]
-                            for i in range(min(16, len(pkt["tof_ranges_raw"])))
-                        }
-                        has_live_sensor_feed = True
-                        last_sensor_time = now_mono
-                    elif "tof" in pkt and isinstance(pkt["tof"], dict):
-                        live_tof = pkt["tof"]
-                        has_live_sensor_feed = True
-                        last_sensor_time = now_mono
+                    if b'"rpms_act"' in raw_bytes:
+                        raw_mcu_bytes = raw_bytes
+                    if b'"tof_ranges_raw"' in raw_bytes or b'"tof"' in raw_bytes:
+                        raw_tof_bytes = raw_bytes
                 except (BlockingIOError, socket.error):
                     break
                 except Exception:
                     break
 
+            if raw_mcu_bytes is not None:
+                try:
+                    pkt = json.loads(raw_mcu_bytes.decode("utf-8"))
+                    latest_mcu_pkt = pkt
+                    last_mcu_pkt = pkt
+                    last_mcu_time = now_mono
+                    if raw_tof_bytes == raw_mcu_bytes:
+                        raw_tof_bytes = None
+                        last_tof_pkt = pkt
+                        if "tof_ranges_raw" in pkt:
+                            r_in = pkt["tof_ranges_raw"]
+                            live_tof_list = [float(r_in[i]) if i < len(r_in) else 0.0 for i in range(16)]
+                            has_live_sensor_feed = True
+                            last_sensor_time = now_mono
+                except Exception:
+                    pass
+
+            if raw_tof_bytes is not None:
+                try:
+                    pkt = json.loads(raw_tof_bytes.decode("utf-8"))
+                    last_tof_pkt = pkt
+                    if "tof_ranges_raw" in pkt:
+                        r_in = pkt["tof_ranges_raw"]
+                        live_tof_list = [float(r_in[i]) if i < len(r_in) else 0.0 for i in range(16)]
+                        has_live_sensor_feed = True
+                        last_sensor_time = now_mono
+                    elif "tof" in pkt and isinstance(pkt["tof"], dict):
+                        t_dict = pkt["tof"]
+                        live_tof_list = [float(t_dict.get(k, 0.0)) for k in SENSOR_NAMES]
+                        has_live_sensor_feed = True
+                        last_sensor_time = now_mono
+                except Exception:
+                    pass
+
             if has_live_sensor_feed and (now_mono - last_sensor_time > 1.0):
                 has_live_sensor_feed = False
-                live_tof = {k: 0.0 for k in SENSOR_NAMES}
-
-            raw_tof = live_tof
+                live_tof_list = [0.0] * 16
 
             # Ingest MCU feedback (prefer latest frame, fallback to last valid hardware frame within 1.0s)
             active_mcu = latest_mcu_pkt or (last_mcu_pkt if (now_mono - last_mcu_time < 1.0) else None)
@@ -224,7 +245,7 @@ def run_path_planner():
                 steer_rad = math.radians(steer_actual_deg)
                 need_full_telem = (step_counter % TELEM_DECIMATION == 0)
                 v_cmd, steer_cmd_rad, brain_telem = brain.step(
-                    tof_readings=raw_tof,
+                    tof_readings=live_tof_list,
                     v_est=v_actual,
                     steer_actual_rad=steer_rad,
                     gyro_z_rad_s=gyro_z,
@@ -289,9 +310,14 @@ def run_path_planner():
                     telemetry["accel_lat"] = float(active_mcu.get("accel_lat", 0.0))
                     telemetry["slip_state"] = str(active_mcu.get("slip_state", "NORMAL"))
                     telemetry["slip_ratio"] = float(active_mcu.get("slip_ratio", 0.0))
+                    telemetry["servo_pulse_us"] = int(active_mcu.get("servo_pulse_us", 1520))
                     telemetry["flags"] = dict(active_mcu.get("flags", {}))
                     telemetry["mcu_msg"] = active_mcu.get("mcu_msg", "")
                     telemetry["mcu_log"] = active_mcu.get("mcu_log", [])
+                    telemetry["mcu_main_connected"] = bool(active_mcu.get("mcu_main_connected", True))
+                    telemetry["mcu_tof_connected"] = bool(active_mcu.get("mcu_tof_connected", has_live_sensor_feed))
+                    telemetry["mcu_main_port"] = str(active_mcu.get("mcu_main_port", ""))
+                    telemetry["mcu_tof_port"] = str(active_mcu.get("mcu_tof_port", ""))
                 else:
                     telemetry["rpms_cmd"] = [0, 0, 0, 0]
                     telemetry["rpms_act"] = [0, 0, 0, 0]
@@ -303,11 +329,16 @@ def run_path_planner():
                     telemetry["accel_lat"] = 0.0
                     telemetry["slip_state"] = "OFFLINE"
                     telemetry["slip_ratio"] = 0.0
+                    telemetry["servo_pulse_us"] = 1520
                     telemetry["flags"] = {"fake_data": False, "standalone_sim": False}
                     telemetry["mcu_msg"] = ""
                     telemetry["mcu_log"] = []
+                    telemetry["mcu_main_connected"] = False
+                    telemetry["mcu_tof_connected"] = bool(has_live_sensor_feed)
+                    telemetry["mcu_main_port"] = ""
+                    telemetry["mcu_tof_port"] = str(last_tof_pkt.get("mcu_tof_port", "")) if last_tof_pkt else ""
 
-                telemetry["tof_ranges_raw"] = [round(raw_tof.get(k, 0.0), 3) for k in SENSOR_NAMES] if has_live_sensor_feed else [0.0] * 16
+                telemetry["tof_ranges_raw"] = [round(v, 3) for v in live_tof_list] if has_live_sensor_feed else [0.0] * 16
                 telemetry["step_ms"] = round(t_ctrl_ms, 2)
                 telemetry["grid_shape"] = [int(s) for s in brain.costmap.shape]
                 telemetry["grid_bounds"] = [GRID_X_MIN, GRID_X_MAX, GRID_Y_MIN, GRID_Y_MAX]
