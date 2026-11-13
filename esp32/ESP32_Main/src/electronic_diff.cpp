@@ -65,9 +65,16 @@ ElectronicDiffOutputs IRAM_ATTR ElectronicDifferential4WD::update(
     out.steer_deg = current_steer_rad_ * (180.0f / PI_F);
 
     // Single Servo PWM calculation (333 Hz Digital Servo on GPIO 21)
-    // Neutral 1520 us = 0.0 rad, +/- 90 deg (+/- 1.5708 rad) = +/- 1000 us
-    float pulse_offset = (current_steer_rad_ / (PI_F * 0.5f)) * 1000.0f;
-    out.servo_pulse_us = fmaxf(SERVO_PULSE_MIN_US, fminf(SERVO_PULSE_MAX_US, SERVO_PULSE_NEUTRAL_US + pulse_offset));
+    // Neutral 1565 us = 0.0 rad
+    // Left turn (+steer_rad -> +max_steer_rad_): inner 35 deg, outer 30 deg -> 1294 us (SERVO_PULSE_MIN_US)
+    // Right turn (-steer_rad -> -max_steer_rad_): inner 35 deg, outer 30 deg -> 1836 us (SERVO_PULSE_MAX_US)
+    float norm_steer = fmaxf(-1.0f, fminf(1.0f, current_steer_rad_ / fmaxf(1e-4f, max_steer_rad_)));
+    if (norm_steer >= 0.0f) {
+        out.servo_pulse_us = SERVO_PULSE_NEUTRAL_US - norm_steer * (SERVO_PULSE_NEUTRAL_US - SERVO_PULSE_MIN_US);
+    } else {
+        out.servo_pulse_us = SERVO_PULSE_NEUTRAL_US + (-norm_steer) * (SERVO_PULSE_MAX_US - SERVO_PULSE_NEUTRAL_US);
+    }
+    out.servo_pulse_us = fmaxf(SERVO_PULSE_MIN_US, fminf(SERVO_PULSE_MAX_US, out.servo_pulse_us));
 
     // -------------------------------------------------------------------------
     // 2. Dynamic Traction Rate Limiter with Instant Crash Resynchronization
@@ -138,7 +145,7 @@ ElectronicDiffOutputs IRAM_ATTR ElectronicDifferential4WD::update(
     out.omega_cmd = (rate_limited_speed_ * tan_d) / L_;
 
     // -------------------------------------------------------------------------
-    // 4. 40% Geometric Ackermann Knuckle Headings
+    // 4. 45% Geometric Ackermann Knuckle Headings (35 deg Inner, 30 deg Outer)
     // -------------------------------------------------------------------------
     if (fabsf(tan_d) > 1e-4f) {
         float half_Wk_sin = (W_k_ * 0.5f) * sin_d;
@@ -146,8 +153,8 @@ ElectronicDiffOutputs IRAM_ATTR ElectronicDifferential4WD::update(
         float L_sin = L_ * sin_d;
         float steer_left_true = atan2f(L_sin, L_cos - half_Wk_sin);
         float steer_right_true = atan2f(L_sin, L_cos + half_Wk_sin);
-        out.steer_left_rad = current_steer_rad_ + ackermann_percent_ * (steer_left_true - current_steer_rad_);
-        out.steer_right_rad = current_steer_rad_ + ackermann_percent_ * (steer_right_true - current_steer_rad_);
+        out.steer_left_rad = fmaxf(-VEHICLE_MAX_SERVO_RAD, fminf(VEHICLE_MAX_SERVO_RAD, current_steer_rad_ + ackermann_percent_ * (steer_left_true - current_steer_rad_)));
+        out.steer_right_rad = fmaxf(-VEHICLE_MAX_SERVO_RAD, fminf(VEHICLE_MAX_SERVO_RAD, current_steer_rad_ + ackermann_percent_ * (steer_right_true - current_steer_rad_)));
     } else {
         out.steer_left_rad = current_steer_rad_;
         out.steer_right_rad = current_steer_rad_;
@@ -248,8 +255,13 @@ ElectronicDiffOutputs IRAM_ATTR ElectronicDifferential4WD::update(
         out.steer_rad = stabilized_steer;
         out.steer_deg = stabilized_steer * (180.0f / PI_F);
 
-        float pulse_offset = (stabilized_steer / (PI_F * 0.5f)) * 1000.0f;
-        out.servo_pulse_us = fmaxf(SERVO_PULSE_MIN_US, fminf(SERVO_PULSE_MAX_US, SERVO_PULSE_NEUTRAL_US + pulse_offset));
+        float stab_norm = fmaxf(-1.0f, fminf(1.0f, stabilized_steer / fmaxf(1e-4f, max_steer_rad_)));
+        if (stab_norm >= 0.0f) {
+            out.servo_pulse_us = SERVO_PULSE_NEUTRAL_US - stab_norm * (SERVO_PULSE_NEUTRAL_US - SERVO_PULSE_MIN_US);
+        } else {
+            out.servo_pulse_us = SERVO_PULSE_NEUTRAL_US + (-stab_norm) * (SERVO_PULSE_MAX_US - SERVO_PULSE_NEUTRAL_US);
+        }
+        out.servo_pulse_us = fmaxf(SERVO_PULSE_MIN_US, fminf(SERVO_PULSE_MAX_US, out.servo_pulse_us));
     }
 
     return out;

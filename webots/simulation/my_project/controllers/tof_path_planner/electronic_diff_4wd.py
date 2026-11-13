@@ -1,6 +1,6 @@
 """
 ================================================================================
-  4WD ELECTRONIC DIFFERENTIAL & 40% ACKERMANN KINEMATICS MODULE
+  4WD ELECTRONIC DIFFERENTIAL & ACKERMANN KINEMATICS MODULE
   Real-time geometric speed allocation and BNO08x gyro slip detection
   for Folkrace Robot in Webots.
 ================================================================================
@@ -48,9 +48,9 @@ SLIP_UNDERSTEER = "UNDERSTEER"
 
 class ElectronicDifferential4WD:
     """
-    Computes 40% Ackermann steering angles and 4-wheel rotational speeds with
-    electronic differential, handles standstill guards, proportional saturation
-    scaling, and IMU gross slip detection.
+    Computes 45% Ackermann steering angles (35 deg inner, 30 deg outer)
+    and 4-wheel rotational speeds with electronic differential, handles standstill guards,
+    proportional saturation scaling, and IMU gross slip detection.
     """
 
     def __init__(self, wheelbase=WHEELBASE, track_rear=TRACK_REAR, track_front=TRACK_FRONT,
@@ -119,7 +119,7 @@ class ElectronicDifferential4WD:
         tan_d = math.tan(delta)
         omega_cmd = (target_v * tan_d) / self.L
 
-        # 3. 40% Geometric Ackermann Front Steering Angles
+        # 3. 45% Geometric Ackermann Front Steering Angles (35 deg inner, 30 deg outer)
         if abs(tan_d) > 1e-4:
             half_Wk_sin = (self.W_k * 0.5) * sin_d
             L_cos = self.L * cos_d

@@ -153,7 +153,7 @@ OPTION_2_SL_MPC_GENE_SPECS: List[Tuple[str, float, float, type, float, str]] = [
     ("steer_deadband_rad",   0.000,  0.005,  float,  0.001,  "Steering error deadband (rad) for sensor noise quieting"),
     # Stuck & Emergency Recovery
     ("recovery_clearance_exit_m", 0.25, 0.25, float, 0.25,   "Front clearance threshold (m) to conclude reverse and center steering"),
-    ("recovery_steer_angle_rad",0.650, 0.650, float,  0.650,  "Recovery pivot steering angle (rad)"),
+    ("recovery_steer_angle_rad",0.5623, 0.5623, float, 0.5623, "Recovery pivot steering angle (rad)"),
     ("recovery_arc_lookahead_m",0.10, 0.15,  float,  0.150,  "Kinematic escape arc lookahead length (m) on costmap"),
 ]
 
@@ -280,7 +280,7 @@ def generate_logical_initial_population(
             "straight_lock_dist": 1.70, "straight_lock_speed": 5.50,
             "aggr_dist_far_m": 1.70, "aggr_dist_close_m": 1.00, "aggr_min_scale": 0.30,
             "steer_deadband_rad": 0.002,
-            "recovery_clearance_exit_m": 0.28, "recovery_steer_angle_rad": 0.600,
+            "recovery_clearance_exit_m": 0.28, "recovery_steer_angle_rad": 0.5623,
             "recovery_arc_lookahead_m": 0.13,
         },
         # 1. High-Momentum Apex Striker
@@ -301,7 +301,7 @@ def generate_logical_initial_population(
             "straight_lock_dist": 1.65, "straight_lock_speed": 5.50,
             "aggr_dist_far_m": 1.68, "aggr_dist_close_m": 1.10, "aggr_min_scale": 0.35,
             "steer_deadband_rad": 0.002,
-            "recovery_clearance_exit_m": 0.30, "recovery_steer_angle_rad": 0.600,
+            "recovery_clearance_exit_m": 0.30, "recovery_steer_angle_rad": 0.5623,
             "recovery_arc_lookahead_m": 0.12,
         },
         # 2. Safe High-Clearance Sentinel

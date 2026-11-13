@@ -334,7 +334,7 @@ def build_live_binary_packet(pkt: Dict[str, Any]) -> bytes:
         "target_yaw": pkt.get("target_yaw", 0.0),
         "total_frames": pkt.get("_total_frames", 0),
         "flags": pkt.get("flags", {}),
-        "servo_pulse_us": pkt.get("servo_pulse_us", 1520),
+        "servo_pulse_us": pkt.get("servo_pulse_us", 1565),
         "mcu_msg": pkt.get("mcu_msg", ""),
         "mcu_log": pkt.get("mcu_log", []),
         "mcu_main_connected": pkt.get("mcu_main_connected", False),
@@ -528,10 +528,12 @@ class DebugHTTPRequestHandler(BaseHTTPRequestHandler):
                 v = float(data.get("v", 0.0))
                 cmd_str = f"V {v:.2f}\n"
             elif action == "steer":
-                deg = float(data.get("deg", 90.0))
-                cmd_str = f"A {deg:.1f}\n"
+                deg = float(data.get("deg", 0.0))
+                # Convert steering angle (-32.2..+32.2 deg) to servo dial angle (0..180 deg, 90=Center, 0=Left, 180=Right)
+                dial_deg = max(0.0, min(180.0, 90.0 - (deg / 32.2166) * 90.0))
+                cmd_str = f"A {dial_deg:.1f}\n"
             elif action == "pulse":
-                pulse = float(data.get("pulse", 1520.0))
+                pulse = float(data.get("pulse", 1565.0))
                 cmd_str = f"P {pulse:.0f}\n"
             elif action == "bench":
                 if "enabled" in data:

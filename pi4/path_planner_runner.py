@@ -310,7 +310,7 @@ def run_path_planner():
                     telemetry["accel_lat"] = float(active_mcu.get("accel_lat", 0.0))
                     telemetry["slip_state"] = str(active_mcu.get("slip_state", "NORMAL"))
                     telemetry["slip_ratio"] = float(active_mcu.get("slip_ratio", 0.0))
-                    telemetry["servo_pulse_us"] = int(active_mcu.get("servo_pulse_us", 1520))
+                    telemetry["servo_pulse_us"] = int(active_mcu.get("servo_pulse_us", 1565))
                     telemetry["flags"] = dict(active_mcu.get("flags", {}))
                     telemetry["mcu_msg"] = active_mcu.get("mcu_msg", "")
                     telemetry["mcu_log"] = active_mcu.get("mcu_log", [])
@@ -329,7 +329,7 @@ def run_path_planner():
                     telemetry["accel_lat"] = 0.0
                     telemetry["slip_state"] = "OFFLINE"
                     telemetry["slip_ratio"] = 0.0
-                    telemetry["servo_pulse_us"] = 1520
+                    telemetry["servo_pulse_us"] = 1565
                     telemetry["flags"] = {"fake_data": False, "standalone_sim": False}
                     telemetry["mcu_msg"] = ""
                     telemetry["mcu_log"] = []

@@ -282,7 +282,7 @@ class PlannerCostmapCanvas(QtWidgets.QWidget):
         self.target_yaw: float = 0.0
 
         # Load Kinematic Reverse Backup Logic parameters from active preview config / best genome
-        self.r_min_turn = 0.1325 / max(1e-3, math.tan(0.650))
+        self.r_min_turn = 0.1325 / max(1e-3, math.tan(0.562285))
         self.origin_y = 0.0   # Robot center (0.0, 0.0)
         self.bumper_y = 0.095 # Front bumper mount Y in vehicle frame
         self.arc_lookahead_m = 0.13
@@ -313,7 +313,7 @@ class PlannerCostmapCanvas(QtWidgets.QWidget):
     def reload_config(self, force: bool = False) -> bool:
         """Loads recovery arc kinematics and parameters from active_preview_config.json or best_planner_genome.json."""
         wheelbase = 0.1325
-        max_steer_rad = 0.650  # Default ~37.2 deg (~0.65 rad)
+        max_steer_rad = 0.562285  # Default ~32.22 deg (~0.5623 rad)
         arc_lookahead = 0.13   # Default 0.13 m
 
         for cand_name in ["best_planner_genome.json", "ga_checkpoint.json"]:
@@ -329,7 +329,7 @@ class PlannerCostmapCanvas(QtWidgets.QWidget):
                         cfg_data = json.load(f)
                     cfg_genes = cfg_data.get("genes") or cfg_data.get("best_genome") or cfg_data
                     if "recovery_steer_angle_rad" in cfg_genes:
-                        max_steer_rad = float(cfg_genes["recovery_steer_angle_rad"])
+                        max_steer_rad = min(0.562285, float(cfg_genes["recovery_steer_angle_rad"]))
                     if "recovery_arc_lookahead_m" in cfg_genes:
                         arc_lookahead = float(cfg_genes["recovery_arc_lookahead_m"])
                     break
@@ -339,7 +339,7 @@ class PlannerCostmapCanvas(QtWidgets.QWidget):
         self.update_kinematic_arcs(wheelbase=wheelbase, max_steer_rad=max_steer_rad, arc_lookahead_m=arc_lookahead)
         return True
 
-    def update_kinematic_arcs(self, wheelbase: float = 0.1325, max_steer_rad: float = 0.650, arc_lookahead_m: float = 0.13):
+    def update_kinematic_arcs(self, wheelbase: float = 0.1325, max_steer_rad: float = 0.562285, arc_lookahead_m: float = 0.13):
         self.wheelbase = float(wheelbase)
         self.max_steer_rad = float(max_steer_rad)
         self.arc_lookahead_m = float(arc_lookahead_m)

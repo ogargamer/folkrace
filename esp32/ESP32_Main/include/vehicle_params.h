@@ -17,9 +17,9 @@
 #define VEHICLE_MASS_KG             1.000f
 
 // --- Steering Kinematics & Limits ---
-#define VEHICLE_ACKERMANN_PCT       0.40f
-#define VEHICLE_MAX_SERVO_RAD       0.696386f
-#define VEHICLE_MAX_STEER_RAD       0.657137f
+#define VEHICLE_ACKERMANN_PCT       0.45f
+#define VEHICLE_MAX_SERVO_RAD       0.610865f
+#define VEHICLE_MAX_STEER_RAD       0.562285f
 #define VEHICLE_SERVO_MAX_RATE      16.89f
 #define VEHICLE_MOTOR_DIR           1.0f
 #define VEHICLE_MAX_WHEEL_SPEED     5.00f
@@ -33,8 +33,8 @@
 #define ACCEL_FWD_MAX               8.012f
 #define BRAKE_DECEL_MAX             8.434f
 #define LAT_ACCEL_MAX               8.434f
-#define R_MIN_TURN_M                0.1717f
-#define V_MIN_CRUISE_MPS            1.2035f
+#define R_MIN_TURN_M                0.2103f
+#define V_MIN_CRUISE_MPS            1.3317f
 #define SLIP_GATE_SPEED_MPS         0.30f
 #define SLIP_THRESH_SPIN_RAD_S      0.45f
 
@@ -43,9 +43,9 @@
 #define SERVO_PWM_CHANNEL           0
 #define SERVO_PWM_FREQ_HZ           333
 #define SERVO_PWM_RESOLUTION        14
-#define SERVO_PULSE_MIN_US          500.0f
-#define SERVO_PULSE_NEUTRAL_US      1520.0f
-#define SERVO_PULSE_MAX_US          2500.0f
+#define SERVO_PULSE_MIN_US          1294.0f
+#define SERVO_PULSE_NEUTRAL_US      1565.0f
+#define SERVO_PULSE_MAX_US          1836.0f
 
 // --- Control Loop Frequency & Timing ---
 #define CONTROL_LOOP_FREQ_HZ        400

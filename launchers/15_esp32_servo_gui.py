@@ -5,7 +5,7 @@
   Connects over USB serial to the ESP32D N4 running the 333Hz servo firmware.
   Features:
     - Dedicated 333 Hz / 3.0 ms cycle timing
-    - 500 µs to 2500 µs pulse range with 1520 µs neutral calibration
+    - 1294 µs to 1836 µs pulse range with 1565 µs neutral calibration
     - 2 µs deadband fine-nudge testing
     - Real-time 180° visual servo dial & horn simulation
     - Automated sweep & burn-in endurance test

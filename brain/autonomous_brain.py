@@ -223,7 +223,7 @@ class AutonomousBrain:
         )
         self.planner.costmap = self.costmap
 
-        rec_steer = float(genes.get("recovery_steer_angle_rad", RECOVERY_STEER_ANGLE_RAD))
+        rec_steer = min(MAX_STEERING_RAD, float(genes.get("recovery_steer_angle_rad", RECOVERY_STEER_ANGLE_RAD)))
         rec_speed = float(
             math.sqrt(max(0.01, self.mu_val * 9.81 * (WHEELBASE / max(0.01, math.tan(abs(rec_steer))))))
         )

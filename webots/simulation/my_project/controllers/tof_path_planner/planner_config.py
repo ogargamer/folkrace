@@ -206,8 +206,8 @@ MPC_W_GAP_CLEAR: float = 10.0                                 # Lookahead depth 
 # ==============================================================================
 
 # 6.1 Recovery Kinematics & Speed Limits
-RECOVERY_STEER_ANGLE_RAD: float = MAX_STEERING_RAD     # radians (~37.65 deg) steering lock during reverse arc
-RECOVERY_REVERSE_SPEED_MPS: float = V_MIN_CRUISE       # m/s dynamic cornering speed floor (~1.20 m/s)
+RECOVERY_STEER_ANGLE_RAD: float = MAX_STEERING_RAD     # radians (~32.22 deg) steering lock during reverse arc
+RECOVERY_REVERSE_SPEED_MPS: float = V_MIN_CRUISE       # m/s dynamic cornering speed floor (~1.33 m/s)
 RECOVERY_SERVO_SLEW_RAD_S: float = SERVO_MAX_SPEED_RAD_S  # rad/s centering slew rate (15.4 rad/s at 8.4V)
 RECOVERY_ARC_LOOKAHEAD_M: float = 0.146                # meters length of kinematic escape arcs projected on costmap
 
