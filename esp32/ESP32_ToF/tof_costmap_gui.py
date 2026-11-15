@@ -475,7 +475,7 @@ class CostmapEngine:
           2. Clearing rays travel only until the closest target min(d1, d2) - margin.
     """
 
-    def __init__(self, x_min=-1.25, x_max=1.25, y_min=-0.10, y_max=1.90, res=0.015, r_inflation=0.075):
+    def __init__(self, x_min=-1.25, x_max=1.25, y_min=-0.10, y_max=1.90, res=0.015, r_inflation=0.090):
         self.x_min = x_min
         self.x_max = x_max
         self.y_min = y_min
@@ -1386,7 +1386,7 @@ class MainWindow(QMainWindow):
 
         # Webots Criss-Cross 16-Channel Front Rig (only_front_tofs.proto)
         self.sensor_rig = list(WEBOTS_CRISS_CROSS_RIG)
-        self.costmap_engine = CostmapEngine(res=0.015, r_inflation=0.075)
+        self.costmap_engine = CostmapEngine(res=0.015, r_inflation=0.090)
 
         self.serial_engine = QuadSerialEngine(port="COM7", baud=921600)
         self.serial_engine.connection_changed.connect(self._on_connection_changed)

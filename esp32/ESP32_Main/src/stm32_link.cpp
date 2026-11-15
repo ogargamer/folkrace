@@ -154,6 +154,11 @@ void STM32DualLink::enableDrivers() {
     rear_.enableDrivers();
 }
 
+void STM32DualLink::disableDrivers() {
+    front_.disableDrivers();
+    rear_.disableDrivers();
+}
+
 void STM32DualLink::setPID(float kp, float ki) {
     front_.setPID(kp, ki);
     rear_.setPID(kp, ki);

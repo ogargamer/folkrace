@@ -95,6 +95,7 @@ enum STM32CommandMode : uint8_t {
     STM32_CMD_DRIVE      = 0x00, // Regular 400Hz velocity command (param1=m1_rpm, param2=m2_rpm)
     STM32_CMD_ESTOP      = 0x01, // Immediate E-stop: cut PWM, zero voltage, disable drivers
     STM32_CMD_ENABLE     = 0x02, // Enable motor drivers
+    STM32_CMD_DISABLE    = 0x03, // Disable motor drivers (Hi-Z, non-latched stop)
     STM32_CMD_CALIB_M1   = 0x10, // Start Motor 1 Calibration (param1=align_voltage)
     STM32_CMD_CALIB_M2   = 0x11, // Start Motor 2 Calibration (param1=align_voltage)
     STM32_CMD_SET_PID    = 0x20, // Set velocity PID (param1=Kp, param2=Ki)
@@ -781,17 +782,11 @@ volatile bool g_estop_active = false;
 static bool s_calib_isolation_active = false;
 static bool s_saved_telemetry_state = true;
 
-void triggerGlobalEmergencyStop() {
-    g_estop_active = true;
+void disableBothDrivers() {
     m1_enabled = false;
     m2_enabled = false;
     m1_target_rpm = 0.0f;
     m2_target_rpm = 0.0f;
-    m1_calib_active = false;
-    m2_calib_active = false;
-    live_calib_progress = 0;
-    s_calib_isolation_active = false;
-    show_telemetry = s_saved_telemetry_state;
 
     motor1.voltage.q = 0.0f;
     motor1.voltage.d = 0.0f;
@@ -810,6 +805,18 @@ void triggerGlobalEmergencyStop() {
 
     stall_guard1.reset();
     stall_guard2.reset();
+}
+
+void triggerGlobalEmergencyStop() {
+    g_estop_active = true;
+    m1_calib_active = false;
+    m2_calib_active = false;
+    live_calib_progress = 0;
+    s_calib_isolation_active = false;
+    show_telemetry = s_saved_telemetry_state;
+
+    disableBothDrivers();
+
     motor1.voltage_limit = MOTOR_VOLTAGE_LIMIT;
     motor1.PID_velocity.limit = motor1.voltage_limit;
     motor2.voltage_limit = MOTOR_VOLTAGE_LIMIT;
@@ -3195,6 +3202,12 @@ void processESP32Link() {
                             }
                             break;
 
+                        case STM32_CMD_DISABLE:
+                            if (!s_calib_isolation_active) {
+                                disableBothDrivers();
+                            }
+                            break;
+
                         case STM32_CMD_SET_PID:
                             if (!s_calib_isolation_active) {
                                 if (pkt->param1 > 0.0f) {
@@ -3269,8 +3282,18 @@ void processESP32Link() {
     if (have_latest_drive && !g_estop_active && !s_calib_isolation_active) {
         m1_target_rpm = latest_drive_m1;
         m2_target_rpm = latest_drive_m2;
-        if (!m1_enabled) { m1_enabled = true; driver1.enable(); motor1.enable(); }
-        if (!m2_enabled) { m2_enabled = true; driver2.enable(); motor2.enable(); }
+        // Never auto-enable disabled drivers on a 0 RPM command; only enable
+        // when an actual non-zero velocity is commanded.
+        if (fabsf(latest_drive_m1) > 0.01f && !m1_enabled) {
+            m1_enabled = true;
+            driver1.enable();
+            motor1.enable();
+        }
+        if (fabsf(latest_drive_m2) > 0.01f && !m2_enabled) {
+            m2_enabled = true;
+            driver2.enable();
+            motor2.enable();
+        }
     }
 
     // At most one reply per bounded service pass; do not create a TX burst

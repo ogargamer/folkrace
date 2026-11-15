@@ -55,6 +55,7 @@ enum STM32CommandMode : uint8_t {
     STM32_CMD_DRIVE      = 0x00, // Regular 400Hz velocity command (param1=m1_rpm, param2=m2_rpm)
     STM32_CMD_ESTOP      = 0x01, // Immediate E-stop: cut PWM, zero voltage, disable drivers
     STM32_CMD_ENABLE     = 0x02, // Enable motor drivers
+    STM32_CMD_DISABLE    = 0x03, // Disable motor drivers (Hi-Z, non-latched stop)
     STM32_CMD_CALIB_M1   = 0x10, // Start Motor 1 Calibration (param1=align_voltage)
     STM32_CMD_CALIB_M2   = 0x11, // Start Motor 2 Calibration (param1=align_voltage)
     STM32_CMD_SET_PID    = 0x20, // Set velocity PID (param1=Kp, param2=Ki)

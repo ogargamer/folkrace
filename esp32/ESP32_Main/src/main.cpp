@@ -10,7 +10,6 @@
 #include <esp_cpu.h>
 #include <esp_timer.h>
 
-
 // =============================================================================
 // Inter-Core Shared Memory Structures (Allocated in Internal SRAM)
 // =============================================================================
@@ -93,6 +92,8 @@ static volatile bool s_cli_override_active = false;
 static volatile bool s_manual_servo_direct = false;
 static volatile float s_direct_servo_pulse = SERVO_PULSE_NEUTRAL_US;
 static volatile float s_servo_trim_us = 0.0f;
+static volatile bool s_estop_latched = false;
+static volatile bool s_drive_stopped = true;
 
 static inline float servoPulseToAngle(float pulse_us) {
   if (pulse_us <= SERVO_PULSE_NEUTRAL_US) {
@@ -190,8 +191,8 @@ static void IRAM_ATTR realTimeControlTask(void *pvParameters) {
     s_sensorInputs.updateRead();
     const SharedSensorInputs &inputs = s_sensorInputs.getReadBuffer();
 
-    // 1b. Drain STM32 feedback inside the deterministic task so the UART link is
-    // never delayed by IMU SPI waits / USB shell work on Core 0.
+    // 1b. Drain STM32 feedback inside the deterministic task so the UART link
+    // is never delayed by IMU SPI waits / USB shell work on Core 0.
     s_stm32Link.update();
 
     // Working variables
@@ -237,8 +238,8 @@ static void IRAM_ATTR realTimeControlTask(void *pvParameters) {
       accel_fwd = inputs.accel_fwd;
       fl_rpm = inputs.fl_rpm;
       fr_rpm = inputs.fr_rpm;
-      rl_rpm = -s_stm32Link.getRL_RPM();
-      rr_rpm = s_stm32Link.getRR_RPM();
+      rl_rpm = s_stm32Link.getRL_RPM();
+      rr_rpm = -s_stm32Link.getRR_RPM();
 
       // Hardware Ramp Speed Governor (Safety speed ceiling on incline/pitch)
       const float ramp_pitch_threshold_deg = 8.0f;
@@ -292,8 +293,14 @@ static void IRAM_ATTR realTimeControlTask(void *pvParameters) {
     cycle_counter++;
 
     // 5b. Dispatch drive command to STM32 immediately at a jitter-free 400 Hz
-    // (RWD-only; left motor has inverted rotation vs right).
-    s_stm32Link.getRear().sendDrive(-diff.rpm_RL, diff.rpm_RR);
+    // (RWD-only; right motor has inverted rotation vs left).
+    // When stopped or E-STOPped, keep drivers disabled instead of holding 0
+    // RPM.
+    if (s_estop_latched || s_drive_stopped) {
+      s_stm32Link.getRear().emergencyStop();
+    } else {
+      s_stm32Link.getRear().sendDrive(diff.rpm_RL, -diff.rpm_RR);
+    }
 
     // 6. Commit outputs to Core 0 via lock-free triple buffer
     SharedControlOutputs &out = s_controlOutputs.getWriteBuffer();
@@ -387,6 +394,13 @@ static void handleAsciiCommand(const char *raw_line) {
     if (s_fake_data_active) {
       s_cli_override_active = false;
       s_manual_override = false;
+      if (!s_estop_latched && s_drive_stopped) {
+        s_stm32Link.getRear().enableDrivers();
+        s_drive_stopped = false;
+      }
+    } else {
+      s_drive_stopped = true;
+      s_stm32Link.getRear().emergencyStop();
     }
     Serial.printf("\n>>> [MODE] Synthetic 400Hz Benchmark Mode: %s\n",
                   s_fake_data_active ? "ENABLED (Fake Data)"
@@ -454,12 +468,25 @@ static void handleAsciiCommand(const char *raw_line) {
     s_manual_v = 0.0f;
     s_manual_override = false;
     s_cli_override_active = false;
+    s_fake_data_active = false;
+    s_estop_latched = true;
+    s_drive_stopped = true;
     s_stm32Link.getRear().emergencyStop();
     Serial.println(F(">>> 🛑 EMERGENCY STOP BROADCAST TO ALL STM32s!"));
   } else if (line.equalsIgnoreCase("MOTORS") ||
              line.equalsIgnoreCase("START")) {
+    s_estop_latched = false;
+    s_drive_stopped = false;
     s_stm32Link.getRear().enableDrivers();
     Serial.println(F(">>> ⚡ MOTORS ENABLED ON ALL STM32s."));
+  } else if (line.equalsIgnoreCase("DISABLE")) {
+    s_manual_v = 0.0f;
+    s_manual_override = false;
+    s_cli_override_active = false;
+    s_fake_data_active = false;
+    s_drive_stopped = true;
+    s_stm32Link.getRear().emergencyStop();
+    Serial.println(F(">>> 🔌 MOTOR DRIVERS DISABLED ON ALL STM32s."));
   } else if (line.startsWith("PID ") || line.startsWith("pid ")) {
     float kp = 0.1f, ki = 1.5f;
     sscanf(line.c_str() + 4, "%f %f", &kp, &ki);
@@ -484,6 +511,13 @@ static void handleAsciiCommand(const char *raw_line) {
     s_cli_override_active = (fabsf(s_manual_v) > 0.001f);
     s_manual_override = s_cli_override_active;
     s_fake_data_active = false;
+    if (!s_cli_override_active) {
+      s_drive_stopped = true;
+      s_stm32Link.getRear().emergencyStop();
+    } else if (!s_estop_latched && s_drive_stopped) {
+      s_stm32Link.getRear().enableDrivers();
+      s_drive_stopped = false;
+    }
     Serial.printf(">>> Manual Speed Setpoint: %.2f m/s\n", s_manual_v);
   } else if (line.charAt(0) == 'A' || line.charAt(0) == 'a') {
     String valStr = line.substring(1);
@@ -508,19 +542,22 @@ static void handleAsciiCommand(const char *raw_line) {
     float trim_us = line.substring(5).toFloat();
     trim_us = fmaxf(-20.0f, fminf(20.0f, trim_us));
     s_servo_trim_us = trim_us;
-    Serial.printf(">>> Servo neutral trim: %+.1f us (effective neutral: %.1f us)\n",
-                  s_servo_trim_us, SERVO_PULSE_NEUTRAL_US + s_servo_trim_us);
+    Serial.printf(
+        ">>> Servo neutral trim: %+.1f us (effective neutral: %.1f us)\n",
+        s_servo_trim_us, SERVO_PULSE_NEUTRAL_US + s_servo_trim_us);
   } else if (line.equalsIgnoreCase("RESET")) {
     s_manual_v = 0.0f;
     s_manual_steer = 0.0f;
     s_manual_override = false;
     s_cli_override_active = false;
     s_manual_servo_direct = false;
+    s_drive_stopped = true;
+    s_stm32Link.getRear().emergencyStop();
     s_ediff.reset();
     s_fusion.reset();
-    s_servo.setPulseUs(fmaxf(SERVO_PULSE_MIN_US,
-                             fminf(SERVO_PULSE_MAX_US,
-                                   SERVO_PULSE_NEUTRAL_US + s_servo_trim_us)));
+    s_servo.setPulseUs(fmaxf(
+        SERVO_PULSE_MIN_US,
+        fminf(SERVO_PULSE_MAX_US, SERVO_PULSE_NEUTRAL_US + s_servo_trim_us)));
     Serial.println(F(">>> Controller & Sensor Fusion State Reset."));
   } else if (line.length() == 1 && strchr("tTrR12345+-0mM", line[0])) {
     s_imu.handleSerialCommand(line[0], Serial);
@@ -590,6 +627,8 @@ static void ioTask(void *pvParameters) {
                   s_manual_v = 0.0f;
                   s_manual_override = false;
                   s_cli_override_active = false;
+                  s_estop_latched = true;
+                  s_drive_stopped = true;
                   s_stm32Link.getRear().emergencyStop();
                 } else if (!s_cli_override_active) {
                   if (cmd->run_mode == 1 || cmd->run_mode == 3) {
@@ -598,10 +637,20 @@ static void ioTask(void *pvParameters) {
                     s_manual_override = true;
                     s_manual_servo_direct = false;
                     s_fake_data_active = false;
+                    if (cmd->target_v_mm_s != 0 && !s_estop_latched &&
+                        s_drive_stopped) {
+                      s_stm32Link.getRear().enableDrivers();
+                      s_drive_stopped = false;
+                    }
                   } else {
                     s_manual_v = 0.0f;
                     s_manual_steer = 0.0f;
                     s_manual_override = false;
+                    s_drive_stopped = true;
+                    if (s_stm32Link.getRear().isM1Enabled() ||
+                        s_stm32Link.getRear().isM2Enabled()) {
+                      s_stm32Link.getRear().emergencyStop();
+                    }
                   }
                 }
                 pos += sizeof(MotionCommandPacket);
@@ -666,6 +715,11 @@ static void ioTask(void *pvParameters) {
       s_manual_v = 0.0f;
       s_manual_steer = 0.0f;
       s_manual_override = false;
+      s_drive_stopped = true;
+      if (s_stm32Link.getRear().isM1Enabled() ||
+          s_stm32Link.getRear().isM2Enabled()) {
+        s_stm32Link.getRear().emergencyStop();
+      }
     }
 
     // 4. Update Shared Sensor Inputs for Core 1

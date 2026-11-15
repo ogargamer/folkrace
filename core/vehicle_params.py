@@ -72,5 +72,5 @@ GRID_X_MIN: float = -1.25
 GRID_Y_MIN: float = 0.0
 GRID_Y_MAX: float = 1.9
 GRID_RES: float = 0.015
-R_INFLATION_M: float = 0.075
+R_INFLATION_M: float = 0.09
 

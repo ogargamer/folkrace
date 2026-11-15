@@ -16,6 +16,7 @@ public:
     void sendCommand(float m1_rpm, float m2_rpm) { sendDrive(m1_rpm, m2_rpm); } // backwards compatibility
     void emergencyStop() { sendPacket(STM32_CMD_ESTOP); }
     void enableDrivers() { sendPacket(STM32_CMD_ENABLE); }
+    void disableDrivers() { sendPacket(STM32_CMD_DISABLE); }
     void setPID(float kp, float ki) { sendPacket(STM32_CMD_SET_PID, kp, ki); }
     void startCalibration(int motor_id, float align_voltage = 4.0f) {
         sendPacket(motor_id == 1 ? STM32_CMD_CALIB_M1 : STM32_CMD_CALIB_M2, align_voltage, 0.0f);
@@ -77,6 +78,7 @@ public:
     // Safety & Operational Broadcasts
     void emergencyStop();
     void enableDrivers();
+    void disableDrivers();
     void setPID(float kp, float ki);
     void saveFlash();
     void enterDFU(bool front = true, bool rear = true);

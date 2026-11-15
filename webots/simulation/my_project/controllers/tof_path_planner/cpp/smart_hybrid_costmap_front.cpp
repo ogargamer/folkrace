@@ -103,7 +103,7 @@ public:
     SmartHybridCostmapFront(
         float x_min_ = -1.25f, float x_max_ = 1.25f,
         float y_min_ = 0.0f, float y_max_ = 1.90f,
-        float res_ = 0.015f, float r_inflation_m_ = 0.075f
+        float res_ = 0.015f, float r_inflation_m_ = 0.090f
     ) : x_min(x_min_), x_max(x_max_), y_min(y_min_), y_max(y_max_),
         res(res_), r_inflation_m(r_inflation_m_) {
 
