@@ -19,26 +19,26 @@ VEHICLE_MASS: float = 1.0
 ACKERMANN_PERCENT: float = 0.45
 MAX_SERVO_RAD: float = 0.610865
 MAX_STEERING_RAD: float = 0.562285
-SERVO_MAX_SPEED_RAD_S: float = 11.16
+SERVO_MAX_SPEED_RAD_S: float = 16.89
 
 MOTOR_DIR: float = 1.0
-V_MAX_WHEEL: float = 2.5
-V_MAX_CRUISE: float = 2.5
+V_MAX_WHEEL: float = 5.0
+V_MAX_CRUISE: float = 5.0
 
 # ============================================================================== #
 # 2. TIRE & VEHICLE DYNAMICS LIMITS                                              #
 # ============================================================================== #
-TIRE_MU: float = 0.75
+TIRE_MU: float = 0.86
 GRAVITY_G: float = 9.80665
-A_MAX_BASE: float = 7.3549875
-ACCEL_FWD_RATIO: float = 0.9
+A_MAX_BASE: float = 8.433719
+ACCEL_FWD_RATIO: float = 0.95
 BRAKE_DECEL_RATIO: float = 1.0
 LAT_ACCEL_RATIO: float = 1.0
-ACCEL_FWD_MAX: float = 6.61948875
-BRAKE_DECEL_MAX: float = 7.3549875
-LAT_ACCEL_MAX: float = 7.3549875
+ACCEL_FWD_MAX: float = 8.01203305
+BRAKE_DECEL_MAX: float = 8.433719
+LAT_ACCEL_MAX: float = 8.433719
 R_MIN_TURN: float = 0.210271646984119
-V_MIN_CRUISE: float = 1.2436017590742656
+V_MIN_CRUISE: float = 1.3316801358927215
 SLIP_GATE_SPEED_MPS: float = 0.3
 SLIP_THRESH_SPIN_RAD_S: float = 0.45
 
