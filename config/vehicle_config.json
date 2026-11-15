@@ -16,9 +16,9 @@
     "v_max_cruise_mps": 1.5
   },
   "dynamics": {
-    "tire_mu": 0.20,
+    "tire_mu": 0.60,
     "gravity_g": 9.80665,
-    "accel_fwd_ratio": 0.95,
+    "accel_fwd_ratio": 0.80,
     "brake_decel_ratio": 1.00,
     "lat_accel_ratio": 1.00,
     "slip_gate_speed_mps": 0.30,
