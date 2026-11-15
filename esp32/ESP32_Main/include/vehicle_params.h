@@ -20,7 +20,7 @@
 #define VEHICLE_ACKERMANN_PCT       0.45f
 #define VEHICLE_MAX_SERVO_RAD       0.610865f
 #define VEHICLE_MAX_STEER_RAD       0.562285f
-#define VEHICLE_SERVO_MAX_RATE      16.89f
+#define VEHICLE_SERVO_MAX_RATE      11.16f
 #define VEHICLE_MOTOR_DIR           1.0f
 #define VEHICLE_MAX_WHEEL_SPEED     1.50f
 
@@ -43,9 +43,9 @@
 #define SERVO_PWM_CHANNEL           0
 #define SERVO_PWM_FREQ_HZ           333
 #define SERVO_PWM_RESOLUTION        14
-#define SERVO_PULSE_MIN_US          1294.0f
-#define SERVO_PULSE_NEUTRAL_US      1565.0f
-#define SERVO_PULSE_MAX_US          1836.0f
+#define SERVO_PULSE_MIN_US          1239.0f
+#define SERVO_PULSE_NEUTRAL_US      1510.0f
+#define SERVO_PULSE_MAX_US          1781.0f
 
 // --- Control Loop Frequency & Timing ---
 #define CONTROL_LOOP_FREQ_HZ        400

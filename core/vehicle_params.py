@@ -19,7 +19,7 @@ VEHICLE_MASS: float = 1.0
 ACKERMANN_PERCENT: float = 0.45
 MAX_SERVO_RAD: float = 0.610865
 MAX_STEERING_RAD: float = 0.562285
-SERVO_MAX_SPEED_RAD_S: float = 16.89
+SERVO_MAX_SPEED_RAD_S: float = 11.16
 
 MOTOR_DIR: float = 1.0
 V_MAX_WHEEL: float = 1.5
@@ -49,9 +49,9 @@ SERVO_PWM_PIN: int = 21
 SERVO_PWM_CHANNEL: int = 0
 SERVO_PWM_FREQ_HZ: int = 333
 SERVO_PWM_RESOLUTION: int = 14
-SERVO_PULSE_MIN_US: float = 1294.0
-SERVO_PULSE_NEUTRAL_US: float = 1565.0
-SERVO_PULSE_MAX_US: float = 1836.0
+SERVO_PULSE_MIN_US: float = 1239.0
+SERVO_PULSE_NEUTRAL_US: float = 1510.0
+SERVO_PULSE_MAX_US: float = 1781.0
 
 # ============================================================================== #
 # 4. TIMING & FREQUENCIES                                                        #

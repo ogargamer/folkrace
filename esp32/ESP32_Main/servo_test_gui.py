@@ -8,8 +8,8 @@ Servo Specifications:
   - Modulation:       Digital
   - Rotational Range: 180°
   - Pulse Cycle:      3 ms (Refresh Rate: 333 Hz)
-  - Pulse Width:      1294 µs - 1836 µs (Left 35°/30° = 1294 µs, Right 35°/30° = 1836 µs; 35° inner, 30° outer)
-  - Neutral Position: 1565 µs (Center / 90°)
+  - Pulse Width:      1229 µs - 1771 µs (Left 35°/30° = 1229 µs, Right 35°/30° = 1771 µs; 35° inner, 30° outer)
+  - Neutral Position: 1500 µs (Center / 90°)
   - Dead Band:        2 µs
   - Control System:   Hardware PWM (LEDC)
 
@@ -39,6 +39,25 @@ from PyQt5.QtGui import (
 
 if hasattr(Qt, 'HighDpiScaleFactorRoundingPolicy'):
     QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
+
+# Central vehicle parameters (synced from config/vehicle_config.json)
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+from core.vehicle_params import (
+    SERVO_PWM_PIN,
+    SERVO_PWM_FREQ_HZ,
+    SERVO_PULSE_MIN_US,
+    SERVO_PULSE_NEUTRAL_US,
+    SERVO_PULSE_MAX_US,
+)
+
+PULSE_MIN_US = int(round(SERVO_PULSE_MIN_US))
+PULSE_NEUTRAL_US = int(round(SERVO_PULSE_NEUTRAL_US))
+PULSE_MAX_US = int(round(SERVO_PULSE_MAX_US))
+PULSE_45_US = int(round((PULSE_MIN_US + PULSE_NEUTRAL_US) / 2.0))
+PULSE_135_US = int(round((PULSE_NEUTRAL_US + PULSE_MAX_US) / 2.0))
 
 
 # =============================================================================
@@ -153,11 +172,11 @@ class ServoArcWidget(QWidget):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
         self.angle_deg = 90.0
-        self.pulse_us = 1565
+        self.pulse_us = PULSE_NEUTRAL_US
         self.is_enabled = True
-        self.min_us = 1294
-        self.neutral_us = 1565
-        self.max_us = 1836
+        self.min_us = PULSE_MIN_US
+        self.neutral_us = PULSE_NEUTRAL_US
+        self.max_us = PULSE_MAX_US
 
     def update_state(self, angle_deg, pulse_us, is_enabled=True):
         self.angle_deg = angle_deg
@@ -204,11 +223,11 @@ class ServoArcWidget(QWidget):
         painter.setFont(font_tick)
 
         angles_to_mark = [
-            (0, "LEFT (0°)\n1294µs"),
-            (45, "45°\n1430µs"),
-            (90, "90° (NEUTRAL)\n1565µs"),
-            (135, "135°\n1701µs"),
-            (180, "RIGHT (180°)\n1836µs"),
+            (0, f"LEFT (0°)\n{PULSE_MIN_US}µs"),
+            (45, f"45°\n{PULSE_45_US}µs"),
+            (90, f"90° (NEUTRAL)\n{PULSE_NEUTRAL_US}µs"),
+            (135, f"135°\n{PULSE_135_US}µs"),
+            (180, f"RIGHT (180°)\n{PULSE_MAX_US}µs"),
         ]
 
         for mark_deg, label in angles_to_mark:
@@ -237,7 +256,7 @@ class ServoArcWidget(QWidget):
             painter.setPen(QColor(16, 185, 129) if is_center else QColor(148, 163, 184))
             painter.drawText(text_rect, Qt.AlignCenter, label)
 
-        # Neutral 1565 µs Reference Indicator Line
+        # Neutral 1500 µs Reference Indicator Line
         neutral_polar = math.radians(90.0)
         p_n1 = QPointF(center_x, center_y - 25)
         p_n2 = QPointF(center_x, center_y - radius + 15)
@@ -284,10 +303,10 @@ class ServoArcWidget(QWidget):
 
         font_sub = QFont("Consolas", 12, QFont.Bold)
         painter.setFont(font_sub)
-        pulse_color = QColor(16, 185, 129) if abs(self.pulse_us - 1565) <= 2 else QColor(56, 189, 248)
+        pulse_color = QColor(16, 185, 129) if abs(self.pulse_us - PULSE_NEUTRAL_US) <= 2 else QColor(56, 189, 248)
         painter.setPen(pulse_color)
         text_us = f"{self.pulse_us} µs"
-        if abs(self.pulse_us - 1565) <= 2:
+        if abs(self.pulse_us - PULSE_NEUTRAL_US) <= 2:
             text_us += " (NEUTRAL)"
         painter.drawText(QRectF(center_x - 120, center_y + 56, 240, 24), Qt.AlignCenter, text_us)
 
@@ -315,7 +334,7 @@ class ServoBenchGUI(QMainWindow):
 
         # State
         self.current_angle = 90.0
-        self.current_pulse = 1565
+        self.current_pulse = PULSE_NEUTRAL_US
         self.is_enabled = True
 
         # Sweep Automation State
@@ -323,8 +342,8 @@ class ServoBenchGUI(QMainWindow):
         self.sweep_timer.timeout.connect(self.on_sweep_tick)
         self.sweep_running = False
         self.sweep_direction = 1
-        self.sweep_min_us = 1294
-        self.sweep_max_us = 1836
+        self.sweep_min_us = PULSE_MIN_US
+        self.sweep_max_us = PULSE_MAX_US
         self.sweep_step_us = 10
         self.sweep_interval_ms = 30
 
@@ -353,7 +372,10 @@ class ServoBenchGUI(QMainWindow):
         title_lbl.setStyleSheet("color: #38bdf8; letter-spacing: 1px;")
         top_layout.addWidget(title_lbl)
 
-        spec_badge = QLabel("333 Hz | 3.0 ms Cycle | 1294-1836 µs | Neutral 1565 µs")
+        spec_badge = QLabel(
+            f"{SERVO_PWM_FREQ_HZ} Hz | {1000.0 / SERVO_PWM_FREQ_HZ:.1f} ms Cycle | "
+            f"{PULSE_MIN_US}-{PULSE_MAX_US} µs | Neutral {PULSE_NEUTRAL_US} µs"
+        )
         spec_badge.setFont(QFont("Segoe UI", 9))
         spec_badge.setStyleSheet("color: #94a3b8; background: #1e293b; padding: 4px 8px; border-radius: 4px;")
         top_layout.addWidget(spec_badge)
@@ -446,15 +468,15 @@ class ServoBenchGUI(QMainWindow):
         pulse_row.addWidget(pulse_lbl)
 
         self.pulse_slider = QSlider(Qt.Horizontal)
-        self.pulse_slider.setRange(1294, 1836)
-        self.pulse_slider.setValue(1565)
+        self.pulse_slider.setRange(PULSE_MIN_US, PULSE_MAX_US)
+        self.pulse_slider.setValue(PULSE_NEUTRAL_US)
         self.pulse_slider.valueChanged.connect(self.on_pulse_slider_changed)
         pulse_row.addWidget(self.pulse_slider)
 
         self.pulse_spin = QSpinBox()
-        self.pulse_spin.setRange(1294, 1836)
+        self.pulse_spin.setRange(PULSE_MIN_US, PULSE_MAX_US)
         self.pulse_spin.setSingleStep(1)
-        self.pulse_spin.setValue(1565)
+        self.pulse_spin.setValue(PULSE_NEUTRAL_US)
         self.pulse_spin.setSuffix(" µs")
         self.pulse_spin.setFixedWidth(85)
         self.pulse_spin.valueChanged.connect(self.on_pulse_spin_changed)
@@ -491,25 +513,25 @@ class ServoBenchGUI(QMainWindow):
 
         # Quick Presets Buttons
         preset_row = QHBoxLayout()
-        btn_0 = QPushButton("LEFT (1294µs)")
-        btn_0.clicked.connect(lambda: self.set_preset_pulse(1294))
+        btn_0 = QPushButton(f"LEFT ({PULSE_MIN_US}µs)")
+        btn_0.clicked.connect(lambda: self.set_preset_pulse(PULSE_MIN_US))
         preset_row.addWidget(btn_0)
 
-        btn_45 = QPushButton("45° (1430µs)")
-        btn_45.clicked.connect(lambda: self.set_preset_pulse(1430))
+        btn_45 = QPushButton(f"45° ({PULSE_45_US}µs)")
+        btn_45.clicked.connect(lambda: self.set_preset_pulse(PULSE_45_US))
         preset_row.addWidget(btn_45)
 
-        btn_neutral = QPushButton("★ NEUTRAL (1565µs / 90°)")
+        btn_neutral = QPushButton(f"★ NEUTRAL ({PULSE_NEUTRAL_US}µs / 90°)")
         btn_neutral.setObjectName("neutralBtn")
-        btn_neutral.clicked.connect(lambda: self.set_preset_pulse(1565))
+        btn_neutral.clicked.connect(lambda: self.set_preset_pulse(PULSE_NEUTRAL_US))
         preset_row.addWidget(btn_neutral)
 
-        btn_135 = QPushButton("135° (1701µs)")
-        btn_135.clicked.connect(lambda: self.set_preset_pulse(1701))
+        btn_135 = QPushButton(f"135° ({PULSE_135_US}µs)")
+        btn_135.clicked.connect(lambda: self.set_preset_pulse(PULSE_135_US))
         preset_row.addWidget(btn_135)
 
-        btn_180 = QPushButton("RIGHT (1836µs)")
-        btn_180.clicked.connect(lambda: self.set_preset_pulse(1836))
+        btn_180 = QPushButton(f"RIGHT ({PULSE_MAX_US}µs)")
+        btn_180.clicked.connect(lambda: self.set_preset_pulse(PULSE_MAX_US))
         preset_row.addWidget(btn_180)
 
         ctrl_layout.addLayout(preset_row)
@@ -544,15 +566,15 @@ class ServoBenchGUI(QMainWindow):
 
         sweep_layout.addWidget(QLabel("Min Pulse:"), 0, 0)
         self.sweep_min_spin = QSpinBox()
-        self.sweep_min_spin.setRange(1294, 1836)
-        self.sweep_min_spin.setValue(1294)
+        self.sweep_min_spin.setRange(PULSE_MIN_US, PULSE_MAX_US)
+        self.sweep_min_spin.setValue(PULSE_MIN_US)
         self.sweep_min_spin.setSuffix(" µs")
         sweep_layout.addWidget(self.sweep_min_spin, 0, 1)
 
         sweep_layout.addWidget(QLabel("Max Pulse:"), 0, 2)
         self.sweep_max_spin = QSpinBox()
-        self.sweep_max_spin.setRange(1294, 1836)
-        self.sweep_max_spin.setValue(1836)
+        self.sweep_max_spin.setRange(PULSE_MIN_US, PULSE_MAX_US)
+        self.sweep_max_spin.setValue(PULSE_MAX_US)
         self.sweep_max_spin.setSuffix(" µs")
         sweep_layout.addWidget(self.sweep_max_spin, 0, 3)
 
@@ -861,13 +883,13 @@ class ServoBenchGUI(QMainWindow):
         self.set_pulse(pulse_us)
 
     def set_pulse(self, pulse_us):
-        pulse_us = max(1294, min(1836, int(pulse_us)))
+        pulse_us = max(PULSE_MIN_US, min(PULSE_MAX_US, int(pulse_us)))
         self.current_pulse = pulse_us
-        # Piecewise calculation for display (1294 us = 0 deg, 1565 us = 90 deg, 1836 us = 180 deg)
-        if pulse_us <= 1565:
-            self.current_angle = ((pulse_us - 1294) / 271.0) * 90.0
+        # Piecewise calculation for display (PULSE_MIN_US = 0 deg, PULSE_NEUTRAL_US = 90 deg, PULSE_MAX_US = 180 deg)
+        if pulse_us <= PULSE_NEUTRAL_US:
+            self.current_angle = ((pulse_us - PULSE_MIN_US) / float(PULSE_NEUTRAL_US - PULSE_MIN_US)) * 90.0
         else:
-            self.current_angle = 90.0 + ((pulse_us - 1565) / 271.0) * 90.0
+            self.current_angle = 90.0 + ((pulse_us - PULSE_NEUTRAL_US) / float(PULSE_MAX_US - PULSE_NEUTRAL_US)) * 90.0
 
         self.sync_controls_from_state()
         self.worker.send_command(f"P{pulse_us}")
@@ -876,9 +898,9 @@ class ServoBenchGUI(QMainWindow):
         angle_deg = max(0.0, min(180.0, float(angle_deg)))
         self.current_angle = angle_deg
         if angle_deg <= 90.0:
-            self.current_pulse = int(1294 + (angle_deg / 90.0) * (1565 - 1294) + 0.5)
+            self.current_pulse = int(PULSE_MIN_US + (angle_deg / 90.0) * (PULSE_NEUTRAL_US - PULSE_MIN_US) + 0.5)
         else:
-            self.current_pulse = int(1565 + ((angle_deg - 90.0) / 90.0) * (1836 - 1565) + 0.5)
+            self.current_pulse = int(PULSE_NEUTRAL_US + ((angle_deg - 90.0) / 90.0) * (PULSE_MAX_US - PULSE_NEUTRAL_US) + 0.5)
 
         self.sync_controls_from_state()
         self.worker.send_command(f"A{angle_deg:.2f}")

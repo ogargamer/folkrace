@@ -44,6 +44,7 @@ from debug_recorder import TelemetryFlightRecorder, TelemetryLogReader
 PORT_HTTP = 8080
 PORT_UDP_RECV = 9876
 UDP_CMD_PORT = 9877
+PLANNER_CMD_UDP_PORT = int(os.environ.get("PLANNER_CMD_UDP_PORT", 9878))
 HOST_BIND = "0.0.0.0"
 
 HTML_PATH = os.path.join(CURR_DIR, "web_debug_gui.html")
@@ -61,19 +62,33 @@ def send_mcu_cmd(cmd_bytes: bytes) -> bool:
         return False
 
 
+def send_planner_cmd(cmd_bytes: bytes) -> bool:
+    """Dispatches Start/Stop command bytes to Core 1 Path Planner on UDP 127.0.0.1:9878."""
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.sendto(cmd_bytes, ("127.0.0.1", PLANNER_CMD_UDP_PORT))
+        sock.close()
+        return True
+    except Exception as e:
+        print(f"[DebugServer] Failed dispatching planner command: {e}")
+        return False
+
+
 class DebugServerState:
     def __init__(self):
         self.lock = threading.Lock()
         self.fake_data_active: bool = False
+        self.planner_running: bool = False
         self._bench_t0: float = time.time()
         self.latest_pkt: Dict[str, Any] = {
             "time_step": 0,
             "timestamp": time.time(),
             "sim_time": 0.0,
-            "mode": "STANDBY",
+            "mode": "STOPPED",
             "recovery_state": "STANDBY",
             "escape_state": "NORMAL",
-            "status": "OFFLINE",
+            "status": "STOPPED",
+            "planner_running": False,
             "v_cmd": 0.0,
             "v_real": 0.0,
             "v_est": 0.0,
@@ -334,6 +349,7 @@ def build_live_binary_packet(pkt: Dict[str, Any]) -> bytes:
         "target_yaw": pkt.get("target_yaw", 0.0),
         "total_frames": pkt.get("_total_frames", 0),
         "flags": pkt.get("flags", {}),
+        "planner_running": bool(pkt.get("planner_running", pkt.get("flags", {}).get("planner_running", False))),
         "servo_pulse_us": pkt.get("servo_pulse_us", 1565),
         "mcu_msg": pkt.get("mcu_msg", ""),
         "mcu_log": pkt.get("mcu_log", []),
@@ -532,6 +548,9 @@ class DebugHTTPRequestHandler(BaseHTTPRequestHandler):
                 # Convert steering angle (-32.2..+32.2 deg) to servo dial angle (0..180 deg, 90=Center, 0=Left, 180=Right)
                 dial_deg = max(0.0, min(180.0, 90.0 - (deg / 32.2166) * 90.0))
                 cmd_str = f"A {dial_deg:.1f}\n"
+            elif action == "trim":
+                trim_us = max(-20.0, min(20.0, float(data.get("trim_us", 0.0))))
+                cmd_str = f"TRIM {trim_us:.1f}\n"
             elif action == "pulse":
                 pulse = float(data.get("pulse", 1565.0))
                 cmd_str = f"P {pulse:.0f}\n"
@@ -547,13 +566,25 @@ class DebugHTTPRequestHandler(BaseHTTPRequestHandler):
                 cmd_str = "RECONNECT\n"
             elif action == "status":
                 cmd_str = "STATUS\n"
+            elif action == "planner":
+                enable = bool(data.get("enable", False))
+                cmd_str = "START\n" if enable else "STOP\n"
             elif action == "raw":
                 cmd_str = f"{data.get('cmd', '').strip()}\n"
             else:
                 self._send_json({"error": f"Unknown action: {action}"}, 400)
                 return
 
-            ok = send_mcu_cmd(cmd_str.encode("utf-8"))
+            if action == "planner":
+                enable = bool(data.get("enable", False))
+                ok_planner = send_planner_cmd(cmd_str.encode("utf-8"))
+                if enable:
+                    ok_mcu = send_mcu_cmd(b"E\n") and send_mcu_cmd(b"MOTORS\n")
+                else:
+                    ok_mcu = send_mcu_cmd(b"ESTOP\n") and send_mcu_cmd(b"RESET\n")
+                ok = ok_planner and ok_mcu
+            else:
+                ok = send_mcu_cmd(cmd_str.encode("utf-8"))
 
             # Update cached state
             with STATE.lock:
@@ -566,6 +597,21 @@ class DebugHTTPRequestHandler(BaseHTTPRequestHandler):
                     STATE.latest_pkt["mode"] = "ESTOP"
                 elif action == "motors":
                     STATE.latest_pkt["mode"] = "DRIVE" if data.get("enable", True) else "IDLE"
+                elif action == "planner":
+                    enable = bool(data.get("enable", False))
+                    STATE.planner_running = enable
+                    STATE.latest_pkt["planner_running"] = enable
+                    if "flags" not in STATE.latest_pkt or not isinstance(STATE.latest_pkt["flags"], dict):
+                        STATE.latest_pkt["flags"] = {}
+                    STATE.latest_pkt["flags"]["planner_running"] = enable
+                    STATE.latest_pkt["mode"] = "DRIVE" if enable else "STOPPED"
+                    if not enable:
+                        STATE.latest_pkt["v_cmd"] = 0.0
+                        STATE.latest_pkt["steer_cmd_deg"] = 0.0
+                        STATE.latest_pkt["best_line"] = []
+                        STATE.latest_pkt["candidate_lines"] = []
+                        STATE.latest_pkt["guide_line"] = []
+                    STATE.invalidate_caches()
                 elif action == "bench":
                     if "flags" not in STATE.latest_pkt:
                         STATE.latest_pkt["flags"] = {}
@@ -579,6 +625,7 @@ class DebugHTTPRequestHandler(BaseHTTPRequestHandler):
                 "action": action,
                 "cmd": cmd_str.strip(),
                 "fake_data": STATE.fake_data_active,
+                "planner_running": STATE.planner_running,
                 "pipe": "pi4 -> esp32 -> stm32"
             })
         else:

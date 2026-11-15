@@ -31,7 +31,7 @@ static constexpr double MAX_STEERING_RAD_CONST =
     0.562285; // ~32.22 deg 45% Ackermann center limit (yields 35.0 deg
               // inner, 30.0 deg outer)
 static constexpr double MAX_SERVO_RATE_RAD_S_CONST =
-    16.89; // 0.062 s / 60 deg @ 8.4V (968 deg/s)
+    11.16; // Half-speed 1st test (50% of 22.31 rad/s PTK 9497 tire rate)
 static constexpr double MPC_WEIGHT_SLACK_EPS_CONST = 500.0;
 static constexpr double MPC_FRICTION_OCTAGON_C1_CONST = 1.2;
 static constexpr double MPC_TARGET_SPEED_MPS_CONST = 4.50;

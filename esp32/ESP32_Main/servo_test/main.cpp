@@ -8,8 +8,8 @@
  *   - Modulation:       Digital
  *   - Rotational Range: 180°
  *   - Refresh Rate:     333 Hz (Period = 3003.0 µs ≈ 3.0 ms)
- *   - Pulse Width:      1294 µs to 1836 µs
- *   - Neutral Position: 1565 µs (Center / 90°)
+ *   - Pulse Width:      1229 µs to 1771 µs
+ *   - Neutral Position: 1500 µs (Center / 90°)
  *   - Dead Band:        2 µs
  *   - Control System:   PWM (LEDC Peripheral, 14-bit resolution = 0.183 µs/tick)
  *
@@ -28,7 +28,7 @@
  *       * GPIO 19/20: Native USB D-/D+.
  *
  * SERIAL COMMAND PROTOCOL (921600 Baud, LF / \n terminated):
- *   - P<us>        : Set pulse width in microseconds (e.g. "P1565", "P1294", "P1836")
+ *   - P<us>        : Set pulse width in microseconds (e.g. "P1500", "P1229", "P1771")
  *   - A<deg>       : Set angle in degrees (e.g. "A90.0", "A0", "A180")
  *   - D or DISABLE : Cut PWM output (0% duty) so servo motor rests without holding torque
  *   - E or ENABLE  : Re-enable PWM output at the last target pulse width
@@ -38,19 +38,20 @@
  */
 
 #include <Arduino.h>
+#include "vehicle_params.h"
 
 // -----------------------------------------------------------------------------
-// Pin and Hardware Configuration
+// Pin and Hardware Configuration (synced from config/vehicle_config.json)
 // -----------------------------------------------------------------------------
-#define SERVO_PIN         21        // Recommended PWM pin for ESP32-S3 (FOLKRACE SERVO_FRONT_PWM)
-#define PWM_FREQ_HZ       333       // 333 Hz refresh rate (3.0 ms cycle)
-#define PWM_CHANNEL       0         // LEDC channel (0-7 on ESP32-S3)
-#define PWM_RESOLUTION    14        // 14-bit (0-16383), ~0.183 us per count
+#define SERVO_PIN         SERVO_STEER_PWM_PIN
+#define PWM_FREQ_HZ       SERVO_PWM_FREQ_HZ
+#define PWM_CHANNEL       SERVO_PWM_CHANNEL
+#define PWM_RESOLUTION    SERVO_PWM_RESOLUTION
 
 // Servo Mechanical & Electrical Limits
-#define PULSE_MIN_US      1294      // Full Left Turn (inner 35°, outer 30°)
-#define PULSE_NEUTRAL_US  1565      // Center / 90° neutral position
-#define PULSE_MAX_US      1836      // Full Right Turn (inner 35°, outer 30°)
+#define PULSE_MIN_US      ((uint16_t)SERVO_PULSE_MIN_US)
+#define PULSE_NEUTRAL_US  ((uint16_t)SERVO_PULSE_NEUTRAL_US)
+#define PULSE_MAX_US      ((uint16_t)SERVO_PULSE_MAX_US)
 #define DEAD_BAND_US      2         // Minimum movement threshold
 
 // Math Constants for LEDC PWM
@@ -66,13 +67,13 @@ volatile float currentAngleDeg = 90.0f;
 volatile bool isPwmEnabled = true;
 
 // -----------------------------------------------------------------------------
-// Helper: Map Angle (0-180°) to Pulse Width (1294-1836 µs with 1565 µs Center)
+// Helper: Map Angle (0-180°) to Pulse Width (1229-1771 µs with 1500 µs Center)
 // -----------------------------------------------------------------------------
 uint16_t angleToPulseUs(float angleDeg) {
     if (angleDeg < 0.0f) angleDeg = 0.0f;
     if (angleDeg > 180.0f) angleDeg = 180.0f;
 
-    // Piecewise linear mapping respecting exact 1565 µs digital neutral at 90°
+    // Piecewise linear mapping respecting exact 1500 µs digital neutral at 90°
     if (angleDeg <= 90.0f) {
         return (uint16_t)(PULSE_MIN_US + (angleDeg / 90.0f) * (PULSE_NEUTRAL_US - PULSE_MIN_US) + 0.5f);
     } else {
@@ -81,7 +82,7 @@ uint16_t angleToPulseUs(float angleDeg) {
 }
 
 // -----------------------------------------------------------------------------
-// Helper: Map Pulse Width (1294-1836 µs) back to Angle (0-180°)
+// Helper: Map Pulse Width (1229-1771 µs) back to Angle (0-180°)
 // -----------------------------------------------------------------------------
 float pulseUsToAngle(uint16_t pulseUs) {
     if (pulseUs <= PULSE_NEUTRAL_US) {
@@ -188,16 +189,15 @@ void processCommand(String line) {
         sendTelemetry();
     }
     else if (line.charAt(0) == 'P' || line.charAt(0) == 'p') {
-        // Direct pulse width command, e.g. "P1565"
+        // Direct pulse width command, e.g. "P1500"
         long us = line.substring(1).toInt();
         if (us >= PULSE_MIN_US && us <= PULSE_MAX_US) {
             setPwmEnabled(true);
             setPulseWidth((uint16_t)us);
             sendTelemetry();
         } else {
-            Serial.print("{\"error\":\"Pulse out of bounds (1294-1836 us): ");
-            Serial.print(us);
-            Serial.println("\"}");
+            Serial.printf("{\"error\":\"Pulse out of bounds (%u-%u us): %ld\"}\n",
+                          PULSE_MIN_US, PULSE_MAX_US, us);
         }
     }
     else if (line.charAt(0) == 'A' || line.charAt(0) == 'a') {
@@ -243,7 +243,7 @@ void setup() {
     ledcAttachPin(SERVO_PIN, PWM_CHANNEL);
 #endif
 
-    // Move to 1565 us neutral position immediately
+    // Move to 1500 us neutral position immediately
     setPulseWidth(PULSE_NEUTRAL_US);
     sendTelemetry();
 }

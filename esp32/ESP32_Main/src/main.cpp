@@ -92,6 +92,7 @@ static volatile bool s_manual_override = false;
 static volatile bool s_cli_override_active = false;
 static volatile bool s_manual_servo_direct = false;
 static volatile float s_direct_servo_pulse = SERVO_PULSE_NEUTRAL_US;
+static volatile float s_servo_trim_us = 0.0f;
 
 static inline float servoPulseToAngle(float pulse_us) {
   if (pulse_us <= SERVO_PULSE_NEUTRAL_US) {
@@ -258,11 +259,12 @@ static void IRAM_ATTR realTimeControlTask(void *pvParameters) {
                        DEFAULT_ROAD_MU, s_last_v_est);
 
     // 3. Command Single Steering Servo on LEDC PWM (GPIO 21 @ 333 Hz)
-    if (s_manual_servo_direct) {
-      s_servo.setPulseUs(s_direct_servo_pulse);
-    } else {
-      s_servo.setPulseUs(diff.servo_pulse_us);
-    }
+    float servo_pulse_cmd =
+        (s_manual_servo_direct ? s_direct_servo_pulse : diff.servo_pulse_us) +
+        s_servo_trim_us;
+    servo_pulse_cmd =
+        fmaxf(SERVO_PULSE_MIN_US, fminf(SERVO_PULSE_MAX_US, servo_pulse_cmd));
+    s_servo.setPulseUs(servo_pulse_cmd);
 
     // 4. Execute 4-Wheel Median Odometry + IMU Complementary Sensor Fusion
     FusionOutputs fusion =
@@ -301,8 +303,7 @@ static void IRAM_ATTR realTimeControlTask(void *pvParameters) {
     out.rr_target_rpm = diff.rpm_RR;
     out.steer_rad = diff.steer_rad;
     out.steer_deg = diff.steer_deg;
-    out.servo_pulse_us =
-        s_manual_servo_direct ? s_direct_servo_pulse : diff.servo_pulse_us;
+    out.servo_pulse_us = servo_pulse_cmd;
     out.rate_limited_v = diff.rate_limited_v;
     out.v_FL = diff.v_FL;
     out.v_FR = diff.v_FR;
@@ -503,6 +504,12 @@ static void handleAsciiCommand(const char *raw_line) {
       Serial.printf("{\"error\":\"Angle out of bounds (0-180 deg): %.1f\"}\n",
                     deg);
     }
+  } else if (line.startsWith("TRIM ") || line.startsWith("trim ")) {
+    float trim_us = line.substring(5).toFloat();
+    trim_us = fmaxf(-20.0f, fminf(20.0f, trim_us));
+    s_servo_trim_us = trim_us;
+    Serial.printf(">>> Servo neutral trim: %+.1f us (effective neutral: %.1f us)\n",
+                  s_servo_trim_us, SERVO_PULSE_NEUTRAL_US + s_servo_trim_us);
   } else if (line.equalsIgnoreCase("RESET")) {
     s_manual_v = 0.0f;
     s_manual_steer = 0.0f;
@@ -511,7 +518,9 @@ static void handleAsciiCommand(const char *raw_line) {
     s_manual_servo_direct = false;
     s_ediff.reset();
     s_fusion.reset();
-    s_servo.setPulseUs(SERVO_PULSE_NEUTRAL_US);
+    s_servo.setPulseUs(fmaxf(SERVO_PULSE_MIN_US,
+                             fminf(SERVO_PULSE_MAX_US,
+                                   SERVO_PULSE_NEUTRAL_US + s_servo_trim_us)));
     Serial.println(F(">>> Controller & Sensor Fusion State Reset."));
   } else if (line.length() == 1 && strchr("tTrR12345+-0mM", line[0])) {
     s_imu.handleSerialCommand(line[0], Serial);

@@ -367,6 +367,45 @@
       outline: none;
     }
 
+    /* Tab 1 Start / Stop Control Button */
+    .btn-planner-toggle {
+      width: 100%;
+      padding: 10px 14px;
+      border-radius: 6px;
+      border: 1px solid;
+      font-size: 13px;
+      font-weight: 800;
+      letter-spacing: 0.5px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      transition: all 0.15s ease;
+    }
+
+    .btn-planner-toggle.state-stopped {
+      background: #0d2b1d;
+      border-color: #00e676;
+      color: #00e676;
+    }
+
+    .btn-planner-toggle.state-stopped:hover {
+      background: #143f2b;
+      box-shadow: 0 0 12px rgba(0, 230, 118, 0.25);
+    }
+
+    .btn-planner-toggle.state-running {
+      background: #361217;
+      border-color: #ff5252;
+      color: #ff5252;
+    }
+
+    .btn-planner-toggle.state-running:hover {
+      background: #4d1920;
+      box-shadow: 0 0 12px rgba(255, 82, 82, 0.3);
+    }
+
     .btn-toggle-fake.state-live {
       color: var(--accent-green);
       border-color: #00c853;
@@ -935,6 +974,18 @@
 
       <!-- Telemetry HUD & Diagnostics -->
       <div class="side-panel">
+        <!-- 0. Master Start / Stop Control -->
+        <div class="card" style="padding:8px 10px;">
+          <button id="btnPlannerStartStop" class="btn-planner-toggle state-stopped" onclick="togglePlannerRun()">
+            <span id="plannerToggleIcon">▶</span>
+            <span id="plannerToggleText">START AUTONOMOUS DRIVE</span>
+          </button>
+          <div id="plannerToggleSub"
+            style="margin-top:5px;font-size:10px;color:var(--text-secondary);text-align:center;">
+            STOPPED · Line calc off · Motor drivers disabled · Servo centered
+          </div>
+        </div>
+
         <!-- 1. Motion & Actuator HUD -->
         <div class="card">
           <div class="card-title">
@@ -1297,9 +1348,22 @@
             <input type="range" id="steerSlider" class="bench-slider" min="-32.2" max="32.2" step="0.5" value="0.0"
               oninput="onSteerInput(this.value)">
             <div class="preset-row">
-              <button class="btn-preset" onclick="setSteer(32.2)">◀ Hard Left (+32.2° / 1294µs)</button>
-              <button class="btn-preset" onclick="setSteer(0.0)">Center (0° / 1565µs)</button>
-              <button class="btn-preset" onclick="setSteer(-32.2)">Hard Right (-32.2° / 1836µs) ▶</button>
+              <button class="btn-preset" onclick="setSteer(32.2)">◀ Hard Left (+32.2°)</button>
+              <button class="btn-preset" onclick="setSteer(0.0)">Center (0°)</button>
+              <button class="btn-preset" onclick="setSteer(-32.2)">Hard Right (-32.2°) ▶</button>
+            </div>
+
+            <!-- Live Servo Neutral Trim (±20 µs) -->
+            <div class="slider-row" style="margin-top:8px;">
+              <span>Servo Neutral Trim (±20 µs):</span>
+              <span id="trimSliderVal" style="font-weight:700;color:var(--accent-cyan);">0 µs (1510 µs)</span>
+            </div>
+            <input type="range" id="trimSlider" class="bench-slider" min="-20" max="20" step="1" value="0"
+              oninput="onTrimInput(this.value)">
+            <div class="preset-row">
+              <button class="btn-preset" onclick="nudgeTrim(-1)">◀ -1 µs</button>
+              <button class="btn-preset" onclick="setTrim(0)">Reset (0 µs)</button>
+              <button class="btn-preset" onclick="nudgeTrim(1)">+1 µs ▶</button>
             </div>
 
             <!-- Differential Split Metrics -->
@@ -2903,6 +2967,42 @@
       }
     }
 
+    let plannerRunning = false;
+    let lastPlannerToggleMs = 0;
+
+    function syncPlannerRunButton(isRunning) {
+      const btn = document.getElementById("btnPlannerStartStop");
+      const icon = document.getElementById("plannerToggleIcon");
+      const text = document.getElementById("plannerToggleText");
+      const sub = document.getElementById("plannerToggleSub");
+      if (!btn || !icon || !text || !sub) return;
+      if (isRunning) {
+        btn.className = "btn-planner-toggle state-running";
+        icon.innerText = "⏹";
+        text.innerText = "STOP AUTONOMOUS DRIVE";
+        sub.innerText = "RUNNING · Line calc active · Motor drivers armed";
+        sub.style.color = "#ff8a80";
+      } else {
+        btn.className = "btn-planner-toggle state-stopped";
+        icon.innerText = "▶";
+        text.innerText = "START AUTONOMOUS DRIVE";
+        sub.innerText = "STOPPED · Line calc off · Motor drivers disabled · Servo centered";
+        sub.style.color = "var(--text-secondary)";
+      }
+    }
+
+    async function togglePlannerRun() {
+      const nextState = !plannerRunning;
+      plannerRunning = nextState;
+      lastPlannerToggleMs = performance.now();
+      syncPlannerRunButton(plannerRunning);
+      const data = await sendMcuCommand({ action: "planner", enable: nextState });
+      if (data && typeof data.planner_running === "boolean") {
+        plannerRunning = data.planner_running;
+        syncPlannerRunButton(plannerRunning);
+      }
+    }
+
     let fakeDataActive = false;
 
     function syncFakeDataButtons(isBench) {
@@ -3023,6 +3123,35 @@
       if (steerSendTimer) clearTimeout(steerSendTimer);
       steerSendTimer = setTimeout(() => {
         sendMcuCommand({ action: "steer", deg: parseFloat(deg) });
+      }, 100);
+    }
+
+    let trimSendTimer = null;
+    const BASE_SERVO_NEUTRAL_US = 1510;
+
+    function updateTrimDisplay(us) {
+      const val = Math.max(-20, Math.min(20, Math.round(Number(us))));
+      const sign = val > 0 ? "+" : "";
+      document.getElementById("trimSlider").value = val;
+      document.getElementById("trimSliderVal").innerText = `${sign}${val} µs (${BASE_SERVO_NEUTRAL_US + val} µs)`;
+      return val;
+    }
+
+    function setTrim(us) {
+      const val = updateTrimDisplay(us);
+      executeButtonCommand(null, { action: "trim", trim_us: val });
+    }
+
+    function nudgeTrim(delta) {
+      const cur = Number(document.getElementById("trimSlider").value) || 0;
+      setTrim(cur + delta);
+    }
+
+    function onTrimInput(us) {
+      const val = updateTrimDisplay(us);
+      if (trimSendTimer) clearTimeout(trimSendTimer);
+      trimSendTimer = setTimeout(() => {
+        sendMcuCommand({ action: "trim", trim_us: val });
       }, 100);
     }
 
@@ -3193,6 +3322,18 @@
       // Global Header and Page 2 Button Sync
       fakeDataActive = isBench;
       syncFakeDataButtons(isBench);
+
+      if (performance.now() - lastPlannerToggleMs > 500) {
+        const srvRunning = Boolean(
+          pkt.planner_running !== undefined
+            ? pkt.planner_running
+            : (pkt.flags && pkt.flags.planner_running)
+        );
+        if (srvRunning !== plannerRunning) {
+          plannerRunning = srvRunning;
+          syncPlannerRunButton(plannerRunning);
+        }
+      }
 
       // Differential Split
       const leftAvg = (flAct + rlAct) * 0.5;
@@ -3609,6 +3750,7 @@
     renderRadar(defaultPkt);
     updateHUD(defaultPkt);
     syncFakeDataButtons(false);
+    syncPlannerRunButton(false);
 
     initLiveWebSocket();
     setTimeout(fetchLive, 50);
