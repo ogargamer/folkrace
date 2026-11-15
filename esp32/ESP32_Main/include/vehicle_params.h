@@ -22,7 +22,7 @@
 #define VEHICLE_MAX_STEER_RAD       0.562285f
 #define VEHICLE_SERVO_MAX_RATE      16.89f
 #define VEHICLE_MOTOR_DIR           1.0f
-#define VEHICLE_MAX_WHEEL_SPEED     5.00f
+#define VEHICLE_MAX_WHEEL_SPEED     3.84f
 
 // --- Tire Friction & Dynamic Traction Envelopes ---
 #define DEFAULT_ROAD_MU             0.86f

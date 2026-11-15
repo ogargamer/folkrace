@@ -22,8 +22,8 @@ MAX_STEERING_RAD: float = 0.562285
 SERVO_MAX_SPEED_RAD_S: float = 16.89
 
 MOTOR_DIR: float = 1.0
-V_MAX_WHEEL: float = 5.0
-V_MAX_CRUISE: float = 5.0
+V_MAX_WHEEL: float = 3.84
+V_MAX_CRUISE: float = 3.84
 
 # ============================================================================== #
 # 2. TIRE & VEHICLE DYNAMICS LIMITS                                              #
