@@ -196,7 +196,10 @@ def run_path_planner():
                     if raw_tof_bytes == raw_mcu_bytes:
                         raw_tof_bytes = None
                         last_tof_pkt = pkt
-                        if "tof_ranges_raw" in pkt:
+                        if not pkt.get("mcu_tof_connected", True):
+                            has_live_sensor_feed = False
+                            live_tof_list = [0.0] * 16
+                        elif "tof_ranges_raw" in pkt:
                             r_in = pkt["tof_ranges_raw"]
                             live_tof_list = [float(r_in[i]) if i < len(r_in) else 0.0 for i in range(16)]
                             has_live_sensor_feed = True
@@ -208,7 +211,10 @@ def run_path_planner():
                 try:
                     pkt = json.loads(raw_tof_bytes.decode("utf-8"))
                     last_tof_pkt = pkt
-                    if "tof_ranges_raw" in pkt:
+                    if not pkt.get("mcu_tof_connected", True):
+                        has_live_sensor_feed = False
+                        live_tof_list = [0.0] * 16
+                    elif "tof_ranges_raw" in pkt:
                         r_in = pkt["tof_ranges_raw"]
                         live_tof_list = [float(r_in[i]) if i < len(r_in) else 0.0 for i in range(16)]
                         has_live_sensor_feed = True

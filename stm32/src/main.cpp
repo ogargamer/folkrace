@@ -41,6 +41,51 @@ static_assert(sizeof(TelemetryPacket) == 26, "TelemetryPacket must be exactly 26
 // ----------------------------------------------------------------------------
 // ESP32 High-Speed 400 Hz UART Protocol Definitions
 // ----------------------------------------------------------------------------
+#define FOC_TRACE_SAMPLE_HZ        500
+#define FOC_TRACE_CAPACITY         5120
+
+struct __attribute__((packed)) FocTraceSample {
+    uint16_t m1_raw_angle;
+    uint16_t m2_raw_angle;
+    int16_t m1_target_rpm;
+    int16_t m2_target_rpm;
+    int16_t m1_actual_rpm;
+    int16_t m2_actual_rpm;
+    int16_t m1_uq_mv;
+    int16_t m2_uq_mv;
+};
+static_assert(sizeof(FocTraceSample) == 16, "FocTraceSample must be exactly 16 bytes");
+
+struct __attribute__((packed)) FocTraceHeader {
+    uint8_t sync[2];
+    uint16_t version;
+    uint16_t sample_hz;
+    uint16_t sample_count;
+    uint32_t overwritten;
+    uint32_t reserved;
+};
+static_assert(sizeof(FocTraceHeader) == 16, "FocTraceHeader must be exactly 16 bytes");
+
+static volatile FocTraceSample foc_trace[FOC_TRACE_CAPACITY];
+static volatile uint16_t foc_trace_write_index = 0;
+static volatile uint16_t foc_trace_count = 0;
+static volatile uint32_t foc_trace_overwritten = 0;
+static volatile bool foc_trace_active = false;
+static constexpr uint32_t FOC_TRACE_DECIMATION = FOC_COMMUTATION_HZ / FOC_TRACE_SAMPLE_HZ;
+
+static uint32_t last_esp_packet_ms = 0;
+static bool esp_link_active = false;
+static constexpr size_t ESP_COMMAND_BYTE_BUDGET = 64;
+static uint32_t esp_rx_bytes = 0;
+static uint32_t esp_pkts_ok = 0;
+static uint32_t esp_chk_err = 0;
+static uint32_t esp_wdog_trips = 0;
+static uint32_t esp_max_gap_ms = 0;
+static uint32_t esp_usart1_ore = 0;
+static uint32_t esp_usart1_fe = 0;
+static uint32_t esp_usart1_ne = 0;
+static uint32_t esp_drive_zero = 0;
+
 #define STM32_CMD_SYNC_1           0xAA
 #define STM32_CMD_SYNC_2           0x55
 #define STM32_FEEDBACK_SYNC_1      0xAA
@@ -596,6 +641,26 @@ void focTimerISR() {
     }
     uint32_t c5 = DWT->CYCCNT;
 
+    if (foc_trace_active && (foc_tick_count % FOC_TRACE_DECIMATION) == 0U) {
+        uint16_t index = foc_trace_write_index;
+        volatile FocTraceSample &sample = foc_trace[index];
+        sample.m1_raw_angle = encoder1.last_raw_14bit;
+        sample.m2_raw_angle = encoder2.last_raw_14bit;
+        sample.m1_target_rpm = (int16_t)_constrain(m1_target_rpm, -32768.0f, 32767.0f);
+        sample.m2_target_rpm = (int16_t)_constrain(m2_target_rpm, -32768.0f, 32767.0f);
+        sample.m1_actual_rpm = (int16_t)_constrain(motor1.shaftVelocity() * 9.54929659f, -32768.0f, 32767.0f);
+        sample.m2_actual_rpm = (int16_t)_constrain(motor2.shaftVelocity() * 9.54929659f, -32768.0f, 32767.0f);
+        sample.m1_uq_mv = (int16_t)_constrain(motor1.voltage.q * 1000.0f, -32768.0f, 32767.0f);
+        sample.m2_uq_mv = (int16_t)_constrain(motor2.voltage.q * 1000.0f, -32768.0f, 32767.0f);
+
+        foc_trace_write_index = (uint16_t)((index + 1U) % FOC_TRACE_CAPACITY);
+        if (foc_trace_count < FOC_TRACE_CAPACITY) {
+            foc_trace_count++;
+        } else {
+            foc_trace_overwritten++;
+        }
+    }
+
     // 5. Profiling & Jitter Tracking
     uint32_t d_spi = c1 - c0;
     uint32_t d_upd = c2 - c1;
@@ -1031,6 +1096,10 @@ bool saveConfigToFlash() {
     // Disable motor PWM and pause 20kHz FOC interrupt during flash write
     motor1.disable();
     motor2.disable();
+    driver1.disable();
+    driver2.disable();
+    digitalWrite(M1_EN, LOW);
+    digitalWrite(M2_EN, LOW);
     motor1.voltage.q = 0.0f;
     motor1.voltage.d = 0.0f;
     motor2.voltage.q = 0.0f;
@@ -1953,6 +2022,8 @@ void runMasterCalibrationSequence(int motor_id, float align_voltage) {
     motor.voltage.d = 0.0f;
     if (!prev_enabled) {
         motor.disable();
+        driver.disable();
+        digitalWrite((motor_id == 1) ? M1_EN : M2_EN, LOW);
     }
 
     Serial.print("[CALIB_CERTIFIED]:M"); Serial.println(motor_id);
@@ -2081,8 +2152,81 @@ void printHelp() {
 // ----------------------------------------------------------------------------
 // Command Interpreter
 // ----------------------------------------------------------------------------
+void startFocTrace() {
+    foc_trace_active = false;
+    foc_trace_write_index = 0;
+    foc_trace_count = 0;
+    foc_trace_overwritten = 0;
+    foc_trace_active = true;
+    Serial.println(">>> FOC TRACE STARTED (500 Hz, 10.24 s ring)");
+}
+
+void stopFocTrace() {
+    foc_trace_active = false;
+    Serial.print(">>> FOC TRACE STOPPED samples=");
+    Serial.print(foc_trace_count);
+    Serial.print(" overwritten=");
+    Serial.println(foc_trace_overwritten);
+}
+
+void dumpFocTrace() {
+    foc_trace_active = false;
+    uint16_t count = foc_trace_count;
+    uint16_t write_index = foc_trace_write_index;
+
+    FocTraceHeader header = {{'F', 'T'}, 1, FOC_TRACE_SAMPLE_HZ, count, foc_trace_overwritten, 0};
+    Serial.write(reinterpret_cast<const uint8_t *>(&header), sizeof(header));
+
+    uint16_t first = (count < FOC_TRACE_CAPACITY)
+        ? 0
+        : (uint16_t)((write_index + FOC_TRACE_CAPACITY - count) % FOC_TRACE_CAPACITY);
+    for (uint16_t offset = 0; offset < count; offset++) {
+        uint16_t index = (uint16_t)((first + offset) % FOC_TRACE_CAPACITY);
+        FocTraceSample sample;
+        const volatile FocTraceSample &source = foc_trace[index];
+        sample.m1_raw_angle = source.m1_raw_angle;
+        sample.m2_raw_angle = source.m2_raw_angle;
+        sample.m1_target_rpm = source.m1_target_rpm;
+        sample.m2_target_rpm = source.m2_target_rpm;
+        sample.m1_actual_rpm = source.m1_actual_rpm;
+        sample.m2_actual_rpm = source.m2_actual_rpm;
+        sample.m1_uq_mv = source.m1_uq_mv;
+        sample.m2_uq_mv = source.m2_uq_mv;
+        Serial.write(reinterpret_cast<const uint8_t *>(&sample), sizeof(sample));
+    }
+    Serial.flush();
+    Serial.println(">>> FOC TRACE DUMP COMPLETE");
+}
+
 void processCommand(const char *cmd) {
     if (strlen(cmd) == 0) return;
+
+    if (strcasecmp(cmd, "TRACE_START") == 0) {
+        startFocTrace();
+        return;
+    }
+    if (strcasecmp(cmd, "TRACE_STOP") == 0) {
+        stopFocTrace();
+        return;
+    }
+    if (strcasecmp(cmd, "TRACE_DUMP") == 0) {
+        dumpFocTrace();
+        return;
+    }
+    if (strcasecmp(cmd, "ESP_DIAG") == 0) {
+        Serial.print("[ESP_DIAG]:RX="); Serial.print(esp_rx_bytes);
+        Serial.print(":PKT="); Serial.print(esp_pkts_ok);
+        Serial.print(":CHK_ERR="); Serial.print(esp_chk_err);
+        Serial.print(":WDOG="); Serial.print(esp_wdog_trips);
+        Serial.print(":MAX_GAP_MS="); Serial.print(esp_max_gap_ms);
+        Serial.print(":ORE="); Serial.print(esp_usart1_ore);
+        Serial.print(":FE="); Serial.print(esp_usart1_fe);
+        Serial.print(":NE="); Serial.print(esp_usart1_ne);
+        Serial.print(":DRV_ZERO="); Serial.print(esp_drive_zero);
+        Serial.print(":LINK="); Serial.println(esp_link_active ? 1 : 0);
+        esp_max_gap_ms = 0;
+        return;
+    }
 
     if (strcasecmp(cmd, "PROF") == 0) {
         float us_scale = 1.0f / (SystemCoreClock / 1000000.0f);
@@ -2190,6 +2334,7 @@ void processCommand(const char *cmd) {
         motor1.voltage_limit = MOTOR_VOLTAGE_LIMIT;
         motor1.PID_velocity.limit = motor1.voltage_limit;
         m1_enabled = true;
+        driver1.enable();
         motor1.enable();
         if (!m1_calibrated) initMotorFOC(1);
         Serial.println(">>> M1: ENABLED");
@@ -2201,6 +2346,7 @@ void processCommand(const char *cmd) {
         motor2.voltage_limit = MOTOR_VOLTAGE_LIMIT;
         motor2.PID_velocity.limit = motor2.voltage_limit;
         m2_enabled = true;
+        driver2.enable();
         motor2.enable();
         if (!m2_calibrated) initMotorFOC(2);
         Serial.println(">>> M2: ENABLED");
@@ -2216,6 +2362,8 @@ void processCommand(const char *cmd) {
         motor2.PID_velocity.limit = motor2.voltage_limit;
         m1_enabled = true;
         m2_enabled = true;
+        driver1.enable();
+        driver2.enable();
         motor1.enable();
         motor2.enable();
         if (!m1_calibrated) initMotorFOC(1);
@@ -2227,6 +2375,8 @@ void processCommand(const char *cmd) {
     if (strcmp(cmd, "D1") == 0) {
         m1_enabled = false;
         motor1.disable();
+        driver1.disable();
+        digitalWrite(M1_EN, LOW);
         m1_target_rpm = 0.0f;
         motor1.voltage.q = 0.0f;
         motor1.voltage.d = 0.0f;
@@ -2239,6 +2389,8 @@ void processCommand(const char *cmd) {
     if (strcmp(cmd, "D2") == 0) {
         m2_enabled = false;
         motor2.disable();
+        driver2.disable();
+        digitalWrite(M2_EN, LOW);
         m2_target_rpm = 0.0f;
         motor2.voltage.q = 0.0f;
         motor2.voltage.d = 0.0f;
@@ -2253,6 +2405,10 @@ void processCommand(const char *cmd) {
         m2_enabled = false;
         motor1.disable();
         motor2.disable();
+        driver1.disable();
+        driver2.disable();
+        digitalWrite(M1_EN, LOW);
+        digitalWrite(M2_EN, LOW);
         m1_target_rpm = 0.0f;
         m2_target_rpm = 0.0f;
         motor1.voltage.q = 0.0f;
@@ -2621,6 +2777,7 @@ void processCommand(const char *cmd) {
     // Open-loop voltage commands: 'v1 <volts>', 'v2 <volts>', or 'v <volts>' (both)
     if (strncasecmp(cmd, "v1 ", 3) == 0 || strncasecmp(cmd, "v1", 2) == 0) {
         float val = fast_atof(cmd + 2);
+        driver1.enable();
         motor1.enable();
         m1_enabled = true;
 #if defined(INVERT_ENCODER_DIRECTION) && (INVERT_ENCODER_DIRECTION == 1)
@@ -2634,6 +2791,7 @@ void processCommand(const char *cmd) {
     }
     if (strncasecmp(cmd, "v2 ", 3) == 0 || strncasecmp(cmd, "v2", 2) == 0) {
         float val = fast_atof(cmd + 2);
+        driver2.enable();
         motor2.enable();
         m2_enabled = true;
 #if defined(INVERT_ENCODER_DIRECTION) && (INVERT_ENCODER_DIRECTION == 1)
@@ -2647,6 +2805,8 @@ void processCommand(const char *cmd) {
     }
     if ((cmd[0] == 'v' || cmd[0] == 'V') && (cmd[1] == ' ' || cmd[1] == '+' || cmd[1] == '-' || (cmd[1] >= '0' && cmd[1] <= '9'))) {
         float val = fast_atof(cmd + 1);
+        driver1.enable();
+        driver2.enable();
         motor1.enable();
         motor2.enable();
         m1_enabled = true;
@@ -2922,8 +3082,6 @@ void sendBinaryTelemetry() {
 // ----------------------------------------------------------------------------
 // ESP32 High-Speed 400 Hz Bidirectional Link Handlers
 // ----------------------------------------------------------------------------
-static uint32_t last_esp_packet_ms = 0;
-static bool esp_link_active = false;
 
 void sendESP32Feedback() {
     if (SerialESP.availableForWrite() < (int)sizeof(STM32FeedbackPacket)) return;
@@ -2960,9 +3118,22 @@ void processESP32Link() {
     static uint8_t rx_buf[sizeof(STM32MotorCommandPacket)];
     static uint8_t rx_idx = 0;
     static bool sync_found = false;
+    float latest_drive_m1 = 0.0f;
+    float latest_drive_m2 = 0.0f;
+    bool have_latest_drive = false;
+    bool have_valid_packet = false;
+    size_t bytes_processed = 0;
 
-    while (SerialESP.available() > 0) {
+    uint32_t uisr = USART1->ISR;
+    if (uisr & USART_ISR_ORE) { esp_usart1_ore++; USART1->ICR = USART_ICR_ORECF; }
+    if (uisr & USART_ISR_FE)  { esp_usart1_fe++;  USART1->ICR = USART_ICR_FECF; }
+    if (uisr & USART_ISR_NE)  { esp_usart1_ne++;  USART1->ICR = USART_ICR_NECF; }
+
+    while (SerialESP.available() > 0 &&
+           bytes_processed < ESP_COMMAND_BYTE_BUDGET) {
         uint8_t b = SerialESP.read();
+        bytes_processed++;
+        esp_rx_bytes++;
 
         if (!sync_found) {
             if (b == STM32_CMD_SYNC_1) {
@@ -2990,14 +3161,21 @@ void processESP32Link() {
                     const STM32MotorCommandPacket *pkt = (const STM32MotorCommandPacket *)rx_buf;
                     last_esp_packet_ms = millis();
                     esp_link_active = true;
+                    have_valid_packet = true;
+                    esp_pkts_ok++;
 
                     switch (pkt->cmd_mode) {
                         case STM32_CMD_DRIVE:
                             if (!g_estop_active && !s_calib_isolation_active) {
-                                m1_target_rpm = pkt->param1;
-                                m2_target_rpm = pkt->param2;
-                                if (!m1_enabled) { m1_enabled = true; motor1.enable(); }
-                                if (!m2_enabled) { m2_enabled = true; motor2.enable(); }
+                                // Keep only the newest drive target from this
+                                // service pass. This bounds PID-target churn
+                                // when UART bytes arrive in a burst.
+                                latest_drive_m1 = pkt->param1;
+                                latest_drive_m2 = pkt->param2;
+                                have_latest_drive = true;
+                                if ((m1_enabled || m2_enabled) && pkt->param1 == 0.0f && pkt->param2 == 0.0f) {
+                                    esp_drive_zero++;
+                                }
                             }
                             break;
 
@@ -3010,6 +3188,8 @@ void processESP32Link() {
                                 g_estop_active = false;
                                 m1_enabled = true;
                                 m2_enabled = true;
+                                driver1.enable();
+                                driver2.enable();
                                 motor1.enable();
                                 motor2.enable();
                             }
@@ -3059,10 +3239,8 @@ void processESP32Link() {
                         default:
                             break;
                     }
-
-                    // Synchronous 400 Hz Ping-Pong Feedback Reply
-                    sendESP32Feedback();
                 } else {
+                    esp_chk_err++;
                     // Checksum mismatch on false sync: rescan rx_buf[1..11] so real header isn't lost
                     for (uint8_t shift = 1; shift < sizeof(STM32MotorCommandPacket); shift++) {
                         if (rx_buf[shift] == STM32_CMD_SYNC_1) {
@@ -3082,9 +3260,23 @@ void processESP32Link() {
                             }
                         }
                     }
+
                 }
             }
         }
+    }
+
+    if (have_latest_drive && !g_estop_active && !s_calib_isolation_active) {
+        m1_target_rpm = latest_drive_m1;
+        m2_target_rpm = latest_drive_m2;
+        if (!m1_enabled) { m1_enabled = true; driver1.enable(); motor1.enable(); }
+        if (!m2_enabled) { m2_enabled = true; driver2.enable(); motor2.enable(); }
+    }
+
+    // At most one reply per bounded service pass; do not create a TX burst
+    // proportional to the number of queued drive commands.
+    if (have_valid_packet) {
+        sendESP32Feedback();
     }
 }
 
@@ -3230,12 +3422,26 @@ void loop() {
     // 0. High-Speed 400 Hz Bidirectional Binary Link to ESP32
     processESP32Link();
 
-    // 0b. Safety Watchdog: If no ESP32 packet received for > 60 ms while motors armed, disarm motors
-    if (esp_link_active && (m1_enabled || m2_enabled) && (now - last_esp_packet_ms > 60)) {
+    // Refresh timestamp after processESP32Link() so last_esp_packet_ms cannot be ahead of now
+    // (which would otherwise underflow unsigned subtraction to 0xFFFFFFFF and trip the watchdog).
+    now = millis();
+
+    // 0b. Safety Watchdog: If no ESP32 packet received for > 100 ms while motors armed, disarm motors
+    if (esp_link_active && now >= last_esp_packet_ms) {
+        uint32_t gap = now - last_esp_packet_ms;
+        if (gap > esp_max_gap_ms) esp_max_gap_ms = gap;
+    }
+    if (esp_link_active && (m1_enabled || m2_enabled) &&
+        (now >= last_esp_packet_ms) && (now - last_esp_packet_ms > 100)) {
+        esp_wdog_trips++;
         m1_target_rpm = 0.0f;
         m2_target_rpm = 0.0f;
         motor1.disable();
         motor2.disable();
+        driver1.disable();
+        driver2.disable();
+        digitalWrite(M1_EN, LOW);
+        digitalWrite(M2_EN, LOW);
         m1_enabled = false;
         m2_enabled = false;
     }

@@ -1,5 +1,9 @@
 #include "stm32_link.h"
 
+namespace {
+constexpr size_t STM32_FEEDBACK_BYTE_BUDGET = 64;
+}
+
 STM32Channel::STM32Channel()
     : serial_(nullptr),
       rx_index_(0),
@@ -49,8 +53,11 @@ bool STM32Channel::update() {
     if (!serial_) return false;
 
     bool new_packet = false;
-    while (serial_->available() > 0) {
+    size_t bytes_processed = 0;
+    while (serial_->available() > 0 &&
+           bytes_processed < STM32_FEEDBACK_BYTE_BUDGET) {
         uint8_t b = serial_->read();
+        bytes_processed++;
 
         if (!sync_found_) {
             if (b == STM32_FEEDBACK_SYNC_1) {

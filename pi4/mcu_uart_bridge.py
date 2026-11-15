@@ -399,6 +399,7 @@ class MCU_UART_Bridge:
         self.link_active: Dict[str, bool] = {"ESP32_Main": False, "ESP32_ToF": False}
         self.last_rx_timestamp: Dict[str, float] = {"ESP32_Main": 0.0, "ESP32_ToF": 0.0}
         self.force_reconnect_flag = False
+        self.reconnect_gen = 0  # bumped per reset request so BOTH links always see it
         self.discovery_lock = threading.Lock()
 
         self.udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -433,6 +434,7 @@ class MCU_UART_Bridge:
     def trigger_reconnect(self):
         """Forces immediate re-probe and reconnect across all MCU serial links."""
         print("[MCU Bridge] Manual reconnect command received. Re-detecting all MCU links...")
+        self.reconnect_gen += 1
         self.force_reconnect_flag = True
         def _clear():
             time.sleep(1.0)
@@ -558,6 +560,9 @@ class MCU_UART_Bridge:
                     self.send_to_main_mcu(data)
 
                 if latest_motion_cmd is not None:
+                    # Safety interlock: never drive without a live ToF link
+                    if not self.link_active.get("ESP32_ToF", False):
+                        latest_motion_cmd = encode_motion_command(0.0, 0.0, 0, 0)
                     self.send_to_main_mcu(latest_motion_cmd)
             except Exception:
                 pass
@@ -655,10 +660,18 @@ class MCU_UART_Bridge:
                 self.link_active[label] = True
                 last_pkt_time = time.time()
                 self.last_rx_timestamp[label] = last_pkt_time
+                my_gen = self.reconnect_gen
 
                 while self.running:
-                    if self.force_reconnect_flag:
-                        print(f"[MCU Bridge] Force reconnect requested for {label}. Closing link...")
+                    if self.reconnect_gen != my_gen:
+                        print(f"[MCU Bridge] Reset requested for {label}. Pulsing EN and closing link...")
+                        try:
+                            ser.dtr = False
+                            ser.rts = True
+                            time.sleep(0.1)
+                            ser.rts = False
+                        except Exception:
+                            pass
                         break
 
                     # Event-driven wait: wakes immediately (<0.1ms) when USB URB arrives

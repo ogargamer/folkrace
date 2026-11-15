@@ -189,6 +189,10 @@ static void IRAM_ATTR realTimeControlTask(void *pvParameters) {
     s_sensorInputs.updateRead();
     const SharedSensorInputs &inputs = s_sensorInputs.getReadBuffer();
 
+    // 1b. Drain STM32 feedback inside the deterministic task so the UART link is
+    // never delayed by IMU SPI waits / USB shell work on Core 0.
+    s_stm32Link.update();
+
     // Working variables
     float target_v;
     float target_steer;
@@ -232,8 +236,8 @@ static void IRAM_ATTR realTimeControlTask(void *pvParameters) {
       accel_fwd = inputs.accel_fwd;
       fl_rpm = inputs.fl_rpm;
       fr_rpm = inputs.fr_rpm;
-      rl_rpm = inputs.rl_rpm;
-      rr_rpm = inputs.rr_rpm;
+      rl_rpm = -s_stm32Link.getRL_RPM();
+      rr_rpm = s_stm32Link.getRR_RPM();
 
       // Hardware Ramp Speed Governor (Safety speed ceiling on incline/pitch)
       const float ramp_pitch_threshold_deg = 8.0f;
@@ -284,6 +288,10 @@ static void IRAM_ATTR realTimeControlTask(void *pvParameters) {
       avg_exec_us = exec_us;
     }
     cycle_counter++;
+
+    // 5b. Dispatch drive command to STM32 immediately at a jitter-free 400 Hz
+    // (RWD-only; left motor has inverted rotation vs right).
+    s_stm32Link.getRear().sendDrive(-diff.rpm_RL, diff.rpm_RR);
 
     // 6. Commit outputs to Core 0 via lock-free triple buffer
     SharedControlOutputs &out = s_controlOutputs.getWriteBuffer();
@@ -445,29 +453,29 @@ static void handleAsciiCommand(const char *raw_line) {
     s_manual_v = 0.0f;
     s_manual_override = false;
     s_cli_override_active = false;
-    s_stm32Link.emergencyStop();
+    s_stm32Link.getRear().emergencyStop();
     Serial.println(F(">>> 🛑 EMERGENCY STOP BROADCAST TO ALL STM32s!"));
   } else if (line.equalsIgnoreCase("MOTORS") ||
              line.equalsIgnoreCase("START")) {
-    s_stm32Link.enableDrivers();
+    s_stm32Link.getRear().enableDrivers();
     Serial.println(F(">>> ⚡ MOTORS ENABLED ON ALL STM32s."));
   } else if (line.startsWith("PID ") || line.startsWith("pid ")) {
     float kp = 0.1f, ki = 1.5f;
     sscanf(line.c_str() + 4, "%f %f", &kp, &ki);
-    s_stm32Link.setPID(kp, ki);
+    s_stm32Link.getRear().setPID(kp, ki);
     Serial.printf(">>> Velocity PID Dispatched to STM32s: Kp=%.3f, Ki=%.3f\n",
                   kp, ki);
   } else if (line.equalsIgnoreCase("SAVE")) {
-    s_stm32Link.saveFlash();
+    s_stm32Link.getRear().saveFlash();
     Serial.println(F(">>> 💾 FLASH SAVE DISPATCHED TO ALL STM32s."));
   } else if (line.equalsIgnoreCase("DFU")) {
-    s_stm32Link.enterDFU(true, true);
+    s_stm32Link.enterDFU(false, true);
     Serial.println(F(">>> 🔄 DFU BOOTLOADER REBOOT DISPATCHED TO ALL STM32s."));
   } else if (line.startsWith("CALIB ") || line.startsWith("calib ")) {
     int axle = 0, motor = 1;
     float v = 4.0f;
     sscanf(line.c_str() + 6, "%d %d %f", &axle, &motor, &v);
-    s_stm32Link.startCalibration(axle, motor, v);
+    s_stm32Link.startCalibration(2, motor, v);
     Serial.printf(">>> Calibration Dispatched: Axle %d, Motor %d @ %.1fV\n",
                   axle, motor, v);
   } else if (line.startsWith("V ") || line.startsWith("v ")) {
@@ -573,7 +581,7 @@ static void ioTask(void *pvParameters) {
                   s_manual_v = 0.0f;
                   s_manual_override = false;
                   s_cli_override_active = false;
-                  s_stm32Link.emergencyStop();
+                  s_stm32Link.getRear().emergencyStop();
                 } else if (!s_cli_override_active) {
                   if (cmd->run_mode == 1 || cmd->run_mode == 3) {
                     s_manual_v = (float)cmd->target_v_mm_s / 1000.0f;
@@ -640,8 +648,7 @@ static void ioTask(void *pvParameters) {
       s_imu.update();
     }
 
-    // 3. Process Dual STM32 UARTs
-    s_stm32Link.update();
+    // 3. STM32 UART RX/TX now runs in the 400 Hz control task (Core 1).
 
     // Command Loss Watchdog (Dead-Man Switch @ 150 ms timeout for autonomous
     // stream)
@@ -678,23 +685,15 @@ static void ioTask(void *pvParameters) {
       }
     }
 
-    inputs.fl_rpm = -s_stm32Link.getFL_RPM();
-    inputs.fr_rpm = s_stm32Link.getFR_RPM();
+    inputs.fl_rpm = 0.0f; // RWD-only: front STM32 not used
+    inputs.fr_rpm = 0.0f;
     inputs.rl_rpm = -s_stm32Link.getRL_RPM();
     inputs.rr_rpm = s_stm32Link.getRR_RPM();
     s_sensorInputs.commitWrite();
 
     // 5. Receive latest control outputs from Core 1 and dispatch to STM32s @
     // 400 Hz
-    if (s_controlOutputs.updateRead()) {
-      const SharedControlOutputs &ctrl = s_controlOutputs.getReadBuffer();
-
-      // Dispatch target RPMs to Front and Rear STM32s
-      // Note: Left motors (FL, RL) have inverted physical rotation compared to
-      // Right motors (FR, RR)
-      s_stm32Link.sendCommands(-ctrl.fl_target_rpm, ctrl.fr_target_rpm,
-                               -ctrl.rl_target_rpm, ctrl.rr_target_rpm);
-    }
+    s_controlOutputs.updateRead();
 
     // 6. Periodic Binary Telemetry Dispatch to Pi 4 @ 100 Hz (10 ms period)
     static uint32_t s_last_pi_tx_ms = 0;

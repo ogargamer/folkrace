@@ -836,6 +836,11 @@ def udp_listener_worker():
                 else:
                     # Planner is active: non-destructively merge fresh MCU telemetry fields
                     for k in (
+                        "seq",
+                        "mcu_timestamp_us",
+                        "v_cmd",
+                        "v_est",
+                        "rpms_cmd",
                         "rpms_act",
                         "flags",
                         "mcu_msg",
