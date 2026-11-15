@@ -2,8 +2,8 @@
   "vehicle": {
     "rear_axle_offset_m": -0.0700,
     "front_axle_offset_m": 0.0625,
-    "track_rear_m": 0.1000,
-    "track_front_m": 0.0822,
+    "track_rear_m": 0.1130,
+    "track_front_m": 0.0980,
     "track_kingpin_m": 0.0620,
     "wheel_radius_m": 0.0275,
     "vehicle_mass_kg": 1.000,

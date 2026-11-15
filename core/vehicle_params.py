@@ -10,8 +10,8 @@ import math
 REAR_AXLE_OFFSET_M: float = -0.07
 FRONT_AXLE_OFFSET_M: float = 0.0625
 WHEELBASE: float = 0.1325
-TRACK_REAR: float = 0.1
-TRACK_FRONT: float = 0.0822
+TRACK_REAR: float = 0.113
+TRACK_FRONT: float = 0.098
 TRACK_KINGPIN: float = 0.062
 WHEEL_RADIUS: float = 0.0275
 VEHICLE_MASS: float = 1.0
