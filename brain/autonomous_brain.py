@@ -62,6 +62,7 @@ try:
         ACCEL_FWD_RATIO,
         BRAKE_DECEL_RATIO,
         GRAVITY_G,
+        MPC_MU_FRICTION,
         TOF_MAX_RANGE_M,
         WHEELBASE,
     )
@@ -89,6 +90,7 @@ except ImportError:
         ACCEL_FWD_RATIO,
         BRAKE_DECEL_RATIO,
         GRAVITY_G,
+        MPC_MU_FRICTION,
         TOF_MAX_RANGE_M,
         WHEELBASE,
     )
@@ -132,7 +134,7 @@ class AutonomousBrain:
         self.ramp_detector = RampDetector()
 
         # 3. Dynamic Tuning Parameters
-        self.base_mu = 0.817
+        self.base_mu = MPC_MU_FRICTION
         self.mu_val = self.base_mu
         self.target_lookahead_m = 2.40
         self.aggr_dist_far = 2.40
@@ -166,7 +168,7 @@ class AutonomousBrain:
         if not genes:
             return
 
-        self.base_mu = float(genes.get("mu_friction", 0.817))
+        self.base_mu = float(genes.get("mu_friction", MPC_MU_FRICTION))
         self.mu_val = self.base_mu
         self.r_infl = float(genes.get("r_inflation_m", R_INFLATION_M))
         self.target_lookahead_m = float(genes.get("target_lookahead_m", 2.40))

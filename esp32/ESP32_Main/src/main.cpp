@@ -94,6 +94,7 @@ static volatile float s_direct_servo_pulse = SERVO_PULSE_NEUTRAL_US;
 static volatile float s_servo_trim_us = 0.0f;
 static volatile bool s_estop_latched = false;
 static volatile bool s_drive_stopped = true;
+static volatile bool s_imu_usb_stream = false;
 
 static inline float servoPulseToAngle(float pulse_us) {
   if (pulse_us <= SERVO_PULSE_NEUTRAL_US) {
@@ -563,6 +564,22 @@ static void handleAsciiCommand(const char *raw_line) {
     s_imu.handleSerialCommand(line[0], Serial);
   } else if (line.equalsIgnoreCase("IMU") || line.equalsIgnoreCase("I")) {
     s_imu.printCurrentReadings(Serial);
+  } else if (line.equalsIgnoreCase("IMU_STREAM 1") ||
+             line.equalsIgnoreCase("IMU_STREAM ON")) {
+    s_imu_usb_stream = true;
+    Serial.println(F("{\"imu_stream\":true}"));
+  } else if (line.equalsIgnoreCase("IMU_STREAM 0") ||
+             line.equalsIgnoreCase("IMU_STREAM OFF")) {
+    s_imu_usb_stream = false;
+    Serial.println(F("{\"imu_stream\":false}"));
+  } else if (line.equalsIgnoreCase("IMU_TARE_ALL")) {
+    s_imu.tareAllAxes(Serial);
+  } else if (line.equalsIgnoreCase("IMU_TARE_YAW")) {
+    s_imu.tareYawOnly(Serial);
+  } else if (line.equalsIgnoreCase("IMU_SAVE")) {
+    s_imu.saveTare(Serial);
+  } else if (line.equalsIgnoreCase("IMU_CLEAR")) {
+    s_imu.clearTare(Serial);
   }
 }
 
@@ -750,8 +767,8 @@ static void ioTask(void *pvParameters) {
 
     inputs.fl_rpm = 0.0f; // RWD-only: front STM32 not used
     inputs.fr_rpm = 0.0f;
-    inputs.rl_rpm = -s_stm32Link.getRL_RPM();
-    inputs.rr_rpm = s_stm32Link.getRR_RPM();
+    inputs.rl_rpm = s_stm32Link.getRL_RPM();
+    inputs.rr_rpm = -s_stm32Link.getRR_RPM();
     s_sensorInputs.commitWrite();
 
     // 5. Receive latest control outputs from Core 1 and dispatch to STM32s @
@@ -811,7 +828,26 @@ static void ioTask(void *pvParameters) {
       }
     }
 
-    // 7. Periodic Benchmark Telemetry to Serial (every 500 ms = 2 Hz, bench
+    // 7. Periodic USB IMU JSON Stream (50 Hz when enabled via IMU_STREAM 1)
+    static uint32_t s_last_imu_stream_ms = 0;
+    if (s_imu_usb_stream && (now - s_last_imu_stream_ms >= 20)) {
+      s_last_imu_stream_ms = now;
+      if (s_imu.isInitialized()) {
+        const auto &d = s_imu.getData();
+        Serial.printf(
+            "{\"imu\":1,\"online\":1,\"qw\":%.4f,\"qx\":%.4f,\"qy\":%.4f,"
+            "\"qz\":%.4f,\"r\":%.2f,\"p\":%.2f,\"y\":%.2f,\"ax\":%.2f,"
+            "\"ay\":%.2f,\"az\":%.2f,\"gx\":%.3f,\"gy\":%.3f,\"gz\":%.3f,"
+            "\"lax\":%.2f,\"lay\":%.2f,\"acc\":%u}\n",
+            d.quat_w, d.quat_x, d.quat_y, d.quat_z, d.roll_deg, d.pitch_deg,
+            d.yaw_deg, d.accel_x, d.accel_y, d.accel_z, d.gyro_x, d.gyro_y,
+            d.gyro_z, d.lin_accel_x, d.lin_accel_y, d.quat_accuracy);
+      } else {
+        Serial.println(F("{\"imu\":1,\"online\":0}"));
+      }
+    }
+
+    // 8. Periodic Benchmark Telemetry to Serial (every 500 ms = 2 Hz, bench
     // mode only)
     if (now - last_report_ms >= 500) {
       last_report_ms = now;
