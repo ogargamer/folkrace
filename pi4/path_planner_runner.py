@@ -66,6 +66,7 @@ TELEM_DECIMATION = int(round(TARGET_HZ / TELEM_HZ))  # Exactly 20 Hz (1 frame pe
 DEBUG_UDP_PORT = int(os.environ.get("DEBUG_UDP_PORT", 9876))
 DEBUG_UDP_HOST = os.environ.get("DEBUG_UDP_HOST", "127.0.0.1")
 SENSOR_UDP_PORT = int(os.environ.get("SENSOR_UDP_PORT", 9875))
+PLANNER_CMD_UDP_PORT = int(os.environ.get("PLANNER_CMD_UDP_PORT", 9878))
 
 
 def create_nonblocking_udp_socket() -> socket.socket:
@@ -142,6 +143,33 @@ def run_path_planner():
     except Exception as e:
         print(f"[Planner Core 1] Note on sensor socket: {e}")
 
+    planner_cmd_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    planner_cmd_sock.setblocking(False)
+    try:
+        planner_cmd_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        planner_cmd_sock.bind(("127.0.0.1", PLANNER_CMD_UDP_PORT))
+        print(f"[Planner Core 1] Listening for Start/Stop commands on 127.0.0.1:{PLANNER_CMD_UDP_PORT}...")
+    except Exception as e:
+        print(f"[Planner Core 1] Note on planner command socket: {e}")
+
+    def dispatch_stop_hw():
+        try:
+            cmd_sock.sendto(b"ESTOP\n", mcu_cmd_target)
+            cmd_sock.sendto(b"RESET\n", mcu_cmd_target)
+            cmd_sock.sendto(encode_motion_command(0.0, 0.0, 0, step_counter), mcu_cmd_target)
+        except Exception:
+            pass
+
+    def dispatch_start_hw():
+        try:
+            cmd_sock.sendto(b"E\n", mcu_cmd_target)
+            cmd_sock.sendto(b"MOTORS\n", mcu_cmd_target)
+        except Exception:
+            pass
+
+    planner_running = False
+    was_mcu_main_connected = False
+
     live_tof_list: List[float] = [0.0] * 16
     has_live_sensor_feed = False
     last_sensor_time = 0.0
@@ -168,6 +196,33 @@ def run_path_planner():
             t_step_start = time.perf_counter()
             sim_time += DT_STEP
             step_counter += 1
+
+            # 0. Drain Start/Stop Planner Commands
+            while True:
+                try:
+                    p_cmd_bytes, _ = planner_cmd_sock.recvfrom(512)
+                    p_cmd = p_cmd_bytes.decode("utf-8", errors="ignore").strip().upper()
+                    if p_cmd == "START":
+                        if not planner_running:
+                            planner_running = True
+                            dispatch_start_hw()
+                            print("[Planner Core 1] ▶ STARTED (Line calc active, motor drivers enabled)")
+                    elif p_cmd == "STOP":
+                        planner_running = False
+                        dispatch_stop_hw()
+                        print("[Planner Core 1] ⏹ STOPPED (Line calc stopped, motors disabled, servo centered)")
+                    elif p_cmd == "TOGGLE":
+                        planner_running = not planner_running
+                        if planner_running:
+                            dispatch_start_hw()
+                            print("[Planner Core 1] ▶ STARTED (Line calc active, motor drivers enabled)")
+                        else:
+                            dispatch_stop_hw()
+                            print("[Planner Core 1] ⏹ STOPPED (Line calc stopped, motors disabled, servo centered)")
+                except (BlockingIOError, socket.error):
+                    break
+                except Exception:
+                    break
 
             # 1. Perception Ingestion: Drain sensor UDP socket to receive latest real-time frame.
             # Coalesce raw datagrams before JSON decoding so bursty packets never waste Core 1 CPU.
@@ -246,8 +301,14 @@ def run_path_planner():
                 pitch_deg = 0.0
                 roll_deg = 0.0
 
-            # 2. Execute Shared Autonomous Brain Step
-            if has_live_sensor_feed:
+            # Ensure hardware starts in safe stopped state when ESP32 Main first connects
+            mcu_main_now = bool(active_mcu and active_mcu.get("mcu_main_connected", True))
+            if mcu_main_now and not was_mcu_main_connected and not planner_running:
+                dispatch_stop_hw()
+            was_mcu_main_connected = mcu_main_now
+
+            # 2. Execute Shared Autonomous Brain Step (only when started)
+            if planner_running and has_live_sensor_feed:
                 steer_rad = math.radians(steer_actual_deg)
                 need_full_telem = (step_counter % TELEM_DECIMATION == 0)
                 v_cmd, steer_cmd_rad, brain_telem = brain.step(
@@ -271,14 +332,20 @@ def run_path_planner():
                 brain.rate_limited_speed = 0.0
                 brain.cached_target_speed = 0.0
                 brain_telem = {
-                    "mode": "STANDBY",
-                    "status": "OFFLINE",
+                    "mode": "STOPPED" if not planner_running else "STANDBY",
+                    "status": "STOPPED" if not planner_running else "OFFLINE",
                     "v_cmd": 0.0,
                     "steer_cmd_deg": 0.0,
                     "plan_ms": 0.0,
                     "map_ms": 0.0,
                     "scout_ms": 0.0,
                     "step_ms": 0.0,
+                    "best_line": [],
+                    "candidate_lines": [],
+                    "guide_line": [],
+                    "corridor_left": [],
+                    "corridor_right": [],
+                    "targets": [],
                 }
 
             # 3. Motion Command Uplink: Dispatch binary packet to ESP32 Main via MCU UART Bridge
@@ -348,6 +415,10 @@ def run_path_planner():
                 telemetry["step_ms"] = round(t_ctrl_ms, 2)
                 telemetry["grid_shape"] = [int(s) for s in brain.costmap.shape]
                 telemetry["grid_bounds"] = [GRID_X_MIN, GRID_X_MAX, GRID_Y_MIN, GRID_Y_MAX]
+                telemetry["planner_running"] = planner_running
+                if not isinstance(telemetry.get("flags"), dict):
+                    telemetry["flags"] = {}
+                telemetry["flags"]["planner_running"] = planner_running
 
                 # Non-blocking handoff to background worker
                 try:
