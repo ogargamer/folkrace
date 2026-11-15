@@ -12,11 +12,11 @@
     "max_steering_rad": 0.562285,
     "servo_max_speed_rad_s": 16.89,
     "motor_dir": 1.0,
-    "v_max_wheel_mps": 5.0,
-    "v_max_cruise_mps": 5.0
+    "v_max_wheel_mps": 1.5,
+    "v_max_cruise_mps": 1.5
   },
   "dynamics": {
-    "tire_mu": 0.86,
+    "tire_mu": 0.20,
     "gravity_g": 9.80665,
     "accel_fwd_ratio": 0.95,
     "brake_decel_ratio": 1.00,

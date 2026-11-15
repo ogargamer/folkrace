@@ -22,23 +22,23 @@ MAX_STEERING_RAD: float = 0.562285
 SERVO_MAX_SPEED_RAD_S: float = 16.89
 
 MOTOR_DIR: float = 1.0
-V_MAX_WHEEL: float = 5.0
-V_MAX_CRUISE: float = 5.0
+V_MAX_WHEEL: float = 1.5
+V_MAX_CRUISE: float = 1.5
 
 # ============================================================================== #
 # 2. TIRE & VEHICLE DYNAMICS LIMITS                                              #
 # ============================================================================== #
-TIRE_MU: float = 0.86
+TIRE_MU: float = 0.2
 GRAVITY_G: float = 9.80665
-A_MAX_BASE: float = 8.433719
+A_MAX_BASE: float = 1.96133
 ACCEL_FWD_RATIO: float = 0.95
 BRAKE_DECEL_RATIO: float = 1.0
 LAT_ACCEL_RATIO: float = 1.0
-ACCEL_FWD_MAX: float = 8.01203305
-BRAKE_DECEL_MAX: float = 8.433719
-LAT_ACCEL_MAX: float = 8.433719
+ACCEL_FWD_MAX: float = 1.8632635
+BRAKE_DECEL_MAX: float = 1.96133
+LAT_ACCEL_MAX: float = 1.96133
 R_MIN_TURN: float = 0.210271646984119
-V_MIN_CRUISE: float = 1.3316801358927215
+V_MIN_CRUISE: float = 0.6421931869611839
 SLIP_GATE_SPEED_MPS: float = 0.3
 SLIP_THRESH_SPIN_RAD_S: float = 0.45
 
