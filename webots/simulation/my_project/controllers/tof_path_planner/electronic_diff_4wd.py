@@ -71,6 +71,10 @@ class ElectronicDifferential4WD:
         self.v_max = v_max
         self.thresh_spin = thresh_spin
         self.max_servo_rate = max_servo_rate
+        # PTK9794 @ 8.4V: 1510 +/- 271 us over a 2000 us / 180 deg span -> +/- 24.39 deg horn throw
+        self.max_horn_angle = (271.0 / 2000.0) * math.pi
+        self._linkage_gain = math.sin(self.max_steer) / math.sin(self.max_horn_angle)
+        self.current_horn_rad = 0.0
         self.current_steer_rad = 0.0
 
     def update(
@@ -103,14 +107,18 @@ class ElectronicDifferential4WD:
         # 1. Clamp target steering input to physical steering lock
         target_delta = max(-self.max_steer, min(target_steer_rad, self.max_steer))
 
-        # 2. Apply physical servo slew rate limit at 120 Hz
-        max_d_steer = self.max_servo_rate * dt
-        steer_diff = target_delta - self.current_steer_rad
-        if abs(steer_diff) <= max_d_steer:
-            self.current_steer_rad = target_delta
+        # 2. Apply servo horn slew rate limit (22.0 rad/s) through non-linear tie-rod linkage
+        sin_horn_target = max(-1.0, min(1.0, math.sin(target_delta) / self._linkage_gain))
+        target_horn = math.asin(sin_horn_target)
+        max_d_horn = self.max_servo_rate * dt
+        horn_diff = target_horn - self.current_horn_rad
+        if abs(horn_diff) <= max_d_horn:
+            self.current_horn_rad = target_horn
         else:
-            self.current_steer_rad += math.copysign(max_d_steer, steer_diff)
+            self.current_horn_rad += math.copysign(max_d_horn, horn_diff)
 
+        sin_delta = max(-1.0, min(1.0, self._linkage_gain * math.sin(self.current_horn_rad)))
+        self.current_steer_rad = math.asin(sin_delta)
         delta = self.current_steer_rad
 
         # 3. Kinematic yaw rate command from actual physical wheel angle

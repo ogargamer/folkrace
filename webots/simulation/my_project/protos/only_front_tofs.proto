@@ -113,8 +113,8 @@ PROTO only_front_tofs [
         jointParameters HingeJointParameters {
           axis 0 0 1
           anchor 0.031 0.0625 0
-          minStop -0.698132
-          maxStop 0.698132
+          minStop -0.610865
+          maxStop 0.610865
           dampingConstant 0.05
         }
         jointParameters2 JointParameters {
@@ -125,9 +125,9 @@ PROTO only_front_tofs [
           RotationalMotor {
             name "servo right"
             controlPID 80 0 0
-            maxVelocity 10.5
-            minPosition -0.698132
-            maxPosition 0.698132
+            maxVelocity 35
+            minPosition -0.610865
+            maxPosition 0.610865
             maxTorque 5
           }
           PositionSensor {
@@ -177,8 +177,8 @@ PROTO only_front_tofs [
         jointParameters HingeJointParameters {
           axis 0 0 1
           anchor -0.031 0.0625 0
-          minStop -0.698132
-          maxStop 0.698132
+          minStop -0.610865
+          maxStop 0.610865
           dampingConstant 0.05
         }
         jointParameters2 JointParameters {
@@ -189,9 +189,9 @@ PROTO only_front_tofs [
           RotationalMotor {
             name "servo left"
             controlPID 80 0 0
-            maxVelocity 10.5
-            minPosition -0.698132
-            maxPosition 0.698132
+            maxVelocity 35
+            minPosition -0.610865
+            maxPosition 0.610865
             maxTorque 5
           }
           PositionSensor {
