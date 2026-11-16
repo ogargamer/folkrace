@@ -38,6 +38,7 @@ struct SharedControlOutputs {
   float rr_target_rpm;
   float steer_rad;
   float steer_deg;
+  float driver_steer_deg;
   float servo_pulse_us;
 
   // Kinematics & States
@@ -311,6 +312,7 @@ static void IRAM_ATTR realTimeControlTask(void *pvParameters) {
     out.rr_target_rpm = diff.rpm_RR;
     out.steer_rad = diff.steer_rad;
     out.steer_deg = diff.steer_deg;
+    out.driver_steer_deg = diff.driver_steer_deg;
     out.servo_pulse_us = servo_pulse_cmd;
     out.rate_limited_v = diff.rate_limited_v;
     out.v_FL = diff.v_FL;
@@ -798,7 +800,7 @@ static void ioTask(void *pvParameters) {
       pkt.accel_fwd_cm_s2 = (int16_t)(in.accel_fwd * 100.0f);
       pkt.accel_lat_cm_s2 = (int16_t)(in.accel_lat * 100.0f);
 
-      pkt.steer_cmd_deg_x10 = (int16_t)(c.steer_deg * 10.0f);
+      pkt.steer_cmd_deg_x10 = (int16_t)(c.driver_steer_deg * 10.0f);
       pkt.steer_act_deg_x10 = (int16_t)(c.steer_deg * 10.0f);
       pkt.servo_pulse_us = (uint16_t)c.servo_pulse_us;
       pkt.v_cmd_mm_s = (int16_t)(c.rate_limited_v * 1000.0f);

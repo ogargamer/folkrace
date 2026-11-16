@@ -352,6 +352,7 @@ def build_live_binary_packet(pkt: Dict[str, Any]) -> bytes:
         "corridor_right": pkt.get("corridor_right") or [],
         "shield": pkt.get("shield") or {},
         "targets": pkt.get("targets") or [],
+        "pose": pkt.get("pose") or [0.0, 0.0, 0.0],
         "trail": pkt.get("trail") or [],
         "sightlines": pkt.get("sightlines") or [],
         "is_wrong_way": bool(pkt.get("is_wrong_way", False)),

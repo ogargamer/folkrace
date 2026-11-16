@@ -1091,6 +1091,8 @@
             <label><input type="checkbox" id="chkRays" checked> ToF Cones (16ch)</label>
             <label><input type="checkbox" id="chkChassis" checked> Chassis Footprint</label>
             <label><input type="checkbox" id="chkGrid" checked> Grid &amp; Circles</label>
+            <label><input type="checkbox" id="chkTrail" checked> Historic Trail (Cyan)</label>
+            <label><input type="checkbox" id="chkSightlines" checked> Wrong-Way Rays (Cyan/Red)</label>
           </div>
         </div>
 
@@ -1540,7 +1542,7 @@
     }
 
     // Layer toggle checkboxes
-    const layerIds = ["chkBest", "chkCand", "chkCorridor", "chkGuide", "chkShield", "chkBackup", "chkGap", "chkHazard", "chkCostmap", "chkRays", "chkChassis", "chkGrid"];
+    const layerIds = ["chkBest", "chkCand", "chkCorridor", "chkGuide", "chkShield", "chkBackup", "chkGap", "chkHazard", "chkCostmap", "chkRays", "chkChassis", "chkGrid", "chkTrail", "chkSightlines"];
     for (const id of layerIds) {
       const el = document.getElementById(id);
       if (el) {
@@ -2512,7 +2514,7 @@
       }
 
       // 11. Breadcrumb Historical Trail & Wrong-Way Sightlines (if present)
-      if (pkt.trail && Array.isArray(pkt.trail) && pkt.trail.length > 0) {
+      if (isLayerOn("chkTrail") && pkt.trail && Array.isArray(pkt.trail) && pkt.trail.length > 0) {
         const pose = (pkt.pose && pkt.pose.length >= 3) ? pkt.pose : [0.0, 0.0, 0.0];
         const gx = pose[0], gy = pose[1], gyaw = pose[2];
         const cosYaw = Math.cos(gyaw), sinYaw = Math.sin(gyaw);
@@ -2540,15 +2542,120 @@
             ctx.moveTo(p1x, p1y);
             ctx.lineTo(p2x, p2y);
             ctx.stroke();
+
+            if (i % 2 === 0) {
+              ctx.fillStyle = `rgba(0, 229, 255, ${(alpha * 0.8).toFixed(2)})`;
+              ctx.beginPath();
+              ctx.arc(p1x, p1y, 2.2, 0, Math.PI * 2);
+              ctx.fill();
+            }
           }
           ctx.restore();
         }
+      }
+
+      // 11b. Wrong-Way Line-of-Sight Raycasts
+      if (isLayerOn("chkSightlines") && pkt.sightlines && Array.isArray(pkt.sightlines) && pkt.sightlines.length > 0) {
+        const [ox, oy] = toPixel(0.0, 0.095); // Front bumper origin
+        ctx.save();
+        ctx.font = "bold 7pt Consolas, monospace";
+        for (const ray of pkt.sightlines) {
+          const rx = Number(ray.xv || 0.0);
+          const ry = Number(ray.yv || 0.0);
+          const isClear = ray.clear !== undefined ? Boolean(ray.clear) : true;
+          const isOpp = Boolean(ray.opposing);
+          const [tx, ty] = toPixel(rx, ry);
+
+          if (isClear && isOpp) {
+            ctx.strokeStyle = "rgba(0, 255, 180, 0.90)";
+            ctx.lineWidth = 2.4;
+            ctx.setLineDash([]);
+            ctx.beginPath();
+            ctx.moveTo(ox, oy);
+            ctx.lineTo(tx, ty);
+            ctx.stroke();
+
+            ctx.fillStyle = "rgba(0, 255, 180, 0.94)";
+            ctx.beginPath();
+            ctx.arc(tx, ty, 4.0, 0, Math.PI * 2);
+            ctx.fill();
+
+            const hDiff = Number(ray.heading_diff_deg || 0.0);
+            ctx.fillStyle = "rgba(0, 255, 180, 0.98)";
+            ctx.fillText(`LOS ${Math.round(hDiff)}°`, tx + 5, ty - 3);
+          } else if (!isClear) {
+            ctx.strokeStyle = "rgba(255, 60, 60, 0.51)";
+            ctx.lineWidth = 1.2;
+            ctx.setLineDash([4, 4]);
+            ctx.beginPath();
+            ctx.moveTo(ox, oy);
+            ctx.lineTo(tx, ty);
+            ctx.stroke();
+
+            ctx.fillStyle = "rgba(255, 60, 60, 0.63)";
+            ctx.fillRect(tx - 2.5, ty - 2.5, 5, 5);
+          }
+        }
+        ctx.restore();
+      }
+
+      // 11c. Corrective 180 Target Vector (Gold Arrow)
+      const recStateWw = String(pkt.escape_state || pkt.recovery_state || "").toUpperCase();
+      const isWrongWayActive = Boolean(pkt.is_wrong_way) || recStateWw.includes("180");
+      if (isWrongWayActive) {
+        const pose = (pkt.pose && pkt.pose.length >= 3) ? pkt.pose : [0.0, 0.0, 0.0];
+        const gyaw = Number(pose[2] || 0.0);
+        const tgtWorld = Number(pkt.target_yaw || 0.0);
+        const relYaw = Math.atan2(Math.sin(tgtWorld - gyaw), Math.cos(tgtWorld - gyaw));
+        const arrowLenM = 0.85;
+        const axv = arrowLenM * Math.sin(relYaw);
+        const ayv = arrowLenM * Math.cos(relYaw);
+        const [px0, py0] = toPixel(0.0, 0.0);
+        const [px1, py1] = toPixel(axv, ayv);
+
+        ctx.save();
+        ctx.strokeStyle = "rgba(255, 215, 0, 0.94)";
+        ctx.lineWidth = 3.5;
+        ctx.lineCap = "round";
+        ctx.beginPath();
+        ctx.moveTo(px0, py0);
+        ctx.lineTo(px1, py1);
+        ctx.stroke();
+
+        const angle = Math.atan2(py1 - py0, px1 - px0);
+        const headLen = 10;
+        ctx.fillStyle = "rgba(255, 215, 0, 0.96)";
+        ctx.beginPath();
+        ctx.moveTo(px1, py1);
+        ctx.lineTo(px1 - headLen * Math.cos(angle - Math.PI / 6), py1 - headLen * Math.sin(angle - Math.PI / 6));
+        ctx.lineTo(px1 - headLen * Math.cos(angle + Math.PI / 6), py1 - headLen * Math.sin(angle + Math.PI / 6));
+        ctx.closePath();
+        ctx.fill();
+        ctx.restore();
       }
 
       // 12. Physical Chassis Footprint & Origin (150x200mm Robot Geometry matching planner_gui.py)
       if (isLayerOn("chkChassis")) {
         const steerRad = ((pkt.steer_deg !== undefined ? pkt.steer_deg : (pkt.steer_cmd_deg || 0)) * Math.PI) / 180.0;
         drawChassis(steerRad);
+      }
+
+      // 12b. Wrong-Way Alert Banner
+      if (isWrongWayActive) {
+        ctx.save();
+        ctx.fillStyle = "rgba(40, 10, 16, 0.86)";
+        ctx.strokeStyle = "rgba(255, 60, 60, 0.86)";
+        ctx.lineWidth = 1.5;
+        drawRoundedRect(ctx, 14, 12, 360, 26, 5);
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.font = "bold 10pt 'Segoe UI', sans-serif";
+        ctx.fillStyle = "rgb(255, 80, 80)";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText("🚨 WRONG-WAY TRIPPED — EXECUTING 180°", 14 + 180, 12 + 13);
+        ctx.restore();
       }
 
       // 13. Costmap Category & Breadcrumb Legend (Free / Unknown / Obstacle / C-Space / Trail / LOS Ray)
@@ -2694,7 +2801,16 @@
       document.getElementById("mapMs").innerText = (pkt.map_ms || 0).toFixed(2);
       document.getElementById("scoutMs").innerText = (pkt.scout_ms || 0).toFixed(2);
 
-      document.getElementById("lblMode").innerText = `MODE: ${pkt.mode || "DRIVE"}`;
+      const recStateHud = String(pkt.escape_state || pkt.recovery_state || "").toUpperCase();
+      const isWrongWayHud = Boolean(pkt.is_wrong_way) || recStateHud.includes("180");
+      const lblModeEl = document.getElementById("lblMode");
+      if (isWrongWayHud) {
+        lblModeEl.innerText = `🚨 WRONG-WAY (${recStateHud || "180°"})`;
+        lblModeEl.style.color = "var(--accent-red)";
+      } else {
+        lblModeEl.innerText = `MODE: ${pkt.mode || "DRIVE"}`;
+        lblModeEl.style.color = "var(--accent-green)";
+      }
 
       // Time / Frame labels
       const simT = pkt.sim_time || 0;

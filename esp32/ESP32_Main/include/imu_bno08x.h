@@ -51,6 +51,8 @@ struct IMUData {
 
 class BNO08xIMU {
 public:
+    static constexpr uint32_t DEFAULT_IMU_INTERVAL_US = 2500; // 400 Hz
+
     BNO08xIMU();
     ~BNO08xIMU();
 
@@ -63,10 +65,12 @@ public:
 
     bool update();
     void setReportMode(ReportMode mode, uint32_t intervalMs = 10);
+    void setReportModeUs(ReportMode mode, uint32_t intervalUs = DEFAULT_IMU_INTERVAL_US);
     void disableAllReports();
 
     const IMUData& getData() const { return data_; }
     ReportMode getCurrentReportMode() const { return current_mode_; }
+    uint32_t getReportIntervalUs() const { return report_interval_us_; }
     bool isInitialized() const { return initialized_; }
 
     void printMenu(Stream &out = Serial);
@@ -79,12 +83,13 @@ public:
     void clearTare(Stream &out = Serial);
 
 private:
+    void setFeatureReportRateUs(uint8_t reportID, uint32_t intervalUs, uint32_t specificConfig = 0);
     void convertQuaternionToEuler(float w, float x, float y, float z, float &roll, float &pitch, float &yaw);
 
     BNO080 bno08x_;
     IMUData data_;
     ReportMode current_mode_ = REPORT_MODE_FUSION_GAME;
-    uint32_t report_interval_ms_ = 10;
+    uint32_t report_interval_us_ = DEFAULT_IMU_INTERVAL_US;
     bool initialized_ = false;
 };
 

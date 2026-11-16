@@ -7,7 +7,7 @@
   a connection to the Raspberry Pi 4.
 
   Usage:
-    python launchers/19_local_flight_replay.py                  # Opens latest .db in data/recordings/
+    python launchers/19_local_flight_replay.py                  # Opens latest .db in Downloads or data/recordings/
     python launchers/19_local_flight_replay.py path/to/file.db  # Opens a specific .db file
     python launchers/19_local_flight_replay.py --list           # Lists available local recordings
     python launchers/19_local_flight_replay.py --pick           # Choose a recording interactively
@@ -29,7 +29,9 @@ if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
         pass
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
+DOWNLOADS_DIR = Path.home() / "Downloads"
 RECORDINGS_DIR = ROOT_DIR / "data" / "recordings"
+SEARCH_DIRS = (DOWNLOADS_DIR, RECORDINGS_DIR)
 
 
 def _load_debug_studio_module():
@@ -42,10 +44,18 @@ def _load_debug_studio_module():
 
 
 def list_local_recordings() -> List[Path]:
-    """Returns all .db files in data/recordings/ sorted newest first."""
-    if not RECORDINGS_DIR.exists():
-        return []
-    return sorted(RECORDINGS_DIR.glob("*.db"), key=lambda p: p.stat().st_mtime, reverse=True)
+    """Returns all .db files in Downloads and data/recordings/ sorted newest first."""
+    dbs: List[Path] = []
+    seen = set()
+    for directory in SEARCH_DIRS:
+        if not directory.exists():
+            continue
+        for p in directory.glob("*.db"):
+            resolved = p.resolve()
+            if resolved not in seen:
+                seen.add(resolved)
+                dbs.append(p)
+    return sorted(dbs, key=lambda p: p.stat().st_mtime, reverse=True)
 
 
 def print_recordings(dbs: List[Path]):
@@ -55,8 +65,8 @@ def print_recordings(dbs: List[Path]):
         sys.path.insert(0, pi4_dir)
     from debug_recorder import TelemetryLogReader
 
-    print("\nAvailable local flight recordings (data/recordings/):")
-    print("-" * 75)
+    print("\nAvailable local flight recordings (Downloads & data/recordings/):")
+    print("-" * 90)
     for idx, p in enumerate(dbs, 1):
         size_mb = p.stat().st_size / (1024 * 1024)
         frames_str = "?"
@@ -67,15 +77,16 @@ def print_recordings(dbs: List[Path]):
             frames_str = f"{total} frames"
         except Exception:
             pass
-        print(f"  [{idx}] {p.name:<38} | {size_mb:6.2f} MB | {frames_str}")
-    print("-" * 75)
+        source = "Downloads" if p.parent.resolve() == DOWNLOADS_DIR.resolve() else "data/recordings"
+        print(f"  [{idx}] {p.name:<34} | {source:<15} | {size_mb:6.2f} MB | {frames_str}")
+    print("-" * 90)
 
 
 def main():
     parser = argparse.ArgumentParser(description="Offline 60 Hz Local Flight Log Replay Viewer")
     parser.add_argument("db_path", nargs="?", default=None, help="Path to a downloaded .db flight recording")
-    parser.add_argument("--list", action="store_true", help="List available .db files in data/recordings/")
-    parser.add_argument("--pick", action="store_true", help="Interactively pick a recording from data/recordings/")
+    parser.add_argument("--list", action="store_true", help="List available .db files in Downloads and data/recordings/")
+    parser.add_argument("--pick", action="store_true", help="Interactively pick a recording from Downloads or data/recordings/")
     parser.add_argument("--tab", dest="browser_tab", action="store_true", help="Open in standard browser tab instead of standalone app window")
     parser.add_argument("--no-browser", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
@@ -88,7 +99,7 @@ def main():
 
     if args.list:
         if not dbs:
-            print(f"[Replay] No recordings found in {RECORDINGS_DIR}")
+            print(f"[Replay] No recordings found in {DOWNLOADS_DIR} or {RECORDINGS_DIR}")
             print("  Download one from the Pi with: python launchers/17_pi4_debug_studio.py --download")
         else:
             print_recordings(dbs)
@@ -97,7 +108,7 @@ def main():
     target_db = args.db_path
     if not target_db:
         if not dbs:
-            print(f"[Replay ERROR] No .db recordings found in {RECORDINGS_DIR}")
+            print(f"[Replay ERROR] No .db recordings found in {DOWNLOADS_DIR} or {RECORDINGS_DIR}")
             print("  Download one from the Pi with: python launchers/17_pi4_debug_studio.py --download")
             sys.exit(1)
 
@@ -108,6 +119,7 @@ def main():
             target_db = str(dbs[idx])
         else:
             target_db = str(dbs[0])
+            print(f"[Replay] Auto-selected latest recording: {target_db}")
 
     if not os.path.exists(target_db):
         print(f"[Replay ERROR] Database not found: {target_db}")

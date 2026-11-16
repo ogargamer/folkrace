@@ -27,7 +27,7 @@ bool BNO08xIMU::begin(int csPin, int misoPin, int mosiPin, int sckPin, int intPi
         Serial.println(F(" [SUCCESS] SparkFun BNO08x Connected over SPI (CS=10, INT=9)!"));
         initialized_ = true;
         delay(100);
-        setReportMode(REPORT_MODE_FUSION_GAME, 10);
+        setReportModeUs(REPORT_MODE_FUSION_GAME, DEFAULT_IMU_INTERVAL_US);
         return true;
     }
 
@@ -37,7 +37,7 @@ bool BNO08xIMU::begin(int csPin, int misoPin, int mosiPin, int sckPin, int intPi
         Serial.println(F(" [SUCCESS] SparkFun BNO08x Connected over SPI (Swapped Pins CS=9, INT=10)!"));
         initialized_ = true;
         delay(100);
-        setReportMode(REPORT_MODE_FUSION_GAME, 10);
+        setReportModeUs(REPORT_MODE_FUSION_GAME, DEFAULT_IMU_INTERVAL_US);
         return true;
     }
 
@@ -50,52 +50,83 @@ void BNO08xIMU::disableAllReports() {
     if (!initialized_) return;
 }
 
+void BNO08xIMU::setFeatureReportRateUs(uint8_t reportID, uint32_t intervalUs, uint32_t specificConfig) {
+    bno08x_.shtpData[0] = SHTP_REPORT_SET_FEATURE_COMMAND;
+    bno08x_.shtpData[1] = reportID;
+    bno08x_.shtpData[2] = 0;
+    bno08x_.shtpData[3] = 0;
+    bno08x_.shtpData[4] = 0;
+    bno08x_.shtpData[5] = (intervalUs >> 0) & 0xFF;
+    bno08x_.shtpData[6] = (intervalUs >> 8) & 0xFF;
+    bno08x_.shtpData[7] = (intervalUs >> 16) & 0xFF;
+    bno08x_.shtpData[8] = (intervalUs >> 24) & 0xFF;
+    bno08x_.shtpData[9] = 0;
+    bno08x_.shtpData[10] = 0;
+    bno08x_.shtpData[11] = 0;
+    bno08x_.shtpData[12] = 0;
+    bno08x_.shtpData[13] = (specificConfig >> 0) & 0xFF;
+    bno08x_.shtpData[14] = (specificConfig >> 8) & 0xFF;
+    bno08x_.shtpData[15] = (specificConfig >> 16) & 0xFF;
+    bno08x_.shtpData[16] = (specificConfig >> 24) & 0xFF;
+    bno08x_.sendPacket(CHANNEL_CONTROL, 17);
+}
+
 void BNO08xIMU::setReportMode(ReportMode mode, uint32_t intervalMs) {
+    uint32_t clampedMs = (intervalMs == 0U) ? 1U : intervalMs;
+    setReportModeUs(mode, clampedMs * 1000U);
+}
+
+void BNO08xIMU::setReportModeUs(ReportMode mode, uint32_t intervalUs) {
     if (!initialized_) return;
 
+    if (intervalUs < 2000U) intervalUs = 2000U;
     current_mode_ = mode;
-    report_interval_ms_ = intervalMs;
+    report_interval_us_ = intervalUs;
 
-    Serial.printf("[BNO08x IMU] Enabling Report Mode %d (Interval: %u ms / %u Hz)...\n",
-                  (int)mode, intervalMs, 1000 / intervalMs);
+    uint32_t rate_hz = 1000000U / intervalUs;
+    uint32_t fusion_us = (intervalUs < 5000U) ? 5000U : intervalUs;   // Game RV / Gravity max 200 Hz to preserve SH-2 CPU headroom
+    uint32_t aux_us = (intervalUs < 10000U) ? 10000U : intervalUs;     // Raw accel & mag capped at 100 Hz
+
+    Serial.printf("[BNO08x IMU] Enabling Report Mode %d (Gyro/LinAcc: %u us / %u Hz, Fusion: %u us)...\n",
+                  (int)mode, intervalUs, rate_hz, fusion_us);
 
     switch (mode) {
         case REPORT_MODE_FUSION_GAME:
-            bno08x_.enableGameRotationVector(intervalMs);
-            bno08x_.enableAccelerometer(intervalMs);
-            bno08x_.enableGyro(intervalMs);
-            bno08x_.enableLinearAccelerometer(intervalMs);
+            setFeatureReportRateUs(SENSOR_REPORTID_GYROSCOPE, intervalUs);
+            setFeatureReportRateUs(SENSOR_REPORTID_LINEAR_ACCELERATION, intervalUs);
+            setFeatureReportRateUs(SENSOR_REPORTID_GAME_ROTATION_VECTOR, fusion_us);
+            setFeatureReportRateUs(SENSOR_REPORTID_ACCELEROMETER, aux_us);
             break;
 
         case REPORT_MODE_FUSION_9AXIS:
-            bno08x_.enableRotationVector(intervalMs);
-            bno08x_.enableAccelerometer(intervalMs);
-            bno08x_.enableGyro(intervalMs);
-            bno08x_.enableMagnetometer(intervalMs);
-            bno08x_.enableLinearAccelerometer(intervalMs);
+            setFeatureReportRateUs(SENSOR_REPORTID_GYROSCOPE, intervalUs);
+            setFeatureReportRateUs(SENSOR_REPORTID_LINEAR_ACCELERATION, intervalUs);
+            setFeatureReportRateUs(SENSOR_REPORTID_ROTATION_VECTOR, fusion_us);
+            setFeatureReportRateUs(SENSOR_REPORTID_ACCELEROMETER, aux_us);
+            setFeatureReportRateUs(SENSOR_REPORTID_MAGNETIC_FIELD, aux_us);
             break;
 
         case REPORT_MODE_FILTERED_IMU:
-            bno08x_.enableAccelerometer(intervalMs);
-            bno08x_.enableGyro(intervalMs);
-            bno08x_.enableLinearAccelerometer(intervalMs);
-            bno08x_.enableGravity(intervalMs);
+            setFeatureReportRateUs(SENSOR_REPORTID_GYROSCOPE, intervalUs);
+            setFeatureReportRateUs(SENSOR_REPORTID_LINEAR_ACCELERATION, intervalUs);
+            setFeatureReportRateUs(SENSOR_REPORTID_ACCELEROMETER, aux_us);
+            setFeatureReportRateUs(SENSOR_REPORTID_GRAVITY, fusion_us);
             break;
 
         case REPORT_MODE_RAW_MEMS:
-            bno08x_.enableUncalibratedGyro(intervalMs);
-            bno08x_.enableMagnetometer(intervalMs);
-            bno08x_.enableAccelerometer(intervalMs);
+            setFeatureReportRateUs(SENSOR_REPORTID_UNCALIBRATED_GYRO, intervalUs);
+            setFeatureReportRateUs(SENSOR_REPORTID_ACCELEROMETER, intervalUs);
+            setFeatureReportRateUs(SENSOR_REPORTID_MAGNETIC_FIELD, aux_us);
             break;
 
         case REPORT_MODE_ALL:
-            bno08x_.enableGameRotationVector(intervalMs);
-            bno08x_.enableRotationVector(intervalMs);
-            bno08x_.enableAccelerometer(intervalMs);
-            bno08x_.enableGyro(intervalMs);
-            bno08x_.enableMagnetometer(intervalMs);
-            bno08x_.enableLinearAccelerometer(intervalMs);
-            bno08x_.enableGravity(intervalMs);
+            setFeatureReportRateUs(SENSOR_REPORTID_GYROSCOPE, intervalUs);
+            setFeatureReportRateUs(SENSOR_REPORTID_LINEAR_ACCELERATION, intervalUs);
+            setFeatureReportRateUs(SENSOR_REPORTID_GAME_ROTATION_VECTOR, fusion_us);
+            setFeatureReportRateUs(SENSOR_REPORTID_ROTATION_VECTOR, aux_us);
+            setFeatureReportRateUs(SENSOR_REPORTID_ACCELEROMETER, aux_us);
+            setFeatureReportRateUs(SENSOR_REPORTID_MAGNETIC_FIELD, aux_us);
+            setFeatureReportRateUs(SENSOR_REPORTID_GRAVITY, aux_us);
             break;
     }
 }
@@ -115,52 +146,79 @@ bool BNO08xIMU::update() {
     if (bno08x_.hasReset()) {
         Serial.println(F("[BNO08x IMU] WARNING: BNO08x Sensor Was Reset! Re-enabling reports..."));
         delay(100);
-        setReportMode(current_mode_, report_interval_ms_);
+        setReportModeUs(current_mode_, report_interval_us_);
     }
 
     bool got_new_data = false;
 
     // Drain all pending SHTP packets available from SparkFun BNO08x driver
-    while (bno08x_.dataAvailable()) {
+    uint16_t report_id = 0;
+    while ((report_id = bno08x_.getReadings()) != 0) {
         got_new_data = true;
         data_.last_update_ms = millis();
         data_.updated = true;
 
-        float qw = bno08x_.getQuatReal();
-        float qx_i = bno08x_.getQuatI();
-        float qy_i = bno08x_.getQuatJ();
-        float qz_i = bno08x_.getQuatK();
-        float qx, qy, qz;
-        rotateImuToBody(qx_i, qy_i, qz_i, qx, qy, qz);
-        float qnorm = sqrtf(qw * qw + qx * qx + qy * qy + qz * qz);
-        if (qnorm > 1e-6f) {
-            float inv = 1.0f / qnorm;
-            qw *= inv;
-            qx *= inv;
-            qy *= inv;
-            qz *= inv;
+        switch (report_id) {
+            case SENSOR_REPORTID_ROTATION_VECTOR:
+            case SENSOR_REPORTID_GAME_ROTATION_VECTOR:
+            case SENSOR_REPORTID_AR_VR_STABILIZED_ROTATION_VECTOR:
+            case SENSOR_REPORTID_AR_VR_STABILIZED_GAME_ROTATION_VECTOR: {
+                float qw = bno08x_.getQuatReal();
+                float qx_i = bno08x_.getQuatI();
+                float qy_i = bno08x_.getQuatJ();
+                float qz_i = bno08x_.getQuatK();
+                float qx, qy, qz;
+                rotateImuToBody(qx_i, qy_i, qz_i, qx, qy, qz);
+                float qnorm = sqrtf(qw * qw + qx * qx + qy * qy + qz * qz);
+                if (qnorm > 1e-6f) {
+                    float inv = 1.0f / qnorm;
+                    qw *= inv;
+                    qx *= inv;
+                    qy *= inv;
+                    qz *= inv;
+                }
+                data_.quat_w = qw;
+                data_.quat_x = qx;
+                data_.quat_y = qy;
+                data_.quat_z = qz;
+                convertQuaternionToEuler(qw, qx, qy, qz, data_.roll_deg, data_.pitch_deg, data_.yaw_deg);
+                data_.quat_accuracy = bno08x_.getQuatRadianAccuracy();
+                break;
+            }
+
+            case SENSOR_REPORTID_ACCELEROMETER:
+                rotateImuToBody(bno08x_.getAccelX(), bno08x_.getAccelY(), bno08x_.getAccelZ(),
+                                data_.accel_x, data_.accel_y, data_.accel_z);
+                break;
+
+            case SENSOR_REPORTID_GYROSCOPE:
+                rotateImuToBody(bno08x_.getGyroX(), bno08x_.getGyroY(), bno08x_.getGyroZ(),
+                                data_.gyro_x, data_.gyro_y, data_.gyro_z);
+                break;
+
+            case SENSOR_REPORTID_UNCALIBRATED_GYRO:
+                rotateImuToBody(bno08x_.getUncalibratedGyroX(), bno08x_.getUncalibratedGyroY(), bno08x_.getUncalibratedGyroZ(),
+                                data_.gyro_x, data_.gyro_y, data_.gyro_z);
+                break;
+
+            case SENSOR_REPORTID_MAGNETIC_FIELD:
+                rotateImuToBody(bno08x_.getMagX(), bno08x_.getMagY(), bno08x_.getMagZ(),
+                                data_.mag_x, data_.mag_y, data_.mag_z);
+                break;
+
+            case SENSOR_REPORTID_LINEAR_ACCELERATION:
+                rotateImuToBody(bno08x_.getLinAccelX(), bno08x_.getLinAccelY(), bno08x_.getLinAccelZ(),
+                                data_.lin_accel_x, data_.lin_accel_y, data_.lin_accel_z);
+                break;
+
+            case SENSOR_REPORTID_GRAVITY:
+                rotateImuToBody(bno08x_.getGravityX(), bno08x_.getGravityY(), bno08x_.getGravityZ(),
+                                data_.gravity_x, data_.gravity_y, data_.gravity_z);
+                break;
+
+            default:
+                break;
         }
-        data_.quat_w = qw;
-        data_.quat_x = qx;
-        data_.quat_y = qy;
-        data_.quat_z = qz;
-        convertQuaternionToEuler(qw, qx, qy, qz, data_.roll_deg, data_.pitch_deg, data_.yaw_deg);
-        data_.quat_accuracy = bno08x_.getQuatRadianAccuracy();
-
-        rotateImuToBody(bno08x_.getAccelX(), bno08x_.getAccelY(), bno08x_.getAccelZ(),
-                        data_.accel_x, data_.accel_y, data_.accel_z);
-
-        rotateImuToBody(bno08x_.getGyroX(), bno08x_.getGyroY(), bno08x_.getGyroZ(),
-                        data_.gyro_x, data_.gyro_y, data_.gyro_z);
-
-        rotateImuToBody(bno08x_.getMagX(), bno08x_.getMagY(), bno08x_.getMagZ(),
-                        data_.mag_x, data_.mag_y, data_.mag_z);
-
-        rotateImuToBody(bno08x_.getLinAccelX(), bno08x_.getLinAccelY(), bno08x_.getLinAccelZ(),
-                        data_.lin_accel_x, data_.lin_accel_y, data_.lin_accel_z);
-
-        rotateImuToBody(bno08x_.getGravityX(), bno08x_.getGravityY(), bno08x_.getGravityZ(),
-                        data_.gravity_x, data_.gravity_y, data_.gravity_z);
     }
 
     return got_new_data;
@@ -191,8 +249,9 @@ void BNO08xIMU::printMenu(Stream &out) {
     out.println(F(" [3] Mode 3: Filtered IMU (Accel, Gyro, LinAccel, Gravity)"));
     out.println(F(" [4] Mode 4: Raw MEMS Counts (Raw Accel, Gyro, Mag)"));
     out.println(F(" [5] Mode 5: ALL Reports Active (Full Telemetry)"));
-    out.println(F(" [+] Increase Rate (100Hz -> 200Hz)"));
-    out.println(F(" [-] Decrease Rate (100Hz -> 50Hz)"));
+    out.println(F(" [+] Increase Rate (up to 400Hz)"));
+    out.println(F(" [-] Decrease Rate (down to 50Hz)"));
+    out.println(F(" [0] Reset Rate to Default (400Hz / 2500us)"));
     out.println(F(" [m] Display Menu"));
     out.println(F("==============================================\n"));
 }
@@ -238,23 +297,23 @@ void BNO08xIMU::printCurrentReadings(Stream &out) {
 void BNO08xIMU::handleSerialCommand(char cmd, Stream &out) {
     switch (cmd) {
         case '1':
-            setReportMode(REPORT_MODE_FUSION_GAME, report_interval_ms_);
+            setReportModeUs(REPORT_MODE_FUSION_GAME, report_interval_us_);
             out.println(F("[BNO08x] Switched to Mode 1: 6-DOF Game Rotation Vector."));
             break;
         case '2':
-            setReportMode(REPORT_MODE_FUSION_9AXIS, report_interval_ms_);
+            setReportModeUs(REPORT_MODE_FUSION_9AXIS, report_interval_us_);
             out.println(F("[BNO08x] Switched to Mode 2: 9-DOF Rotation Vector."));
             break;
         case '3':
-            setReportMode(REPORT_MODE_FILTERED_IMU, report_interval_ms_);
+            setReportModeUs(REPORT_MODE_FILTERED_IMU, report_interval_us_);
             out.println(F("[BNO08x] Switched to Mode 3: Filtered IMU (Accel/Gyro/LinAccel)."));
             break;
         case '4':
-            setReportMode(REPORT_MODE_RAW_MEMS, report_interval_ms_);
+            setReportModeUs(REPORT_MODE_RAW_MEMS, report_interval_us_);
             out.println(F("[BNO08x] Switched to Mode 4: Raw MEMS Counts."));
             break;
         case '5':
-            setReportMode(REPORT_MODE_ALL, report_interval_ms_);
+            setReportModeUs(REPORT_MODE_ALL, report_interval_us_);
             out.println(F("[BNO08x] Switched to Mode 5: ALL Reports Active."));
             break;
         case 't':
@@ -277,25 +336,39 @@ void BNO08xIMU::handleSerialCommand(char cmd, Stream &out) {
         case 'R':
             bno08x_.softReset();
             delay(150);
-            setReportMode(current_mode_, report_interval_ms_);
+            setReportModeUs(current_mode_, report_interval_us_);
             out.println(F("[BNO08x] Soft Reset Executed & Reports Re-enabled."));
             break;
         case '+':
-        case 'h': // High (200Hz)
-            report_interval_ms_ = 5; // 200Hz
-            setReportMode(current_mode_, report_interval_ms_);
-            out.println(F("[BNO08x] Rate updated to 200Hz (5 ms)."));
+        case 'h': // Step up: 50Hz -> 100Hz -> 200Hz -> 400Hz
+            if (report_interval_us_ > 10000U) {
+                report_interval_us_ = 10000U;
+            } else if (report_interval_us_ > 5000U) {
+                report_interval_us_ = 5000U;
+            } else {
+                report_interval_us_ = DEFAULT_IMU_INTERVAL_US;
+            }
+            setReportModeUs(current_mode_, report_interval_us_);
+            out.printf("[BNO08x] Rate updated to %u Hz (%u us).\n",
+                       1000000U / report_interval_us_, report_interval_us_);
             break;
         case '-':
-        case 'l': // Low (50Hz)
-            report_interval_ms_ = 20; // 50Hz
-            setReportMode(current_mode_, report_interval_ms_);
-            out.println(F("[BNO08x] Rate updated to 50Hz (20 ms)."));
+        case 'l': // Step down: 400Hz -> 200Hz -> 100Hz -> 50Hz
+            if (report_interval_us_ < 5000U) {
+                report_interval_us_ = 5000U;
+            } else if (report_interval_us_ < 10000U) {
+                report_interval_us_ = 10000U;
+            } else {
+                report_interval_us_ = 20000U;
+            }
+            setReportModeUs(current_mode_, report_interval_us_);
+            out.printf("[BNO08x] Rate updated to %u Hz (%u us).\n",
+                       1000000U / report_interval_us_, report_interval_us_);
             break;
-        case '0': // Normal (100Hz)
-            report_interval_ms_ = 10; // 100Hz
-            setReportMode(current_mode_, report_interval_ms_);
-            out.println(F("[BNO08x] Rate updated to 100Hz (10 ms)."));
+        case '0': // Default (400Hz)
+            report_interval_us_ = DEFAULT_IMU_INTERVAL_US;
+            setReportModeUs(current_mode_, report_interval_us_);
+            out.println(F("[BNO08x] Rate updated to 400Hz (2500 us)."));
             break;
         case 'm':
         case 'M':

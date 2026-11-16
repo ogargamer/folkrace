@@ -7,14 +7,17 @@
 
 enum VehicleSlipState : uint8_t {
     SLIP_NORMAL = 0,
-    SLIP_OVERSTEER = 1,
-    SLIP_UNDERSTEER = 2
+    SLIP_UNDERSTEER = 1,
+    SLIP_OVERSTEER = 2
 };
 
 struct ElectronicDiffOutputs {
     // Steering
-    float steer_rad;          // Physical center steering angle after slew limiting (rad)
+    float steer_rad;          // Physical center steering angle after gyro assist & slew limiting (rad)
     float steer_deg;          // Physical center steering angle (deg)
+    float driver_steer_rad;   // Slew-limited driver/MPC steering angle before gyro assist (rad)
+    float driver_steer_deg;   // Driver/MPC steering angle (deg)
+    float delta_gyro_rad;     // Continuous PD gyro countersteer contribution (rad)
     float steer_left_rad;     // Geometric Ackermann left knuckle angle (rad)
     float steer_right_rad;    // Geometric Ackermann right knuckle angle (rad)
     float servo_pulse_us;     // Commanded pulse width for 333 Hz digital servo (us)
@@ -37,10 +40,11 @@ struct ElectronicDiffOutputs {
     float rpm_RR;
 
     // Kinematics & Health
-    float omega_cmd;          // Theoretical yaw rate (rad/s)
+    float omega_cmd;          // Theoretical kinematic yaw rate from physical steer (rad/s)
+    float omega_ref;          // Grip-capped, lagged reference yaw rate (rad/s)
     float scale_factor;       // RPM saturation scale factor (1.0 = nominal)
     VehicleSlipState slip_state;
-    float yaw_error;          // Measured gyro_z minus omega_cmd (rad/s)
+    float yaw_error;          // Measured gyro_z minus omega_ref (rad/s)
 };
 
 class ElectronicDifferential4WD {
@@ -94,7 +98,15 @@ private:
 
     // Internal continuous state
     float current_steer_rad_;
+    float driver_steer_rad_;
     float rate_limited_speed_;
+    float omega_ref_;
+    float prev_gyro_z_;
+    float gyro_z_dot_filt_;
+    bool has_prev_gyro_;
+    VehicleSlipState slip_state_;
+    float slip_hold_timer_;
+    float diff_split_gain_;
 };
 
 #endif // ELECTRONIC_DIFF_H

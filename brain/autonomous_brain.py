@@ -619,6 +619,30 @@ class AutonomousBrain:
 
         # 11. Compile Telemetry Dictionary
         if full_telemetry:
+            if self.last_aww_status is not None and getattr(self.watchdog, "mode", "DISABLED") != "DISABLED":
+                trail_pts = [
+                    [round(float(p.x), 3), round(float(p.y), 3)]
+                    for p in list(self.watchdog.breadcrumb_watchdog.breadcrumbs)[::2]
+                ][-60:]
+                sightline_rays = [
+                    {
+                        "xv": round(float(r["xv"]), 3),
+                        "yv": round(float(r["yv"]), 3),
+                        "clear": bool(r["clear"]),
+                        "opposing": bool(r["opposing"]),
+                        "heading_diff_deg": round(float(r["heading_diff_deg"]), 1),
+                    }
+                    for r in (self.last_aww_status.sightline_rays or [])
+                ]
+                raw_tgt_yaw = self.last_aww_status.target_recovery_yaw
+                if raw_tgt_yaw is None:
+                    raw_tgt_yaw = getattr(self.recovery_manager, "target_corrective_yaw", None)
+                aww_target_yaw = round(float(raw_tgt_yaw), 3) if raw_tgt_yaw is not None else 0.0
+            else:
+                trail_pts = []
+                sightline_rays = []
+                aww_target_yaw = 0.0
+
             telemetry = {
                 "time_step": self.step_counter,
                 "sim_time": round(float(sim_time_s), 3),
@@ -654,6 +678,9 @@ class AutonomousBrain:
                 "step_ms": round(float(t_total_ms), 2),
                 "recovery_state": str(self.recovery_manager.state),
                 "is_wrong_way": bool(self.last_aww_status.is_wrong_way) if self.last_aww_status else False,
+                "target_yaw": aww_target_yaw,
+                "trail": trail_pts,
+                "sightlines": sightline_rays,
                 "is_on_ramp": bool(ramp_res["is_on_ramp"]),
                 "ramp_speed_limit": float(ramp_res["speed_limit"]),
                 "pitch_deg": float(ramp_res["pitch_deg"]),

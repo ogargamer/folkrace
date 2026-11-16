@@ -476,6 +476,7 @@ class FolkraceVehicle:
         self.watchdog = self.brain.watchdog
         self.pose_tracker = self.brain.pose_tracker
 
+        self.ediff.reset()
         self.drift_controller.reset()
         self.ramp_detector.reset()
         self.last_aww_status = None
@@ -841,7 +842,11 @@ class FolkraceVehicle:
         if override_speed is not None:
             self.rate_limited_speed = float(override_speed)
         else:
-            target_v = self.cached_target_speed
+            target_v = self.ediff.apply_traction_speed_cap(
+                self.cached_target_speed,
+                current_v=self.rate_limited_speed,
+                mu=self.mu_val,
+            )
             v_curr = self.v_est
 
             # Ramp Speed Governor: enforce speed limit (e.g. 2.0 m/s) when traversing ramps/inclines
@@ -916,6 +921,7 @@ class FolkraceVehicle:
             v_ground_RL=drift_res["v_ground_RL"],
             v_ground_RR=drift_res["v_ground_RR"],
             is_drifting=is_drift_active,
+            mu=self.mu_val,
         )
 
         # 7. Apply Actuator Commands
@@ -1017,6 +1023,8 @@ class FolkraceVehicle:
                 "v_tilt_limit": ramp_res["speed_limit"] if ramp_res["is_on_ramp"] else None,
                 "rear_alpha": combined_alpha,
                 "effective_mu": drift_res["effective_mu"],
+                "slip_state": diff_res["slip_state"],
+                "yaw_error": round(float(diff_res["yaw_error"]), 3),
             }
             return telemetry, planner_ran
 
@@ -1067,6 +1075,8 @@ class FolkraceVehicle:
             "v_tilt_limit": ramp_res["speed_limit"] if ramp_res["is_on_ramp"] else None,
             "rear_alpha": combined_alpha,
             "effective_mu": drift_res["effective_mu"],
+            "slip_state": diff_res["slip_state"],
+            "yaw_error": round(float(diff_res["yaw_error"]), 3),
             "yaw_fused": round(float(self.yaw_est), 4),
             "roll_deg": round(float(self.fusion.roll_deg), 2),
             "pitch_deg": round(float(self.fusion.pitch_deg), 2),
