@@ -291,15 +291,20 @@ class DebugServerState:
         else:
             return self.latest_pkt
 
+    def _get_total_recorded_frames(self) -> int:
+        return self.recorder.total_frames_recorded if self.recorder else self.total_frames_received
+
     def get_cached_bin(self) -> bytes:
         if self._cached_bin is None:
-            self._cached_bin = build_live_binary_packet(self._get_current_effective_packet())
+            pkt = dict(self._get_current_effective_packet())
+            pkt["_total_frames"] = self._get_total_recorded_frames()
+            self._cached_bin = build_live_binary_packet(pkt)
         return self._cached_bin
 
     def get_cached_json(self) -> bytes:
         if self._cached_json is None:
             pkt = dict(self._get_current_effective_packet())
-            pkt["_total_frames"] = self.recorder.total_frames_recorded if self.recorder else self.total_frames_received
+            pkt["_total_frames"] = self._get_total_recorded_frames()
             self._cached_json = json.dumps(pkt).encode("utf-8")
         return self._cached_json
 
@@ -365,7 +370,7 @@ def build_live_binary_packet(pkt: Dict[str, Any]) -> bytes:
 
     rpms_cmd = pkt.get("rpms_cmd", [0.0, 0.0, 0.0, 0.0])
     rpms_act = pkt.get("rpms_act", [0.0, 0.0, 0.0, 0.0])
-    tof_ranges = pkt.get("tof_ranges", [0.0] * 16)
+    tof_ranges = pkt.get("tof_ranges") or pkt.get("tof_ranges_raw") or [0.0] * 16
     if len(tof_ranges) < 16:
         tof_ranges = list(tof_ranges) + [0.0] * (16 - len(tof_ranges))
     gap = pkt.get("gap") or [0.0, 0.0, 0.0]
@@ -915,9 +920,13 @@ def udp_listener_worker():
             if bin_data:
                 STATE.broadcast_ws_binary(bin_data)
 
-            # Non-blocking write to Flight Recorder (all planner frames, bounded sensor frames)
+            # Non-blocking write to Flight Recorder (skip idle STOPPED/STANDBY/OFFLINE frames when stationary)
             if STATE.recorder:
-                if is_planner or (now - getattr(STATE, "_last_db_record", 0.0) >= 0.05):
+                eff_mode = str(pkt.get("mode") or STATE.latest_pkt.get("mode") or "").upper()
+                v_cmd_val = abs(float(pkt.get("v_cmd", STATE.latest_pkt.get("v_cmd", 0.0))))
+                v_real_val = abs(float(pkt.get("v_real", pkt.get("v_est", 0.0))))
+                is_idle_stopped = (eff_mode in ("STOPPED", "STANDBY", "OFFLINE")) and v_cmd_val < 0.01 and v_real_val < 0.05
+                if not is_idle_stopped and (is_planner or (now - getattr(STATE, "_last_db_record", 0.0) >= 0.05)):
                     STATE._last_db_record = now
                     STATE.recorder.record_frame(pkt, raw_bytes=data)
 

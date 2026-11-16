@@ -64,6 +64,7 @@ void BNO08xIMU::setReportMode(ReportMode mode, uint32_t intervalMs) {
             bno08x_.enableGameRotationVector(intervalMs);
             bno08x_.enableAccelerometer(intervalMs);
             bno08x_.enableGyro(intervalMs);
+            bno08x_.enableLinearAccelerometer(intervalMs);
             break;
 
         case REPORT_MODE_FUSION_9AXIS:
@@ -71,6 +72,7 @@ void BNO08xIMU::setReportMode(ReportMode mode, uint32_t intervalMs) {
             bno08x_.enableAccelerometer(intervalMs);
             bno08x_.enableGyro(intervalMs);
             bno08x_.enableMagnetometer(intervalMs);
+            bno08x_.enableLinearAccelerometer(intervalMs);
             break;
 
         case REPORT_MODE_FILTERED_IMU:
@@ -98,6 +100,14 @@ void BNO08xIMU::setReportMode(ReportMode mode, uint32_t intervalMs) {
     }
 }
 
+// Rotate a 3D vector from IMU sensor frame to Robot Body frame (+X Forward, +Y Left, +Z Up).
+// Physical mount: IMU +X points Left (+Y_body), IMU +Y points Back (-X_body), IMU +Z points Up (+Z_body).
+static inline void rotateImuToBody(float ix, float iy, float iz, float &bx, float &by, float &bz) {
+    bx = -iy;
+    by = ix;
+    bz = iz;
+}
+
 bool BNO08xIMU::update() {
     if (!initialized_) return false;
 
@@ -116,34 +126,41 @@ bool BNO08xIMU::update() {
         data_.last_update_ms = millis();
         data_.updated = true;
 
-        data_.quat_w = bno08x_.getQuatReal();
-        data_.quat_x = bno08x_.getQuatI();
-        data_.quat_y = bno08x_.getQuatJ();
-        data_.quat_z = bno08x_.getQuatK();
-        data_.roll_deg = bno08x_.getRoll() * (180.0f / M_PI);
-        data_.pitch_deg = bno08x_.getPitch() * (180.0f / M_PI);
-        data_.yaw_deg = bno08x_.getYaw() * (180.0f / M_PI);
+        float qw = bno08x_.getQuatReal();
+        float qx_i = bno08x_.getQuatI();
+        float qy_i = bno08x_.getQuatJ();
+        float qz_i = bno08x_.getQuatK();
+        float qx, qy, qz;
+        rotateImuToBody(qx_i, qy_i, qz_i, qx, qy, qz);
+        float qnorm = sqrtf(qw * qw + qx * qx + qy * qy + qz * qz);
+        if (qnorm > 1e-6f) {
+            float inv = 1.0f / qnorm;
+            qw *= inv;
+            qx *= inv;
+            qy *= inv;
+            qz *= inv;
+        }
+        data_.quat_w = qw;
+        data_.quat_x = qx;
+        data_.quat_y = qy;
+        data_.quat_z = qz;
+        convertQuaternionToEuler(qw, qx, qy, qz, data_.roll_deg, data_.pitch_deg, data_.yaw_deg);
         data_.quat_accuracy = bno08x_.getQuatRadianAccuracy();
 
-        data_.accel_x = bno08x_.getAccelX();
-        data_.accel_y = bno08x_.getAccelY();
-        data_.accel_z = bno08x_.getAccelZ();
+        rotateImuToBody(bno08x_.getAccelX(), bno08x_.getAccelY(), bno08x_.getAccelZ(),
+                        data_.accel_x, data_.accel_y, data_.accel_z);
 
-        data_.gyro_x = bno08x_.getGyroX();
-        data_.gyro_y = bno08x_.getGyroY();
-        data_.gyro_z = bno08x_.getGyroZ();
+        rotateImuToBody(bno08x_.getGyroX(), bno08x_.getGyroY(), bno08x_.getGyroZ(),
+                        data_.gyro_x, data_.gyro_y, data_.gyro_z);
 
-        data_.mag_x = bno08x_.getMagX();
-        data_.mag_y = bno08x_.getMagY();
-        data_.mag_z = bno08x_.getMagZ();
+        rotateImuToBody(bno08x_.getMagX(), bno08x_.getMagY(), bno08x_.getMagZ(),
+                        data_.mag_x, data_.mag_y, data_.mag_z);
 
-        data_.lin_accel_x = bno08x_.getLinAccelX();
-        data_.lin_accel_y = bno08x_.getLinAccelY();
-        data_.lin_accel_z = bno08x_.getLinAccelZ();
+        rotateImuToBody(bno08x_.getLinAccelX(), bno08x_.getLinAccelY(), bno08x_.getLinAccelZ(),
+                        data_.lin_accel_x, data_.lin_accel_y, data_.lin_accel_z);
 
-        data_.gravity_x = bno08x_.getGravityX();
-        data_.gravity_y = bno08x_.getGravityY();
-        data_.gravity_z = bno08x_.getGravityZ();
+        rotateImuToBody(bno08x_.getGravityX(), bno08x_.getGravityY(), bno08x_.getGravityZ(),
+                        data_.gravity_x, data_.gravity_y, data_.gravity_z);
     }
 
     return got_new_data;
@@ -242,8 +259,19 @@ void BNO08xIMU::handleSerialCommand(char cmd, Stream &out) {
             break;
         case 't':
         case 'T':
-            bno08x_.tareNow();
-            out.println(F("[BNO08x] TARE COMPLETE: Current orientation set to 0."));
+            tareAllAxes(out);
+            break;
+        case 'z':
+        case 'Z':
+            tareYawOnly(out);
+            break;
+        case 'p':
+        case 'P':
+            saveTare(out);
+            break;
+        case 'c':
+        case 'C':
+            clearTare(out);
             break;
         case 'r':
         case 'R':
@@ -276,4 +304,46 @@ void BNO08xIMU::handleSerialCommand(char cmd, Stream &out) {
         default:
             break;
     }
+}
+
+void BNO08xIMU::tareAllAxes(Stream &out) {
+    if (!initialized_) {
+        out.println(F("[BNO08x] ERROR: IMU not initialized."));
+        return;
+    }
+    uint8_t basis = (current_mode_ == REPORT_MODE_FUSION_9AXIS)
+                        ? TARE_ROTATION_VECTOR
+                        : TARE_GAME_ROTATION_VECTOR;
+    bno08x_.tareNow(false, basis);
+    out.println(F("[BNO08x] TARE_ALL COMPLETE: Roll, Pitch & Yaw set to 0."));
+}
+
+void BNO08xIMU::tareYawOnly(Stream &out) {
+    if (!initialized_) {
+        out.println(F("[BNO08x] ERROR: IMU not initialized."));
+        return;
+    }
+    uint8_t basis = (current_mode_ == REPORT_MODE_FUSION_9AXIS)
+                        ? TARE_ROTATION_VECTOR
+                        : TARE_GAME_ROTATION_VECTOR;
+    bno08x_.tareNow(true, basis);
+    out.println(F("[BNO08x] TARE_YAW COMPLETE: Heading (Yaw) set to 0."));
+}
+
+void BNO08xIMU::saveTare(Stream &out) {
+    if (!initialized_) {
+        out.println(F("[BNO08x] ERROR: IMU not initialized."));
+        return;
+    }
+    bno08x_.saveTare();
+    out.println(F("[BNO08x] SAVE_TARE COMPLETE: Orientation persisted to BNO08x flash."));
+}
+
+void BNO08xIMU::clearTare(Stream &out) {
+    if (!initialized_) {
+        out.println(F("[BNO08x] ERROR: IMU not initialized."));
+        return;
+    }
+    bno08x_.clearTare();
+    out.println(F("[BNO08x] CLEAR_TARE COMPLETE: Persisted orientation reset to factory default."));
 }

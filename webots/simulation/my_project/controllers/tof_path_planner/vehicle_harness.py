@@ -246,7 +246,7 @@ class FolkraceVehicle:
                 short_name = name.replace("tof_front_", "tof_")
                 dev = robot.getDevice(short_name)
             step_ms_int = int(round(TIME_STEP_MS))
-            tof_step_ms_int = int(round(TOF_TIME_STEP_MS))
+            tof_step_ms_int = max(1, int(TOF_TIME_STEP_MS))
             if dev is not None:
                 dev.enable(tof_step_ms_int)
                 self.tofs[name] = dev
@@ -382,9 +382,10 @@ class FolkraceVehicle:
         self.last_tofs = {name: TOF_MAX_RANGE_M for name in TOF_SENSOR_NAMES}
         self.cached_f_tof = TOF_MAX_RANGE_M
 
-        # Hardware Latency Buffers (2-step ToF delay + 1-step actuator lag = 3 steps total)
+        # Hardware Latency Buffers (1-step 60 Hz ToF delay = 16.67 ms + 1-step 120 Hz actuator lag = 8.33 ms)
         initial_tofs = {name: TOF_MAX_RANGE_M for name in TOF_SENSOR_NAMES}
-        self.tof_queue = LatencyQueue(steps=TOF_LATENCY_STEPS, default_val=initial_tofs)
+        tof_queue_steps = max(1, int(round(TOF_LATENCY_STEPS / max(1, PLANNER_DECIMATION))))
+        self.tof_queue = LatencyQueue(steps=tof_queue_steps, default_val=initial_tofs)
         start_x = float(self.x_est)
         start_y = float(self.y_est)
         start_yaw = float(self.yaw_est)
@@ -731,7 +732,7 @@ class FolkraceVehicle:
         planner_ran = False
         tof_readings = self.last_tofs
 
-        # Closed-loop Control Tick (125 Hz with Decimation = 1)
+        # Closed-loop Control Tick (60 Hz Pi/ToF with Decimation = 2 on 120 Hz ESP/physics)
         if self.step_counter % PLANNER_DECIMATION == 0:
             planner_ran = True
             raw_tofs = self.read_tof_sensors()

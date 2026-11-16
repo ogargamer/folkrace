@@ -15,8 +15,9 @@
 
 import os
 import sys
+import json
 import math
-from typing import Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 
 # Ensure repository root is on sys.path for core module access
 _CURR_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -289,3 +290,104 @@ RAMP_ENTER_TILT_DEG: float = 6.0        # Combined tilt hypot(roll, pitch) (deg)
 RAMP_EXIT_PITCH_DEG: float = 3.0        # Pitch hysteresis exit floor (deg)
 RAMP_EXIT_TILT_DEG: float = 4.0         # Tilt hysteresis exit floor (deg)
 RAMP_HOLD_TIME_S: float = 0.30          # Hold latch duration (s) across ramp apex / transition
+
+
+# ==============================================================================
+# 10. BEST GENOME AUTO-LOADING (SHARED BY PI 4, BRAIN & WEBOTS PLANNERS)
+# ==============================================================================
+
+BEST_GENOME_SOURCE_PATH: Optional[str] = None
+
+
+def _find_best_genome_path() -> Optional[str]:
+    """Searches local and repository paths for best_planner_genome.json."""
+    candidates: List[str] = [
+        os.path.join(_CURR_DIR, "best_planner_genome.json"),
+        os.path.join(os.path.dirname(_CURR_DIR), "best_planner_genome.json"),
+    ]
+    probe = _CURR_DIR
+    for _ in range(6):
+        candidates.append(
+            os.path.join(probe, "webots", "optimization", "ga_planner_optimizer", "best_planner_genome.json")
+        )
+        parent = os.path.dirname(probe)
+        if parent == probe:
+            break
+        probe = parent
+
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def load_best_genome_genes() -> Tuple[Dict[str, Any], Optional[str]]:
+    """Loads the 'genes' dictionary from best_planner_genome.json if present."""
+    path = _find_best_genome_path()
+    if not path:
+        return {}, None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        genes = data.get("genes") or data.get("best_genome") or {}
+        if isinstance(genes, dict) and genes:
+            return genes, path
+    except Exception as e:
+        print(f"[planner_config] Warning: Failed to load {path}: {e}", flush=True)
+    return {}, None
+
+
+def _apply_best_genome_overrides() -> None:
+    """Overrides static planner defaults with values from best_planner_genome.json."""
+    global BEST_GENOME_SOURCE_PATH
+    genes, path = load_best_genome_genes()
+    if not genes:
+        return
+    BEST_GENOME_SOURCE_PATH = path
+
+    mapping = {
+        "r_inflation_m": ("R_INFLATION_M", float),
+        "target_lookahead_m": ("GAP_MAX_LOOKAHEAD_M", float),
+        "w_gap_distance": ("WEIGHT_GAP_DISTANCE", float),
+        "w_gap_width": ("WEIGHT_GAP_WIDTH", float),
+        "w_gap_steer": ("WEIGHT_ALIGN_STEER", float),
+        "w_gap_straight": ("WEIGHT_ALIGN_STRAIGHT", float),
+        "w_side_clearance": ("WEIGHT_SIDE_CLEARANCE", float),
+        "gap_dist_thresh_m": ("GAP_DIST_THRESH_M", float),
+        "gap_dist_exp_k": ("GAP_DIST_EXP_K", float),
+        "straight_lock_dist": ("STRAIGHT_LOCK_DIST_M", float),
+        "straight_lock_speed": ("STRAIGHT_LOCK_SPEED_MPS", float),
+        "alt_min_separation_m": ("ALT_MIN_SEPARATION_M", float),
+        "alt_aperture_bias": ("ALT_APERTURE_BIAS", float),
+        "horizon_N": ("MPC_HORIZON_N", int),
+        "dt": ("MPC_DT", float),
+        "q_progress": ("MPC_Q_PROGRESS", float),
+        "q_cte": ("MPC_Q_CTE", float),
+        "q_heading": ("MPC_Q_HEADING", float),
+        "r_steer": ("MPC_R_STEER", float),
+        "r_accel": ("MPC_R_ACCEL", float),
+        "r_steer_rate": ("MPC_R_STEER_RATE", float),
+        "mu_friction": ("MPC_MU_FRICTION", float),
+        "v_corner_factor": ("MPC_V_CORNER_FACTOR", float),
+        "v_cruise_max": ("MPC_V_CRUISE_MAX", float),
+        "v_cruise_min": ("MPC_V_CRUISE_MIN", float),
+        "alt_switch_hysteresis": ("MPC_ALT_SWITCH_HYSTERESIS", float),
+        "w_gap_clear": ("MPC_W_GAP_CLEAR", float),
+        "recovery_steer_angle_rad": ("RECOVERY_STEER_ANGLE_RAD", float),
+        "recovery_clearance_exit_m": ("RECOVERY_CLEARANCE_EXIT_M", float),
+        "recovery_arc_lookahead_m": ("RECOVERY_ARC_LOOKAHEAD_M", float),
+    }
+
+    g = globals()
+    for gene_key, (const_name, cast) in mapping.items():
+        if gene_key in genes:
+            g[const_name] = cast(genes[gene_key])
+
+    # Keep alias constants synchronized
+    g["MPC_STRAIGHT_LOCK_DIST_M"] = g["STRAIGHT_LOCK_DIST_M"]
+    g["MPC_STRAIGHT_LOCK_SPEED_MPS"] = g["STRAIGHT_LOCK_SPEED_MPS"]
+    g["MPC_ALT_MIN_SEPARATION_M"] = g["ALT_MIN_SEPARATION_M"]
+    g["MPC_ALT_APERTURE_BIAS"] = g["ALT_APERTURE_BIAS"]
+
+
+_apply_best_genome_overrides()

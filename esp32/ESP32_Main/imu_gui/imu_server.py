@@ -121,9 +121,9 @@ def serial_reader_thread(port_name, baud_rate):
                 serial_instance = ser
             print(f"[Serial Reader] CONNECTED to {chosen_port} @ {baud_rate} Baud!")
 
-            # Trigger live sensor mode if device was in synthetic bench
+            # Enable 50 Hz USB IMU JSON stream on ESP32_Main
             time.sleep(0.1)
-            ser.write(b"BENCH\n")
+            ser.write(b"IMU_STREAM 1\n")
 
             line_buf = ""
             raw_buf = bytearray()
@@ -203,7 +203,7 @@ def serial_reader_thread(port_name, baud_rate):
                     except Exception:
                         raw_buf = raw_buf[1:]
 
-                # 2. Parse Fallback Text Telemetry
+                # 2. Parse JSON Stream & Fallback Text Telemetry
                 if '\n' in line_buf:
                     lines = line_buf.split('\n')
                     line_buf = lines[-1]
@@ -211,6 +211,28 @@ def serial_reader_thread(port_name, baud_rate):
                         line = l.strip()
                         if not line or line.startswith("[400Hz BENCH]"):
                             continue
+                        if line.startswith("{"):
+                            try:
+                                obj = json.loads(line)
+                                if obj.get("imu") == 1 and obj.get("online", 1) == 1:
+                                    with state_lock:
+                                        latest_telemetry["qw"] = round(float(obj.get("qw", 1.0)), 4)
+                                        latest_telemetry["qx"] = round(float(obj.get("qx", 0.0)), 4)
+                                        latest_telemetry["qy"] = round(float(obj.get("qy", 0.0)), 4)
+                                        latest_telemetry["qz"] = round(float(obj.get("qz", 0.0)), 4)
+                                        latest_telemetry["roll"] = round(float(obj.get("r", 0.0)), 2)
+                                        latest_telemetry["pitch"] = round(float(obj.get("p", 0.0)), 2)
+                                        latest_telemetry["yaw"] = round(float(obj.get("y", 0.0)), 2)
+                                        latest_telemetry["ax"] = round(float(obj.get("ax", 0.0)), 2)
+                                        latest_telemetry["ay"] = round(float(obj.get("ay", 0.0)), 2)
+                                        latest_telemetry["az"] = round(float(obj.get("az", 9.81)), 2)
+                                        latest_telemetry["gx"] = round(float(obj.get("gx", 0.0)) * RAD_TO_DEG, 1)
+                                        latest_telemetry["gy"] = round(float(obj.get("gy", 0.0)) * RAD_TO_DEG, 1)
+                                        latest_telemetry["gz"] = round(float(obj.get("gz", 0.0)) * RAD_TO_DEG, 1)
+                                        latest_telemetry["ts"] = time.time()
+                                    continue
+                            except Exception:
+                                pass
                         qm = QUAT_REGEX.search(line)
                         rm = RPY_REGEX.search(line)
                         am = ACCEL_REGEX.search(line)

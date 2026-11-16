@@ -162,6 +162,15 @@ class AutonomousBrain:
 
         if genes:
             self.configure(genes)
+        else:
+            try:
+                from .planner_config import load_best_genome_genes
+            except ImportError:
+                from planner_config import load_best_genome_genes
+            best_genes, best_path = load_best_genome_genes()
+            if best_genes:
+                print(f"[AutonomousBrain] Auto-loaded best genome from {best_path}", flush=True)
+                self.configure(best_genes)
 
     def configure(self, genes: Dict[str, Any]) -> None:
         """Applies dynamic tuning parameters or genome weights."""

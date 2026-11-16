@@ -1472,8 +1472,8 @@
     let isLive = true;
     let isPlaying = false;
     let playInterval = null;
-    let currentFrameId = 1;
-    let totalFrames = 1;
+    let currentFrameId = 0;
+    let totalFrames = 0;
     let currentPkt = null;
     let anomaliesList = [];
 
@@ -3319,19 +3319,21 @@
         }
       }
 
-      // Global Header and Page 2 Button Sync
-      fakeDataActive = isBench;
-      syncFakeDataButtons(isBench);
+      // Global Header and Page 2 Button Sync (only from live stream, never overwrite during replay)
+      if (isLive) {
+        fakeDataActive = isBench;
+        syncFakeDataButtons(isBench);
 
-      if (performance.now() - lastPlannerToggleMs > 500) {
-        const srvRunning = Boolean(
-          pkt.planner_running !== undefined
-            ? pkt.planner_running
-            : (pkt.flags && pkt.flags.planner_running)
-        );
-        if (srvRunning !== plannerRunning) {
-          plannerRunning = srvRunning;
-          syncPlannerRunButton(plannerRunning);
+        if (performance.now() - lastPlannerToggleMs > 500) {
+          const srvRunning = Boolean(
+            pkt.planner_running !== undefined
+              ? pkt.planner_running
+              : (pkt.flags && pkt.flags.planner_running)
+          );
+          if (srvRunning !== plannerRunning) {
+            plannerRunning = srvRunning;
+            syncPlannerRunButton(plannerRunning);
+          }
         }
       }
 
@@ -3556,6 +3558,21 @@
       perfMetrics.lastRenderMs = performance.now() - t0;
     }
 
+    function syncLiveFrameCounter(totFrames) {
+      const n = parseInt(totFrames || 0, 10);
+      if (n <= 0) return;
+      totalFrames = n;
+      const slider = document.getElementById("frameSlider");
+      slider.max = totalFrames;
+      if (isLive) {
+        currentFrameId = totalFrames;
+        slider.value = totalFrames;
+        document.getElementById("lblFrame").innerText = `Frame ${totalFrames} / ${totalFrames}`;
+      } else {
+        document.getElementById("lblFrame").innerText = `Frame ${currentFrameId} / ${totalFrames}`;
+      }
+    }
+
     function initLiveWebSocket() {
       if (wsLive) {
         try { wsLive.close(); } catch (e) { }
@@ -3604,13 +3621,7 @@
           perfMetrics.lastPayloadKb = ab.byteLength / 1024.0;
           perfMetrics.frameCount++;
 
-          const totFrames = pkt._total_frames || pkt.total_frames;
-          if (totFrames) {
-            totalFrames = totFrames;
-            document.getElementById("frameSlider").max = totalFrames;
-            document.getElementById("frameSlider").value = totalFrames;
-            document.getElementById("lblFrame").innerText = `Frame ${totalFrames} / ${totalFrames}`;
-          }
+          syncLiveFrameCounter(pkt._total_frames || pkt.total_frames);
 
           if (t0 - perfMetrics.lastFpsCalc >= 500.0) {
             perfMetrics.currentFps = (perfMetrics.frameCount * 1000.0) / (t0 - perfMetrics.lastFpsCalc);
@@ -3662,13 +3673,7 @@
             scheduleRender(pkt);
             perfMetrics.isBinary = true;
 
-            const totFrames = pkt._total_frames || pkt.total_frames;
-            if (totFrames) {
-              totalFrames = totFrames;
-              document.getElementById("frameSlider").max = totalFrames;
-              document.getElementById("frameSlider").value = totalFrames;
-              document.getElementById("lblFrame").innerText = `Frame ${totalFrames} / ${totalFrames}`;
-            }
+            syncLiveFrameCounter(pkt._total_frames || pkt.total_frames);
           } else {
             useBinaryEndpoint = false;
           }
@@ -3682,13 +3687,7 @@
             scheduleRender(pkt);
             perfMetrics.isBinary = false;
 
-            const totFrames = pkt._total_frames || pkt.total_frames;
-            if (totFrames) {
-              totalFrames = totFrames;
-              document.getElementById("frameSlider").max = totalFrames;
-              document.getElementById("frameSlider").value = totalFrames;
-              document.getElementById("lblFrame").innerText = `Frame ${totalFrames} / ${totalFrames}`;
-            }
+            syncLiveFrameCounter(pkt._total_frames || pkt.total_frames);
           }
         }
       } catch (err) {
@@ -3791,6 +3790,7 @@
           document.getElementById("diskFree").innerText = `${data.disk_free_gb || "--"} GB`;
           document.getElementById("sessionName").innerText = `Session: ${data.session_id || "active"}`;
           document.getElementById("freqBadge").innerText = `${Math.round(data.loop_hz || 60)} Hz`;
+          syncLiveFrameCounter(data.total_recorded);
         }
       } catch (err) { }
     }
@@ -3800,6 +3800,8 @@
     // Time-Travel / Frame-by-Frame Scrubbing
     const frameSlider = document.getElementById("frameSlider");
     frameSlider.addEventListener("input", (e) => {
+      if (totalFrames <= 0) return;
+      stopPlayback();
       setReplayMode();
       loadFrame(parseInt(e.target.value));
     });
@@ -3811,11 +3813,34 @@
       document.getElementById("modeBadge").className = "badge badge-replay";
     }
 
+    function stopPlayback() {
+      isPlaying = false;
+      if (playInterval) {
+        clearTimeout(playInterval);
+        playInterval = null;
+      }
+      document.getElementById("btnPlay").innerText = "▶ Play";
+    }
+
+    async function stepPlayback() {
+      if (!isPlaying || isLive) return;
+      if (currentFrameId >= totalFrames) {
+        stopPlayback();
+        return;
+      }
+      const tStart = performance.now();
+      await loadFrame(currentFrameId + 1);
+      if (!isPlaying || isLive) return;
+      const speed = parseFloat(document.getElementById("selSpeed").value) || 1.0;
+      const targetMs = 50.0 / speed;
+      const elapsed = performance.now() - tStart;
+      const delay = Math.max(1, Math.round(targetMs - elapsed));
+      playInterval = setTimeout(stepPlayback, delay);
+    }
+
     document.getElementById("btnToggleLive").addEventListener("click", () => {
       isLive = true;
-      isPlaying = false;
-      clearInterval(playInterval);
-      document.getElementById("btnPlay").innerText = "▶ Play";
+      stopPlayback();
       document.getElementById("btnToggleLive").classList.add("active");
       document.getElementById("modeBadge").innerText = "LIVE STREAM";
       document.getElementById("modeBadge").className = "badge badge-live";
@@ -3826,6 +3851,7 @@
     });
 
     async function loadFrame(frameId) {
+      if (totalFrames <= 0) return;
       currentFrameId = Math.max(1, Math.min(totalFrames, frameId));
       frameSlider.value = currentFrameId;
       document.getElementById("lblFrame").innerText = `Frame ${currentFrameId} / ${totalFrames}`;
@@ -3853,33 +3879,32 @@
       } catch (err) { }
     }
 
-    document.getElementById("btnFirst").addEventListener("click", () => { setReplayMode(); loadFrame(1); });
-    document.getElementById("btnLast").addEventListener("click", () => { setReplayMode(); loadFrame(totalFrames); });
-    document.getElementById("btnPrev1").addEventListener("click", () => { setReplayMode(); loadFrame(currentFrameId - 1); });
-    document.getElementById("btnNext1").addEventListener("click", () => { setReplayMode(); loadFrame(currentFrameId + 1); });
-    document.getElementById("btnPrev10").addEventListener("click", () => { setReplayMode(); loadFrame(currentFrameId - 10); });
-    document.getElementById("btnNext10").addEventListener("click", () => { setReplayMode(); loadFrame(currentFrameId + 10); });
+    function stepToFrame(targetId) {
+      if (totalFrames <= 0) return;
+      stopPlayback();
+      setReplayMode();
+      loadFrame(targetId);
+    }
+
+    document.getElementById("btnFirst").addEventListener("click", () => stepToFrame(1));
+    document.getElementById("btnLast").addEventListener("click", () => stepToFrame(totalFrames));
+    document.getElementById("btnPrev1").addEventListener("click", () => stepToFrame(currentFrameId - 1));
+    document.getElementById("btnNext1").addEventListener("click", () => stepToFrame(currentFrameId + 1));
+    document.getElementById("btnPrev10").addEventListener("click", () => stepToFrame(currentFrameId - 10));
+    document.getElementById("btnNext10").addEventListener("click", () => stepToFrame(currentFrameId + 10));
 
     document.getElementById("btnPlay").addEventListener("click", () => {
+      if (totalFrames <= 0) return;
       setReplayMode();
-      isPlaying = !isPlaying;
-      const btn = document.getElementById("btnPlay");
       if (isPlaying) {
-        btn.innerText = "⏸ Pause";
-        const speed = parseFloat(document.getElementById("selSpeed").value);
-        const intervalMs = Math.round(16.6 / speed);
-        playInterval = setInterval(() => {
-          if (currentFrameId >= totalFrames) {
-            isPlaying = false;
-            clearInterval(playInterval);
-            btn.innerText = "▶ Play";
-          } else {
-            loadFrame(currentFrameId + 1);
-          }
-        }, intervalMs);
+        stopPlayback();
       } else {
-        btn.innerText = "▶ Play";
-        clearInterval(playInterval);
+        if (currentFrameId >= totalFrames) {
+          currentFrameId = 0;
+        }
+        isPlaying = true;
+        document.getElementById("btnPlay").innerText = "⏸ Pause";
+        stepPlayback();
       }
     });
 

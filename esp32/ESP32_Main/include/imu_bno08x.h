@@ -73,6 +73,11 @@ public:
     void printCurrentReadings(Stream &out = Serial);
     void handleSerialCommand(char cmd, Stream &out = Serial);
 
+    void tareAllAxes(Stream &out = Serial);
+    void tareYawOnly(Stream &out = Serial);
+    void saveTare(Stream &out = Serial);
+    void clearTare(Stream &out = Serial);
+
 private:
     void convertQuaternionToEuler(float w, float x, float y, float z, float &roll, float &pitch, float &yaw);
 

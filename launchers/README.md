@@ -33,6 +33,7 @@ Hardware-dependent diagnostic launchers explicitly denote their target hardware 
 | **15** | **ESP32** | [`15_esp32_servo_gui.py`](file:///c:/Users/nurmi/Documents/Folkrace/launchers/15_esp32_servo_gui.py) | Physical ESP32 333 Hz high-rate digital steering servo test bench, center trimming, and dynamic frequency sweep GUI. | ESP32-S3 (Main) |
 | **16** | **ESP32** | [`16_esp32_4tof_gui.py`](file:///c:/Users/nurmi/Documents/Folkrace/launchers/16_esp32_4tof_gui.py) | Physical ESP32 quad VL53L8CX live 20-byte binary stream viewer displaying 1x4 2D LiDAR ray distance strips. | ESP32-S3 (ToF Hub) |
 | **17** | **Pi 4** | [`17_pi4_debug_studio.py`](file:///c:/Users/nurmi/Documents/Folkrace/launchers/17_pi4_debug_studio.py) | Raspberry Pi 4 Dual-Core Debug Studio: Web Tactical Mission Control & SQLite Black Box with frame-by-frame time-travel scrubbing. | Pi 4 / Browser |
+| **18** | **ESP32** | [`18_esp32_imu_calib_gui.py`](file:///c:/Users/nurmi/Documents/Folkrace/launchers/18_esp32_imu_calib_gui.py) | Easy 3-step BNO086 IMU Heading & Mounting Calibration GUI (live top-down car compass, Tare All/Yaw, and permanent flash save). | ESP32-S3 (Main) |
 
 ---
 
