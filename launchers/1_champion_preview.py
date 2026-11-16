@@ -117,7 +117,7 @@ def launch_webots(launch_gui: bool = True, telemetry_hz: int = 60):
         gui_script = os.path.join(PLANNERS_DIR, "planner_gui.py")
         if os.path.exists(gui_script):
             print(f"[1/2] Spawning Live Telemetry Map GUI (Port 9876, Stream: {telemetry_hz} Hz)...", flush=True)
-            gui_proc = subprocess.Popen([sys.executable, gui_script, "--telemetry-hz", str(telemetry_hz)], cwd=PLANNERS_DIR, env=env)
+            gui_proc = subprocess.Popen([sys.executable, gui_script, "--telemetry-hz", str(telemetry_hz), "--local-only"], cwd=PLANNERS_DIR, env=env)
             time.sleep(0.6)
 
     cmd = [

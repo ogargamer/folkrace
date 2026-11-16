@@ -1116,8 +1116,9 @@ def parse_binary_packet(data: bytes) -> Optional[dict]:
 class ComprehensivePlannerGUI(QMainWindow):
     """Main Telemetry & Costmap GUI Window with Dark Theme Live Studio."""
 
-    def __init__(self, initial_telem_hz: int = 60):
+    def __init__(self, initial_telem_hz: int = 60, local_only: bool = False):
         super().__init__()
+        self.local_only = bool(local_only)
         self.initial_telem_hz = max(1, min(60, int(os.environ.get("WEBOTS_TELEMETRY_HZ", initial_telem_hz))))
         self.setWindowTitle(f"Curvilinear SL-MPC Autonomous Racing Studio ({self.initial_telem_hz} Hz)")
         self.resize(1260, 820)
@@ -1662,8 +1663,9 @@ class ComprehensivePlannerGUI(QMainWindow):
             pass
 
         bound = False
-        # Bind to 0.0.0.0 first to accept packets from both local Webots sim and remote Pi 4 robot over Wi-Fi
-        for bind_ip in ["0.0.0.0", "127.0.0.1"]:
+        # Bind to 127.0.0.1 only in --local-only mode (sim preview); otherwise 0.0.0.0 to accept Pi 4 over Wi-Fi too
+        bind_ips = ["127.0.0.1"] if self.local_only else ["0.0.0.0", "127.0.0.1"]
+        for bind_ip in bind_ips:
             try:
                 sock.bind((bind_ip, 9876))
                 sock.settimeout(0.5)
@@ -1969,6 +1971,7 @@ def launch_gui():
     import argparse
     parser = argparse.ArgumentParser(description="Live Telemetry & Trajectory GUI")
     parser.add_argument("--telemetry-hz", "--hz", type=int, default=int(os.environ.get("WEBOTS_TELEMETRY_HZ", 60)), help="Initial streaming frequency (1-60 Hz)")
+    parser.add_argument("--local-only", action="store_true", help="Bind to 127.0.0.1 only (ignore remote Pi 4 UDP telemetry)")
     args, _ = parser.parse_known_args()
 
     app = QApplication(sys.argv)
@@ -1991,7 +1994,7 @@ def launch_gui():
     dark_palette.setColor(QPalette.HighlightedText, QColor(255, 255, 255))
     app.setPalette(dark_palette)
 
-    gui = ComprehensivePlannerGUI(initial_telem_hz=args.telemetry_hz)
+    gui = ComprehensivePlannerGUI(initial_telem_hz=args.telemetry_hz, local_only=args.local_only)
     gui.show()
     sys.exit(app.exec_())
 

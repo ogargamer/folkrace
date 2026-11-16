@@ -149,6 +149,26 @@ class StuckRecoveryManager:
         self._arc_pts_center[:, 1] = self.origin_y + self._arc_s
 
     # --- STATE TRANSITION & COMMAND HELPERS ---
+    def reset(self) -> None:
+        """Resets all recovery state machine timers, flags, and corrective tracking."""
+        self.state = StuckRecoveryState.NORMAL_DRIVE
+        self.stroke_timer = 0.0
+        self.total_recovery_timer = 0.0
+        self.preferred_yaw_sign = 1.0
+        self.current_cmd_v = 0.0
+        self.current_cmd_steer = 0.0
+
+        self.target_corrective_yaw = None
+        self.last_corrective_yaw = 0.0
+        self.corrective_accumulated_turn = 0.0
+        self.corrective_substate = "FORWARD"
+        self.corrective_steer_dir = 1.0
+        self.corrective_reverse_timer = 0.0
+        self.forward_grace_timer = 0.0
+
+        self.is_left_pinned = False
+        self.is_right_pinned = False
+
     def _finish_recovery(self) -> Tuple[bool, float, float]:
         self.state = StuckRecoveryState.NORMAL_DRIVE
         self.stroke_timer = 0.0

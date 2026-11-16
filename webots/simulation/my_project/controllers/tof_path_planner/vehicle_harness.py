@@ -314,7 +314,9 @@ class FolkraceVehicle:
             max_steer=MAX_STEERING_RAD,
             max_servo_angle=MAX_SERVO_RAD,
             ackermann_percent=ACKERMANN_PERCENT,
-            motor_dir=MOTOR_DIR,
+            # Webots only_front_tofs.proto wheels rotate around +X (axis 1 0 0),
+            # where negative omega drives +Y forward (matching imu_encoder_fusion.py).
+            motor_dir=-1.0,
             v_max=V_MAX_WHEEL,
         )
         self.drift_controller = TractionDriftController(
