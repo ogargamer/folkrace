@@ -1099,7 +1099,11 @@
           <div class="card-title">SD Card Flight Black Box</div>
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
             <span id="sessionName">Session: active</span>
-            <button id="btnDownloadLog" title="Download SQLite database to laptop">💾 Download Log</button>
+            <div style="display:flex;gap:4px;">
+              <button id="btnOpenLocalDb" title="Open a downloaded .db file for 60 Hz offline replay">📂 Open .db</button>
+              <button id="btnDownloadLog" title="Download SQLite database to laptop">💾 Download Log</button>
+              <input type="file" id="fileOpenLocalDb" accept=".db,.sqlite" style="display:none">
+            </div>
           </div>
           <div style="font-size:11px;color:var(--text-secondary);display:flex;flex-direction:column;gap:3px;">
             <div>Driving Buffer: <span id="drivingTime" style="color:var(--accent-cyan);font-weight:700">0.0 min</span>
@@ -1473,7 +1477,9 @@
     let isPlaying = false;
     let playInterval = null;
     let currentFrameId = 0;
+    let minFrameId = 1;
     let totalFrames = 0;
+    let loadSeq = 0;
     let currentPkt = null;
     let anomaliesList = [];
 
@@ -3558,8 +3564,15 @@
       perfMetrics.lastRenderMs = performance.now() - t0;
     }
 
-    function syncLiveFrameCounter(totFrames) {
+    function syncLiveFrameCounter(totFrames, minFrame) {
       const n = parseInt(totFrames || 0, 10);
+      if (minFrame !== undefined && minFrame !== null) {
+        const m = parseInt(minFrame, 10);
+        if (m >= 1) {
+          minFrameId = m;
+          document.getElementById("frameSlider").min = minFrameId;
+        }
+      }
       if (n <= 0) return;
       totalFrames = n;
       const slider = document.getElementById("frameSlider");
@@ -3751,8 +3764,13 @@
     syncFakeDataButtons(false);
     syncPlannerRunButton(false);
 
-    initLiveWebSocket();
-    setTimeout(fetchLive, 50);
+    const isLocalReplay = new URLSearchParams(window.location.search).get("replay") === "1";
+    if (isLocalReplay) {
+      setReplayMode();
+    } else {
+      initLiveWebSocket();
+      setTimeout(fetchLive, 50);
+    }
 
     function updatePerfHUD() {
       const elFps = document.getElementById("perfFps");
@@ -3790,12 +3808,16 @@
           document.getElementById("diskFree").innerText = `${data.disk_free_gb || "--"} GB`;
           document.getElementById("sessionName").innerText = `Session: ${data.session_id || "active"}`;
           document.getElementById("freqBadge").innerText = `${Math.round(data.loop_hz || 60)} Hz`;
-          syncLiveFrameCounter(data.total_recorded);
+          syncLiveFrameCounter(data.total_recorded, data.min_frame_id);
         }
       } catch (err) { }
     }
     setInterval(fetchStatus, 2000);
-    fetchStatus();
+    fetchStatus().then(() => {
+      if (isLocalReplay && totalFrames > 0) {
+        loadFrame(minFrameId);
+      }
+    });
 
     // Time-Travel / Frame-by-Frame Scrubbing
     const frameSlider = document.getElementById("frameSlider");
@@ -3808,9 +3830,13 @@
 
     function setReplayMode() {
       isLive = false;
-      document.getElementById("btnToggleLive").classList.remove("active");
-      document.getElementById("modeBadge").innerText = "REPLAY / SCRUB";
-      document.getElementById("modeBadge").className = "badge badge-replay";
+      const btnLive = document.getElementById("btnToggleLive");
+      if (btnLive) btnLive.classList.remove("active");
+      const mb = document.getElementById("modeBadge");
+      if (mb) {
+        mb.innerText = "REPLAY / SCRUB";
+        mb.className = "badge badge-replay";
+      }
     }
 
     function stopPlayback() {
@@ -3832,7 +3858,7 @@
       await loadFrame(currentFrameId + 1);
       if (!isPlaying || isLive) return;
       const speed = parseFloat(document.getElementById("selSpeed").value) || 1.0;
-      const targetMs = 50.0 / speed;
+      const targetMs = 16.667 / speed;
       const elapsed = performance.now() - tStart;
       const delay = Math.max(1, Math.round(targetMs - elapsed));
       playInterval = setTimeout(stepPlayback, delay);
@@ -3841,9 +3867,13 @@
     document.getElementById("btnToggleLive").addEventListener("click", () => {
       isLive = true;
       stopPlayback();
-      document.getElementById("btnToggleLive").classList.add("active");
-      document.getElementById("modeBadge").innerText = "LIVE STREAM";
-      document.getElementById("modeBadge").className = "badge badge-live";
+      const btnLive = document.getElementById("btnToggleLive");
+      if (btnLive) btnLive.classList.add("active");
+      const mb = document.getElementById("modeBadge");
+      if (mb) {
+        mb.innerText = "LIVE STREAM";
+        mb.className = "badge badge-live";
+      }
       if (!wsConnected) {
         initLiveWebSocket();
         setTimeout(fetchLive, 50);
@@ -3852,31 +3882,41 @@
 
     async function loadFrame(frameId) {
       if (totalFrames <= 0) return;
-      currentFrameId = Math.max(1, Math.min(totalFrames, frameId));
+      const targetId = Math.max(minFrameId, Math.min(totalFrames, frameId));
+      const reqSeq = ++loadSeq;
+      currentFrameId = targetId;
       frameSlider.value = currentFrameId;
       document.getElementById("lblFrame").innerText = `Frame ${currentFrameId} / ${totalFrames}`;
 
       try {
-        const resBin = await fetch(`/api/frame_bin/${currentFrameId}`);
+        const resBin = await fetch(`/api/frame_bin/${targetId}`);
         if (resBin.ok) {
           const ab = await resBin.arrayBuffer();
           const pkt = await parseLiveBinary(ab);
+          if (reqSeq !== loadSeq || isLive) return;
           currentPkt = pkt;
           updateHUD(pkt);
           renderRadar(pkt);
           return;
         }
-      } catch (err) { }
+      } catch (err) {
+        console.warn("Replay binary frame load failed, falling back to JSON:", err);
+      }
 
       try {
-        const res = await fetch(`/api/frame/${currentFrameId}`);
+        const res = await fetch(`/api/frame/${targetId}`);
         if (res.ok) {
           const pkt = await res.json();
+          if (reqSeq !== loadSeq || isLive) return;
           currentPkt = pkt;
           updateHUD(pkt);
           renderRadar(pkt);
+        } else {
+          console.warn(`Replay frame ${targetId} HTTP ${res.status}`);
         }
-      } catch (err) { }
+      } catch (err) {
+        console.warn("Replay JSON frame load failed:", err);
+      }
     }
 
     function stepToFrame(targetId) {
@@ -3886,7 +3926,7 @@
       loadFrame(targetId);
     }
 
-    document.getElementById("btnFirst").addEventListener("click", () => stepToFrame(1));
+    document.getElementById("btnFirst").addEventListener("click", () => stepToFrame(minFrameId));
     document.getElementById("btnLast").addEventListener("click", () => stepToFrame(totalFrames));
     document.getElementById("btnPrev1").addEventListener("click", () => stepToFrame(currentFrameId - 1));
     document.getElementById("btnNext1").addEventListener("click", () => stepToFrame(currentFrameId + 1));
@@ -3899,8 +3939,8 @@
       if (isPlaying) {
         stopPlayback();
       } else {
-        if (currentFrameId >= totalFrames) {
-          currentFrameId = 0;
+        if (currentFrameId >= totalFrames || currentFrameId < minFrameId) {
+          currentFrameId = minFrameId - 1;
         }
         isPlaying = true;
         document.getElementById("btnPlay").innerText = "⏸ Pause";
@@ -3930,6 +3970,7 @@
       // Find next anomaly after current frame
       let nextAnom = anomaliesList.find(a => a.frame_id > currentFrameId);
       if (!nextAnom) nextAnom = anomaliesList[0]; // loop back to first
+      stopPlayback();
       setReplayMode();
       loadFrame(nextAnom.frame_id);
     });
@@ -3937,6 +3978,46 @@
     // Download log database
     document.getElementById("btnDownloadLog").addEventListener("click", () => {
       window.location.href = "/api/download";
+    });
+
+    // Open / upload a local .db file (active in local --replay server mode)
+    const fileOpenLocalDb = document.getElementById("fileOpenLocalDb");
+    document.getElementById("btnOpenLocalDb").addEventListener("click", () => {
+      if (!isLocalReplay) {
+        alert("To replay a downloaded .db offline at 60 Hz, first click 'Download Log' and then run:\n\npython launchers/17_pi4_debug_studio.py --replay");
+        return;
+      }
+      fileOpenLocalDb.value = "";
+      fileOpenLocalDb.click();
+    });
+
+    fileOpenLocalDb.addEventListener("change", async (e) => {
+      const file = e.target.files && e.target.files[0];
+      if (!file) return;
+      try {
+        const res = await fetch("/api/upload_db", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/octet-stream",
+            "X-Filename": file.name
+          },
+          body: await file.arrayBuffer()
+        });
+        if (!res.ok) {
+          alert(`Failed to load database: HTTP ${res.status}`);
+          return;
+        }
+        stopPlayback();
+        setReplayMode();
+        anomaliesList = [];
+        await fetchStatus();
+        await loadAnomalies();
+        if (totalFrames > 0) {
+          await loadFrame(minFrameId);
+        }
+      } catch (err) {
+        alert(`Failed to upload database: ${err}`);
+      }
     });
   </script>
 </body>

@@ -19,6 +19,7 @@
     python launchers/17_pi4_debug_studio.py --verify     # Tests all Pi server endpoints
     python launchers/17_pi4_debug_studio.py --stream     # Live terminal telemetry dashboard
     python launchers/17_pi4_debug_studio.py --download   # Downloads active SQLite flight log
+    python launchers/17_pi4_debug_studio.py --replay     # Downloads (or opens latest) .db for 60Hz offline replay
     python launchers/17_pi4_debug_studio.py --restart    # Restarts remote Folkrace service
     python launchers/17_pi4_debug_studio.py --sync       # Syncs pi4 code to robot before launch
 ================================================================================
@@ -215,8 +216,8 @@ def trigger_mcu_reconnect(base_url: str) -> bool:
         return False
 
 
-def download_database(base_url: str, output_path: Optional[str] = None) -> bool:
-    """Downloads the active flight recorder SQLite database."""
+def download_database(base_url: str, output_path: Optional[str] = None) -> Optional[str]:
+    """Downloads the active flight recorder SQLite database and returns its local path."""
     status = query_api_json(base_url, "/api/status")
     session_id = status.get("session_id", "recording") if status else "recording"
     
@@ -241,10 +242,190 @@ def download_database(base_url: str, output_path: Optional[str] = None) -> bool:
         dt = time.time() - t0
         mb = total_bytes / (1024 * 1024)
         print(f"[Download] Saved {mb:.2f} MB in {dt:.2f}s ({mb/max(0.01, dt):.2f} MB/s) -> {output_path}")
-        return True
+        return output_path
     except Exception as e:
         print(f"[Download] Error: {e}")
-        return False
+        return None
+
+
+def find_latest_local_recording() -> Optional[str]:
+    """Returns the most recently modified .db file in data/recordings/, if any."""
+    rec_dir = Path(ROOT_DIR) / "data" / "recordings"
+    if not rec_dir.exists():
+        return None
+    dbs = sorted(rec_dir.glob("*.db"), key=lambda p: p.stat().st_mtime, reverse=True)
+    return str(dbs[0]) if dbs else None
+
+
+def run_local_replay_server(db_path: str, prefer_app_window: bool = True, open_browser: bool = True):
+    """Starts a localhost 60 Hz offline replay server for a downloaded SQLite flight database."""
+    from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+    from urllib.parse import urlparse
+    import threading
+
+    if PI4_DIR not in sys.path:
+        sys.path.insert(0, PI4_DIR)
+    from debug_recorder import TelemetryLogReader
+    from debug_server import build_live_binary_packet
+
+    html_path = os.path.join(PI4_DIR, "web_debug_gui.html")
+    state_lock = threading.Lock()
+    replay_state: Dict[str, Any] = {
+        "db_path": db_path,
+        "reader": TelemetryLogReader(db_path),
+        "summary": None,
+        "bounds": (1, 0, 0),
+    }
+
+    def _reload_db(new_path: str):
+        new_reader = TelemetryLogReader(new_path)
+        summary = new_reader.get_summary()
+        bounds = new_reader.get_frame_bounds()
+        with state_lock:
+            old_reader = replay_state.get("reader")
+            replay_state["db_path"] = new_path
+            replay_state["reader"] = new_reader
+            replay_state["summary"] = summary
+            replay_state["bounds"] = bounds
+        if old_reader and hasattr(old_reader, "close"):
+            old_reader.close()
+
+    _reload_db(db_path)
+
+    class LocalReplayHandler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, format, *args):
+            pass
+
+        def _send_bytes(self, body: bytes, content_type: str, status: int = 200):
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _send_json(self, obj: Any, status: int = 200):
+            self._send_bytes(json.dumps(obj).encode("utf-8"), "application/json", status)
+
+        def do_GET(self):
+            path = urlparse(self.path).path
+            if path in ("/", "/index.html"):
+                with open(html_path, "rb") as f:
+                    self._send_bytes(f.read(), "text/html")
+            elif path == "/api/status":
+                with state_lock:
+                    cur_db = replay_state["db_path"]
+                    summary = replay_state["summary"] or {}
+                    min_id, max_id, _ = replay_state["bounds"]
+                try:
+                    _, _, disk_free = shutil.disk_usage(os.path.dirname(cur_db) or ROOT_DIR)
+                    disk_free_gb = round(disk_free / (1024**3), 2)
+                except Exception:
+                    disk_free_gb = 0.0
+                self._send_json({
+                    "session_id": summary.get("session_id", os.path.basename(cur_db)),
+                    "min_frame_id": min_id,
+                    "total_recorded": max_id,
+                    "dropped_frames": 0,
+                    "pruned_frames": 0,
+                    "driving_seconds": summary.get("driving_seconds", 0.0),
+                    "driving_minutes": summary.get("driving_minutes", 0.0),
+                    "max_buffer_minutes": 30.0,
+                    "file_size_mb": summary.get("file_size_mb", 0.0),
+                    "disk_free_gb": disk_free_gb,
+                    "temp_c": 0.0,
+                    "loop_hz": 60.0,
+                    "cpu_affinity": [],
+                })
+            elif path.startswith("/api/frame_bin/"):
+                try:
+                    frame_id = int(path.split("/")[-1])
+                except ValueError:
+                    self.send_error(400, "Invalid frame ID")
+                    return
+                with state_lock:
+                    reader = replay_state["reader"]
+                frame_data = reader.get_frame(frame_id)
+                if not frame_data:
+                    self.send_error(404, f"Frame {frame_id} not found")
+                    return
+                try:
+                    self._send_bytes(build_live_binary_packet(frame_data), "application/octet-stream")
+                except Exception as e:
+                    self.send_error(500, f"Failed to pack frame {frame_id}: {e}")
+            elif path.startswith("/api/frame/"):
+                try:
+                    frame_id = int(path.split("/")[-1])
+                except ValueError:
+                    self._send_json({"error": "Invalid frame ID"}, 400)
+                    return
+                with state_lock:
+                    reader = replay_state["reader"]
+                frame_data = reader.get_frame(frame_id)
+                if frame_data:
+                    self._send_json(frame_data)
+                else:
+                    self._send_json({"error": f"Frame {frame_id} not found"}, 404)
+            elif path == "/api/anomalies":
+                with state_lock:
+                    reader = replay_state["reader"]
+                self._send_json(reader.get_anomalies())
+            elif path == "/api/download":
+                with state_lock:
+                    cur_db = replay_state["db_path"]
+                if os.path.exists(cur_db):
+                    with open(cur_db, "rb") as f:
+                        data = f.read()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/octet-stream")
+                    self.send_header("Content-Disposition", f'attachment; filename="{os.path.basename(cur_db)}"')
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+                else:
+                    self.send_error(404, "Database not found")
+            elif path in ("/api/live", "/api/live_bin"):
+                self._send_json({"status": "REPLAY_OFFLINE"}, 200) if path == "/api/live" else self.send_error(404)
+            else:
+                self._send_json({"error": "Not Found"}, 404)
+
+        def do_POST(self):
+            path = urlparse(self.path).path
+            if path == "/api/upload_db":
+                content_len = int(self.headers.get("Content-Length", 0))
+                if content_len <= 0:
+                    self._send_json({"error": "Empty body"}, 400)
+                    return
+                body = self.rfile.read(content_len)
+                raw_name = os.path.basename(self.headers.get("X-Filename", "uploaded.db")) or "uploaded.db"
+                out_dir = Path(ROOT_DIR) / "data" / "recordings"
+                out_dir.mkdir(parents=True, exist_ok=True)
+                target_path = str(out_dir / raw_name)
+                with open(target_path, "wb") as f:
+                    f.write(body)
+                try:
+                    _reload_db(target_path)
+                    self._send_json({"status": "ok", "db_path": target_path})
+                except Exception as e:
+                    self._send_json({"error": str(e)}, 400)
+            else:
+                self._send_json({"error": "Endpoint not found"}, 404)
+
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), LocalReplayHandler)
+    port = httpd.server_address[1]
+    url = f"http://127.0.0.1:{port}/?replay=1"
+    print(f"[Replay] Serving {db_path} locally at 60 Hz: {url}")
+    print("[Replay] Press Ctrl+C to stop the local replay server.")
+    if open_browser:
+        launch_tactical_gui(url, prefer_app_window=prefer_app_window)
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        print("\n[Replay] Stopped.")
+    finally:
+        httpd.server_close()
 
 
 def run_full_verification(base_url: str, ssh_host: str = "robot") -> bool:
@@ -426,6 +607,7 @@ def main():
     parser.add_argument("--verify", action="store_true", help="Run full automated verification of all server endpoints")
     parser.add_argument("--stream", action="store_true", help="Stream live telemetry dashboard in terminal")
     parser.add_argument("--download", action="store_true", help="Download current SQLite black box flight database")
+    parser.add_argument("--replay", nargs="?", const="__AUTO__", default=None, help="Open local 60 Hz replay GUI (optional .db path; downloads from Pi or uses latest local .db)")
     parser.add_argument("--reconnect", "--reconnect-mcu", dest="reconnect", action="store_true", help="Trigger remote ESP32 serial re-probe & reconnection")
     parser.add_argument("--tab", "--browser-tab", "--browser", "--web", dest="browser_tab", action="store_true", help="Open Tactical Mission Control in standard browser tab instead of standalone app window")
     parser.add_argument("--desktop", "--pyqt", "--planner-gui", dest="desktop", action="store_true", help="Launch native PyQt5 desktop planner GUI instead of Tactical Mission Control")
@@ -451,6 +633,26 @@ def main():
         restart_remote_service(args.host or "robot")
     if args.stop:
         stop_remote_service(args.host or "robot")
+        return
+
+    # 2b. Handle offline local --replay before requiring Pi connectivity
+    if args.replay is not None:
+        if args.replay != "__AUTO__":
+            if not os.path.exists(args.replay):
+                print(f"[Replay ERROR] Database not found: {args.replay}")
+                sys.exit(1)
+            run_local_replay_server(args.replay, prefer_app_window=not args.browser_tab, open_browser=not args.no_browser)
+            return
+
+        # --replay without path: try downloading from Pi, else fall back to latest local .db
+        _, base_url = resolve_pi_host(args.host, timeout_s=1.0)
+        db_file = download_database(base_url) if base_url else None
+        if not db_file:
+            db_file = find_latest_local_recording()
+        if not db_file:
+            print("[Replay ERROR] Pi 4 is unreachable and no local recordings found in data/recordings/.")
+            sys.exit(1)
+        run_local_replay_server(db_file, prefer_app_window=not args.browser_tab, open_browser=not args.no_browser)
         return
 
     # 3. Auto-detect Pi host and verify HTTP server

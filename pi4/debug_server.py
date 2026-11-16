@@ -320,103 +320,125 @@ def build_live_binary_packet(pkt: Dict[str, Any]) -> bytes:
     """
     prob_comp_bytes = b""
     haz_comp_bytes = b""
-    grid_shape = pkt.get("grid_shape", [0, 0])
-    rows = int(grid_shape[0]) if len(grid_shape) >= 1 else 0
-    cols = int(grid_shape[1]) if len(grid_shape) >= 2 else 0
+    grid_shape = pkt.get("grid_shape") or [0, 0]
+    rows = int(grid_shape[0]) if len(grid_shape) >= 1 and grid_shape[0] is not None else 0
+    cols = int(grid_shape[1]) if len(grid_shape) >= 2 and grid_shape[1] is not None else 0
     raw_costmap_len = rows * cols
 
-    if "grid_data" in pkt:
+    if pkt.get("grid_data"):
         try:
             prob_comp_bytes = base64.b64decode(pkt["grid_data"])
         except Exception:
             prob_comp_bytes = b""
-    if "hazard_data" in pkt:
+    if pkt.get("hazard_data"):
         try:
             haz_comp_bytes = base64.b64decode(pkt["hazard_data"])
         except Exception:
             haz_comp_bytes = b""
 
+    flags = pkt.get("flags") or {}
+    if not isinstance(flags, dict):
+        flags = {}
+
     meta = {
-        "status": pkt.get("status", "OK"),
-        "mode": pkt.get("mode", "DRIVE"),
-        "slip_state": pkt.get("slip_state", "NORMAL"),
-        "recovery_state": pkt.get("escape_state", pkt.get("recovery_state", "DRIVE")),
-        "best_line": pkt.get("best_line", []),
-        "candidate_lines": pkt.get("candidate_lines", []),
-        "guide_line": pkt.get("guide_line", []),
-        "corridor_left": pkt.get("corridor_left", []),
-        "corridor_right": pkt.get("corridor_right", []),
-        "shield": pkt.get("shield", {}),
-        "targets": pkt.get("targets", []),
-        "trail": pkt.get("trail", []),
-        "sightlines": pkt.get("sightlines", []),
-        "is_wrong_way": pkt.get("is_wrong_way", False),
-        "target_yaw": pkt.get("target_yaw", 0.0),
-        "total_frames": pkt.get("_total_frames", 0),
-        "flags": pkt.get("flags", {}),
-        "planner_running": bool(pkt.get("planner_running", pkt.get("flags", {}).get("planner_running", False))),
-        "servo_pulse_us": pkt.get("servo_pulse_us", 1565),
-        "mcu_msg": pkt.get("mcu_msg", ""),
-        "mcu_log": pkt.get("mcu_log", []),
-        "mcu_main_connected": pkt.get("mcu_main_connected", False),
-        "mcu_tof_connected": pkt.get("mcu_tof_connected", False),
-        "mcu_main_port": pkt.get("mcu_main_port", ""),
-        "mcu_tof_port": pkt.get("mcu_tof_port", ""),
-        "step_ms": pkt.get("step_ms", 0.0),
-        "last_action": pkt.get("last_action", ""),
-        "last_cmd_sent": pkt.get("last_cmd_sent", ""),
+        "status": pkt.get("status") or "OK",
+        "mode": pkt.get("mode") or "DRIVE",
+        "slip_state": pkt.get("slip_state") or "NORMAL",
+        "recovery_state": pkt.get("escape_state") or pkt.get("recovery_state") or "DRIVE",
+        "best_line": pkt.get("best_line") or [],
+        "candidate_lines": pkt.get("candidate_lines") or [],
+        "guide_line": pkt.get("guide_line") or [],
+        "corridor_left": pkt.get("corridor_left") or [],
+        "corridor_right": pkt.get("corridor_right") or [],
+        "shield": pkt.get("shield") or {},
+        "targets": pkt.get("targets") or [],
+        "trail": pkt.get("trail") or [],
+        "sightlines": pkt.get("sightlines") or [],
+        "is_wrong_way": bool(pkt.get("is_wrong_way", False)),
+        "target_yaw": pkt.get("target_yaw") if pkt.get("target_yaw") is not None else 0.0,
+        "total_frames": pkt.get("_total_frames") or 0,
+        "flags": flags,
+        "planner_running": bool(pkt.get("planner_running") if pkt.get("planner_running") is not None else flags.get("planner_running", False)),
+        "servo_pulse_us": pkt.get("servo_pulse_us") if pkt.get("servo_pulse_us") is not None else 1565,
+        "mcu_msg": pkt.get("mcu_msg") or "",
+        "mcu_log": pkt.get("mcu_log") or [],
+        "mcu_main_connected": bool(pkt.get("mcu_main_connected", False)),
+        "mcu_tof_connected": bool(pkt.get("mcu_tof_connected", False)),
+        "mcu_main_port": pkt.get("mcu_main_port") or "",
+        "mcu_tof_port": pkt.get("mcu_tof_port") or "",
+        "step_ms": pkt.get("step_ms") if pkt.get("step_ms") is not None else 0.0,
+        "last_action": pkt.get("last_action") or "",
+        "last_cmd_sent": pkt.get("last_cmd_sent") or "",
     }
     meta_bytes = json.dumps(meta).encode("utf-8")
 
-    rpms_cmd = pkt.get("rpms_cmd", [0.0, 0.0, 0.0, 0.0])
-    rpms_act = pkt.get("rpms_act", [0.0, 0.0, 0.0, 0.0])
+    def _f(val: Any, default: float = 0.0) -> float:
+        return float(default if val is None else val)
+
+    def _i(val: Any, default: int = 0) -> int:
+        return int(default if val is None else val)
+
+    rpms_cmd = pkt.get("rpms_cmd") or [0.0, 0.0, 0.0, 0.0]
+    rpms_act = pkt.get("rpms_act") or [0.0, 0.0, 0.0, 0.0]
     tof_ranges = pkt.get("tof_ranges") or pkt.get("tof_ranges_raw") or [0.0] * 16
     if len(tof_ranges) < 16:
         tof_ranges = list(tof_ranges) + [0.0] * (16 - len(tof_ranges))
     gap = pkt.get("gap") or [0.0, 0.0, 0.0]
     bounds = pkt.get("grid_bounds") or [-1.25, 1.25, 0.0, 1.90]
+    if len(bounds) < 4:
+        bounds = [-1.25, 1.25, 0.0, 1.90]
 
     header_fmt = "<4s I I d 16f 4f 4f 16f 3f 2H 4f 5I"
     header_size = struct.calcsize(header_fmt)
     total_len = header_size + len(prob_comp_bytes) + len(haz_comp_bytes) + len(meta_bytes)
 
+    v_real_val = pkt.get("v_real")
+    if v_real_val is None:
+        v_real_val = pkt.get("v_est")
+    steer_cmd_val = pkt.get("steer_cmd_deg")
+    if steer_cmd_val is None:
+        steer_cmd_val = pkt.get("steer_deg")
+    steer_act_val = pkt.get("steer_actual_deg")
+    if steer_act_val is None:
+        steer_act_val = pkt.get("steer_deg")
+
     header = struct.pack(
         header_fmt,
         b"FOLK",
         total_len,
-        int(pkt.get("time_step", 0)),
-        float(pkt.get("timestamp", time.time())),
-        float(pkt.get("sim_time", 0.0)),
-        float(pkt.get("v_cmd", 0.0)),
-        float(pkt.get("v_real", pkt.get("v_est", 0.0))),
-        float(pkt.get("steer_cmd_deg", pkt.get("steer_deg", 0.0))),
-        float(pkt.get("steer_actual_deg", pkt.get("steer_deg", 0.0))),
-        float(pkt.get("yaw_deg", 0.0)),
-        float(pkt.get("pitch_deg", 0.0)),
-        float(pkt.get("roll_deg", 0.0)),
-        float(pkt.get("gyro_z", 0.0)),
-        float(pkt.get("accel_fwd", 0.0)),
-        float(pkt.get("accel_lat", 0.0)),
-        float(pkt.get("slip_ratio", 0.0)),
-        float(pkt.get("f_tof", 0.0)),
-        float(pkt.get("plan_ms", 0.0)),
-        float(pkt.get("map_ms", 0.0)),
-        float(pkt.get("scout_ms", 0.0)),
-        float(rpms_cmd[0] if len(rpms_cmd) > 0 else 0.0),
-        float(rpms_cmd[1] if len(rpms_cmd) > 1 else 0.0),
-        float(rpms_cmd[2] if len(rpms_cmd) > 2 else 0.0),
-        float(rpms_cmd[3] if len(rpms_cmd) > 3 else 0.0),
-        float(rpms_act[0] if len(rpms_act) > 0 else 0.0),
-        float(rpms_act[1] if len(rpms_act) > 1 else 0.0),
-        float(rpms_act[2] if len(rpms_act) > 2 else 0.0),
-        float(rpms_act[3] if len(rpms_act) > 3 else 0.0),
-        *[float(tof_ranges[i]) for i in range(16)],
-        float(gap[0] if len(gap) > 0 else 0.0),
-        float(gap[1] if len(gap) > 1 else 0.0),
-        float(gap[2] if len(gap) > 2 else 0.0),
+        _i(pkt.get("time_step"), 0),
+        _f(pkt.get("timestamp"), time.time()),
+        _f(pkt.get("sim_time"), 0.0),
+        _f(pkt.get("v_cmd"), 0.0),
+        _f(v_real_val, 0.0),
+        _f(steer_cmd_val, 0.0),
+        _f(steer_act_val, 0.0),
+        _f(pkt.get("yaw_deg"), 0.0),
+        _f(pkt.get("pitch_deg"), 0.0),
+        _f(pkt.get("roll_deg"), 0.0),
+        _f(pkt.get("gyro_z"), 0.0),
+        _f(pkt.get("accel_fwd"), 0.0),
+        _f(pkt.get("accel_lat"), 0.0),
+        _f(pkt.get("slip_ratio"), 0.0),
+        _f(pkt.get("f_tof"), 0.0),
+        _f(pkt.get("plan_ms"), 0.0),
+        _f(pkt.get("map_ms"), 0.0),
+        _f(pkt.get("scout_ms"), 0.0),
+        _f(rpms_cmd[0] if len(rpms_cmd) > 0 else 0.0),
+        _f(rpms_cmd[1] if len(rpms_cmd) > 1 else 0.0),
+        _f(rpms_cmd[2] if len(rpms_cmd) > 2 else 0.0),
+        _f(rpms_cmd[3] if len(rpms_cmd) > 3 else 0.0),
+        _f(rpms_act[0] if len(rpms_act) > 0 else 0.0),
+        _f(rpms_act[1] if len(rpms_act) > 1 else 0.0),
+        _f(rpms_act[2] if len(rpms_act) > 2 else 0.0),
+        _f(rpms_act[3] if len(rpms_act) > 3 else 0.0),
+        *[_f(tof_ranges[i], 0.0) for i in range(16)],
+        _f(gap[0] if len(gap) > 0 else 0.0),
+        _f(gap[1] if len(gap) > 1 else 0.0),
+        _f(gap[2] if len(gap) > 2 else 0.0),
         int(rows),
         int(cols),
-        float(bounds[0]), float(bounds[1]), float(bounds[2]), float(bounds[3]),
+        _f(bounds[0], -1.25), _f(bounds[1], 1.25), _f(bounds[2], 0.0), _f(bounds[3], 1.90),
         len(prob_comp_bytes),
         raw_costmap_len,
         len(haz_comp_bytes),
@@ -728,6 +750,7 @@ class DebugHTTPRequestHandler(BaseHTTPRequestHandler):
 
         data = {
             "session_id": STATE.recorder.session_id if STATE.recorder else "none",
+            "min_frame_id": getattr(STATE.recorder, "min_frame_id", 1) if STATE.recorder else 1,
             "total_recorded": STATE.recorder.total_frames_recorded if STATE.recorder else 0,
             "dropped_frames": STATE.recorder.dropped_frames if STATE.recorder else 0,
             "pruned_frames": STATE.recorder.pruned_frames_count if STATE.recorder else 0,
@@ -784,7 +807,11 @@ class DebugHTTPRequestHandler(BaseHTTPRequestHandler):
         reader = TelemetryLogReader(STATE.recorder.db_path)
         frame_data = reader.get_frame(frame_id)
         if frame_data:
-            body = build_live_binary_packet(frame_data)
+            try:
+                body = build_live_binary_packet(frame_data)
+            except Exception as e:
+                self.send_error(500, f"Failed to pack frame {frame_id}: {e}")
+                return
             self.send_response(200)
             self.send_header("Content-Type", "application/octet-stream")
             self.send_header("Content-Length", str(len(body)))
@@ -916,8 +943,10 @@ def udp_listener_worker():
                 STATE.invalidate_caches()
                 bin_data = STATE.get_cached_bin() if is_planner else None
 
-            # Push live binary frame instantly to connected WebSockets (zero polling overhead)
-            if bin_data:
+            # Push live binary frame to connected WebSockets (throttled to ~20 Hz to save Wi-Fi bandwidth;
+            # full 60 Hz telemetry is still recorded locally on SD card for offline review)
+            if bin_data and (now - getattr(STATE, "_last_ws_push", 0.0) >= 0.05):
+                STATE._last_ws_push = now
                 STATE.broadcast_ws_binary(bin_data)
 
             # Non-blocking write to Flight Recorder (skip idle STOPPED/STANDBY/OFFLINE frames when stationary)

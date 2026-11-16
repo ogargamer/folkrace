@@ -88,6 +88,7 @@ class TelemetryFlightRecorder:
         self.last_sim_time = 0.0
         self.last_prune_driving_s = 0.0
         self.pruned_frames_count = 0
+        self.min_frame_id = 1
 
         # Statistics
         self.total_frames_recorded = 0
@@ -230,28 +231,35 @@ class TelemetryFlightRecorder:
         flags = AnomalyFlag.NONE
 
         # 1. Traction / Slip
-        slip_str = str(telemetry.get("slip_state", "")).upper()
-        slip_ratio = float(telemetry.get("slip_ratio", 0.0))
+        slip_str = str(telemetry.get("slip_state") or "").upper()
+        slip_ratio = float(telemetry.get("slip_ratio") or 0.0)
         if any(x in slip_str for x in ("OVERSTEER", "UNDERSTEER", "SPIN")) or abs(slip_ratio) > 0.35:
             flags |= AnomalyFlag.SLIP
 
         # 2. Emergency stop or recovery state
-        mode_str = str(telemetry.get("mode", "")).upper()
+        mode_str = str(telemetry.get("mode") or "").upper()
         if any(x in mode_str for x in ("PIVOT", "REVERSE", "DECEL", "STUCK", "EMERGENCY")):
             flags |= AnomalyFlag.EMERGENCY
 
         # 3. Dangerous close contact (< 0.12m)
-        f_tof = float(telemetry.get("f_tof", 1.0))
+        f_tof_val = telemetry.get("f_tof")
+        f_tof = float(1.0 if f_tof_val is None else f_tof_val)
         if f_tof < 0.12:
             flags |= AnomalyFlag.PROXIMITY
 
         # 4. Planner latency spike (> 16.6ms)
-        plan_ms = float(telemetry.get("plan_ms", telemetry.get("step_ms", 0.0)))
+        plan_ms_val = telemetry.get("plan_ms")
+        if plan_ms_val is None:
+            plan_ms_val = telemetry.get("step_ms")
+        plan_ms = float(0.0 if plan_ms_val is None else plan_ms_val)
         if plan_ms > 16.6:
             flags |= AnomalyFlag.LATENCY_SPIKE
 
         # 5. Severe steering jerk
-        steer_deg = float(telemetry.get("steer_cmd_deg", telemetry.get("steer_deg", 0.0)))
+        steer_val = telemetry.get("steer_cmd_deg")
+        if steer_val is None:
+            steer_val = telemetry.get("steer_deg")
+        steer_deg = float(0.0 if steer_val is None else steer_val)
         if abs(steer_deg - self.last_steer_deg) > 25.0:
             flags |= AnomalyFlag.STEER_JERK
         self.last_steer_deg = steer_deg
@@ -302,12 +310,15 @@ class TelemetryFlightRecorder:
             else:
                 telem, raw_b = item, None
             frame_id = self.total_frames_recorded + 1
-            ts = float(telem.get("timestamp", time.time()))
-            sim_time = float(telem.get("sim_time", 0.0))
-            mode = str(telem.get("mode", "DRIVE"))
+            ts = float(telem.get("timestamp") or time.time())
+            sim_time = float(telem.get("sim_time") or 0.0)
+            mode = str(telem.get("mode") or "DRIVE")
 
-            v_cmd = float(telem.get("v_cmd", 0.0))
-            v_real = float(telem.get("v_real", telem.get("v_est", 0.0)))
+            v_cmd = float(telem.get("v_cmd") or 0.0)
+            v_real_raw = telem.get("v_real")
+            if v_real_raw is None:
+                v_real_raw = telem.get("v_est")
+            v_real = float(0.0 if v_real_raw is None else v_real_raw)
 
             # Track driving duration (only accumulates when vehicle is actively moving)
             dt = 1.0 / 60.0
@@ -319,30 +330,41 @@ class TelemetryFlightRecorder:
             if is_driving:
                 self.total_driving_seconds += dt
 
-            steer_cmd_deg = float(telem.get("steer_cmd_deg", telem.get("steer_deg", 0.0)))
-            steer_act_deg = float(telem.get("steer_actual_deg", steer_cmd_deg))
+            steer_cmd_raw = telem.get("steer_cmd_deg")
+            if steer_cmd_raw is None:
+                steer_cmd_raw = telem.get("steer_deg")
+            steer_cmd_deg = float(0.0 if steer_cmd_raw is None else steer_cmd_raw)
+            steer_act_raw = telem.get("steer_actual_deg")
+            steer_act_deg = float(steer_cmd_deg if steer_act_raw is None else steer_act_raw)
 
             # Wheel RPMs (commanded vs actual)
-            rpms_cmd = telem.get("rpms_cmd", [0.0, 0.0, 0.0, 0.0])
-            rpms_act = telem.get("rpms_act", [0.0, 0.0, 0.0, 0.0])
+            rpms_cmd = [float(x or 0.0) for x in (telem.get("rpms_cmd") or [0.0, 0.0, 0.0, 0.0])]
+            rpms_act = [float(x or 0.0) for x in (telem.get("rpms_act") or [0.0, 0.0, 0.0, 0.0])]
             fl_cmd, fr_cmd, rl_cmd, rr_cmd = (rpms_cmd + [0.0]*4)[:4]
             fl_act, fr_act, rl_act, rr_act = (rpms_act + [0.0]*4)[:4]
 
             # IMU
-            yaw_deg = float(telem.get("yaw_deg", telem.get("yaw_fused", 0.0)))
-            pitch_deg = float(telem.get("pitch_deg", 0.0))
-            roll_deg = float(telem.get("roll_deg", 0.0))
-            gyro_z = float(telem.get("gyro_z", 0.0))
-            accel_fwd = float(telem.get("accel_fwd", 0.0))
-            accel_lat = float(telem.get("accel_lat", 0.0))
+            yaw_raw = telem.get("yaw_deg")
+            if yaw_raw is None:
+                yaw_raw = telem.get("yaw_fused")
+            yaw_deg = float(0.0 if yaw_raw is None else yaw_raw)
+            pitch_deg = float(telem.get("pitch_deg") or 0.0)
+            roll_deg = float(telem.get("roll_deg") or 0.0)
+            gyro_z = float(telem.get("gyro_z") or 0.0)
+            accel_fwd = float(telem.get("accel_fwd") or 0.0)
+            accel_lat = float(telem.get("accel_lat") or 0.0)
 
-            slip_state = str(telem.get("slip_state", "NORMAL"))
-            slip_ratio = float(telem.get("slip_ratio", 0.0))
+            slip_state = str(telem.get("slip_state") or "NORMAL")
+            slip_ratio = float(telem.get("slip_ratio") or 0.0)
 
-            plan_ms = float(telem.get("plan_ms", 0.0))
-            map_ms = float(telem.get("map_ms", 0.0))
-            osqp_iters = int(telem.get("iters_prim", telem.get("osqp_iters", 0)))
-            f_tof_min = float(telem.get("f_tof", 1.0))
+            plan_ms = float(telem.get("plan_ms") or 0.0)
+            map_ms = float(telem.get("map_ms") or 0.0)
+            iters_raw = telem.get("iters_prim")
+            if iters_raw is None:
+                iters_raw = telem.get("osqp_iters")
+            osqp_iters = int(0 if iters_raw is None else iters_raw)
+            f_tof_raw = telem.get("f_tof")
+            f_tof_min = float(1.0 if f_tof_raw is None else f_tof_raw)
 
             anomaly_flags = self.detect_anomalies(telem)
 
@@ -408,6 +430,7 @@ class TelemetryFlightRecorder:
                 conn.commit()
                 if pruned > 0:
                     self.pruned_frames_count += pruned
+                    self.min_frame_id = cutoff_frame_id
         except Exception as e:
             print(f"[FlightRecorder] Prune error: {e}")
 
@@ -467,6 +490,34 @@ class TelemetryLogReader:
         self.db_path = db_path
         if not os.path.exists(db_path):
             raise FileNotFoundError(f"Flight database not found: {db_path}")
+        self._local = threading.local()
+
+    def _get_conn(self) -> sqlite3.Connection:
+        """Returns a thread-local read-only SQLite connection for fast 60 Hz playback."""
+        conn = getattr(self._local, "conn", None)
+        if conn is None:
+            conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
+            self._local.conn = conn
+        return conn
+
+    def close(self):
+        conn = getattr(self._local, "conn", None)
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            self._local.conn = None
+
+    def get_frame_bounds(self) -> tuple:
+        """Returns (min_frame_id, max_frame_id, total_frames) from the database."""
+        conn = self._get_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT MIN(frame_id), MAX(frame_id), COUNT(*) FROM frames;")
+        row = cur.fetchone()
+        if not row or row[2] == 0:
+            return (1, 0, 0)
+        return (int(row[0] or 1), int(row[1] or 0), int(row[2] or 0))
 
     def get_summary(self) -> Dict[str, Any]:
         """Returns session metadata, total frames, duration, and anomaly count."""
@@ -507,11 +558,10 @@ class TelemetryLogReader:
 
     def get_frame(self, frame_id: int) -> Optional[Dict[str, Any]]:
         """Instant O(1) query for full uncompressed frame data."""
-        conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
+        conn = self._get_conn()
         cur = conn.cursor()
         cur.execute("SELECT payload_compressed FROM frames WHERE frame_id = ? LIMIT 1;", (frame_id,))
         row = cur.fetchone()
-        conn.close()
 
         if row and row[0]:
             try:
