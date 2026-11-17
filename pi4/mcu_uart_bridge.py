@@ -57,6 +57,7 @@ SENSOR_CHANNEL_SLOTS = {
     3: [12, 13, 14, 15],
     4: [8, 9, 10, 11],
 }
+CRITICAL_TOF_SENSORS = (2, 4)  # Front-Left Center & Front-Right Center (critical for forward driving)
 
 try:
     import serial
@@ -68,6 +69,11 @@ UDP_DISPATCH_HOST = "127.0.0.1"
 UDP_DISPATCH_PORT = 9876
 UDP_CMD_PORT = 9877
 UART_BAUD = 921600
+LINK_TIMEOUT_S = 0.25          # 250ms link-loss failsafe (matches ESP32-STM32 250ms timeout)
+RECONNECT_SILENCE_S = 1.2      # 1.2s total silence before tearing down & re-probing USB port
+FRONT_TOF_REBOOT_S = 0.40      # 400ms front-ToF stall before auto-rebooting ESP32_ToF
+TOF_BOOT_GRACE_S = 3.0         # 3.0s grace period after connect for VL53L8CX firmware upload
+TOF_REBOOT_COOLDOWN_S = 5.0    # Minimum seconds between automatic ESP32_ToF reboots
 
 
 class BinaryStreamParser:
@@ -400,6 +406,8 @@ class MCU_UART_Bridge:
         self.last_rx_timestamp: Dict[str, float] = {"ESP32_Main": 0.0, "ESP32_ToF": 0.0}
         self.force_reconnect_flag = False
         self.reconnect_gen = 0  # bumped per reset request so BOTH links always see it
+        self.tof_reconnect_gen = 0  # bumped to reboot ONLY ESP32_ToF without resetting ESP32_Main
+        self._last_tof_reboot_ts = 0.0
         self.discovery_lock = threading.Lock()
 
         self.udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -419,9 +427,50 @@ class MCU_UART_Bridge:
         self.compensator = ToFLatencyCompensator()
         self.lock = threading.Lock()
         self.latest_chassis: Dict[str, Any] = {}
-        self.latest_tof_ranges = [1.8] * 16
-        self.latest_tof_ranges_raw = [1.8] * 16
+        self.latest_tof_ranges = [0.0] * 16
+        self.latest_tof_ranges_raw = [0.0] * 16
+        self.last_tof_sensor_rx: Dict[int, float] = {sid: 0.0 for sid in SENSOR_CHANNEL_SLOTS}
         self._last_debug_dispatch = 0.0
+
+    def _is_link_fresh(self, label: str, now: Optional[float] = None) -> bool:
+        """True only when valid packets have arrived within LINK_TIMEOUT_S (mirrors STM32Channel::isConnected)."""
+        if not self.link_active.get(label, False):
+            return False
+        t_rx = self.last_rx_timestamp.get(label, 0.0)
+        if t_rx <= 0.0:
+            return False
+        t_now = time.time() if now is None else now
+        return (t_now - t_rx) <= LINK_TIMEOUT_S
+
+    def _are_front_tofs_fresh(self, now: Optional[float] = None) -> bool:
+        """True only when ALL critical front ToF sensors (2 & 4) have reported within LINK_TIMEOUT_S."""
+        t_now = time.time() if now is None else now
+        for sid in CRITICAL_TOF_SENSORS:
+            t_rx = self.last_tof_sensor_rx.get(sid, 0.0)
+            if t_rx <= 0.0 or (t_now - t_rx) > LINK_TIMEOUT_S:
+                return False
+        return True
+
+    def trigger_tof_reboot(self, reason: str = "Front ToF failure") -> bool:
+        """Pulses EN on ESP32_ToF only (with cooldown) without disrupting ESP32_Main."""
+        now = time.time()
+        if (now - self._last_tof_reboot_ts) < TOF_REBOOT_COOLDOWN_S:
+            return False
+        self._last_tof_reboot_ts = now
+        print(f"[MCU Bridge] Auto-rebooting ESP32_ToF ({reason})...")
+        self.tof_reconnect_gen += 1
+        return True
+
+    def _clear_link_state(self, label: str):
+        """Resets cached telemetry for a disconnected/timed-out MCU link (zero fake/stale data)."""
+        with self.lock:
+            if label == "ESP32_ToF":
+                self.latest_tof_ranges = [0.0] * 16
+                self.latest_tof_ranges_raw = [0.0] * 16
+                for sid in self.last_tof_sensor_rx:
+                    self.last_tof_sensor_rx[sid] = 0.0
+            else:
+                self.latest_chassis = {}
 
     @property
     def main_port(self) -> Optional[str]:
@@ -560,8 +609,8 @@ class MCU_UART_Bridge:
                     self.send_to_main_mcu(data)
 
                 if latest_motion_cmd is not None:
-                    # Safety interlock: never drive without a live ToF link
-                    if not self.link_active.get("ESP32_ToF", False):
+                    # Safety interlock: never drive without a fresh ToF link AND both critical front ToFs
+                    if not self._is_link_fresh("ESP32_ToF") or not self._are_front_tofs_fresh():
                         latest_motion_cmd = encode_motion_command(0.0, 0.0, 0, 0)
                     self.send_to_main_mcu(latest_motion_cmd)
             except Exception:
@@ -656,15 +705,22 @@ class MCU_UART_Bridge:
                 except Exception:
                     pass
 
-                print(f"[MCU Bridge] Connected to {label} ({port}). Sub-ms live streaming active.")
-                self.link_active[label] = True
+                print(f"[MCU Bridge] Connected to {label} ({port}). Waiting for valid telemetry...")
+                # Do NOT mark link_active=True until a checksum-validated packet arrives
+                self.link_active[label] = False
                 last_pkt_time = time.time()
-                self.last_rx_timestamp[label] = last_pkt_time
+                connect_time = last_pkt_time
                 my_gen = self.reconnect_gen
+                my_tof_gen = self.tof_reconnect_gen
 
                 while self.running:
-                    if self.reconnect_gen != my_gen:
-                        print(f"[MCU Bridge] Reset requested for {label}. Pulsing EN and closing link...")
+                    if self.reconnect_gen != my_gen or (is_tof and self.tof_reconnect_gen != my_tof_gen):
+                        print(f"[MCU Bridge] Reset requested for {label}. Sending reboot & pulsing EN...")
+                        if is_tof:
+                            try:
+                                os.write(fd, b"R\n")  # Software ESP.restart() for native USB CDC (ttyACM*)
+                            except Exception:
+                                pass
                         try:
                             ser.dtr = False
                             ser.rts = True
@@ -699,9 +755,40 @@ class MCU_UART_Bridge:
                         if needs_dispatch:
                             self._dispatch_telemetry(now)
 
+                    # Fast link-loss safeguard (250 ms): mark offline and clear stale state immediately
+                    if self.link_active.get(label, False) and (now - self.last_rx_timestamp.get(label, 0.0) > LINK_TIMEOUT_S):
+                        print(f"[MCU Bridge] Failsafe: {label} telemetry timed out (>{int(LINK_TIMEOUT_S*1000)}ms). Marking OFFLINE.")
+                        self.link_active[label] = False
+                        self._clear_link_state(label)
+                        self._dispatch_telemetry(now)
+
+                    # Per-ToF front sensor watchdog: if either front ToF (2 or 4) stalls/never boots,
+                    # zero its slots immediately and auto-reboot ESP32_ToF (respecting boot grace & cooldown).
+                    if is_tof and self.link_active.get(label, False):
+                        front_missing = [
+                            sid for sid in CRITICAL_TOF_SENSORS
+                            if (self.last_tof_sensor_rx.get(sid, 0.0) <= 0.0 and (now - connect_time) > TOF_BOOT_GRACE_S)
+                            or (self.last_tof_sensor_rx.get(sid, 0.0) > 0.0 and (now - self.last_tof_sensor_rx.get(sid, 0.0)) > FRONT_TOF_REBOOT_S)
+                        ]
+                        if front_missing:
+                            self.trigger_tof_reboot(reason=f"Front ToF {front_missing} offline/stalled")
+
                     # Watchdog: Silence detection (1.2 seconds with no valid telemetry packets)
-                    if now - last_pkt_time > 1.2:
-                        print(f"[MCU Bridge] Watchdog: No telemetry from {label} on {port} for 1.2s. Reconnecting...")
+                    if now - last_pkt_time > RECONNECT_SILENCE_S:
+                        print(f"[MCU Bridge] Watchdog: No telemetry from {label} on {port} for {RECONNECT_SILENCE_S:.1f}s. Reconnecting...")
+                        if is_tof and (now - self._last_tof_reboot_ts) >= TOF_REBOOT_COOLDOWN_S:
+                            self._last_tof_reboot_ts = now
+                            try:
+                                os.write(fd, b"R\n")
+                            except Exception:
+                                pass
+                            try:
+                                ser.dtr = False
+                                ser.rts = True
+                                time.sleep(0.1)
+                                ser.rts = False
+                            except Exception:
+                                pass
                         break
 
             except (serial.SerialException, OSError) as e:
@@ -720,10 +807,9 @@ class MCU_UART_Bridge:
                     except Exception:
                         pass
                 self.link_active[label] = False
+                self.last_rx_timestamp[label] = 0.0
                 self.assigned_ports[label] = None
-                if not is_tof:
-                    with self.lock:
-                        self.latest_chassis = {}
+                self._clear_link_state(label)
                 self._dispatch_telemetry(time.time())
                 print(f"[MCU Bridge] {label} disconnected. Re-probing in 0.25s...")
                 time.sleep(0.25)
@@ -744,12 +830,22 @@ class MCU_UART_Bridge:
                 self.latest_chassis = pkt
                 return True
             elif msg_type == MSG_ID_TOF_SUB_TELEM:
+                now_rx = time.time()
                 sensor_id = pkt.get("sensor_id", 0)
                 dists = pkt.get("distances_m", [])
                 slots = SENSOR_CHANNEL_SLOTS.get(sensor_id, [])
+                if sensor_id in self.last_tof_sensor_rx:
+                    self.last_tof_sensor_rx[sensor_id] = now_rx
                 for i, slot in enumerate(slots):
                     if i < len(dists):
                         self.latest_tof_ranges_raw[slot] = dists[i]
+
+                # Zero out any individual ToF sensor whose packets have gone stale (> LINK_TIMEOUT_S)
+                for sid, s_slots in SENSOR_CHANNEL_SLOTS.items():
+                    t_sid = self.last_tof_sensor_rx.get(sid, 0.0)
+                    if t_sid <= 0.0 or (now_rx - t_sid) > LINK_TIMEOUT_S:
+                        for s_idx in s_slots:
+                            self.latest_tof_ranges_raw[s_idx] = 0.0
 
                 v_est = float(self.latest_chassis.get("v_est", self.latest_chassis.get("v_real", 0.0)))
                 gyro_z = float(self.latest_chassis.get("gyro_z", 0.0))
@@ -758,8 +854,11 @@ class MCU_UART_Bridge:
                 )
                 return True
             elif msg_type == MSG_ID_TOF_TELEM:
+                now_rx = time.time()
                 dists = pkt.get("distances_m", [])
                 if len(dists) == 16:
+                    for sid in self.last_tof_sensor_rx:
+                        self.last_tof_sensor_rx[sid] = now_rx
                     self.latest_tof_ranges_raw = list(dists)
                     v_est = float(self.latest_chassis.get("v_est", self.latest_chassis.get("v_real", 0.0)))
                     gyro_z = float(self.latest_chassis.get("gyro_z", 0.0))
@@ -772,32 +871,57 @@ class MCU_UART_Bridge:
     def _dispatch_telemetry(self, now: float):
         """Composes and dispatches telemetry once per read batch to Core 1 Planner and Core 2 Debug Server."""
         send_debug = (now - self._last_debug_dispatch >= 0.05)
+        main_fresh = self._is_link_fresh("ESP32_Main", now)
+        tof_fresh = self._is_link_fresh("ESP32_ToF", now)
+        front_tofs_ok = tof_fresh and self._are_front_tofs_fresh(now)
         with self.lock:
-            telemetry = dict(self.latest_chassis)
+            telemetry = dict(self.latest_chassis) if main_fresh else {}
             telemetry["timestamp"] = now
-            telemetry["tof_ranges"] = list(self.latest_tof_ranges)
-            telemetry["tof_ranges_raw"] = list(self.latest_tof_ranges_raw)
-            telemetry["f_tof"] = round(float(min(self.latest_tof_ranges)), 3) if self.latest_tof_ranges else 1.8
-            telemetry["f_tof_raw"] = round(float(min(self.latest_tof_ranges_raw)), 3) if self.latest_tof_ranges_raw else 1.8
+            if tof_fresh:
+                # Zero any individual sensor slots that have gone stale (> LINK_TIMEOUT_S)
+                for sid, s_slots in SENSOR_CHANNEL_SLOTS.items():
+                    t_sid = self.last_tof_sensor_rx.get(sid, 0.0)
+                    if t_sid <= 0.0 or (now - t_sid) > LINK_TIMEOUT_S:
+                        for s_idx in s_slots:
+                            self.latest_tof_ranges_raw[s_idx] = 0.0
+                            self.latest_tof_ranges[s_idx] = 0.0
+                tof_comp = list(self.latest_tof_ranges)
+                tof_raw = list(self.latest_tof_ranges_raw)
+            else:
+                tof_comp = [0.0] * 16
+                tof_raw = [0.0] * 16
+            telemetry["tof_ranges"] = tof_comp
+            telemetry["tof_ranges_raw"] = tof_raw
+            telemetry["f_tof"] = round(float(min(tof_comp)), 3) if tof_fresh and tof_comp else 0.0
+            telemetry["f_tof_raw"] = round(float(min(tof_raw)), 3) if tof_fresh and tof_raw else 0.0
             telemetry["mcu_msg"] = self.latest_mcu_msg
             telemetry["mcu_log"] = list(self.mcu_log[-10:])
-            telemetry["mcu_main_connected"] = bool(self.link_active.get("ESP32_Main", False))
-            telemetry["mcu_tof_connected"] = bool(self.link_active.get("ESP32_ToF", False))
+            telemetry["mcu_main_connected"] = main_fresh
+            telemetry["mcu_tof_connected"] = tof_fresh
+            telemetry["tof_front_ok"] = front_tofs_ok
+            telemetry["tof_sensor_online"] = {
+                str(sid): (
+                    tof_fresh
+                    and self.last_tof_sensor_rx.get(sid, 0.0) > 0.0
+                    and (now - self.last_tof_sensor_rx.get(sid, 0.0)) <= LINK_TIMEOUT_S
+                )
+                for sid in SENSOR_CHANNEL_SLOTS
+            }
             telemetry["mcu_main_port"] = self.assigned_ports.get("ESP32_Main") or "Offline"
             telemetry["mcu_tof_port"] = self.assigned_ports.get("ESP32_ToF") or "Offline"
 
             if send_debug:
                 self._last_debug_dispatch = now
                 telemetry["tof"] = {
-                    SENSOR_NAMES[i]: round(self.latest_tof_ranges[i], 3)
-                    for i in range(min(len(SENSOR_NAMES), len(self.latest_tof_ranges)))
+                    SENSOR_NAMES[i]: round(tof_comp[i], 3)
+                    for i in range(min(len(SENSOR_NAMES), len(tof_comp)))
                 }
                 telemetry["tof_raw"] = {
-                    SENSOR_NAMES[i]: round(self.latest_tof_ranges_raw[i], 3)
-                    for i in range(min(len(SENSOR_NAMES), len(self.latest_tof_ranges_raw)))
+                    SENSOR_NAMES[i]: round(tof_raw[i], 3)
+                    for i in range(min(len(SENSOR_NAMES), len(tof_raw)))
                 }
-                v_curr = float(self.latest_chassis.get("v_est", 0.0))
-                w_curr = float(self.latest_chassis.get("gyro_z", 0.0))
+                v_curr = float(telemetry.get("v_est", 0.0))
+                w_curr = float(telemetry.get("gyro_z", 0.0))
                 telemetry["tof_anchor_proj"] = list(self.compensator.compute_projected_anchor(v_curr, w_curr, 0.01667))
 
         try:

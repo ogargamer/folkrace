@@ -313,19 +313,23 @@ class AutonomousBrain:
         self.step_counter += 1
 
         # 1. Perception Pre-Processing & 30mm Blind-Zone Clamping (In-Place Mutation)
+        # Note: values <= 0.0 represent offline/missing sensors and are preserved as 0.0
+        # so the costmap leaves their rays as unknown space rather than a 30mm obstacle.
         clean_tofs = self._clean_tofs
         if isinstance(tof_readings, (list, tuple)):
             for i, name in enumerate(SENSOR_NAMES):
                 val = float(tof_readings[i]) if i < len(tof_readings) else TOF_MAX_RANGE_M
-                if 0.0 < val < MIN_TOF_PHYSICAL_M:
-                    val = MIN_TOF_PHYSICAL_M
-                clean_tofs[name] = max(MIN_TOF_PHYSICAL_M, min(TOF_MAX_RANGE_M, val))
+                if val <= 0.0 or math.isnan(val):
+                    clean_tofs[name] = 0.0
+                else:
+                    clean_tofs[name] = max(MIN_TOF_PHYSICAL_M, min(TOF_MAX_RANGE_M, val))
         else:
             for name in SENSOR_NAMES:
                 val = float(tof_readings.get(name, TOF_MAX_RANGE_M))
-                if 0.0 < val < MIN_TOF_PHYSICAL_M:
-                    val = MIN_TOF_PHYSICAL_M
-                clean_tofs[name] = max(MIN_TOF_PHYSICAL_M, min(TOF_MAX_RANGE_M, val))
+                if val <= 0.0 or math.isnan(val):
+                    clean_tofs[name] = 0.0
+                else:
+                    clean_tofs[name] = max(MIN_TOF_PHYSICAL_M, min(TOF_MAX_RANGE_M, val))
 
         f_tof = min(
             clean_tofs.get("tof_front_left_4.1deg", TOF_MAX_RANGE_M),

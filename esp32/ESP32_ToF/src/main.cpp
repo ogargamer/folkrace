@@ -35,7 +35,7 @@
 #define TOF4_LPN_PIN 16
 #define TOF4_MISO_PIN 15
 
-#define SPI_INIT_SPEED_HZ 2000000
+#define SPI_INIT_SPEED_HZ 3000000
 #define SPI_RANGING_SPEED_HZ 3000000
 #define CHUNK_SIZE 1024
 
@@ -776,6 +776,10 @@ void loop() {
     char c = Serial.read();
     if (c == 'D' || c == 'd' || c == 'M' || c == 'm') g_packet_mode_52 = true;  // Debug mode: 52B multi-target
     else if (c == 'L' || c == 'l' || c == 'N' || c == 'n') g_packet_mode_52 = false; // Lean mode: 20B (default for Pi)
+    else if (c == 'R' || c == 'r') {
+      Serial.flush();
+      ESP.restart();
+    }
   }
 
   for (int i = 0; i < NUM_SENSORS; i++) {

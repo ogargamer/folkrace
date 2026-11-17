@@ -222,6 +222,7 @@ public:
         // Pass 2A: Accumulate Obstacle Hit Evidence for active returns
         for (int s_idx = 0; s_idx < 16; ++s_idx) {
             float raw_z = ranges_16[s_idx];
+            if (raw_z <= 0.0f || std::isnan(raw_z)) continue; // Offline/missing sensor -> leave as unknown space
             float z = std::min(SENSOR_RIG[s_idx].max_range, std::max(SENSOR_RIG[s_idx].min_range, raw_z));
             bool is_hit = (z < SENSOR_RIG[s_idx].max_range - 0.01f);
             if (!is_hit) continue;
@@ -251,6 +252,7 @@ public:
         // Hits confirmed by active returns are protected and never overwritten by open-air rays.
         for (int s_idx = 0; s_idx < 16; ++s_idx) {
             float raw_z = ranges_16[s_idx];
+            if (raw_z <= 0.0f || std::isnan(raw_z)) continue; // Offline/missing sensor -> leave as unknown space
             float z = std::min(SENSOR_RIG[s_idx].max_range, std::max(SENSOR_RIG[s_idx].min_range, raw_z));
             bool is_hit = (z < SENSOR_RIG[s_idx].max_range - 0.01f);
 

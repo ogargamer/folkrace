@@ -61,6 +61,7 @@ from brain.planner_config import (
 
 TARGET_HZ = 60.0
 DT_STEP = 1.0 / TARGET_HZ
+LINK_TIMEOUT_S = 0.25  # 250ms link-loss failsafe (matches MCU bridge & ESP32-STM32)
 TELEM_HZ = 20.0
 TELEM_DECIMATION = int(round(TARGET_HZ / TELEM_HZ))  # Exactly 20 Hz (1 frame per 3 control steps)
 DEBUG_UDP_PORT = int(os.environ.get("DEBUG_UDP_PORT", 9876))
@@ -169,6 +170,7 @@ def run_path_planner():
 
     planner_running = False
     was_mcu_main_connected = False
+    was_driving_links_ok = False
 
     live_tof_list: List[float] = [0.0] * 16
     has_live_sensor_feed = False
@@ -251,7 +253,7 @@ def run_path_planner():
                     if raw_tof_bytes == raw_mcu_bytes:
                         raw_tof_bytes = None
                         last_tof_pkt = pkt
-                        if not pkt.get("mcu_tof_connected", True):
+                        if not pkt.get("mcu_tof_connected", False) or not pkt.get("tof_front_ok", True):
                             has_live_sensor_feed = False
                             live_tof_list = [0.0] * 16
                         elif "tof_ranges_raw" in pkt:
@@ -266,7 +268,7 @@ def run_path_planner():
                 try:
                     pkt = json.loads(raw_tof_bytes.decode("utf-8"))
                     last_tof_pkt = pkt
-                    if not pkt.get("mcu_tof_connected", True):
+                    if not pkt.get("mcu_tof_connected", False) or not pkt.get("tof_front_ok", True):
                         has_live_sensor_feed = False
                         live_tof_list = [0.0] * 16
                     elif "tof_ranges_raw" in pkt:
@@ -282,12 +284,12 @@ def run_path_planner():
                 except Exception:
                     pass
 
-            if has_live_sensor_feed and (now_mono - last_sensor_time > 1.0):
+            if has_live_sensor_feed and (now_mono - last_sensor_time > LINK_TIMEOUT_S):
                 has_live_sensor_feed = False
                 live_tof_list = [0.0] * 16
 
-            # Ingest MCU feedback (prefer latest frame, fallback to last valid hardware frame within 1.0s)
-            active_mcu = latest_mcu_pkt or (last_mcu_pkt if (now_mono - last_mcu_time < 1.0) else None)
+            # Ingest MCU feedback (prefer latest frame, fallback to last valid hardware frame within LINK_TIMEOUT_S)
+            active_mcu = latest_mcu_pkt or (last_mcu_pkt if (now_mono - last_mcu_time <= LINK_TIMEOUT_S) else None)
             if active_mcu and "rpms_act" in active_mcu:
                 v_actual = float(active_mcu.get("v_est", active_mcu.get("v_real", v_actual)))
                 steer_actual_deg = float(active_mcu.get("steer_actual_deg", steer_actual_deg))
@@ -302,13 +304,15 @@ def run_path_planner():
                 roll_deg = 0.0
 
             # Ensure hardware starts in safe stopped state when ESP32 Main first connects
-            mcu_main_now = bool(active_mcu and active_mcu.get("mcu_main_connected", True))
+            mcu_main_now = bool(active_mcu and active_mcu.get("mcu_main_connected", False))
             if mcu_main_now and not was_mcu_main_connected and not planner_running:
                 dispatch_stop_hw()
             was_mcu_main_connected = mcu_main_now
 
-            # 2. Execute Shared Autonomous Brain Step (only when started)
-            if planner_running and has_live_sensor_feed:
+            # 2. Execute Shared Autonomous Brain Step (only when started AND both Main & ToF links are live)
+            driving_links_ok = has_live_sensor_feed and mcu_main_now
+            if planner_running and driving_links_ok:
+                was_driving_links_ok = True
                 steer_rad = math.radians(steer_actual_deg)
                 need_full_telem = (step_counter % TELEM_DECIMATION == 0)
                 v_cmd, steer_cmd_rad, brain_telem = brain.step(
@@ -325,12 +329,18 @@ def run_path_planner():
                 steer_cmd_deg = math.degrees(steer_cmd_rad)
                 run_mode_val = 1
             else:
+                if planner_running and was_driving_links_ok:
+                    print("[Planner Core 1] ⚠ FAILSAFE: MCU/ToF link lost — zeroing drive & resetting recovery state.")
+                    dispatch_stop_hw()
+                was_driving_links_ok = False
                 v_cmd = 0.0
                 steer_cmd_rad = 0.0
                 steer_cmd_deg = 0.0
                 run_mode_val = 0
                 brain.rate_limited_speed = 0.0
                 brain.cached_target_speed = 0.0
+                brain.cached_target_steer = 0.0
+                brain.recovery_manager.reset()
                 brain_telem = {
                     "mode": "STOPPED" if not planner_running else "STANDBY",
                     "status": "STOPPED" if not planner_running else "OFFLINE",
@@ -387,7 +397,7 @@ def run_path_planner():
                     telemetry["flags"] = dict(active_mcu.get("flags", {}))
                     telemetry["mcu_msg"] = active_mcu.get("mcu_msg", "")
                     telemetry["mcu_log"] = active_mcu.get("mcu_log", [])
-                    telemetry["mcu_main_connected"] = bool(active_mcu.get("mcu_main_connected", True))
+                    telemetry["mcu_main_connected"] = bool(active_mcu.get("mcu_main_connected", False))
                     telemetry["mcu_tof_connected"] = bool(active_mcu.get("mcu_tof_connected", has_live_sensor_feed))
                     telemetry["mcu_main_port"] = str(active_mcu.get("mcu_main_port", ""))
                     telemetry["mcu_tof_port"] = str(active_mcu.get("mcu_tof_port", ""))
