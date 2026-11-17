@@ -1114,6 +1114,10 @@
                 id="recSize">0.0 MB</span>) | Pruned: <span id="prunedFrames">0</span></div>
             <div>Free SD Storage: <span id="diskFree" style="color:var(--accent-green);font-weight:700">-- GB</span>
             </div>
+            <div id="prevSessionsRow" style="display:none;margin-top:4px;gap:4px;align-items:center;">
+              <span style="color:var(--text-secondary);">Log:</span>
+              <select id="prevSessionSelect" style="flex:1;min-width:0;background:var(--bg-secondary,#111827);color:var(--text-primary);border:1px solid var(--border-color,#334155);border-radius:4px;padding:2px 4px;font-size:11px;"></select>
+            </div>
           </div>
         </div>
       </div>
@@ -4091,10 +4095,48 @@
       loadFrame(nextAnom.frame_id);
     });
 
-    // Download log database
+    // Download selected log database (current or past session)
     document.getElementById("btnDownloadLog").addEventListener("click", () => {
-      window.location.href = "/api/download";
+      const sel = document.getElementById("prevSessionSelect");
+      if (sel && sel.value && sel.value !== "__CURRENT__") {
+        window.location.href = `/api/download?file=${encodeURIComponent(sel.value)}`;
+      } else {
+        window.location.href = "/api/download";
+      }
     });
+
+    // Populate current + past/crashed sessions from Pi SD card (hidden in local replay mode)
+    async function refreshPiSessions() {
+      if (isLocalReplay) return;
+      try {
+        const res = await fetch("/api/sessions");
+        if (!res.ok) return;
+        const sessions = await res.json();
+        const visible = (sessions || []).filter(s => s.is_current || s.frames > 0);
+        const row = document.getElementById("prevSessionsRow");
+        const sel = document.getElementById("prevSessionSelect");
+        if (!visible.length) {
+          row.style.display = "none";
+          return;
+        }
+        const prevChoice = sel.value;
+        sel.innerHTML = "";
+        for (const s of visible) {
+          const opt = document.createElement("option");
+          opt.value = s.is_current ? "__CURRENT__" : s.filename;
+          const mb = (s.size_bytes / (1024 * 1024)).toFixed(1);
+          opt.textContent = s.is_current
+            ? `Current: ${s.filename} (${s.frames}f, ${mb} MB)`
+            : `${s.filename} (${s.frames}f, ${mb} MB)`;
+          sel.appendChild(opt);
+        }
+        if (prevChoice && [...sel.options].some(o => o.value === prevChoice)) {
+          sel.value = prevChoice;
+        }
+        row.style.display = "flex";
+      } catch (_) {}
+    }
+    refreshPiSessions();
 
     // Open / upload a local .db file (active in local --replay server mode)
     const fileOpenLocalDb = document.getElementById("fileOpenLocalDb");

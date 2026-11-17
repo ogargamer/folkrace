@@ -59,8 +59,8 @@ class TelemetryFlightRecorder:
         max_driving_seconds: float = 1800.0,       # 30-minute running buffer of active driving
         prune_interval_driving_s: float = 30.0,    # Lazy prune check every 30s of driving
         min_free_space_bytes: int = 5 * 1024 * 1024 * 1024,  # 5 GB safety reserve
-        batch_size: int = 20,
-        commit_interval_s: float = 1.0,
+        batch_size: int = 6,
+        commit_interval_s: float = 0.25,
     ):
         self.output_dir = output_dir
         os.makedirs(self.output_dir, exist_ok=True)
@@ -107,9 +107,9 @@ class TelemetryFlightRecorder:
         conn = sqlite3.connect(self.db_path)
         cur = conn.cursor()
 
-        # High-performance write pragmas for SD card (WAL + normal synchronous + incremental vacuum)
+        # Crash-safe write pragmas for SD card (WAL + FULL synchronous fsync + incremental vacuum)
         cur.execute("PRAGMA journal_mode = WAL;")
-        cur.execute("PRAGMA synchronous = NORMAL;")
+        cur.execute("PRAGMA synchronous = FULL;")
         cur.execute("PRAGMA temp_store = MEMORY;")
         cur.execute("PRAGMA cache_size = -64000;")  # 64 MB cache
         cur.execute("PRAGMA auto_vacuum = INCREMENTAL;")
@@ -270,6 +270,8 @@ class TelemetryFlightRecorder:
         """Asynchronous disk writer worker running on dedicated core."""
         conn = sqlite3.connect(self.db_path)
         cur = conn.cursor()
+        # Ensure every WAL commit fsyncs to SD card so sudden power loss loses at most one small batch
+        cur.execute("PRAGMA synchronous = FULL;")
 
         batch = []
         last_commit_time = time.time()

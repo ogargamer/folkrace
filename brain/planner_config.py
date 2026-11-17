@@ -229,7 +229,7 @@ RECOVERY_ANY_TOF_EXIT_M: float = 0.60        # meters (60 cm) minimum clearance 
 # 7.1 Watchdog Mode & Breadcrumb History
 ANTI_WRONG_WAY_MODE: str = "OPTION_1_BREADCRUMB"
 AWW_BREADCRUMB_LOOKBACK_M: float = 8.0         # meters baseline historical path retained
-AWW_BREADCRUMB_DURATION_SCALE: float = 0.475   # scale factor for breadcrumb fade (0.475x * 8.0m = 3.8m effective window)
+AWW_BREADCRUMB_DURATION_SCALE: float = 0.35    # scale factor for breadcrumb fade (0.35x * 8.0m = 2.8m effective window)
 AWW_BREADCRUMB_SPACING_M: float = 0.05         # meters minimum spatial spacing between breadcrumb nodes
 AWW_BREADCRUMB_MAX_TIMEOUT_S: float = 6.0      # seconds maximum timeout before breadcrumb history expires
 

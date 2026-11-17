@@ -524,8 +524,11 @@ class DebugHTTPRequestHandler(BaseHTTPRequestHandler):
         elif path == "/api/anomalies":
             self._serve_anomalies()
 
+        elif path == "/api/sessions":
+            self._serve_sessions()
+
         elif path == "/api/download":
-            self._serve_download()
+            self._serve_download(parse_qs(parsed.query))
 
         else:
             self._send_json({"error": "Not Found"}, 404)
@@ -832,19 +835,70 @@ class DebugHTTPRequestHandler(BaseHTTPRequestHandler):
         anoms = reader.get_anomalies()
         self._send_json(anoms)
 
-    def _serve_download(self):
-        if not STATE.recorder or not os.path.exists(STATE.recorder.db_path):
+    def _serve_sessions(self):
+        if not STATE.recorder or not os.path.isdir(STATE.recorder.output_dir):
+            self._send_json([])
+            return
+        cur_name = os.path.basename(STATE.recorder.db_path)
+        candidates = []
+        for fname in os.listdir(STATE.recorder.output_dir):
+            if not fname.endswith(".db"):
+                continue
+            fpath = os.path.join(STATE.recorder.output_dir, fname)
+            if not os.path.isfile(fpath):
+                continue
+            try:
+                st = os.stat(fpath)
+                wal_path = fpath + "-wal"
+                wal_size = os.path.getsize(wal_path) if os.path.exists(wal_path) else 0
+                candidates.append((st.st_mtime, st.st_size + wal_size, fname, fpath))
+            except Exception:
+                pass
+        candidates.sort(key=lambda item: item[0], reverse=True)
+
+        sessions = []
+        for mtime, total_size, fname, fpath in candidates[:12]:
+            frames = 0
+            try:
+                reader = TelemetryLogReader(fpath)
+                _, _, frames = reader.get_frame_bounds()
+                reader.close()
+            except Exception:
+                pass
+            sessions.append({
+                "filename": fname,
+                "size_bytes": total_size,
+                "mtime": mtime,
+                "frames": int(frames or 0),
+                "is_current": fname == cur_name,
+            })
+        self._send_json(sessions)
+
+    def _serve_download(self, query: Optional[Dict[str, List[str]]] = None):
+        if not STATE.recorder:
+            self.send_error(404, "Recorder not initialized")
+            return
+
+        target_path = STATE.recorder.db_path
+        if query and "file" in query and query["file"]:
+            req_name = os.path.basename(query["file"][0])
+            if not req_name.endswith(".db"):
+                self.send_error(400, "Invalid session filename")
+                return
+            target_path = os.path.join(STATE.recorder.output_dir, req_name)
+
+        if not os.path.exists(target_path):
             self.send_error(404, "Recording not found")
             return
 
-        filename = os.path.basename(STATE.recorder.db_path)
+        filename = os.path.basename(target_path)
         tmp_path = None
         try:
             # Use sqlite3.backup() so frames still buffered in the WAL (-wal)
             # are merged into a consistent, self-contained .db snapshot.
             fd, tmp_path = tempfile.mkstemp(suffix=".db", prefix="dl_")
             os.close(fd)
-            src_conn = sqlite3.connect(STATE.recorder.db_path, timeout=10.0)
+            src_conn = sqlite3.connect(target_path, timeout=10.0)
             dst_conn = sqlite3.connect(tmp_path)
             try:
                 src_conn.backup(dst_conn)

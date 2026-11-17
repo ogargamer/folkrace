@@ -552,7 +552,7 @@ def test_early_gap_exit_sentry():
 
 def test_breadcrumb_duration_scale():
     print("\n--- Testing Breadcrumb Duration Scale & Max Timeout ---")
-    assert AWW_BREADCRUMB_DURATION_SCALE == 0.475, f"Expected default scale 0.475x, got {AWW_BREADCRUMB_DURATION_SCALE}"
+    assert AWW_BREADCRUMB_DURATION_SCALE == 0.35, f"Expected default scale 0.35x, got {AWW_BREADCRUMB_DURATION_SCALE}"
     assert AWW_BREADCRUMB_MAX_TIMEOUT_S == 6.0, f"Expected default max timeout 6.0s, got {AWW_BREADCRUMB_MAX_TIMEOUT_S}"
 
     # 1. Compare 1.0x baseline vs 0.6x faster disappearance

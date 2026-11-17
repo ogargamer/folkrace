@@ -61,7 +61,7 @@ except ImportError:
     except ImportError:
         ANTI_WRONG_WAY_MODE = "OPTION_1_BREADCRUMB"
         AWW_BREADCRUMB_LOOKBACK_M = 8.0
-        AWW_BREADCRUMB_DURATION_SCALE = 0.475
+        AWW_BREADCRUMB_DURATION_SCALE = 0.35
         AWW_BREADCRUMB_SPACING_M = 0.05
         AWW_BREADCRUMB_MAX_TIMEOUT_S = 6.0
         AWW_EARLY_EXIT_MIN_GAP_M = 1.4
@@ -196,7 +196,7 @@ class BreadcrumbWatchdog:
         # Max history timeout (default 6.0s from planner_config prevents premature queue wipe during maneuvers)
         self.max_history_s = self.max_timeout_s
 
-        # Prune points exceeding max timeout (6.0s) or exceeding spatial lookback (3.8m @ 0.475x)
+        # Prune points exceeding max timeout (6.0s) or exceeding spatial lookback (2.8m @ 0.35x)
         while self.breadcrumbs and (
             (now_s - self.breadcrumbs[0].timestamp) > self.max_history_s
             or (self.cumulative_dist_m - self.breadcrumbs[0].s_dist) > effective_lookback
