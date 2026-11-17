@@ -27,6 +27,8 @@ import hashlib
 import socket
 import struct
 import shutil
+import sqlite3
+import tempfile
 import threading
 import queue
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
@@ -836,8 +838,21 @@ class DebugHTTPRequestHandler(BaseHTTPRequestHandler):
             return
 
         filename = os.path.basename(STATE.recorder.db_path)
+        tmp_path = None
         try:
-            with open(STATE.recorder.db_path, "rb") as f:
+            # Use sqlite3.backup() so frames still buffered in the WAL (-wal)
+            # are merged into a consistent, self-contained .db snapshot.
+            fd, tmp_path = tempfile.mkstemp(suffix=".db", prefix="dl_")
+            os.close(fd)
+            src_conn = sqlite3.connect(STATE.recorder.db_path, timeout=10.0)
+            dst_conn = sqlite3.connect(tmp_path)
+            try:
+                src_conn.backup(dst_conn)
+            finally:
+                dst_conn.close()
+                src_conn.close()
+
+            with open(tmp_path, "rb") as f:
                 content = f.read()
             self.send_response(200)
             self.send_header("Content-Type", "application/octet-stream")
@@ -847,6 +862,12 @@ class DebugHTTPRequestHandler(BaseHTTPRequestHandler):
             self.wfile.write(content)
         except Exception as e:
             self.send_error(500, f"Error sending file: {e}")
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
 
 
 def udp_listener_worker():

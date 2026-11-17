@@ -20,7 +20,7 @@ import sys
 import argparse
 import importlib.util
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
     try:
@@ -43,11 +43,11 @@ def _load_debug_studio_module():
     return mod
 
 
-def list_local_recordings() -> List[Path]:
-    """Returns all .db files in Downloads and data/recordings/ sorted newest first."""
+def list_local_recordings(directories=SEARCH_DIRS) -> List[Path]:
+    """Returns all .db files in the given directories sorted newest first."""
     dbs: List[Path] = []
     seen = set()
-    for directory in SEARCH_DIRS:
+    for directory in directories:
         if not directory.exists():
             continue
         for p in directory.glob("*.db"):
@@ -56,6 +56,12 @@ def list_local_recordings() -> List[Path]:
                 seen.add(resolved)
                 dbs.append(p)
     return sorted(dbs, key=lambda p: p.stat().st_mtime, reverse=True)
+
+
+def get_latest_downloads_recording() -> Optional[Path]:
+    """Returns the newest .db file in Downloads, or None if none exist."""
+    downloads_dbs = list_local_recordings((DOWNLOADS_DIR,))
+    return downloads_dbs[0] if downloads_dbs else None
 
 
 def print_recordings(dbs: List[Path]):
@@ -118,8 +124,11 @@ def main():
             idx = int(choice) - 1 if choice.isdigit() and 1 <= int(choice) <= len(dbs) else 0
             target_db = str(dbs[idx])
         else:
-            target_db = str(dbs[0])
-            print(f"[Replay] Auto-selected latest recording: {target_db}")
+            latest_download = get_latest_downloads_recording()
+            chosen = latest_download if latest_download is not None else dbs[0]
+            target_db = str(chosen)
+            source_label = "Downloads" if latest_download is not None else "data/recordings"
+            print(f"[Replay] Auto-selected latest recording from {source_label}: {target_db}")
 
     if not os.path.exists(target_db):
         print(f"[Replay ERROR] Database not found: {target_db}")
