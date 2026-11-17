@@ -49,18 +49,20 @@ except ImportError:
 V_SLIP_GATE = SLIP_GATE_SPEED_MPS         # m/s minimum speed to activate dynamic IMU slip detection
 THRESH_SPIN = SLIP_THRESH_SPIN_RAD_S      # rad/s gross yaw rate divergence threshold for oversteer
 
-GYRO_YAW_REF_TAU_S = 0.030      # 30 ms 1st-order tire/chassis yaw reference lag
+GYRO_YAW_REF_TAU_S = 0.055      # 55 ms chassis + servo yaw-rate buildup lag
 GYRO_YAW_DOT_TAU_S = 0.020      # 20 ms 1st-order derivative low-pass filter
 GYRO_DEADBAND_RAD_S = 0.20      # IMU yaw-rate noise deadband
-GYRO_KP_STEER = 0.08            # Proportional gyro countersteer gain (rad / (rad/s))
-GYRO_KD_STEER = 0.008           # Derivative yaw damper gain (rad / (rad/s^2))
+GYRO_KP_STEER = 0.07            # Proportional gyro countersteer gain (rad / (rad/s))
+GYRO_KD_STEER = 0.007           # Derivative yaw damper gain (rad / (rad/s^2))
 GYRO_FULL_SPEED_MPS = 0.60      # Speed where gyro assist reaches 100% authority
-SLIP_HOLD_TIME_S = 0.060        # 60 ms hysteresis hold latch for slip telemetry/interventions
+UNDERSTEER_CONFIRM_TIME_S = 0.065  # Require 65 ms sustained plow before throttling
+OVERSTEER_CONFIRM_TIME_S = 0.035   # Require 35 ms sustained breakaway before latching
+SLIP_HOLD_TIME_S = 0.035        # 35 ms hysteresis hold latch for slip telemetry/interventions
 DIFF_FADE_RATE = 12.0           # Fast fade-out of rear diff split on oversteer (1/s)
 DIFF_RISE_RATE = 4.0            # Smooth recovery of rear diff split (1/s)
-UNDERSTEER_SPEED_SCALE = 0.75   # Speed reduction ratio during front-plow understeer
-OVERSTEER_SPEED_SCALE = 0.85    # Speed reduction ratio during rear-axle oversteer
-SLIP_SPEED_FLOOR_MPS = 0.50     # Minimum cornering speed floor during slip throttle cut
+UNDERSTEER_SPEED_SCALE = 0.85   # Fixed cap fraction of entry speed on sustained understeer
+OVERSTEER_SPEED_SCALE = 0.95    # Gentle 5% throttle lift on oversteer (fixed entry cap, no slam braking)
+SLIP_SPEED_FLOOR_MPS = 0.60     # Minimum cornering speed floor during slip throttle cap
 
 SLIP_NORMAL = "NORMAL"
 SLIP_OVERSTEER = "OVERSTEER"
@@ -108,22 +110,26 @@ class ElectronicDifferential4WD:
         self._has_prev_gyro = False
         self.slip_state = SLIP_NORMAL
         self._slip_hold_timer = 0.0
+        self._understeer_confirm_timer = 0.0
+        self._oversteer_confirm_timer = 0.0
+        self._slip_entry_speed = 0.0
         self.diff_split_gain = 1.0
 
     def apply_traction_speed_cap(self, target_v: float, current_v: float, mu: float = TIRE_MU) -> float:
-        """Caps commanded velocity when active understeer or oversteer is latched."""
+        """Caps commanded velocity using fixed slip-entry speed ceiling when slip is confirmed."""
         safe_mu = max(0.10, float(mu))
         effective_v = float(target_v)
+        entry_v = self._slip_entry_speed if self._slip_entry_speed > 0.0 else abs(current_v)
         if self.slip_state == SLIP_UNDERSTEER:
             tan_driver = max(0.05, abs(math.tan(self.driver_steer_rad)))
             v_corner_max = math.sqrt((safe_mu * GRAVITY_G * self.L) / tan_driver)
-            v_cap = max(SLIP_SPEED_FLOOR_MPS, min(v_corner_max, UNDERSTEER_SPEED_SCALE * abs(current_v)))
+            v_cap = max(SLIP_SPEED_FLOOR_MPS, min(v_corner_max, UNDERSTEER_SPEED_SCALE * entry_v))
             if effective_v > 0.0:
                 effective_v = min(effective_v, v_cap)
             elif effective_v < 0.0:
                 effective_v = max(effective_v, -v_cap)
         elif self.slip_state == SLIP_OVERSTEER:
-            v_cap = max(SLIP_SPEED_FLOOR_MPS, OVERSTEER_SPEED_SCALE * abs(current_v))
+            v_cap = max(SLIP_SPEED_FLOOR_MPS, OVERSTEER_SPEED_SCALE * entry_v)
             if effective_v > 0.0:
                 effective_v = min(effective_v, v_cap)
             elif effective_v < 0.0:
@@ -141,6 +147,7 @@ class ElectronicDifferential4WD:
         v_ground_RR: Optional[float] = None,
         is_drifting: bool = False,
         mu: float = TIRE_MU,
+        v_curr: Optional[float] = None,
     ):
         """
         Calculates actuator setpoints given desired longitudinal velocity and virtual steering angle.
@@ -159,8 +166,12 @@ class ElectronicDifferential4WD:
             self.driver_steer_rad += math.copysign(max_d_driver, driver_diff)
         self.driver_steer_rad = max(-self.max_steer, min(self.driver_steer_rad, self.max_steer))
 
-        omega_cmd_driver = (target_v * math.tan(self.driver_steer_rad)) / self.L
-        omega_grip_max = (safe_mu * GRAVITY_G) / max(abs(target_v), 0.50)
+        v_for_ref = target_v
+        if v_curr is not None and abs(v_curr) > abs(target_v) and (v_curr * target_v >= 0.0):
+            v_for_ref = math.copysign(abs(v_curr), target_v)
+
+        omega_cmd_driver = (v_for_ref * math.tan(self.driver_steer_rad)) / self.L
+        omega_grip_max = (safe_mu * GRAVITY_G) / max(abs(v_for_ref), 0.50)
         omega_ref_target = max(-omega_grip_max, min(omega_grip_max, omega_cmd_driver))
         alpha_ref = safe_dt / (GYRO_YAW_REF_TAU_S + safe_dt)
         self.omega_ref += alpha_ref * (omega_ref_target - self.omega_ref)
@@ -187,11 +198,11 @@ class ElectronicDifferential4WD:
         else:
             excess_yaw = gyro_z_rad_s
 
-        speed_abs = abs(target_v)
+        speed_abs = abs(v_for_ref)
         gyro_fade = 0.0
         if speed_abs > V_SLIP_GATE:
             gyro_fade = min(1.0, (speed_abs - V_SLIP_GATE) / max(0.05, GYRO_FULL_SPEED_MPS - V_SLIP_GATE))
-        speed_sign = 1.0 if target_v >= 0.0 else -1.0
+        speed_sign = 1.0 if v_for_ref >= 0.0 else -1.0
 
         delta_gyro = 0.0
         if gyro_fade > 0.0 and abs(excess_yaw) > GYRO_DEADBAND_RAD_S:
@@ -246,6 +257,9 @@ class ElectronicDifferential4WD:
             self.omega_ref = 0.0
             self.slip_state = SLIP_NORMAL
             self._slip_hold_timer = 0.0
+            self._understeer_confirm_timer = 0.0
+            self._oversteer_confirm_timer = 0.0
+            self._slip_entry_speed = 0.0
             self.diff_split_gain = min(1.0, self.diff_split_gain + DIFF_RISE_RATE * safe_dt)
             return {
                 "steer_left": steer_left,
@@ -262,33 +276,55 @@ class ElectronicDifferential4WD:
                 "yaw_error": 0.0
             }
 
-        # 7. Grip-Capped, Hysteretic IMU Slip Classification
+        # 7. Grip-Capped, Confirmed & Hysteretic IMU Slip Classification
         yaw_error = gyro_z_rad_s - self.omega_ref
         raw_slip = SLIP_NORMAL
 
-        if abs(target_v) >= V_SLIP_GATE:
-            dyn_thresh = max(self.thresh_spin, 0.35 * abs(self.omega_ref))
+        if abs(v_for_ref) >= V_SLIP_GATE:
+            dyn_thresh = max(max(self.thresh_spin * 2.2, 0.95), 0.40 * abs(self.omega_ref))
+            a_lat_req = abs(v_for_ref * omega_cmd_driver)
 
-            if self.omega_ref > 0.05 and (gyro_z_rad_s - self.omega_ref) > dyn_thresh:
+            if self.omega_ref > 0.10 and (gyro_z_rad_s - self.omega_ref) > dyn_thresh:
                 raw_slip = SLIP_OVERSTEER
-            elif self.omega_ref < -0.05 and (self.omega_ref - gyro_z_rad_s) > dyn_thresh:
+            elif self.omega_ref < -0.10 and (self.omega_ref - gyro_z_rad_s) > dyn_thresh:
                 raw_slip = SLIP_OVERSTEER
-            elif abs(gyro_z_rad_s) > max(1.00, self.thresh_spin * 2.0) and (gyro_z_rad_s * self.omega_ref <= 0.0):
+            elif abs(gyro_z_rad_s) > max(1.35, self.thresh_spin * 3.0) and (gyro_z_rad_s * self.omega_ref <= 0.0):
                 raw_slip = SLIP_OVERSTEER
-            elif (abs(self.driver_steer_rad) > 0.15 and abs(self.omega_ref) > 1.00 and
+            elif (abs(self.driver_steer_rad) > 0.17 and abs(self.omega_ref) > 1.25 and
+                  a_lat_req > (0.50 * safe_mu * GRAVITY_G) and
                   (gyro_z_rad_s * self.omega_ref >= 0.0) and abs(gyro_z_rad_s) < (0.40 * abs(self.omega_ref))):
                 raw_slip = SLIP_UNDERSTEER
 
-        if abs(target_v) < V_SLIP_GATE:
+        prev_slip = self.slip_state
+        if abs(v_for_ref) < V_SLIP_GATE:
             self.slip_state = SLIP_NORMAL
             self._slip_hold_timer = 0.0
-        elif raw_slip != SLIP_NORMAL:
-            self.slip_state = raw_slip
-            self._slip_hold_timer = SLIP_HOLD_TIME_S
-        elif self._slip_hold_timer > 0.0:
-            self._slip_hold_timer = max(0.0, self._slip_hold_timer - safe_dt)
+            self._understeer_confirm_timer = 0.0
+            self._oversteer_confirm_timer = 0.0
+            self._slip_entry_speed = 0.0
+        elif raw_slip == SLIP_OVERSTEER:
+            self._oversteer_confirm_timer += safe_dt
+            self._understeer_confirm_timer = 0.0
+            if self._oversteer_confirm_timer >= OVERSTEER_CONFIRM_TIME_S:
+                self.slip_state = SLIP_OVERSTEER
+                self._slip_hold_timer = SLIP_HOLD_TIME_S
+        elif raw_slip == SLIP_UNDERSTEER:
+            self._understeer_confirm_timer += safe_dt
+            self._oversteer_confirm_timer = 0.0
+            if self._understeer_confirm_timer >= UNDERSTEER_CONFIRM_TIME_S:
+                self.slip_state = SLIP_UNDERSTEER
+                self._slip_hold_timer = SLIP_HOLD_TIME_S
         else:
-            self.slip_state = SLIP_NORMAL
+            self._understeer_confirm_timer = 0.0
+            self._oversteer_confirm_timer = 0.0
+            if self._slip_hold_timer > 0.0:
+                self._slip_hold_timer = max(0.0, self._slip_hold_timer - safe_dt)
+            else:
+                self.slip_state = SLIP_NORMAL
+                self._slip_entry_speed = 0.0
+
+        if self.slip_state != SLIP_NORMAL and prev_slip != self.slip_state:
+            self._slip_entry_speed = abs(v_for_ref)
 
         target_diff_gain = 0.0 if self.slip_state == SLIP_OVERSTEER else 1.0
         if target_diff_gain < self.diff_split_gain:

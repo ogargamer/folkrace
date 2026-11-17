@@ -238,8 +238,8 @@ static void IRAM_ATTR realTimeControlTask(void *pvParameters) {
           inputs.override_active ? s_manual_steer : inputs.target_steer_rad;
       gyro_z = inputs.gyro_z;
       accel_fwd = inputs.accel_fwd;
-      fl_rpm = inputs.fl_rpm;
-      fr_rpm = inputs.fr_rpm;
+      fl_rpm = s_stm32Link.getFL_RPM();  // FL +RPM = fwd
+      fr_rpm = s_stm32Link.getFR_RPM();  // FR encoder active (freewheeling, +RPM = fwd)
       rl_rpm = s_stm32Link.getRL_RPM();
       rr_rpm = -s_stm32Link.getRR_RPM();
 
@@ -295,13 +295,13 @@ static void IRAM_ATTR realTimeControlTask(void *pvParameters) {
     cycle_counter++;
 
     // 5b. Dispatch drive command to STM32 immediately at a jitter-free 400 Hz
-    // (RWD-only; right motor has inverted rotation vs left).
+    // (3WD: FL + RL + RR; RR has inverted rotation vs FL/RL, FR driver is dead).
     // When stopped or E-STOPped, keep drivers disabled instead of holding 0
     // RPM.
     if (s_estop_latched || s_drive_stopped) {
-      s_stm32Link.getRear().emergencyStop();
+      s_stm32Link.emergencyStop();
     } else {
-      s_stm32Link.getRear().sendDrive(diff.rpm_RL, -diff.rpm_RR);
+      s_stm32Link.sendDrive(diff.rpm_FL, 0.0f, diff.rpm_RL, -diff.rpm_RR);
     }
 
     // 6. Commit outputs to Core 0 via lock-free triple buffer
@@ -398,12 +398,12 @@ static void handleAsciiCommand(const char *raw_line) {
       s_cli_override_active = false;
       s_manual_override = false;
       if (!s_estop_latched && s_drive_stopped) {
-        s_stm32Link.getRear().enableDrivers();
+        s_stm32Link.enableDrivers();
         s_drive_stopped = false;
       }
     } else {
       s_drive_stopped = true;
-      s_stm32Link.getRear().emergencyStop();
+      s_stm32Link.emergencyStop();
     }
     Serial.printf("\n>>> [MODE] Synthetic 400Hz Benchmark Mode: %s\n",
                   s_fake_data_active ? "ENABLED (Fake Data)"
@@ -474,13 +474,13 @@ static void handleAsciiCommand(const char *raw_line) {
     s_fake_data_active = false;
     s_estop_latched = true;
     s_drive_stopped = true;
-    s_stm32Link.getRear().emergencyStop();
+    s_stm32Link.emergencyStop();
     Serial.println(F(">>> 🛑 EMERGENCY STOP BROADCAST TO ALL STM32s!"));
   } else if (line.equalsIgnoreCase("MOTORS") ||
              line.equalsIgnoreCase("START")) {
     s_estop_latched = false;
     s_drive_stopped = false;
-    s_stm32Link.getRear().enableDrivers();
+    s_stm32Link.enableDrivers();
     Serial.println(F(">>> ⚡ MOTORS ENABLED ON ALL STM32s."));
   } else if (line.equalsIgnoreCase("DISABLE")) {
     s_manual_v = 0.0f;
@@ -488,25 +488,25 @@ static void handleAsciiCommand(const char *raw_line) {
     s_cli_override_active = false;
     s_fake_data_active = false;
     s_drive_stopped = true;
-    s_stm32Link.getRear().emergencyStop();
+    s_stm32Link.emergencyStop();
     Serial.println(F(">>> 🔌 MOTOR DRIVERS DISABLED ON ALL STM32s."));
   } else if (line.startsWith("PID ") || line.startsWith("pid ")) {
     float kp = 0.1f, ki = 1.5f;
     sscanf(line.c_str() + 4, "%f %f", &kp, &ki);
-    s_stm32Link.getRear().setPID(kp, ki);
+    s_stm32Link.setPID(kp, ki);
     Serial.printf(">>> Velocity PID Dispatched to STM32s: Kp=%.3f, Ki=%.3f\n",
                   kp, ki);
   } else if (line.equalsIgnoreCase("SAVE")) {
-    s_stm32Link.getRear().saveFlash();
+    s_stm32Link.saveFlash();
     Serial.println(F(">>> 💾 FLASH SAVE DISPATCHED TO ALL STM32s."));
   } else if (line.equalsIgnoreCase("DFU")) {
-    s_stm32Link.enterDFU(false, true);
+    s_stm32Link.enterDFU(true, true);
     Serial.println(F(">>> 🔄 DFU BOOTLOADER REBOOT DISPATCHED TO ALL STM32s."));
   } else if (line.startsWith("CALIB ") || line.startsWith("calib ")) {
     int axle = 0, motor = 1;
     float v = 4.0f;
     sscanf(line.c_str() + 6, "%d %d %f", &axle, &motor, &v);
-    s_stm32Link.startCalibration(2, motor, v);
+    s_stm32Link.startCalibration(axle, motor, v);
     Serial.printf(">>> Calibration Dispatched: Axle %d, Motor %d @ %.1fV\n",
                   axle, motor, v);
   } else if (line.startsWith("V ") || line.startsWith("v ")) {
@@ -516,9 +516,9 @@ static void handleAsciiCommand(const char *raw_line) {
     s_fake_data_active = false;
     if (!s_cli_override_active) {
       s_drive_stopped = true;
-      s_stm32Link.getRear().emergencyStop();
+      s_stm32Link.emergencyStop();
     } else if (!s_estop_latched && s_drive_stopped) {
-      s_stm32Link.getRear().enableDrivers();
+      s_stm32Link.enableDrivers();
       s_drive_stopped = false;
     }
     Serial.printf(">>> Manual Speed Setpoint: %.2f m/s\n", s_manual_v);
@@ -555,7 +555,7 @@ static void handleAsciiCommand(const char *raw_line) {
     s_cli_override_active = false;
     s_manual_servo_direct = false;
     s_drive_stopped = true;
-    s_stm32Link.getRear().emergencyStop();
+    s_stm32Link.emergencyStop();
     s_ediff.reset();
     s_fusion.reset();
     s_servo.setPulseUs(fmaxf(
@@ -648,7 +648,7 @@ static void ioTask(void *pvParameters) {
                   s_cli_override_active = false;
                   s_estop_latched = true;
                   s_drive_stopped = true;
-                  s_stm32Link.getRear().emergencyStop();
+                  s_stm32Link.emergencyStop();
                 } else if (!s_cli_override_active) {
                   if (cmd->run_mode == 1 || cmd->run_mode == 3) {
                     s_manual_v = (float)cmd->target_v_mm_s / 1000.0f;
@@ -658,7 +658,7 @@ static void ioTask(void *pvParameters) {
                     s_fake_data_active = false;
                     if (cmd->target_v_mm_s != 0 && !s_estop_latched &&
                         s_drive_stopped) {
-                      s_stm32Link.getRear().enableDrivers();
+                      s_stm32Link.enableDrivers();
                       s_drive_stopped = false;
                     }
                   } else {
@@ -666,9 +666,10 @@ static void ioTask(void *pvParameters) {
                     s_manual_steer = 0.0f;
                     s_manual_override = false;
                     s_drive_stopped = true;
-                    if (s_stm32Link.getRear().isM1Enabled() ||
+                    if (s_stm32Link.getFront().isM1Enabled() ||
+                        s_stm32Link.getRear().isM1Enabled() ||
                         s_stm32Link.getRear().isM2Enabled()) {
-                      s_stm32Link.getRear().emergencyStop();
+                      s_stm32Link.emergencyStop();
                     }
                   }
                 }
@@ -735,9 +736,10 @@ static void ioTask(void *pvParameters) {
       s_manual_steer = 0.0f;
       s_manual_override = false;
       s_drive_stopped = true;
-      if (s_stm32Link.getRear().isM1Enabled() ||
+      if (s_stm32Link.getFront().isM1Enabled() ||
+          s_stm32Link.getRear().isM1Enabled() ||
           s_stm32Link.getRear().isM2Enabled()) {
-        s_stm32Link.getRear().emergencyStop();
+        s_stm32Link.emergencyStop();
       }
     }
 
@@ -767,8 +769,8 @@ static void ioTask(void *pvParameters) {
       }
     }
 
-    inputs.fl_rpm = 0.0f; // RWD-only: front STM32 not used
-    inputs.fr_rpm = 0.0f;
+    inputs.fl_rpm = s_stm32Link.getFL_RPM();  // FL +RPM = fwd
+    inputs.fr_rpm = s_stm32Link.getFR_RPM();  // FR encoder active (freewheeling, +RPM = fwd)
     inputs.rl_rpm = s_stm32Link.getRL_RPM();
     inputs.rr_rpm = -s_stm32Link.getRR_RPM();
     s_sensorInputs.commitWrite();

@@ -118,7 +118,7 @@ uint8_t current_frequency_hz = 60;
 uint32_t current_integration_ms =
     10; // Used only if AUTONOMOUS mode is selected
 uint8_t current_target_order = VL53L8CX_TARGET_ORDER_STRONGEST;
-uint8_t current_sharpener = 1;
+uint8_t current_sharpener = 5;
 
 // Forward declarations
 bool init_and_upload_firmware(VL53L8CX_Configuration *p_dev,

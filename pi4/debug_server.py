@@ -577,7 +577,7 @@ class DebugHTTPRequestHandler(BaseHTTPRequestHandler):
                 dial_deg = max(0.0, min(180.0, 90.0 - (deg / 32.2166) * 90.0))
                 cmd_str = f"A {dial_deg:.1f}\n"
             elif action == "trim":
-                trim_us = max(-20.0, min(20.0, float(data.get("trim_us", 0.0))))
+                trim_us = max(-60.0, min(60.0, float(data.get("trim_us", 0.0))))
                 cmd_str = f"TRIM {trim_us:.1f}\n"
             elif action == "pulse":
                 pulse = float(data.get("pulse", 1565.0))

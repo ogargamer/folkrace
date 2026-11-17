@@ -44,9 +44,8 @@ static void jump_to_dfu() {
 static void apply_driver_states() {
     if (d1_en) {
         driver1.enable();
-        // Sets 3 phase PWM voltages with SpaceVector offsets:
-        // phase A = d1_v, phase B = d1_v * 0.5, phase C = 0.0V
-        driver1.setPwm(d1_v, d1_v * 0.5f, 0.0f);
+        // phase A (PA5) = 3.0V (25%), phase B (PA1) = 6.0V (50%), phase C (PA2) = 9.0V (75%)
+        driver1.setPwm(3.0f, 6.0f, 9.0f);
     } else {
         driver1.disable();
     }
@@ -65,15 +64,15 @@ static void print_pins() {
     Serial.println("  STM32 EXACT PRODUCTION DRIVER REAL-TIME PWM & ENABLE TEST BENCH   ");
     Serial.println("====================================================================");
     Serial.println("MOTOR 1 INVERTER (TIM2 @ 25 kHz Center-Aligned PWM):");
-    Serial.println("  * PA3 (M1_EN)    : " + String(d1_en ? "3.3V (ENABLED)" : "0.0V (DISABLED)"));
-    Serial.println("  * PA5 (M1_PWM_A) : TIM2_CH1 PWM (Duty ~50% -> ~1.65V DC)");
-    Serial.println("  * PA1 (M1_PWM_B) : TIM2_CH2 PWM (Duty ~25% -> ~0.825V DC)");
-    Serial.println("  * PA2 (M1_PWM_C) : TIM2_CH3 PWM (Duty   0% -> ~0.000V DC)");
+    Serial.println("  * PA3 (M1_EN)    : Pulses HIGH (3.3V) / LOW (0.0V) every 1s");
+    Serial.println("  * PA5 (M1_PWM_A) : TIM2_CH1 PWM (Duty  25% -> 25 kHz, ~0.825V DC)");
+    Serial.println("  * PA1 (M1_PWM_B) : TIM2_CH2 PWM (Duty  50% -> 25 kHz, ~1.650V DC)");
+    Serial.println("  * PA2 (M1_PWM_C) : TIM2_CH3 PWM (Duty  75% -> 25 kHz, ~2.475V DC)");
     Serial.println("MOTOR 2 INVERTER (TIM3 @ 25 kHz Center-Aligned PWM):");
-    Serial.println("  * PA7 (M2_EN)    : " + String(d2_en ? "3.3V (ENABLED)" : "0.0V (DISABLED)"));
-    Serial.println("  * PA6 (M2_PWM_A) : TIM3_CH1 PWM (Duty  25% -> ~0.825V DC)");
-    Serial.println("  * PA4 (M2_PWM_B) : TIM3_CH2 PWM (Duty  50% -> ~1.650V DC)");
-    Serial.println("  * PB0 (M2_PWM_C) : TIM3_CH3 PWM (Duty  75% -> ~2.475V DC)");
+    Serial.println("  * PA7 (M2_EN)    : Pulses HIGH (3.3V) / LOW (0.0V) every 1s");
+    Serial.println("  * PA6 (M2_PWM_A) : TIM3_CH1 PWM (Duty  25% -> 25 kHz, ~0.825V DC)");
+    Serial.println("  * PA4 (M2_PWM_B) : TIM3_CH2 PWM (Duty  50% -> 25 kHz, ~1.650V DC)");
+    Serial.println("  * PB0 (M2_PWM_C) : TIM3_CH3 PWM (Duty  75% -> 25 kHz, ~2.475V DC)");
     Serial.println("STATUS LED (PA8): OFF (No blink)");
     Serial.println("--------------------------------------------------------------------");
     Serial.println("Interactive Commands:");
@@ -111,13 +110,22 @@ void setup() {
 }
 
 void loop() {
+    static uint32_t last_toggle = 0;
     static uint32_t last_report = 0;
     static char rx_buf[32];
     static uint8_t rx_idx = 0;
     uint32_t now = millis();
 
-    // Continuous refresh of PWM duty cycles
-    if (d1_en) driver1.setPwm(d1_v, d1_v * 0.5f, 0.0f);
+    // Pulse enable pins HIGH / LOW every 1 second
+    if (now - last_toggle >= 1000) {
+        last_toggle = now;
+        d1_en = !d1_en;
+        d2_en = !d2_en;
+        apply_driver_states();
+    }
+
+    // Continuous refresh of PWM duty cycles when enabled
+    if (d1_en) driver1.setPwm(3.0f, 6.0f, 9.0f);
     if (d2_en) driver2.setPwm(3.0f, 6.0f, 9.0f);
 
     // Periodic reminder every 3 seconds

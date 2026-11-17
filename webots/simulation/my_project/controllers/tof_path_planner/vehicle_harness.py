@@ -922,6 +922,7 @@ class FolkraceVehicle:
             v_ground_RR=drift_res["v_ground_RR"],
             is_drifting=is_drift_active,
             mu=self.mu_val,
+            v_curr=self.v_est,
         )
 
         # 7. Apply Actuator Commands

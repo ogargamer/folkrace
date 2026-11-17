@@ -1359,12 +1359,12 @@
               <button class="btn-preset" onclick="setSteer(-32.2)">Hard Right (-32.2°) ▶</button>
             </div>
 
-            <!-- Live Servo Neutral Trim (±20 µs) -->
+            <!-- Live Servo Neutral Trim (±60 µs) -->
             <div class="slider-row" style="margin-top:8px;">
-              <span>Servo Neutral Trim (±20 µs):</span>
+              <span>Servo Neutral Trim (±60 µs):</span>
               <span id="trimSliderVal" style="font-weight:700;color:var(--accent-cyan);">0 µs (1510 µs)</span>
             </div>
-            <input type="range" id="trimSlider" class="bench-slider" min="-20" max="20" step="1" value="0"
+            <input type="range" id="trimSlider" class="bench-slider" min="-60" max="60" step="1" value="0"
               oninput="onTrimInput(this.value)">
             <div class="preset-row">
               <button class="btn-preset" onclick="nudgeTrim(-1)">◀ -1 µs</button>
@@ -3252,7 +3252,7 @@
     const BASE_SERVO_NEUTRAL_US = 1510;
 
     function updateTrimDisplay(us) {
-      const val = Math.max(-20, Math.min(20, Math.round(Number(us))));
+      const val = Math.max(-60, Math.min(60, Math.round(Number(us))));
       const sign = val > 0 ? "+" : "";
       document.getElementById("trimSlider").value = val;
       document.getElementById("trimSliderVal").innerText = `${sign}${val} µs (${BASE_SERVO_NEUTRAL_US + val} µs)`;

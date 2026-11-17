@@ -106,6 +106,9 @@ private:
     bool has_prev_gyro_;
     VehicleSlipState slip_state_;
     float slip_hold_timer_;
+    float understeer_confirm_timer_;
+    float oversteer_confirm_timer_;
+    float slip_entry_speed_;
     float diff_split_gain_;
 };
 

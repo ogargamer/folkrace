@@ -3383,7 +3383,9 @@ void setup() {
     motor1.LPF_velocity.Tf = DEFAULT_LPF_TF;
     motor1.LPF_velocity.Ts = 0.0002f;
     motor1.init();
+    motor1.disable();
     driver1.disable();
+    digitalWrite(M1_EN, LOW);
 
     motor2.linkDriver(&driver2);
     motor2.linkSensor(&encoder2);
@@ -3402,7 +3404,9 @@ void setup() {
     motor2.LPF_velocity.Tf = DEFAULT_LPF_TF;
     motor2.LPF_velocity.Ts = 0.0002f;
     motor2.init();
+    motor2.disable();
     driver2.disable();
+    digitalWrite(M2_EN, LOW);
 
     // 7. Silent Pre-Loaded Alignment Check (Auto-load from Flash if saved, else fallback to constants)
     if (loadConfigFromFlash()) {
@@ -3422,6 +3426,9 @@ void setup() {
             m2_calibrated = true;
         }
     }
+
+    // Ensure both motors and gate drivers start disabled by default
+    disableBothDrivers();
 
     // 8. Configure & Start TIM6 Hardware Timer Interrupt @ 20.0 kHz (Highest Priority 0)
     foc_timer = new HardwareTimer(TIM6);

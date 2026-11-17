@@ -693,7 +693,7 @@ class ToFArcRadarApp(QMainWindow):
         # Multi-target configuration (Order, Targets depth, Sharpener)
         self.target_order = 1       # 1: Closest, 2: Strongest
         self.max_targets = 3        # 2 or 3 targets
-        self.sharpener_percent = 1  # 1% to 10%
+        self.sharpener_percent = 5  # 1% to 10%
         self.config_debounce_timer = QTimer(self)
         self.config_debounce_timer.setSingleShot(True)
         self.config_debounce_timer.timeout.connect(self.apply_config_to_sensor)
@@ -835,18 +835,18 @@ class ToFArcRadarApp(QMainWindow):
         cfg_layout.addWidget(sep)
 
         # 3. Veiling Glare Sharpener Slider (1-10%)
-        self.lbl_sharp = QLabel("✨ Sharpener: 1%", self.cfg_bar)
+        self.lbl_sharp = QLabel("✨ Sharpener: 5%", self.cfg_bar)
         self.lbl_sharp.setFont(QFont("Segoe UI", 8, QFont.Bold))
         self.lbl_sharp.setStyleSheet("color: #e2e8f0; min-width: 95px;")
         cfg_layout.addWidget(self.lbl_sharp)
 
         self.slider_sharp = QSlider(Qt.Horizontal, self.cfg_bar)
         self.slider_sharp.setRange(1, 10)
-        self.slider_sharp.setValue(1)
+        self.slider_sharp.setValue(5)
         self.slider_sharp.setFixedWidth(110)
         self.slider_sharp.setFixedHeight(22)
         self.slider_sharp.setCursor(Qt.PointingHandCursor)
-        self.slider_sharp.setToolTip("Veiling glare sharpener percentage (1% - 10%, default: 1%)")
+        self.slider_sharp.setToolTip("Veiling glare sharpener percentage (1% - 10%, default: 5%)")
         self.slider_sharp.setStyleSheet("""
             QSlider::groove:horizontal {
                 height: 4px;

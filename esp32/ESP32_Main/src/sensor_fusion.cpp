@@ -82,14 +82,12 @@ FusionOutputs IRAM_ATTR IMUEncoderFusion::update(
     if (w1 > w3) std::swap(w1, w3);
     if (w1 > w2) std::swap(w1, w2);
 
-    // RWD-only: front wheels unmeasured, use rear axle only
-    (void)w0; (void)w1; (void)w2; (void)w3;
-    float v_wheels_robust = 0.5f * (v_rl_body + v_rr_body);
+    float v_wheels_robust = 0.5f * (w1 + w2);
 
     // 6. Dynamic Slip Estimation
     float rear_diff_yaw_rate = (v_rr - v_rl) / fmaxf(0.01f, W_r_);
     float diff_error = fabsf(rear_diff_yaw_rate - gyro_z_rad_s);
-    float axle_discrepancy = 0.0f; // RWD-only: no front wheel feedback
+    float axle_discrepancy = fabsf(v_front_avg - v_rear_avg);
     float wheel_accel = (v_wheels_robust - v_est_) / fmaxf(1e-4f, step_dt);
     float accel_mismatch = fabsf(wheel_accel - accel_fwd_m_s2);
 

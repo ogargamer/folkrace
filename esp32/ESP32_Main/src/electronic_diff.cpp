@@ -5,18 +5,20 @@
 #endif
 
 namespace {
-constexpr float kGyroYawRefTauS = 0.030f;       // 30 ms 1st-order tire/chassis yaw reference lag
-constexpr float kGyroYawDotTauS = 0.020f;       // 20 ms 1st-order derivative low-pass filter
-constexpr float kGyroDeadbandRadS = 0.20f;      // IMU yaw-rate noise deadband
-constexpr float kGyroKpSteer = 0.08f;           // Proportional gyro countersteer gain (rad / (rad/s))
-constexpr float kGyroKdSteer = 0.008f;          // Derivative yaw damper gain (rad / (rad/s^2))
-constexpr float kGyroFullSpeedMps = 0.60f;      // Speed where gyro assist reaches 100% authority
-constexpr float kSlipHoldTimeS = 0.060f;        // 60 ms hysteresis hold latch for slip telemetry/interventions
-constexpr float kDiffFadeRate = 12.0f;          // Fast fade-out of rear diff split on oversteer (1/s)
-constexpr float kDiffRiseRate = 4.0f;           // Smooth recovery of rear diff split (1/s)
-constexpr float kUndersteerSpeedScale = 0.75f;  // Speed reduction ratio during front-plow understeer
-constexpr float kOversteerSpeedScale = 0.85f;   // Speed reduction ratio during rear-axle oversteer
-constexpr float kSlipSpeedFloorMps = 0.50f;     // Minimum cornering speed floor during slip throttle cut
+constexpr float kGyroYawRefTauS = 0.055f;         // 55 ms chassis + servo yaw-rate buildup lag
+constexpr float kGyroYawDotTauS = 0.020f;         // 20 ms 1st-order derivative low-pass filter
+constexpr float kGyroDeadbandRadS = 0.20f;        // IMU yaw-rate noise deadband
+constexpr float kGyroKpSteer = 0.07f;             // Proportional gyro countersteer gain (rad / (rad/s))
+constexpr float kGyroKdSteer = 0.007f;            // Derivative yaw damper gain (rad / (rad/s^2))
+constexpr float kGyroFullSpeedMps = 0.60f;        // Speed where gyro assist reaches 100% authority
+constexpr float kUndersteerConfirmTimeS = 0.065f; // Require 65 ms sustained plow before throttling
+constexpr float kOversteerConfirmTimeS = 0.035f;  // Require 35 ms sustained breakaway before latching
+constexpr float kSlipHoldTimeS = 0.035f;          // 35 ms hysteresis hold latch
+constexpr float kDiffFadeRate = 12.0f;            // Fast fade-out of rear diff split on oversteer (1/s)
+constexpr float kDiffRiseRate = 4.0f;             // Smooth recovery of rear diff split (1/s)
+constexpr float kUndersteerSpeedScale = 0.85f;    // Fixed cap fraction of entry speed on sustained understeer
+constexpr float kOversteerSpeedScale = 0.95f;     // Gentle 5% throttle lift on oversteer (fixed entry cap, no slam braking)
+constexpr float kSlipSpeedFloorMps = 0.60f;       // Minimum cornering speed floor during slip throttle cap
 } // namespace
 
 ElectronicDifferential4WD::ElectronicDifferential4WD(
@@ -53,6 +55,9 @@ ElectronicDifferential4WD::ElectronicDifferential4WD(
     has_prev_gyro_(false),
     slip_state_(SLIP_NORMAL),
     slip_hold_timer_(0.0f),
+    understeer_confirm_timer_(0.0f),
+    oversteer_confirm_timer_(0.0f),
+    slip_entry_speed_(0.0f),
     diff_split_gain_(1.0f) {}
 
 void ElectronicDifferential4WD::reset() {
@@ -65,6 +70,9 @@ void ElectronicDifferential4WD::reset() {
     has_prev_gyro_ = false;
     slip_state_ = SLIP_NORMAL;
     slip_hold_timer_ = 0.0f;
+    understeer_confirm_timer_ = 0.0f;
+    oversteer_confirm_timer_ = 0.0f;
+    slip_entry_speed_ = 0.0f;
     diff_split_gain_ = 1.0f;
 }
 
@@ -96,8 +104,12 @@ ElectronicDiffOutputs IRAM_ATTR ElectronicDifferential4WD::update(
     out.driver_steer_rad = driver_steer_rad_;
     out.driver_steer_deg = driver_steer_rad_ * (180.0f / PI_F);
 
-    float omega_cmd_driver = (rate_limited_speed_ * tanf(driver_steer_rad_)) / L_;
-    float omega_grip_max = (safe_mu * GRAVITY_G_CONST) / fmaxf(fabsf(rate_limited_speed_), 0.50f);
+    float v_for_ref = rate_limited_speed_;
+    if (fabsf(v_curr) > fabsf(rate_limited_speed_) && (v_curr * rate_limited_speed_ >= 0.0f)) {
+        v_for_ref = copysignf(fabsf(v_curr), rate_limited_speed_);
+    }
+    float omega_cmd_driver = (v_for_ref * tanf(driver_steer_rad_)) / L_;
+    float omega_grip_max = (safe_mu * GRAVITY_G_CONST) / fmaxf(fabsf(v_for_ref), 0.50f);
     float omega_ref_target = fmaxf(-omega_grip_max, fminf(omega_grip_max, omega_cmd_driver));
     float alpha_ref = safe_dt / (kGyroYawRefTauS + safe_dt);
     omega_ref_ += alpha_ref * (omega_ref_target - omega_ref_);
@@ -135,12 +147,12 @@ ElectronicDiffOutputs IRAM_ATTR ElectronicDifferential4WD::update(
         excess_yaw = gyro_z_rad_s;
     }
 
-    float speed_abs = fabsf(rate_limited_speed_);
+    float speed_abs = fabsf(v_for_ref);
     float gyro_fade = 0.0f;
     if (speed_abs > v_slip_gate_) {
         gyro_fade = fminf(1.0f, (speed_abs - v_slip_gate_) / fmaxf(0.05f, kGyroFullSpeedMps - v_slip_gate_));
     }
-    float speed_sign = (rate_limited_speed_ >= 0.0f) ? 1.0f : -1.0f;
+    float speed_sign = (v_for_ref >= 0.0f) ? 1.0f : -1.0f;
 
     float delta_gyro = 0.0f;
     if (gyro_fade > 0.0f && fabsf(excess_yaw) > kGyroDeadbandRadS) {
@@ -188,14 +200,14 @@ ElectronicDiffOutputs IRAM_ATTR ElectronicDifferential4WD::update(
     if (slip_state_ == SLIP_UNDERSTEER) {
         float tan_driver = fmaxf(0.05f, fabsf(tanf(driver_steer_rad_)));
         float v_corner_max = sqrtf((safe_mu * GRAVITY_G_CONST * L_) / tan_driver);
-        float v_cap = fmaxf(kSlipSpeedFloorMps, fminf(v_corner_max, kUndersteerSpeedScale * fabsf(rate_limited_speed_)));
+        float v_cap = fmaxf(kSlipSpeedFloorMps, fminf(v_corner_max, kUndersteerSpeedScale * slip_entry_speed_));
         if (effective_target_v > 0.0f) {
             effective_target_v = fminf(effective_target_v, v_cap);
         } else if (effective_target_v < 0.0f) {
             effective_target_v = fmaxf(effective_target_v, -v_cap);
         }
     } else if (slip_state_ == SLIP_OVERSTEER) {
-        float v_cap = fmaxf(kSlipSpeedFloorMps, kOversteerSpeedScale * fabsf(rate_limited_speed_));
+        float v_cap = fmaxf(kSlipSpeedFloorMps, kOversteerSpeedScale * slip_entry_speed_);
         if (effective_target_v > 0.0f) {
             effective_target_v = fminf(effective_target_v, v_cap);
         } else if (effective_target_v < 0.0f) {
@@ -228,11 +240,11 @@ ElectronicDiffOutputs IRAM_ATTR ElectronicDifferential4WD::update(
         }
     }
 
-    if (effective_target_v <= v_curr) {
+    if (target_v <= v_curr) {
         if (rate_limited_speed_ > v_curr) {
             rate_limited_speed_ = v_curr;
         }
-    } else if (effective_target_v >= v_curr) {
+    } else if (target_v >= v_curr) {
         if (rate_limited_speed_ < v_curr) {
             rate_limited_speed_ = v_curr;
         }
@@ -284,6 +296,9 @@ ElectronicDiffOutputs IRAM_ATTR ElectronicDifferential4WD::update(
         omega_ref_ = 0.0f;
         slip_state_ = SLIP_NORMAL;
         slip_hold_timer_ = 0.0f;
+        understeer_confirm_timer_ = 0.0f;
+        oversteer_confirm_timer_ = 0.0f;
+        slip_entry_speed_ = 0.0f;
         diff_split_gain_ = fminf(1.0f, diff_split_gain_ + kDiffRiseRate * safe_dt);
         out.omega_ref = 0.0f;
         out.v_FL = out.v_FR = out.v_RL = out.v_RR = 0.0f;
@@ -296,36 +311,62 @@ ElectronicDiffOutputs IRAM_ATTR ElectronicDifferential4WD::update(
     }
 
     // -------------------------------------------------------------------------
-    // 7. Grip-Capped, Hysteretic IMU Slip Classification
+    // 7. Grip-Capped, Confirmed & Hysteretic IMU Slip Classification
     // -------------------------------------------------------------------------
     out.yaw_error = gyro_z_rad_s - omega_ref_;
     VehicleSlipState raw_slip = SLIP_NORMAL;
 
-    if (fabsf(rate_limited_speed_) >= v_slip_gate_) {
-        float dyn_thresh = fmaxf(thresh_spin_, 0.35f * fabsf(omega_ref_));
+    if (fabsf(v_for_ref) >= v_slip_gate_) {
+        float dyn_thresh = fmaxf(fmaxf(thresh_spin_ * 2.2f, 0.95f), 0.40f * fabsf(omega_ref_));
+        float a_lat_req = fabsf(v_for_ref * omega_cmd_driver);
 
-        if (omega_ref_ > 0.05f && (gyro_z_rad_s - omega_ref_) > dyn_thresh) {
+        if (omega_ref_ > 0.10f && (gyro_z_rad_s - omega_ref_) > dyn_thresh) {
             raw_slip = SLIP_OVERSTEER;
-        } else if (omega_ref_ < -0.05f && (omega_ref_ - gyro_z_rad_s) > dyn_thresh) {
+        } else if (omega_ref_ < -0.10f && (omega_ref_ - gyro_z_rad_s) > dyn_thresh) {
             raw_slip = SLIP_OVERSTEER;
-        } else if (fabsf(gyro_z_rad_s) > fmaxf(1.00f, thresh_spin_ * 2.0f) && (gyro_z_rad_s * omega_ref_ <= 0.0f)) {
+        } else if (fabsf(gyro_z_rad_s) > fmaxf(1.35f, thresh_spin_ * 3.0f) && (gyro_z_rad_s * omega_ref_ <= 0.0f)) {
             raw_slip = SLIP_OVERSTEER;
-        } else if (fabsf(driver_steer_rad_) > 0.15f && fabsf(omega_ref_) > 1.00f &&
+        } else if (fabsf(driver_steer_rad_) > 0.17f && fabsf(omega_ref_) > 1.25f &&
+                   a_lat_req > (0.50f * safe_mu * GRAVITY_G_CONST) &&
                    (gyro_z_rad_s * omega_ref_ >= 0.0f) && fabsf(gyro_z_rad_s) < (0.40f * fabsf(omega_ref_))) {
             raw_slip = SLIP_UNDERSTEER;
         }
     }
 
-    if (fabsf(rate_limited_speed_) < v_slip_gate_) {
+    VehicleSlipState prev_slip_state = slip_state_;
+    if (fabsf(v_for_ref) < v_slip_gate_) {
         slip_state_ = SLIP_NORMAL;
         slip_hold_timer_ = 0.0f;
-    } else if (raw_slip != SLIP_NORMAL) {
-        slip_state_ = raw_slip;
-        slip_hold_timer_ = kSlipHoldTimeS;
-    } else if (slip_hold_timer_ > 0.0f) {
-        slip_hold_timer_ = fmaxf(0.0f, slip_hold_timer_ - safe_dt);
+        understeer_confirm_timer_ = 0.0f;
+        oversteer_confirm_timer_ = 0.0f;
+        slip_entry_speed_ = 0.0f;
+    } else if (raw_slip == SLIP_OVERSTEER) {
+        oversteer_confirm_timer_ += safe_dt;
+        understeer_confirm_timer_ = 0.0f;
+        if (oversteer_confirm_timer_ >= kOversteerConfirmTimeS) {
+            slip_state_ = SLIP_OVERSTEER;
+            slip_hold_timer_ = kSlipHoldTimeS;
+        }
+    } else if (raw_slip == SLIP_UNDERSTEER) {
+        understeer_confirm_timer_ += safe_dt;
+        oversteer_confirm_timer_ = 0.0f;
+        if (understeer_confirm_timer_ >= kUndersteerConfirmTimeS) {
+            slip_state_ = SLIP_UNDERSTEER;
+            slip_hold_timer_ = kSlipHoldTimeS;
+        }
     } else {
-        slip_state_ = SLIP_NORMAL;
+        understeer_confirm_timer_ = 0.0f;
+        oversteer_confirm_timer_ = 0.0f;
+        if (slip_hold_timer_ > 0.0f) {
+            slip_hold_timer_ = fmaxf(0.0f, slip_hold_timer_ - safe_dt);
+        } else {
+            slip_state_ = SLIP_NORMAL;
+            slip_entry_speed_ = 0.0f;
+        }
+    }
+
+    if (slip_state_ != SLIP_NORMAL && prev_slip_state != slip_state_) {
+        slip_entry_speed_ = fmaxf(fabsf(rate_limited_speed_), fabsf(v_curr));
     }
     out.slip_state = slip_state_;
 
