@@ -134,7 +134,7 @@ class BreadcrumbWatchdog:
         lookback_m: float = AWW_BREADCRUMB_LOOKBACK_M,
         spacing_m: float = AWW_BREADCRUMB_SPACING_M,
         max_history_s: float = AWW_BREADCRUMB_MAX_TIMEOUT_S,
-        cone_angle_deg: float = 50.0,
+        cone_angle_deg: float = 65.0,
         duration_scale: float = AWW_BREADCRUMB_DURATION_SCALE,
         max_timeout_s: float = AWW_BREADCRUMB_MAX_TIMEOUT_S,
         **kwargs,
@@ -279,7 +279,7 @@ class BreadcrumbWatchdog:
         Evaluates candidate breadcrumbs:
           - Odometry gate: Delta S in [0.80 m, 8.0 m] excludes points under chassis and far laps.
           - Spatial search envelope: Euclidean distance d in [0.40 m, 1.70 m], y_v in [0.40 m, 1.70 m],
-            forward cone |angle| <= cone_angle_rad (default 50 deg).
+            forward cone |angle| <= cone_angle_rad (default 65 deg).
           - Direct 2D Bresenham raycast across hazard_mask.
           - Heading opposition check: diff >= 110 deg.
         Returns: (is_wrong_way, confidence, target_recovery_yaw, sightline_rays)
@@ -364,6 +364,52 @@ class BreadcrumbWatchdog:
             return True, confidence, target_recovery_yaw, sightline_rays
 
         return False, 0.0, 0.0, sightline_rays
+
+    def get_reverse_breadcrumb_yaw(
+        self,
+        current_x: float,
+        current_y: float,
+        current_yaw: float,
+        target_dist_m: float = 0.45,
+        min_dist_m: float = 0.25,
+        max_dist_m: float = 0.70,
+    ) -> Optional[float]:
+        """Returns a target yaw that steers the rear toward the recent breadcrumb closest to ~0.45m."""
+        if not self.breadcrumbs:
+            return None
+
+        cos_yaw = math.cos(current_yaw)
+        sin_yaw = math.sin(current_yaw)
+        best_bc: Optional[Tuple[float, float]] = None
+        best_err = float("inf")
+
+        for bc in reversed(self.breadcrumbs):
+            delta_s = self.cumulative_dist_m - bc.s_dist
+            if delta_s > (max_dist_m + 0.30):
+                break
+
+            dx = bc.x - current_x
+            dy = bc.y - current_y
+            xv = cos_yaw * dx + sin_yaw * dy
+            yv = -sin_yaw * dx + cos_yaw * dy
+            d = math.hypot(xv, yv)
+
+            if d < min_dist_m or d > max_dist_m or yv > 0.15:
+                continue
+
+            dist_err = abs(d - target_dist_m)
+            if dist_err < best_err:
+                best_err = dist_err
+                best_bc = (xv, yv)
+
+        if best_bc is None:
+            return None
+
+        xv, yv = best_bc
+        # Reverse-pursuit bearing: if bc is behind-left (xv < 0, yv < 0),
+        # heading_err < 0 -> compute_reverse_steer steers LEFT (+steer),
+        # swinging the rear toward the breadcrumb and the nose away from it.
+        return wrap_to_pi(current_yaw + math.atan2(xv, -yv))
 
     def check_gap_channel(
         self,
@@ -687,6 +733,27 @@ class AntiWrongWayWatchdog:
             cone_deg=cone_deg,
             opposing_deg=opposing_deg,
             min_bc_dist=min_bc_dist,
+        )
+
+    def get_reverse_breadcrumb_yaw(
+        self,
+        current_x: float,
+        current_y: float,
+        current_yaw: float,
+        target_dist_m: float = 0.45,
+        min_dist_m: float = 0.25,
+        max_dist_m: float = 0.70,
+    ) -> Optional[float]:
+        """Returns a reverse-pursuit target yaw toward the recent breadcrumb closest to ~0.45m."""
+        if self.mode == WrongWayOptionMode.DISABLED or self.mode == "DISABLED":
+            return None
+        return self.breadcrumb_watchdog.get_reverse_breadcrumb_yaw(
+            current_x=current_x,
+            current_y=current_y,
+            current_yaw=current_yaw,
+            target_dist_m=target_dist_m,
+            min_dist_m=min_dist_m,
+            max_dist_m=max_dist_m,
         )
 
     def get_detailed_telemetry(

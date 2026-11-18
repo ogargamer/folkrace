@@ -554,13 +554,15 @@ void send_binary_telemetry(uint8_t sensor_id, VL53L8CX_ResultsData *p_res,
     uint8_t z = zones[i];
     uint32_t spad = p_res->nb_spads_enabled[z];
 
-    // Check target 0 and target 1 (both are strongest targets returned by VL53L8CX)
+    // Check target 0 and target 1, gated by nb_target_detected so stale
+    // buffer entries from previous frames are never reused.
+    uint8_t nb_tgt = p_res->nb_target_detected[z];
     int src0 = z * VL53L8CX_NB_TARGET_PER_ZONE + 0;
     int src1 = z * VL53L8CX_NB_TARGET_PER_ZONE + 1;
-    uint8_t st0 = p_res->target_status[src0];
-    uint8_t st1 = p_res->target_status[src1];
-    int16_t d0 = p_res->distance_mm[src0];
-    int16_t d1 = p_res->distance_mm[src1];
+    uint8_t st0 = (nb_tgt >= 1) ? p_res->target_status[src0] : 255;
+    uint8_t st1 = (nb_tgt >= 2) ? p_res->target_status[src1] : 255;
+    int16_t d0 = (nb_tgt >= 1) ? p_res->distance_mm[src0] : 0;
+    int16_t d1 = (nb_tgt >= 2) ? p_res->distance_mm[src1] : 0;
 
     target0_mm[i] = (d0 > 0) ? (uint16_t)d0 : 0;
     target1_mm[i] = (d1 > 0) ? (uint16_t)d1 : 0;

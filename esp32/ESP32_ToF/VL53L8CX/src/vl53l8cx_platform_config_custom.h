@@ -8,14 +8,14 @@
 #define VL53L8CX_NB_TARGET_PER_ZONE 2U
 
 /*
- * Disable all unneeded sensor metrics from the sensor MCU output stream.
- * Keeping ONLY:
+ * Disable unneeded sensor metrics from the sensor MCU output stream.
+ * Keeping:
  *  - Distance (distance_mm)
  *  - Target status (target_status)
+ *  - Number of targets detected (nb_target_detected, prevents stale zone/target latching)
  *  - Active SPAD count (nb_spads_enabled, needed for 1024 SPAD contact fallback)
  */
 #define VL53L8CX_DISABLE_AMBIENT_PER_SPAD
-#define VL53L8CX_DISABLE_NB_TARGET_DETECTED
 #define VL53L8CX_DISABLE_SIGNAL_PER_SPAD
 #define VL53L8CX_DISABLE_RANGE_SIGMA_MM
 #define VL53L8CX_DISABLE_REFLECTANCE_PERCENT

@@ -134,7 +134,7 @@ class BreadcrumbWatchdog:
         lookback_m: float = AWW_BREADCRUMB_LOOKBACK_M,
         spacing_m: float = AWW_BREADCRUMB_SPACING_M,
         max_history_s: float = AWW_BREADCRUMB_MAX_TIMEOUT_S,
-        cone_angle_deg: float = 50.0,
+        cone_angle_deg: float = 65.0,
         duration_scale: float = AWW_BREADCRUMB_DURATION_SCALE,
         max_timeout_s: float = AWW_BREADCRUMB_MAX_TIMEOUT_S,
         **kwargs,
@@ -279,7 +279,7 @@ class BreadcrumbWatchdog:
         Evaluates candidate breadcrumbs:
           - Odometry gate: Delta S in [0.80 m, 8.0 m] excludes points under chassis and far laps.
           - Spatial search envelope: Euclidean distance d in [0.40 m, 1.70 m], y_v in [0.40 m, 1.70 m],
-            forward cone |angle| <= cone_angle_rad (default 50 deg).
+            forward cone |angle| <= cone_angle_rad (default 65 deg).
           - Direct 2D Bresenham raycast across hazard_mask.
           - Heading opposition check: diff >= 110 deg.
         Returns: (is_wrong_way, confidence, target_recovery_yaw, sightline_rays)

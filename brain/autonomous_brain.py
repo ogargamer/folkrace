@@ -461,6 +461,13 @@ class AutonomousBrain:
         is_wall_contact = (min_fwd_dist <= 0.05)
         shield_reverse = bool(_shield_cur.get("reverse_suggested", False))
 
+        is_aww_wrong_way = bool(self.last_aww_status and self.last_aww_status.is_wrong_way)
+        target_breadcrumb_yaw = (
+            self.last_aww_status.target_recovery_yaw
+            if (self.last_aww_status and self.last_aww_status.target_recovery_yaw is not None)
+            else self.watchdog.get_reverse_breadcrumb_yaw(nav_pose[0], nav_pose[1], nav_pose[2])
+        )
+
         if (shield_reverse or is_wall_contact or is_stall) and self.recovery_manager.state == StuckRecoveryState.NORMAL_DRIVE:
             _arc_cl = self.recovery_manager.evaluate_costmap_escape_arcs(hazard_mask, self.costmap)
             _is_l_pin, _is_r_pin = self.recovery_manager.evaluate_pinned_state(hazard_mask, self.costmap, clean_tofs)
@@ -468,14 +475,13 @@ class AutonomousBrain:
                 arc_clearance=_arc_cl, heading_err=float(theta_g),
                 is_left_pinned=_is_l_pin, is_right_pinned=_is_r_pin,
             )
-            _target_bc_yaw = self.last_aww_status.target_recovery_yaw if self.last_aww_status else None
             self.recovery_manager.trigger_emergency_recovery(
                 heading_err=float(theta_g),
                 steer_dir=_side,
                 current_v=v_est,
                 current_steer=steer_actual_rad,
                 instant_reverse=True,
-                target_breadcrumb_yaw=_target_bc_yaw,
+                target_breadcrumb_yaw=target_breadcrumb_yaw,
                 current_yaw=nav_pose[2],
                 front_clearance_m=min_fwd_dist,
                 hazard_mask=hazard_mask,
@@ -483,10 +489,10 @@ class AutonomousBrain:
                 cached_tofs=clean_tofs,
                 is_left_pinned=_is_l_pin,
                 is_right_pinned=_is_r_pin,
+                is_wrong_way=is_aww_wrong_way,
             )
 
         # 10. Execute Recovery State Machine
-        target_breadcrumb_yaw = self.last_aww_status.target_recovery_yaw if self.last_aww_status else None
         is_early_exit = bool(
             self.last_aww_status
             and self.last_aww_status.early_exit_found
@@ -505,6 +511,7 @@ class AutonomousBrain:
             current_yaw=nav_pose[2],
             target_breadcrumb_yaw=target_breadcrumb_yaw,
             early_exit_available=is_early_exit,
+            is_wrong_way=is_aww_wrong_way,
         )
 
         if is_recovering:
