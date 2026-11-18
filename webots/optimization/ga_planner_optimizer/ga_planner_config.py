@@ -143,9 +143,6 @@ OPTION_2_SL_MPC_GENE_SPECS: List[Tuple[str, float, float, type, float, str]] = [
     ("alt_aperture_bias",    1.00,   4.00,   float,  3.309,  "Challenger aperture width bias multiplier"),
     ("alt_switch_hysteresis",1.00,  50.00,   float, 18.330,  "MPC cost reduction threshold needed to switch lines"),
     ("w_gap_clear",          0.00,  50.00,   float, 13.997,  "Lookahead projection depth credit and clear gap weight in dual-line arbitration"),
-    # Fast Straight-Line Lock (Capped to real-world 3.84 m/s wheel limit)
-    ("straight_lock_dist",   1.80,   1.80,   float,  1.80,   "Forward clearance (m) to lock straight line acceleration"),
-    ("straight_lock_speed",  3.84,   3.84,   float,  3.84,   "Speed ceiling (m/s) when straight-line locked (real-world limit)"),
     # Straight Quieting & Anti-Oscillation Adaptive Steering Response
     ("aggr_dist_far_m",      1.72,   1.72,   float,  1.72,   "Forward clearance distance (m) to engage max straight quieting"),
     ("aggr_dist_close_m",    0.80,   1.30,   float,  1.042,  "Emergency distance threshold (m) below which 100% steering authority is engaged"),
@@ -277,7 +274,6 @@ def generate_logical_initial_population(
             "gap_latch_hysteresis": 1.25, "gap_latch_dist_m": 0.28,
             "alt_min_separation_m": 0.15, "alt_aperture_bias": 1.80, "alt_switch_hysteresis": 8.00,
             "w_gap_clear": 5.00,
-            "straight_lock_dist": 1.70, "straight_lock_speed": 5.50,
             "aggr_dist_far_m": 1.70, "aggr_dist_close_m": 1.00, "aggr_min_scale": 0.30,
             "steer_deadband_rad": 0.002,
             "recovery_clearance_exit_m": 0.28, "recovery_steer_angle_rad": 0.5623,
@@ -298,7 +294,6 @@ def generate_logical_initial_population(
             "gap_latch_hysteresis": 1.10, "gap_latch_dist_m": 0.25,
             "alt_min_separation_m": 0.15, "alt_aperture_bias": 1.80, "alt_switch_hysteresis": 7.00,
             "w_gap_clear": 6.00,
-            "straight_lock_dist": 1.65, "straight_lock_speed": 5.50,
             "aggr_dist_far_m": 1.68, "aggr_dist_close_m": 1.10, "aggr_min_scale": 0.35,
             "steer_deadband_rad": 0.002,
             "recovery_clearance_exit_m": 0.30, "recovery_steer_angle_rad": 0.5623,
@@ -319,7 +314,6 @@ def generate_logical_initial_population(
             "gap_latch_hysteresis": 1.50, "gap_latch_dist_m": 0.32,
             "alt_min_separation_m": 0.20, "alt_aperture_bias": 2.00, "alt_switch_hysteresis": 12.00,
             "w_gap_clear": 4.00,
-            "straight_lock_dist": 1.75, "straight_lock_speed": 5.00,
             "aggr_dist_far_m": 1.75, "aggr_dist_close_m": 1.20, "aggr_min_scale": 0.40,
             "steer_deadband_rad": 0.003,
             "recovery_clearance_exit_m": 0.25, "recovery_steer_angle_rad": 0.550,

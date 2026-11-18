@@ -99,8 +99,6 @@ from planner_config import (
     BRAKE_DECEL_RATIO,
     GRAVITY_G,
     SERVO_MAX_SPEED_RAD_S,
-    STRAIGHT_LOCK_DIST_M,
-    STRAIGHT_LOCK_SPEED_MPS,
     FRONT_LATERAL_RESERVE_MIN,
     ENABLE_OPTICAL_FLOW_SENSOR,
     ENABLE_TRACTION_DRIFT_CONTROL,
@@ -344,8 +342,6 @@ class FolkraceVehicle:
         self.aggr_dist_close = 1.00
         self.aggr_min_scale = 0.30
         self.steer_deadband = 0.002
-        self.straight_lock_dist = STRAIGHT_LOCK_DIST_M
-        self.straight_lock_speed = 5.00
         self.v_cruise_min = V_MIN_CRUISE
         self.v_cruise_max = V_MAX_CRUISE
 
@@ -425,8 +421,6 @@ class FolkraceVehicle:
         self.aggr_dist_close = self.brain.aggr_dist_close
         self.aggr_min_scale = self.brain.aggr_min_scale
         self.steer_deadband = self.brain.steer_deadband
-        self.straight_lock_dist = self.brain.straight_lock_dist
-        self.straight_lock_speed = self.brain.straight_lock_speed
         self.v_cruise_min = self.brain.v_cruise_min
         self.v_cruise_max = self.brain.v_cruise_max
         self.cached_target_speed = self.v_cruise_min

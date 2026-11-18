@@ -29,8 +29,6 @@ try:
         MPC_V_CORNER_FACTOR,
         MPC_V_CRUISE_MAX,
         MPC_V_CRUISE_MIN,
-        MPC_STRAIGHT_LOCK_DIST_M,
-        MPC_STRAIGHT_LOCK_SPEED_MPS,
         MPC_ALT_SWITCH_HYSTERESIS,
         MPC_ALT_MIN_SEPARATION_M,
         MPC_ALT_APERTURE_BIAS,
@@ -51,8 +49,6 @@ except ImportError:
         MPC_V_CORNER_FACTOR,
         MPC_V_CRUISE_MAX,
         MPC_V_CRUISE_MIN,
-        MPC_STRAIGHT_LOCK_DIST_M,
-        MPC_STRAIGHT_LOCK_SPEED_MPS,
         MPC_ALT_SWITCH_HYSTERESIS,
         MPC_ALT_MIN_SEPARATION_M,
         MPC_ALT_APERTURE_BIAS,
@@ -99,7 +95,6 @@ if CPP_AVAILABLE and _lib is not None:
         ctypes.c_double,
         ctypes.c_double, ctypes.c_double, ctypes.c_double,
         ctypes.c_double, ctypes.c_double, ctypes.c_double,
-        ctypes.c_double, ctypes.c_double,
         ctypes.c_double, ctypes.c_double,
         ctypes.c_double, ctypes.c_double,
     ]
@@ -210,8 +205,6 @@ class CppCurvilinearSLMPC:
         v_corner_factor: float = MPC_V_CORNER_FACTOR,
         v_cruise_max: float = MPC_V_CRUISE_MAX,
         v_cruise_min: float = MPC_V_CRUISE_MIN,
-        straight_lock_dist_m: float = MPC_STRAIGHT_LOCK_DIST_M,
-        straight_lock_speed_mps: float = MPC_STRAIGHT_LOCK_SPEED_MPS,
         alt_switch_hysteresis: float = MPC_ALT_SWITCH_HYSTERESIS,
         alt_min_separation_m: float = MPC_ALT_MIN_SEPARATION_M,
         alt_aperture_bias: float = MPC_ALT_APERTURE_BIAS,
@@ -231,8 +224,6 @@ class CppCurvilinearSLMPC:
         self.v_corner_factor = float(v_corner_factor)
         self.v_cruise_max = float(v_cruise_max)
         self.v_cruise_min = float(v_cruise_min)
-        self.straight_lock_dist_m = float(straight_lock_dist_m)
-        self.straight_lock_speed_mps = float(straight_lock_speed_mps)
         self.alt_switch_hysteresis = float(alt_switch_hysteresis)
         self.alt_min_separation_m = float(alt_min_separation_m)
         self.alt_aperture_bias = float(alt_aperture_bias)
@@ -301,8 +292,6 @@ class CppCurvilinearSLMPC:
             float(self.v_corner_factor),
             float(self.v_cruise_max),
             float(self.v_cruise_min),
-            float(self.straight_lock_dist_m),
-            float(self.straight_lock_speed_mps),
         )
 
         # Handle 2: Smart Challenger Alternative Line solver
@@ -321,8 +310,6 @@ class CppCurvilinearSLMPC:
             float(self.v_corner_factor),
             float(self.v_cruise_max),
             float(self.v_cruise_min),
-            float(self.straight_lock_dist_m),
-            float(self.straight_lock_speed_mps),
         )
 
         if not self._handle:
@@ -626,8 +613,8 @@ class CppCurvilinearSLMPC:
         winner = 0
         depth_credit = 0.0
         if has_challenger:
-            primary_ok = (status_prim in (0, 1))
-            alt_ok = (status_alt in (0, 1))
+            primary_ok = (status_prim == 0)
+            alt_ok = (status_alt == 0)
             if not primary_ok and alt_ok:
                 # Primary line blocked/infeasible, challenger clear: immediate safety switch
                 winner = 1
@@ -651,12 +638,8 @@ class CppCurvilinearSLMPC:
                 # Base depth credit proportional to lookahead advantage
                 depth_credit = self.w_gap_clear * depth_diff
 
-                # When primary is straight-locked (status_prim == 1), C++ outputs a dummy cost of 0.0.
-                # Use a nominal straight baseline cost so challenger is not forced to overcome a 0.0 placeholder.
-                eff_cost_prim = max(cost_prim, 25.0) if status_prim == 1 else cost_prim
-
                 # Challenger must beat Incumbent by hysteresis cost margin minus lookahead depth credit
-                if (cost_alt - depth_credit + self.alt_switch_hysteresis) < eff_cost_prim:
+                if (cost_alt - depth_credit + self.alt_switch_hysteresis) < cost_prim:
                     winner = 1
                 else:
                     winner = 0
@@ -749,17 +732,6 @@ class CppCurvilinearSLMPC:
             cmd_speed = cmd_speed_alt
             status_desc = "CHALLENGER_OVERTHROW"
             active_cost = cost_alt
-        elif status_prim == 1:
-            best_line = best_line_prim
-            if shield_is_active:
-                cmd_steer = cmd_steer_prim
-                cmd_speed = cmd_speed_prim
-                status_desc = "STRAIGHT_LOCKED_SHIELD_EVADE"
-            else:
-                cmd_steer = 0.0
-                cmd_speed = self.straight_lock_speed_mps
-                status_desc = "STRAIGHT_LOCKED"
-            active_cost = 0.0
         elif status_prim == 0:
             best_line = best_line_prim
             cmd_steer = cmd_steer_prim

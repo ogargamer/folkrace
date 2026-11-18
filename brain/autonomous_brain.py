@@ -50,8 +50,6 @@ try:
         V_MAX_CRUISE,
         MAX_STEERING_RAD,
         SERVO_MAX_SPEED_RAD_S,
-        STRAIGHT_LOCK_DIST_M,
-        STRAIGHT_LOCK_SPEED_MPS,
         RECOVERY_REVERSE_SPEED_MPS,
         RECOVERY_STEER_ANGLE_RAD,
         RECOVERY_CLEARANCE_EXIT_M,
@@ -78,8 +76,6 @@ except ImportError:
         V_MAX_CRUISE,
         MAX_STEERING_RAD,
         SERVO_MAX_SPEED_RAD_S,
-        STRAIGHT_LOCK_DIST_M,
-        STRAIGHT_LOCK_SPEED_MPS,
         RECOVERY_REVERSE_SPEED_MPS,
         RECOVERY_STEER_ANGLE_RAD,
         RECOVERY_CLEARANCE_EXIT_M,
@@ -141,8 +137,6 @@ class AutonomousBrain:
         self.aggr_dist_close = 1.00
         self.aggr_min_scale = 0.30
         self.steer_deadband = 0.002
-        self.straight_lock_dist = STRAIGHT_LOCK_DIST_M
-        self.straight_lock_speed = STRAIGHT_LOCK_SPEED_MPS
         self.v_cruise_min = V_MIN_CRUISE
         self.v_cruise_max = V_MAX_CRUISE
 
@@ -185,8 +179,6 @@ class AutonomousBrain:
         self.aggr_dist_close = float(genes.get("aggr_dist_close_m", 1.00))
         self.aggr_min_scale = float(genes.get("aggr_min_scale", 0.30))
         self.steer_deadband = float(genes.get("steer_deadband_rad", 0.002))
-        self.straight_lock_dist = float(genes.get("straight_lock_dist", STRAIGHT_LOCK_DIST_M))
-        self.straight_lock_speed = float(genes.get("straight_lock_speed", 5.00))
         self.v_cruise_min = float(genes.get("v_cruise_min", V_MIN_CRUISE))
         self.v_cruise_max = float(genes.get("v_cruise_max", V_MAX_CRUISE))
 
@@ -225,8 +217,6 @@ class AutonomousBrain:
             v_corner_factor=float(genes.get("v_corner_factor", 0.95)),
             v_cruise_max=self.v_cruise_max,
             v_cruise_min=self.v_cruise_min,
-            straight_lock_dist_m=self.straight_lock_dist,
-            straight_lock_speed_mps=self.straight_lock_speed,
             alt_switch_hysteresis=float(genes.get("alt_switch_hysteresis", 15.00)),
             alt_min_separation_m=float(genes.get("alt_min_separation_m", 0.25)),
             alt_aperture_bias=float(genes.get("alt_aperture_bias", 1.80)),
@@ -536,49 +526,40 @@ class AutonomousBrain:
                 self.was_recovering = False
                 self.active_steer = steer_actual_rad
 
-            # Fast Straight-Line Lock
-            d_fl_lock = clean_tofs.get("tof_front_left_4.1deg", 0.0)
-            d_fr_lock = clean_tofs.get("tof_front_right_4.1deg", 0.0)
-            if d_fl_lock >= 1.79 and d_fr_lock >= 1.79:
-                target_speed = self.straight_lock_speed
-                target_steer = 0.0
-                self.active_steer = 0.0
-                self.mode_desc = "STRAIGHT_LOCK"
+            target_speed = raw_target_speed
+            target_steer = raw_target_steer
+            is_shield_active = bool(_shield_cur.get("active", False))
+
+            if is_shield_active:
+                self.active_steer = max(-MAX_STEERING_RAD, min(MAX_STEERING_RAD, target_steer))
+                c_name = _shield_cur.get("chosen_name", "ACTIVE").replace("_", " ").upper()
+                self.mode_desc = f"SHIELD_{c_name}"
             else:
-                target_speed = raw_target_speed
-                target_steer = raw_target_steer
-                is_shield_active = bool(_shield_cur.get("active", False))
-
-                if is_shield_active:
-                    self.active_steer = max(-MAX_STEERING_RAD, min(MAX_STEERING_RAD, target_steer))
-                    c_name = _shield_cur.get("chosen_name", "ACTIVE").replace("_", " ").upper()
-                    self.mode_desc = f"SHIELD_{c_name}"
+                steer_delta = target_steer - self.active_steer
+                # Progressive distance & offset aggressiveness
+                if min_fwd_dist >= self.aggr_dist_far:
+                    dist_scale = self.aggr_min_scale
+                elif min_fwd_dist <= self.aggr_dist_close:
+                    dist_scale = 1.0
                 else:
-                    steer_delta = target_steer - self.active_steer
-                    # Progressive distance & offset aggressiveness
-                    if min_fwd_dist >= self.aggr_dist_far:
-                        dist_scale = self.aggr_min_scale
-                    elif min_fwd_dist <= self.aggr_dist_close:
-                        dist_scale = 1.0
-                    else:
-                        frac = (self.aggr_dist_far - min_fwd_dist) / max(0.001, (self.aggr_dist_far - self.aggr_dist_close))
-                        dist_scale = float(self.aggr_min_scale + (frac ** 1.5) * (1.0 - self.aggr_min_scale))
+                    frac = (self.aggr_dist_far - min_fwd_dist) / max(0.001, (self.aggr_dist_far - self.aggr_dist_close))
+                    dist_scale = float(self.aggr_min_scale + (frac ** 1.5) * (1.0 - self.aggr_min_scale))
 
-                    err_mag = abs(steer_delta)
-                    if err_mag <= self.steer_deadband:
-                        err_scale = 0.90
-                    elif err_mag >= 0.05:
-                        err_scale = 1.0
-                    else:
-                        err_frac = (err_mag - self.steer_deadband) / max(0.001, (0.05 - self.steer_deadband))
-                        err_scale = float(0.90 + err_frac * (1.0 - 0.90))
+                err_mag = abs(steer_delta)
+                if err_mag <= self.steer_deadband:
+                    err_scale = 0.90
+                elif err_mag >= 0.05:
+                    err_scale = 1.0
+                else:
+                    err_frac = (err_mag - self.steer_deadband) / max(0.001, (0.05 - self.steer_deadband))
+                    err_scale = float(0.90 + err_frac * (1.0 - 0.90))
 
-                    steer_aggressiveness = float(max(0.85, min(1.0, dist_scale * err_scale)))
-                    self.active_steer = max(
-                        -MAX_STEERING_RAD,
-                        min(MAX_STEERING_RAD, self.active_steer + steer_aggressiveness * steer_delta),
-                    )
-                    self.mode_desc = "SL_MPC"
+                steer_aggressiveness = float(max(0.85, min(1.0, dist_scale * err_scale)))
+                self.active_steer = max(
+                    -MAX_STEERING_RAD,
+                    min(MAX_STEERING_RAD, self.active_steer + steer_aggressiveness * steer_delta),
+                )
+                self.mode_desc = "SL_MPC"
 
         # 10b. Ramp Detection & Speed Governance (Unified Hardware & Sim Safety)
         ramp_res = self.ramp_detector.update(pitch_rad=pitch_rad, roll_rad=roll_rad, dt=dt)

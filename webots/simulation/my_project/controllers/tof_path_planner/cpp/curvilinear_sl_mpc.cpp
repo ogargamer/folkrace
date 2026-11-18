@@ -38,8 +38,6 @@ static constexpr double MPC_TARGET_SPEED_MPS_CONST = 4.50;
 static constexpr double V_MIN_CRUISE_CONST = 0.60;
 static constexpr double V_MAX_CRUISE_CONST = 5.50;
 static constexpr double DT_PLANNER_CONST = 1.0 / 60.0;
-static constexpr double STRAIGHT_LOCK_DIST_M_CONST = 1.70;
-static constexpr double STRAIGHT_LOCK_SPEED_MPS_CONST = 5.50;
 
 // Maximum trajectory points capacity
 static constexpr int MAX_TRAJ_POINTS = 64;
@@ -75,8 +73,6 @@ public:
   double v_corner_factor;
   double v_cruise_max;
   double v_cruise_min;
-  double straight_lock_dist_m;
-  double straight_lock_speed_mps;
   double dt_actuator;
 
   int nx;
@@ -156,15 +152,12 @@ public:
                          double r_acc = 2.0, double r_str_rate = 10.0,
                          double mu = TIRE_MU_CONST, double v_corner = 0.82,
                          double v_max = V_MAX_CRUISE_CONST,
-                         double v_min = V_MIN_CRUISE_CONST,
-                         double lock_dist = STRAIGHT_LOCK_DIST_M_CONST,
-                         double lock_spd = STRAIGHT_LOCK_SPEED_MPS_CONST)
+                         double v_min = V_MIN_CRUISE_CONST)
       : costmap_handle(cm_handle), costmap_probe_func(probe_fn), N(horizon_N),
         dt(dt_val), q_progress(q_prog), q_cte(q_lat), q_heading(q_head),
         r_steer(r_st), r_accel(r_acc), r_steer_rate(r_str_rate),
         mu_friction(mu), v_corner_factor(v_corner), v_cruise_max(v_max),
-        v_cruise_min(v_min), straight_lock_dist_m(lock_dist),
-        straight_lock_speed_mps(lock_spd), dt_actuator(DT_PLANNER_CONST), nx(7),
+        v_cruise_min(v_min), dt_actuator(DT_PLANNER_CONST), nx(7),
         nu(2), max_iterations(35), best_line_count(0), guide_line_count(0),
         corridor_count(0), shield_active(false), shield_chosen_id(-1),
         shield_k1_l_cnt(0), shield_k1_l_safe(false), shield_k1_r_cnt(0),
@@ -821,51 +814,6 @@ public:
     double delta_0 = steer_current;
     double r_0 = yaw_rate_current;
 
-    // 0. Fast Straight-Line Lock (Zero Compute Bypass when Corridor is Open
-    // Ahead >= 1.70m)
-    if ((yg - y0) >= straight_lock_dist_m && std::abs(xg - x0) <= 0.20 &&
-        std::abs(theta_g - psi0) <= 0.22) {
-      // Verify front blindspot (0-40cm) is clear of obstacles before engaging
-      // straight lock
-      bool straight_clear = true;
-      float cos_psi = -static_cast<float>(std::sin(psi0));
-      float sin_psi = static_cast<float>(std::cos(psi0));
-      if (costmap_probe_func && costmap_handle) {
-        for (double py_check = 0.05; py_check <= 0.40; py_check += 0.05) {
-          float px = static_cast<float>(x0 + py_check * cos_psi);
-          float py = static_cast<float>(y0 + py_check * sin_psi);
-          if (costmap_probe_func(costmap_handle, &px, &py, 1) == 0) {
-            straight_clear = false;
-            break;
-          }
-        }
-      }
-
-      if (straight_clear) {
-        double cmd_steer = 0.0;
-        double cmd_speed = straight_lock_speed_mps;
-        run_shield_rollout_and_cascade(cmd_steer, cmd_speed, xg, v_bar, delta_0,
-                                       false, 0, 0, 0, 0, 0, x0, y0, psi0);
-
-        *out_cmd_steer_rad = cmd_steer;
-        *out_cmd_speed_mps = cmd_speed;
-        *out_best_cost = 0.0;
-        *out_osqp_iters = 0;
-        *out_status_code = 1; // STRAIGHT_LOCKED
-
-        best_line_count = N + 1;
-        for (int k = 0; k <= N; ++k) {
-          double u = static_cast<double>(k) / N;
-          double d_proj = 0.05 + u * (straight_lock_dist_m - 0.05);
-          best_line_x[k] = x0 + d_proj * cos_psi;
-          best_line_y[k] = y0 + d_proj * sin_psi;
-        }
-        guide_line_count = 0;
-        corridor_count = 0;
-        return 1;
-      }
-    }
-
     // 1. Establish Curvilinear Reference Spline towards gap centroid
     double L_guide = std::hypot(xg - x0, std::max(0.35, yg - y0));
     double v_nom = std::max(v_bar, 1.20);
@@ -1281,14 +1229,11 @@ SL_MPC_API void *sl_mpc_create(void *costmap_handle, CostmapProbeFn probe_fn,
                                double q_cte, double q_heading, double r_steer,
                                double r_accel, double r_steer_rate,
                                double mu_friction, double v_corner_factor,
-                               double v_cruise_max, double v_cruise_min,
-                               double straight_lock_dist_m,
-                               double straight_lock_speed_mps) {
+                               double v_cruise_max, double v_cruise_min) {
   return new CurvilinearSLMPCNative(
       costmap_handle, probe_fn, horizon_N, dt, q_progress, q_cte, q_heading,
       r_steer, r_accel, r_steer_rate, mu_friction, v_corner_factor,
-      v_cruise_max, v_cruise_min, straight_lock_dist_m,
-      straight_lock_speed_mps);
+      v_cruise_max, v_cruise_min);
 }
 
 SL_MPC_API void sl_mpc_destroy(void *handle) {

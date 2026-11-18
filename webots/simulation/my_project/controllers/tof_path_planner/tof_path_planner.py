@@ -286,8 +286,6 @@ def run_racing_studio(robot: any, vehicle: FolkraceVehicle) -> None:
                         elif p_name == "target_speed":
                             val_f = float(p_val)
                             vehicle.planner.v_cruise_max = val_f
-                            if hasattr(vehicle, "straight_lock_speed"):
-                                vehicle.straight_lock_speed = val_f
                         elif p_name == "alpha_peak":
                             vehicle.planner.alpha_peak = float(p_val)
                         elif p_name == "alt_switch_hysteresis" and hasattr(vehicle.planner, "alt_switch_hysteresis"):
@@ -604,8 +602,6 @@ def run_champion_preview(robot: any, vehicle: FolkraceVehicle) -> None:
                         elif p_name == "target_speed":
                             val_f = float(p_val)
                             vehicle.planner.v_cruise_max = val_f
-                            if hasattr(vehicle, "straight_lock_speed"):
-                                vehicle.straight_lock_speed = val_f
                         elif p_name == "alpha_peak":
                             vehicle.planner.alpha_peak = float(p_val)
                         elif p_name == "alt_switch_hysteresis" and hasattr(vehicle.planner, "alt_switch_hysteresis"):

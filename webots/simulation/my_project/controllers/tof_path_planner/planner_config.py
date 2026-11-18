@@ -162,11 +162,7 @@ TRACK_CORRIDOR_WIDTH_M: float = 1.00   # meters physical track corridor width
 GAP_DIST_THRESH_M: float = 0.95        # meters threshold distance to engage exponential gap reward
 GAP_DIST_EXP_K: float = 0.717          # Exponential growth scaling factor for distance beyond threshold
 
-# 4.4 Fast Straight-Line Lock
-STRAIGHT_LOCK_DIST_M: float = 1.80     # meters forward clearance on both 4.1 deg ToFs to lock full speed straight (aligned with TOF_MAX_RANGE_M)
-STRAIGHT_LOCK_SPEED_MPS: float = V_MAX_CRUISE  # m/s top cruising speed when straight-line locked (5.0 m/s)
-
-# 4.5 Dual-Path Candidate Selection & Smart Challenger Arbitration
+# 4.4 Dual-Path Candidate Selection & Smart Challenger Arbitration
 ALT_MIN_SEPARATION_M: float = 0.052    # meters minimum lateral separation between primary and challenger targets
 ALT_APERTURE_BIAS: float = 1.553       # Multiplier on aperture width reward for challenger target
 
@@ -193,9 +189,7 @@ MPC_V_CORNER_FACTOR: float = 0.843     # Friction circle cornering speed scaling
 MPC_V_CRUISE_MAX: float = V_MAX_CRUISE # m/s top cruising speed ceiling (5.0 m/s)
 MPC_V_CRUISE_MIN: float = V_MIN_CRUISE # m/s cornering / crawl speed floor (~1.20 m/s)
 
-# 5.4 Straight-Line Lock & Challenger Aliases
-MPC_STRAIGHT_LOCK_DIST_M: float = STRAIGHT_LOCK_DIST_M        # Forward clearance to lock straight (unified with STRAIGHT_LOCK_DIST_M: 1.80 m)
-MPC_STRAIGHT_LOCK_SPEED_MPS: float = STRAIGHT_LOCK_SPEED_MPS  # Top speed when straight locked (unified with STRAIGHT_LOCK_SPEED_MPS: 5.0 m/s)
+# 5.4 Challenger Aliases
 MPC_ALT_SWITCH_HYSTERESIS: float = 24.484                     # Cost reduction needed for challenger overthrow
 MPC_ALT_MIN_SEPARATION_M: float = ALT_MIN_SEPARATION_M        # Minimum lateral separation between paths (m)
 MPC_ALT_APERTURE_BIAS: float = ALT_APERTURE_BIAS              # Challenger aperture width bias multiplier
@@ -355,8 +349,6 @@ def _apply_best_genome_overrides() -> None:
         "w_side_clearance": ("WEIGHT_SIDE_CLEARANCE", float),
         "gap_dist_thresh_m": ("GAP_DIST_THRESH_M", float),
         "gap_dist_exp_k": ("GAP_DIST_EXP_K", float),
-        "straight_lock_dist": ("STRAIGHT_LOCK_DIST_M", float),
-        "straight_lock_speed": ("STRAIGHT_LOCK_SPEED_MPS", float),
         "alt_min_separation_m": ("ALT_MIN_SEPARATION_M", float),
         "alt_aperture_bias": ("ALT_APERTURE_BIAS", float),
         "horizon_N": ("MPC_HORIZON_N", int),
@@ -384,8 +376,6 @@ def _apply_best_genome_overrides() -> None:
             g[const_name] = cast(genes[gene_key])
 
     # Keep alias constants synchronized
-    g["MPC_STRAIGHT_LOCK_DIST_M"] = g["STRAIGHT_LOCK_DIST_M"]
-    g["MPC_STRAIGHT_LOCK_SPEED_MPS"] = g["STRAIGHT_LOCK_SPEED_MPS"]
     g["MPC_ALT_MIN_SEPARATION_M"] = g["ALT_MIN_SEPARATION_M"]
     g["MPC_ALT_APERTURE_BIAS"] = g["ALT_APERTURE_BIAS"]
 

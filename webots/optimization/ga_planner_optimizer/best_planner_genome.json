@@ -10,7 +10,7 @@
     "fitness": 10627.8
   },
   "engine": "Curvilinear Slack-Constrained SL-MPC (C++ OSQP)",
-  "genes_count": 39,
+  "genes_count": 37,
   "genes": {
     "v_cruise_max": 3.84,
     "v_cruise_min": 1.223,
@@ -42,8 +42,6 @@
     "alt_aperture_bias": 2.764,
     "alt_switch_hysteresis": 7.906,
     "w_gap_clear": 12.349,
-    "straight_lock_dist": 1.8,
-    "straight_lock_speed": 3.84,
     "aggr_dist_far_m": 1.72,
     "aggr_dist_close_m": 1.095,
     "aggr_min_scale": 0.824,
