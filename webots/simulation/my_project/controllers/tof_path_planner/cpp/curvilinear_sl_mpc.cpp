@@ -529,6 +529,7 @@ public:
     }
 
     bool is_safe = true;
+    double s_traveled = 0.0;
     for (int i = 0; i < lookahead_steps; ++i) {
       double max_delta_change = MAX_SERVO_RATE_RAD_S_CONST * dt_sim;
       if (target_steer > delta + max_delta_change)
@@ -561,11 +562,18 @@ public:
       x -= v * std::sin(psi_mid) *
            dt_sim; // Leftward lateral displacement for psi > 0
       y += v * std::cos(psi_mid) * dt_sim; // Forward longitudinal displacement
+      s_traveled += v * dt_sim;
 
       if (out_xs && out_ys && out_count && *out_count < MAX_TRAJ_POINTS) {
         out_xs[*out_count] = x;
         out_ys[*out_count] = y;
         (*out_count)++;
+      }
+
+      // Skip initial steps while close to origin (prevents side-wall inflation
+      // overlap from triggering false reverses) without tunneling at high speed
+      if (i < 4 && s_traveled < 0.08) {
+        continue;
       }
 
       float px = static_cast<float>(x);
