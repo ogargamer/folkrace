@@ -42,6 +42,7 @@ if CURR_DIR not in sys.path:
 
 from core_manager import set_core_affinity, get_core_affinity, get_system_cpu_stats
 from debug_recorder import TelemetryFlightRecorder, TelemetryLogReader
+from auto_servo_center import AutoServoCenterCalibrator
 
 PORT_HTTP = 8080
 PORT_UDP_RECV = 9876
@@ -149,6 +150,22 @@ class DebugServerState:
         self._last_disk_check: float = 0.0
         self._cached_disk_free: float = 0.0
         self._cached_db_size: float = 0.0
+        self.auto_servo_center = AutoServoCenterCalibrator(
+            get_telemetry=self._get_telemetry_snapshot,
+            send_cmd=send_mcu_cmd,
+            get_center_us=self.get_servo_center_us,
+            save_center_us=self.save_servo_center,
+        )
+
+    def _get_telemetry_snapshot(self) -> Dict[str, Any]:
+        with self.lock:
+            snap = dict(self.latest_pkt)
+            snap["planner_running"] = self.planner_running
+            return snap
+
+    def get_servo_center_us(self) -> float:
+        with self.lock:
+            return self.servo_center_us
 
     def _load_servo_center(self) -> float:
         """Load persisted servo neutral pulse (µs) from disk."""
@@ -518,6 +535,9 @@ class DebugHTTPRequestHandler(BaseHTTPRequestHandler):
         elif path == "/api/status":
             self._serve_status()
 
+        elif path == "/api/auto_servo_center":
+            self._send_json(STATE.auto_servo_center.get_status())
+
         elif path == "/api/live":
             self._serve_live()
 
@@ -639,11 +659,47 @@ class DebugHTTPRequestHandler(BaseHTTPRequestHandler):
             elif action == "planner":
                 enable = bool(data.get("enable", False))
                 cmd_str = "START\n" if enable else "STOP\n"
+            elif action == "auto_servo_center":
+                enable = bool(data.get("enable", True))
+                if enable:
+                    res = STATE.auto_servo_center.start(
+                        max_iterations=data.get("max_iterations"),
+                        cruise_speed=data.get("cruise_speed"),
+                    )
+                    self._send_json({
+                        "status": "started" if res.get("started") else "error",
+                        "error": res.get("error"),
+                        "action": action,
+                        "servo_center_us": STATE.servo_center_us,
+                        "auto_servo_center": STATE.auto_servo_center.get_status(),
+                    }, 200 if res.get("started") else 409)
+                else:
+                    STATE.auto_servo_center.stop()
+                    self._send_json({
+                        "status": "stopped",
+                        "action": action,
+                        "servo_center_us": STATE.servo_center_us,
+                        "auto_servo_center": STATE.auto_servo_center.get_status(),
+                    })
+                return
+            elif action == "auto_servo_center_stop":
+                STATE.auto_servo_center.stop()
+                self._send_json({
+                    "status": "stopped",
+                    "action": action,
+                    "servo_center_us": STATE.servo_center_us,
+                    "auto_servo_center": STATE.auto_servo_center.get_status(),
+                })
+                return
             elif action == "raw":
                 cmd_str = f"{data.get('cmd', '').strip()}\n"
             else:
                 self._send_json({"error": f"Unknown action: {action}"}, 400)
                 return
+
+            if action in ("estop", "reset") or (action == "motors" and not data.get("enable", True)) or (action == "planner" and data.get("enable", False)):
+                if STATE.auto_servo_center.is_running():
+                    STATE.auto_servo_center.stop(f"Aborted due to {action}")
 
             if action == "planner":
                 enable = bool(data.get("enable", False))
@@ -809,6 +865,7 @@ class DebugHTTPRequestHandler(BaseHTTPRequestHandler):
             "loop_hz": round(STATE.loop_hz, 1),
             "cpu_affinity": list(get_core_affinity()),
             "servo_center_us": STATE.servo_center_us,
+            "auto_servo_center": STATE.auto_servo_center.get_status(),
         }
         self._send_json(data)
 

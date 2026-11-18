@@ -15,11 +15,12 @@ ServoController::ServoController(
     max_duty_ = (1UL << resolution_) - 1;
 }
 
-bool ServoController::begin() {
+bool ServoController::begin(float initial_pulse_us) {
+    initial_pulse_us = fmaxf(SERVO_HARD_MIN_US, fminf(SERVO_HARD_MAX_US, initial_pulse_us));
+    current_pulse_us_ = initial_pulse_us;
     ledcSetup(channel_, freq_hz_, resolution_);
-    ledcAttachPin(pin_, channel_);
     enable();
-    setPulseUs(SERVO_PULSE_NEUTRAL_US);
+    ledcAttachPin(pin_, channel_);
     return true;
 }
 

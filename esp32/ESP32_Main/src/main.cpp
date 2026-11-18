@@ -888,6 +888,19 @@ static void ioTask(void *pvParameters) {
 // Arduino Setup & Core Assignment
 // =============================================================================
 void setup() {
+  // 1. Initialize Single Ackermann Steering Servo immediately (GPIO 21 @ 333 Hz LEDC)
+  //    Load saved NVS trim first so the very first PWM pulse is already trimmed.
+  {
+    Preferences prefs;
+    prefs.begin("servo_cfg", true);
+    float saved_trim = prefs.getFloat("trim_us", 0.0f);
+    prefs.end();
+    if (!isnan(saved_trim)) {
+      s_servo_trim_us = fmaxf(-500.0f, fminf(500.0f, saved_trim));
+    }
+  }
+  s_servo.begin(SERVO_PULSE_NEUTRAL_US + s_servo_trim_us);
+
   Serial.setRxBufferSize(2048);
   Serial.setTxBufferSize(2048);
   Serial.begin(921600);
@@ -900,21 +913,6 @@ void setup() {
   Serial.println(F("  Deterministic 400Hz (2500us) Math + Dual-Core RTOS    "));
   Serial.println(F("  4WD Electronic Diff + 333Hz Servo + IMU Sensor Fusion "));
   Serial.println(F("========================================================"));
-
-  // 1. Initialize Single Ackermann Steering Servo (GPIO 21 @ 333 Hz LEDC)
-  {
-    Preferences prefs;
-    prefs.begin("servo_cfg", true);
-    float saved_trim = prefs.getFloat("trim_us", 0.0f);
-    prefs.end();
-    if (!isnan(saved_trim)) {
-      s_servo_trim_us = fmaxf(-500.0f, fminf(500.0f, saved_trim));
-    }
-  }
-  s_servo.begin();
-  s_servo.setPulseUs(fmaxf(
-      SERVO_HARD_MIN_US,
-      fminf(SERVO_HARD_MAX_US, SERVO_PULSE_NEUTRAL_US + s_servo_trim_us)));
   Serial.printf(
       "[+] Ackermann Steering Servo Initialized on GPIO 21 (333 Hz, trim: %+.1f us).\n",
       s_servo_trim_us);

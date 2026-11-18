@@ -16,7 +16,7 @@ public:
         uint8_t resolution = SERVO_PWM_RESOLUTION
     );
 
-    bool begin();
+    bool begin(float initial_pulse_us = SERVO_PULSE_NEUTRAL_US);
     void setPulseUs(float pulse_us);
     void disable();
     void enable();

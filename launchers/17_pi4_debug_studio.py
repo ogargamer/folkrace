@@ -107,6 +107,7 @@ def sync_pi_stack(host: str = "robot"):
 
     print(f"[Sync] Uploading pi4 subsystem scripts to {host}...")
     files = [
+        os.path.join(PI4_DIR, "auto_servo_center.py"),
         os.path.join(PI4_DIR, "core_manager.py"),
         os.path.join(PI4_DIR, "debug_recorder.py"),
         os.path.join(PI4_DIR, "debug_server.py"),
