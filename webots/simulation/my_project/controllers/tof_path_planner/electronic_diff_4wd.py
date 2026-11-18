@@ -50,10 +50,13 @@ V_SLIP_GATE = SLIP_GATE_SPEED_MPS         # m/s minimum speed to activate dynami
 THRESH_SPIN = SLIP_THRESH_SPIN_RAD_S      # rad/s gross yaw rate divergence threshold for oversteer
 
 GYRO_YAW_REF_TAU_S = 0.055      # 55 ms chassis + servo yaw-rate buildup lag
-GYRO_YAW_DOT_TAU_S = 0.020      # 20 ms 1st-order derivative low-pass filter
-GYRO_DEADBAND_RAD_S = 0.20      # IMU yaw-rate noise deadband
-GYRO_KP_STEER = 0.07            # Proportional gyro countersteer gain (rad / (rad/s))
-GYRO_KD_STEER = 0.007           # Derivative yaw damper gain (rad / (rad/s^2))
+GYRO_YAW_REF_UNWIND_TAU_S = 0.020  # 20 ms fast unwind when straightening out
+GYRO_YAW_DOT_TAU_S = 0.032      # 32 ms 1st-order derivative low-pass filter
+GYRO_DEADBAND_RAD_S = 0.28      # IMU yaw-rate noise deadband
+GYRO_KP_STEER = 0.105           # Proportional gyro countersteer gain (rad / (rad/s))
+GYRO_KD_STEER = 0.004           # Derivative yaw damper gain (rad / (rad/s^2))
+GYRO_KD_RECOVERY_SCALE = 0.15   # Attenuate D-term during spin recovery so it won't unwind countersteer
+GYRO_MAX_RATE_RAD_S = 12.0      # Countersteer slew cap (rad/s) to reject landing/shock spikes
 GYRO_FULL_SPEED_MPS = 0.60      # Speed where gyro assist reaches 100% authority
 UNDERSTEER_CONFIRM_TIME_S = 0.065  # Require 65 ms sustained plow before throttling
 OVERSTEER_CONFIRM_TIME_S = 0.035   # Require 35 ms sustained breakaway before latching
@@ -61,7 +64,10 @@ SLIP_HOLD_TIME_S = 0.035        # 35 ms hysteresis hold latch for slip telemetry
 DIFF_FADE_RATE = 12.0           # Fast fade-out of rear diff split on oversteer (1/s)
 DIFF_RISE_RATE = 4.0            # Smooth recovery of rear diff split (1/s)
 UNDERSTEER_SPEED_SCALE = 0.85   # Fixed cap fraction of entry speed on sustained understeer
-OVERSTEER_SPEED_SCALE = 0.95    # Gentle 5% throttle lift on oversteer (fixed entry cap, no slam braking)
+OVERSTEER_SPEED_SCALE = 0.85    # 15% throttle lift on oversteer (fixed entry cap, no slam braking)
+OVERSTEER_ACCEL_SCALE = 0.25    # Cut forward acceleration torque during oversteer
+OVERSTEER_DECEL_SCALE = 0.60    # Keep oversteer decel smooth to avoid rear weight transfer
+UNDERSTEER_ACCEL_SCALE = 0.30   # Cut forward acceleration torque during front plow
 SLIP_SPEED_FLOOR_MPS = 0.60     # Minimum cornering speed floor during slip throttle cap
 
 SLIP_NORMAL = "NORMAL"
@@ -104,6 +110,7 @@ class ElectronicDifferential4WD:
         self.current_horn_rad = 0.0
         self.current_steer_rad = 0.0
         self.driver_steer_rad = 0.0
+        self._prev_delta_gyro_rad = 0.0
         self.omega_ref = 0.0
         self.prev_gyro_z = 0.0
         self.gyro_z_dot_filt = 0.0
@@ -135,6 +142,14 @@ class ElectronicDifferential4WD:
             elif effective_v < 0.0:
                 effective_v = max(effective_v, -v_cap)
         return effective_v
+
+    def get_slip_accel_decel_scales(self) -> tuple:
+        """Returns (accel_scale, decel_scale) multipliers for the active slip state."""
+        if self.slip_state == SLIP_OVERSTEER:
+            return (OVERSTEER_ACCEL_SCALE, OVERSTEER_DECEL_SCALE)
+        if self.slip_state == SLIP_UNDERSTEER:
+            return (UNDERSTEER_ACCEL_SCALE, 1.0)
+        return (1.0, 1.0)
 
     def update(
         self,
@@ -173,7 +188,9 @@ class ElectronicDifferential4WD:
         omega_cmd_driver = (v_for_ref * math.tan(self.driver_steer_rad)) / self.L
         omega_grip_max = (safe_mu * GRAVITY_G) / max(abs(v_for_ref), 0.50)
         omega_ref_target = max(-omega_grip_max, min(omega_grip_max, omega_cmd_driver))
-        alpha_ref = safe_dt / (GYRO_YAW_REF_TAU_S + safe_dt)
+        is_unwinding = (abs(omega_ref_target) < abs(self.omega_ref)) or (omega_ref_target * self.omega_ref < 0.0)
+        tau_ref = GYRO_YAW_REF_UNWIND_TAU_S if is_unwinding else GYRO_YAW_REF_TAU_S
+        alpha_ref = safe_dt / (tau_ref + safe_dt)
         self.omega_ref += alpha_ref * (omega_ref_target - self.omega_ref)
 
         # 2. Yaw-rate derivative filter & continuous PD gyro-assisted countersteer
@@ -204,16 +221,25 @@ class ElectronicDifferential4WD:
             gyro_fade = min(1.0, (speed_abs - V_SLIP_GATE) / max(0.05, GYRO_FULL_SPEED_MPS - V_SLIP_GATE))
         speed_sign = 1.0 if v_for_ref >= 0.0 else -1.0
 
-        delta_gyro = 0.0
+        raw_delta_gyro = 0.0
         if gyro_fade > 0.0 and abs(excess_yaw) > GYRO_DEADBAND_RAD_S:
             excess_db = math.copysign(abs(excess_yaw) - GYRO_DEADBAND_RAD_S, excess_yaw)
             d_weight = min(1.0, abs(excess_db) / 0.25)
-            pd_raw = -(GYRO_KP_STEER * excess_db) - (d_weight * GYRO_KD_STEER * self.gyro_z_dot_filt)
+            kd_scale = 1.0 if (excess_yaw * self.gyro_z_dot_filt >= 0.0) else GYRO_KD_RECOVERY_SCALE
+            pd_raw = -(GYRO_KP_STEER * excess_db) - (d_weight * kd_scale * GYRO_KD_STEER * self.gyro_z_dot_filt)
             if excess_yaw > 0.0:
                 pd_raw = min(0.0, pd_raw)
             else:
                 pd_raw = max(0.0, pd_raw)
-            delta_gyro = gyro_fade * speed_sign * pd_raw
+            raw_delta_gyro = gyro_fade * speed_sign * pd_raw
+
+        max_d_gyro = GYRO_MAX_RATE_RAD_S * safe_dt
+        gyro_diff = raw_delta_gyro - self._prev_delta_gyro_rad
+        if abs(gyro_diff) <= max_d_gyro:
+            self._prev_delta_gyro_rad = raw_delta_gyro
+        else:
+            self._prev_delta_gyro_rad += math.copysign(max_d_gyro, gyro_diff)
+        delta_gyro = self._prev_delta_gyro_rad
 
         stabilized_target = max(-self.max_steer, min(self.max_steer, target_delta + delta_gyro))
 
@@ -255,6 +281,7 @@ class ElectronicDifferential4WD:
         # 6. Standstill Guard
         if abs(target_v) < 0.001:
             self.omega_ref = 0.0
+            self._prev_delta_gyro_rad = 0.0
             self.slip_state = SLIP_NORMAL
             self._slip_hold_timer = 0.0
             self._understeer_confirm_timer = 0.0

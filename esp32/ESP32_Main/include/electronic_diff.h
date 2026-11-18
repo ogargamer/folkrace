@@ -99,6 +99,7 @@ private:
     // Internal continuous state
     float current_steer_rad_;
     float driver_steer_rad_;
+    float prev_delta_gyro_rad_;
     float rate_limited_speed_;
     float omega_ref_;
     float prev_gyro_z_;

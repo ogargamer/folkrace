@@ -891,13 +891,14 @@ class FolkraceVehicle:
                 if self.rate_limited_speed < v_curr:
                     self.rate_limited_speed = v_curr
 
+            accel_scale, decel_scale = self.ediff.get_slip_accel_decel_scales()
             speed_err = target_v - self.rate_limited_speed
             is_accel = (self.rate_limited_speed >= 0.0 and speed_err > 0.0) or (self.rate_limited_speed <= 0.0 and speed_err < 0.0)
 
             if is_accel:
-                max_dv = a_limit * dt
+                max_dv = (a_limit * accel_scale) * dt
             else:
-                max_dv = d_limit * dt
+                max_dv = (d_limit * decel_scale) * dt
 
             if abs(speed_err) <= max_dv:
                 self.rate_limited_speed = target_v

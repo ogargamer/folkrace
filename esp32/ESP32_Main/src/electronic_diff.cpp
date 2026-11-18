@@ -6,10 +6,13 @@
 
 namespace {
 constexpr float kGyroYawRefTauS = 0.055f;         // 55 ms chassis + servo yaw-rate buildup lag
-constexpr float kGyroYawDotTauS = 0.020f;         // 20 ms 1st-order derivative low-pass filter
-constexpr float kGyroDeadbandRadS = 0.20f;        // IMU yaw-rate noise deadband
-constexpr float kGyroKpSteer = 0.07f;             // Proportional gyro countersteer gain (rad / (rad/s))
-constexpr float kGyroKdSteer = 0.007f;            // Derivative yaw damper gain (rad / (rad/s^2))
+constexpr float kGyroYawRefUnwindTauS = 0.020f;   // 20 ms fast unwind when straightening out
+constexpr float kGyroYawDotTauS = 0.032f;         // 32 ms 1st-order derivative low-pass filter
+constexpr float kGyroDeadbandRadS = 0.28f;        // IMU yaw-rate noise deadband
+constexpr float kGyroKpSteer = 0.105f;            // Proportional gyro countersteer gain (rad / (rad/s))
+constexpr float kGyroKdSteer = 0.004f;            // Derivative yaw damper gain (rad / (rad/s^2))
+constexpr float kGyroKdRecoveryScale = 0.15f;     // Attenuate D-term during spin recovery so it won't unwind countersteer
+constexpr float kGyroMaxRateRadS = 12.0f;         // Countersteer slew cap (rad/s) to reject landing/shock spikes
 constexpr float kGyroFullSpeedMps = 0.60f;        // Speed where gyro assist reaches 100% authority
 constexpr float kUndersteerConfirmTimeS = 0.065f; // Require 65 ms sustained plow before throttling
 constexpr float kOversteerConfirmTimeS = 0.035f;  // Require 35 ms sustained breakaway before latching
@@ -17,7 +20,10 @@ constexpr float kSlipHoldTimeS = 0.035f;          // 35 ms hysteresis hold latch
 constexpr float kDiffFadeRate = 12.0f;            // Fast fade-out of rear diff split on oversteer (1/s)
 constexpr float kDiffRiseRate = 4.0f;             // Smooth recovery of rear diff split (1/s)
 constexpr float kUndersteerSpeedScale = 0.85f;    // Fixed cap fraction of entry speed on sustained understeer
-constexpr float kOversteerSpeedScale = 0.95f;     // Gentle 5% throttle lift on oversteer (fixed entry cap, no slam braking)
+constexpr float kOversteerSpeedScale = 0.85f;     // 15% throttle lift on oversteer (fixed entry cap, no slam braking)
+constexpr float kOversteerAccelScale = 0.25f;     // Cut forward acceleration torque during oversteer
+constexpr float kOversteerDecelScale = 0.60f;     // Keep oversteer decel smooth to avoid rear weight transfer
+constexpr float kUndersteerAccelScale = 0.30f;    // Cut forward acceleration torque during front plow
 constexpr float kSlipSpeedFloorMps = 0.60f;       // Minimum cornering speed floor during slip throttle cap
 } // namespace
 
@@ -48,6 +54,7 @@ ElectronicDifferential4WD::ElectronicDifferential4WD(
     thresh_spin_(thresh_spin),
     current_steer_rad_(0.0f),
     driver_steer_rad_(0.0f),
+    prev_delta_gyro_rad_(0.0f),
     rate_limited_speed_(0.0f),
     omega_ref_(0.0f),
     prev_gyro_z_(0.0f),
@@ -63,6 +70,7 @@ ElectronicDifferential4WD::ElectronicDifferential4WD(
 void ElectronicDifferential4WD::reset() {
     current_steer_rad_ = 0.0f;
     driver_steer_rad_ = 0.0f;
+    prev_delta_gyro_rad_ = 0.0f;
     rate_limited_speed_ = 0.0f;
     omega_ref_ = 0.0f;
     prev_gyro_z_ = 0.0f;
@@ -111,7 +119,9 @@ ElectronicDiffOutputs IRAM_ATTR ElectronicDifferential4WD::update(
     float omega_cmd_driver = (v_for_ref * tanf(driver_steer_rad_)) / L_;
     float omega_grip_max = (safe_mu * GRAVITY_G_CONST) / fmaxf(fabsf(v_for_ref), 0.50f);
     float omega_ref_target = fmaxf(-omega_grip_max, fminf(omega_grip_max, omega_cmd_driver));
-    float alpha_ref = safe_dt / (kGyroYawRefTauS + safe_dt);
+    bool is_unwinding = (fabsf(omega_ref_target) < fabsf(omega_ref_)) || (omega_ref_target * omega_ref_ < 0.0f);
+    float tau_ref = is_unwinding ? kGyroYawRefUnwindTauS : kGyroYawRefTauS;
+    float alpha_ref = safe_dt / (tau_ref + safe_dt);
     omega_ref_ += alpha_ref * (omega_ref_target - omega_ref_);
     out.omega_ref = omega_ref_;
 
@@ -154,18 +164,30 @@ ElectronicDiffOutputs IRAM_ATTR ElectronicDifferential4WD::update(
     }
     float speed_sign = (v_for_ref >= 0.0f) ? 1.0f : -1.0f;
 
-    float delta_gyro = 0.0f;
+    float raw_delta_gyro = 0.0f;
     if (gyro_fade > 0.0f && fabsf(excess_yaw) > kGyroDeadbandRadS) {
         float excess_db = copysignf(fabsf(excess_yaw) - kGyroDeadbandRadS, excess_yaw);
         float d_weight = fminf(1.0f, fabsf(excess_db) / 0.25f);
-        float pd_raw = -(kGyroKpSteer * excess_db) - (d_weight * kGyroKdSteer * gyro_z_dot_filt_);
+        // Only apply full derivative damping while spin is diverging; attenuate during recovery
+        // so D-term does not unwind countersteer before yaw rate returns to normal.
+        float kd_scale = (excess_yaw * gyro_z_dot_filt_ >= 0.0f) ? 1.0f : kGyroKdRecoveryScale;
+        float pd_raw = -(kGyroKpSteer * excess_db) - (d_weight * kd_scale * kGyroKdSteer * gyro_z_dot_filt_);
         if (excess_yaw > 0.0f) {
             pd_raw = fminf(0.0f, pd_raw);
         } else {
             pd_raw = fmaxf(0.0f, pd_raw);
         }
-        delta_gyro = gyro_fade * speed_sign * pd_raw;
+        raw_delta_gyro = gyro_fade * speed_sign * pd_raw;
     }
+
+    float max_d_gyro = kGyroMaxRateRadS * safe_dt;
+    float gyro_diff = raw_delta_gyro - prev_delta_gyro_rad_;
+    if (fabsf(gyro_diff) <= max_d_gyro) {
+        prev_delta_gyro_rad_ = raw_delta_gyro;
+    } else {
+        prev_delta_gyro_rad_ += copysignf(max_d_gyro, gyro_diff);
+    }
+    float delta_gyro = prev_delta_gyro_rad_;
     out.delta_gyro_rad = delta_gyro;
 
     // -------------------------------------------------------------------------
@@ -250,9 +272,18 @@ ElectronicDiffOutputs IRAM_ATTR ElectronicDifferential4WD::update(
         }
     }
 
+    float effective_a_limit = a_limit;
+    float effective_d_limit = d_limit;
+    if (slip_state_ == SLIP_OVERSTEER) {
+        effective_a_limit *= kOversteerAccelScale;
+        effective_d_limit *= kOversteerDecelScale;
+    } else if (slip_state_ == SLIP_UNDERSTEER) {
+        effective_a_limit *= kUndersteerAccelScale;
+    }
+
     float speed_err = effective_target_v - rate_limited_speed_;
     bool is_accel = (rate_limited_speed_ >= 0.0f && speed_err > 0.0f) || (rate_limited_speed_ <= 0.0f && speed_err < 0.0f);
-    float max_dv = (is_accel ? a_limit : d_limit) * safe_dt;
+    float max_dv = (is_accel ? effective_a_limit : effective_d_limit) * safe_dt;
 
     if (fabsf(speed_err) <= max_dv) {
         rate_limited_speed_ = effective_target_v;
@@ -294,6 +325,7 @@ ElectronicDiffOutputs IRAM_ATTR ElectronicDifferential4WD::update(
     // -------------------------------------------------------------------------
     if (fabsf(rate_limited_speed_) < 0.001f) {
         omega_ref_ = 0.0f;
+        prev_delta_gyro_rad_ = 0.0f;
         slip_state_ = SLIP_NORMAL;
         slip_hold_timer_ = 0.0f;
         understeer_confirm_timer_ = 0.0f;
