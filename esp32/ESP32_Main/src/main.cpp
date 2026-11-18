@@ -7,6 +7,7 @@
 #include "spsc_triple_buffer.h"
 #include "stm32_link.h"
 #include <Arduino.h>
+#include <Preferences.h>
 #include <esp_cpu.h>
 #include <esp_timer.h>
 
@@ -266,7 +267,7 @@ static void IRAM_ATTR realTimeControlTask(void *pvParameters) {
         (s_manual_servo_direct ? s_direct_servo_pulse : diff.servo_pulse_us) +
         s_servo_trim_us;
     servo_pulse_cmd =
-        fmaxf(SERVO_PULSE_MIN_US, fminf(SERVO_PULSE_MAX_US, servo_pulse_cmd));
+        fmaxf(SERVO_HARD_MIN_US, fminf(SERVO_HARD_MAX_US, servo_pulse_cmd));
     s_servo.setPulseUs(servo_pulse_cmd);
 
     // 4. Execute 4-Wheel Median Odometry + IMU Complementary Sensor Fusion
@@ -543,10 +544,18 @@ static void handleAsciiCommand(const char *raw_line) {
     }
   } else if (line.startsWith("TRIM ") || line.startsWith("trim ")) {
     float trim_us = line.substring(5).toFloat();
-    trim_us = fmaxf(-20.0f, fminf(20.0f, trim_us));
+    trim_us = fmaxf(-500.0f, fminf(500.0f, trim_us));
     s_servo_trim_us = trim_us;
     Serial.printf(
         ">>> Servo neutral trim: %+.1f us (effective neutral: %.1f us)\n",
+        s_servo_trim_us, SERVO_PULSE_NEUTRAL_US + s_servo_trim_us);
+  } else if (line.equalsIgnoreCase("TRIM_SAVE")) {
+    Preferences prefs;
+    prefs.begin("servo_cfg", false);
+    prefs.putFloat("trim_us", s_servo_trim_us);
+    prefs.end();
+    Serial.printf(
+        ">>> Servo neutral trim saved to NVS: %+.1f us (effective neutral: %.1f us)\n",
         s_servo_trim_us, SERVO_PULSE_NEUTRAL_US + s_servo_trim_us);
   } else if (line.equalsIgnoreCase("RESET")) {
     s_manual_v = 0.0f;
@@ -559,8 +568,8 @@ static void handleAsciiCommand(const char *raw_line) {
     s_ediff.reset();
     s_fusion.reset();
     s_servo.setPulseUs(fmaxf(
-        SERVO_PULSE_MIN_US,
-        fminf(SERVO_PULSE_MAX_US, SERVO_PULSE_NEUTRAL_US + s_servo_trim_us)));
+        SERVO_HARD_MIN_US,
+        fminf(SERVO_HARD_MAX_US, SERVO_PULSE_NEUTRAL_US + s_servo_trim_us)));
     Serial.println(F(">>> Controller & Sensor Fusion State Reset."));
   } else if (line.length() == 1 && strchr("tTrR12345+-0mM", line[0])) {
     s_imu.handleSerialCommand(line[0], Serial);
@@ -893,9 +902,22 @@ void setup() {
   Serial.println(F("========================================================"));
 
   // 1. Initialize Single Ackermann Steering Servo (GPIO 21 @ 333 Hz LEDC)
+  {
+    Preferences prefs;
+    prefs.begin("servo_cfg", true);
+    float saved_trim = prefs.getFloat("trim_us", 0.0f);
+    prefs.end();
+    if (!isnan(saved_trim)) {
+      s_servo_trim_us = fmaxf(-500.0f, fminf(500.0f, saved_trim));
+    }
+  }
   s_servo.begin();
-  Serial.println(
-      F("[+] Ackermann Steering Servo Initialized on GPIO 21 (333 Hz)."));
+  s_servo.setPulseUs(fmaxf(
+      SERVO_HARD_MIN_US,
+      fminf(SERVO_HARD_MAX_US, SERVO_PULSE_NEUTRAL_US + s_servo_trim_us)));
+  Serial.printf(
+      "[+] Ackermann Steering Servo Initialized on GPIO 21 (333 Hz, trim: %+.1f us).\n",
+      s_servo_trim_us);
 
   // 2. Initialize Dual STM32 UART Links (UART1 Front, UART2 Rear @ 921,600
   // Baud)

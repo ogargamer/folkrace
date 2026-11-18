@@ -60,6 +60,6 @@
 #define COSTMAP_GRID_Y_MIN          0.000f
 #define COSTMAP_GRID_Y_MAX          1.900f
 #define COSTMAP_GRID_RES            0.015f
-#define COSTMAP_R_INFLATION_M       0.090f
+#define COSTMAP_R_INFLATION_M       0.075f
 
 #endif // VEHICLE_PARAMS_H

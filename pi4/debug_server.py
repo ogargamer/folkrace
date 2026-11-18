@@ -50,6 +50,10 @@ PLANNER_CMD_UDP_PORT = int(os.environ.get("PLANNER_CMD_UDP_PORT", 9878))
 HOST_BIND = "0.0.0.0"
 
 HTML_PATH = os.path.join(CURR_DIR, "web_debug_gui.html")
+SERVO_TRIM_CFG_PATH = os.path.join(CURR_DIR, "servo_trim.json")
+BASE_SERVO_NEUTRAL_US = 1510.0
+SERVO_PULSE_MIN_US = 500.0
+SERVO_PULSE_MAX_US = 2500.0
 
 
 def send_mcu_cmd(cmd_bytes: bytes) -> bool:
@@ -82,6 +86,7 @@ class DebugServerState:
         self.fake_data_active: bool = False
         self.planner_running: bool = False
         self._bench_t0: float = time.time()
+        self.servo_center_us: float = self._load_servo_center()
         self.latest_pkt: Dict[str, Any] = {
             "time_step": 0,
             "timestamp": time.time(),
@@ -144,6 +149,30 @@ class DebugServerState:
         self._last_disk_check: float = 0.0
         self._cached_disk_free: float = 0.0
         self._cached_db_size: float = 0.0
+
+    def _load_servo_center(self) -> float:
+        """Load persisted servo neutral pulse (µs) from disk."""
+        try:
+            if os.path.exists(SERVO_TRIM_CFG_PATH):
+                with open(SERVO_TRIM_CFG_PATH, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                val = float(data.get("servo_center_us", BASE_SERVO_NEUTRAL_US))
+                return max(SERVO_PULSE_MIN_US, min(SERVO_PULSE_MAX_US, val))
+        except Exception:
+            pass
+        return BASE_SERVO_NEUTRAL_US
+
+    def save_servo_center(self, center_us: float) -> float:
+        """Clamp, store, and persist servo neutral pulse (µs) to disk."""
+        clamped = round(max(SERVO_PULSE_MIN_US, min(SERVO_PULSE_MAX_US, float(center_us))), 1)
+        with self.lock:
+            self.servo_center_us = clamped
+        try:
+            with open(SERVO_TRIM_CFG_PATH, "w", encoding="utf-8") as f:
+                json.dump({"servo_center_us": clamped}, f, indent=2)
+        except Exception as e:
+            print(f"[DebugServer] Failed saving servo center: {e}")
+        return clamped
 
     def _generate_synthetic_benchmark_packet(self, now: float) -> Dict[str, Any]:
         """Generates dynamic synthetic sweep telemetry when benchmark mode is explicitly enabled."""
@@ -582,8 +611,16 @@ class DebugHTTPRequestHandler(BaseHTTPRequestHandler):
                 dial_deg = max(0.0, min(180.0, 90.0 - (deg / 32.2166) * 90.0))
                 cmd_str = f"A {dial_deg:.1f}\n"
             elif action == "trim":
-                trim_us = max(-60.0, min(60.0, float(data.get("trim_us", 0.0))))
-                cmd_str = f"TRIM {trim_us:.1f}\n"
+                slider_trim = max(-60.0, min(60.0, float(data.get("trim_us", 0.0))))
+                with STATE.lock:
+                    center_us = STATE.servo_center_us
+                total_trim_us = max(-500.0, min(500.0, (center_us - BASE_SERVO_NEUTRAL_US) + slider_trim))
+                cmd_str = f"TRIM {total_trim_us:.1f}\n"
+            elif action == "save_trim_center":
+                slider_trim = max(-60.0, min(60.0, float(data.get("trim_us", 0.0))))
+                new_center = STATE.save_servo_center(STATE.servo_center_us + slider_trim)
+                total_trim_us = max(-500.0, min(500.0, new_center - BASE_SERVO_NEUTRAL_US))
+                cmd_str = f"TRIM {total_trim_us:.1f}\n"
             elif action == "pulse":
                 pulse = float(data.get("pulse", 1565.0))
                 cmd_str = f"P {pulse:.0f}\n"
@@ -616,6 +653,8 @@ class DebugHTTPRequestHandler(BaseHTTPRequestHandler):
                 else:
                     ok_mcu = send_mcu_cmd(b"ESTOP\n") and send_mcu_cmd(b"RESET\n")
                 ok = ok_planner and ok_mcu
+            elif action == "save_trim_center":
+                ok = send_mcu_cmd(cmd_str.encode("utf-8")) and send_mcu_cmd(b"TRIM_SAVE\n")
             else:
                 ok = send_mcu_cmd(cmd_str.encode("utf-8"))
 
@@ -659,6 +698,7 @@ class DebugHTTPRequestHandler(BaseHTTPRequestHandler):
                 "cmd": cmd_str.strip(),
                 "fake_data": STATE.fake_data_active,
                 "planner_running": STATE.planner_running,
+                "servo_center_us": STATE.servo_center_us,
                 "pipe": "pi4 -> esp32 -> stm32"
             })
         else:
@@ -768,6 +808,7 @@ class DebugHTTPRequestHandler(BaseHTTPRequestHandler):
             "temp_c": stats.get("temp_c", 0.0),
             "loop_hz": round(STATE.loop_hz, 1),
             "cpu_affinity": list(get_core_affinity()),
+            "servo_center_us": STATE.servo_center_us,
         }
         self._send_json(data)
 

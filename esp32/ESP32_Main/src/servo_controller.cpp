@@ -24,7 +24,7 @@ bool ServoController::begin() {
 }
 
 void IRAM_ATTR ServoController::setPulseUs(float pulse_us) {
-    pulse_us = fmaxf(SERVO_PULSE_MIN_US, fminf(SERVO_PULSE_MAX_US, pulse_us));
+    pulse_us = fmaxf(SERVO_HARD_MIN_US, fminf(SERVO_HARD_MAX_US, pulse_us));
     current_pulse_us_ = pulse_us;
 
     if (!enabled_) return;

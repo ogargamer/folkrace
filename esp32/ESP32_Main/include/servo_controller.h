@@ -4,6 +4,9 @@
 #include <Arduino.h>
 #include "config.h"
 
+#define SERVO_HARD_MIN_US 500.0f
+#define SERVO_HARD_MAX_US 2500.0f
+
 class ServoController {
 public:
     ServoController(
