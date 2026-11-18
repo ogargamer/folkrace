@@ -250,6 +250,7 @@ class AutonomousBrain:
             brake_decel_max=BRAKE_DECEL_MAX,
             accel_fwd_max=ACCEL_FWD_MAX,
             arc_lookahead_m=float(genes.get("recovery_arc_lookahead_m", RECOVERY_ARC_LOOKAHEAD_M)),
+            mu_friction=self.mu_val,
         )
 
     def set_dynamic_mu(self, new_mu: float) -> None:
@@ -257,6 +258,8 @@ class AutonomousBrain:
         self.mu_val = float(new_mu)
         if hasattr(self.planner, "set_dynamic_mu"):
             self.planner.set_dynamic_mu(new_mu)
+        if hasattr(self.recovery_manager, "mu_friction"):
+            self.recovery_manager.mu_friction = float(new_mu)
 
     def reset(self, start_pose: Tuple[float, float, float] = (0.0, 0.0, 0.0)) -> None:
         """Resets all internal filters, costmap, pose tracker, and recovery state machines."""

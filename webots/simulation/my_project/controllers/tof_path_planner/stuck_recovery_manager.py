@@ -17,6 +17,8 @@ try:
     from .planner_config import (
         WHEELBASE,
         MAX_STEERING_RAD,
+        GRAVITY_G,
+        MPC_MU_FRICTION,
         RECOVERY_REVERSE_SPEED_MPS,
         RECOVERY_STEER_ANGLE_RAD,
         RECOVERY_REVERSE_STROKE_MAX_S,
@@ -33,6 +35,8 @@ except ImportError:
     from planner_config import (
         WHEELBASE,
         MAX_STEERING_RAD,
+        GRAVITY_G,
+        MPC_MU_FRICTION,
         RECOVERY_REVERSE_SPEED_MPS,
         RECOVERY_STEER_ANGLE_RAD,
         RECOVERY_REVERSE_STROKE_MAX_S,
@@ -90,6 +94,7 @@ class StuckRecoveryManager:
         wheelbase_m: float = WHEELBASE,
         max_steer_rad: float = MAX_STEERING_RAD,
         arc_lookahead_m: float = RECOVERY_ARC_LOOKAHEAD_M,
+        mu_friction: float = MPC_MU_FRICTION,
         **kwargs,
     ):
         self.state = StuckRecoveryState.NORMAL_DRIVE
@@ -99,6 +104,7 @@ class StuckRecoveryManager:
         self.clearance_exit_m = float(clearance_exit_m)
         self.any_tof_exit_m = float(any_tof_exit_m)
         self.servo_slew_rad_s = float(servo_slew_rad_s)
+        self.mu_friction = float(mu_friction)
 
         self.stroke_timer = 0.0
         self.total_recovery_timer = 0.0
@@ -441,10 +447,10 @@ class StuckRecoveryManager:
                 intended_steer_dir = -1.0 if heading_err > 0.0 else 1.0
             else:
                 pref = preferred_sign if preferred_sign is not None else self.preferred_yaw_sign
-                intended_steer_dir = pref if current_v > 0.1 else -pref
+                intended_steer_dir = -pref
         else:
             pref = preferred_sign if preferred_sign is not None else self.preferred_yaw_sign
-            intended_steer_dir = pref if current_v > 0.1 else -pref
+            intended_steer_dir = -pref
 
         if is_left_pinned is None or is_right_pinned is None:
             if hazard_mask is not None and costmap_obj is not None:
@@ -456,11 +462,23 @@ class StuckRecoveryManager:
                 is_right_pinned = (min_r_tof <= 0.035) if is_right_pinned is None else is_right_pinned
 
         if is_left_pinned and is_right_pinned:
-            return 0.0
+            reverse_steer = 0.0
+        elif intended_steer_dir < 0.0:
+            reverse_steer = +self.steer_angle if is_left_pinned else -self.steer_angle
+        else:
+            reverse_steer = -self.steer_angle if is_right_pinned else +self.steer_angle
 
-        if intended_steer_dir < 0.0:
-            return +self.steer_angle if is_left_pinned else -self.steer_angle
-        return -self.steer_angle if is_right_pinned else +self.steer_angle
+        # Above 0.5 m/s forward speed, continue steering the opposite of reverse steer,
+        # capped by the tire friction circle so braking + steering stays within grip.
+        if current_v >= 0.5:
+            if reverse_steer == 0.0:
+                return 0.0
+            a_lat_max = max(0.1, self.mu_friction) * GRAVITY_G
+            friction_steer_cap = math.atan((a_lat_max * self.wheelbase) / (current_v * current_v))
+            steer_mag = min(self.steer_angle, friction_steer_cap)
+            return -math.copysign(steer_mag, reverse_steer)
+
+        return reverse_steer
 
     def _step_reverse_stroke(
         self,
