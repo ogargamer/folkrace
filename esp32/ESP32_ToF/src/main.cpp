@@ -513,6 +513,20 @@ struct ToF_Binary_Packet_20 {
   uint8_t checksum;           // XOR checksum
 };
 
+// 44-byte multi-target frame for Pi (both target distances + statuses, no SPAD)
+struct ToF_Binary_Packet_44 {
+  uint8_t  header[2];          // 0xAA, 0x55
+  uint8_t  sensor_id;          // 1, 2, 3, 4
+  uint32_t seq;                // Frame sequence counter
+  uint32_t ts_ms;              // ESP32 millis() timestamp
+  uint16_t dist_mm[4];         // Resolved / chosen distance (mm, >= 30mm)
+  uint16_t target0_mm[4];      // Main target distance (mm)
+  uint16_t target1_mm[4];      // 2nd target distance (mm)
+  uint8_t  target0_status[4];  // Main target status (ST table 4)
+  uint8_t  target1_status[4];  // 2nd target status (ST table 4)
+  uint8_t  checksum;           // XOR checksum
+};
+
 // 52-byte multi-target debug frame for PC GUI
 struct ToF_Binary_Packet_52 {
   uint8_t header[2];          // 0xAA, 0x55
@@ -529,12 +543,24 @@ struct ToF_Binary_Packet_52 {
 };
 #pragma pack(pop)
 
-static bool g_packet_mode_52 = false; // Default: 20-byte lean mode for Pi
+enum ToFPacketMode { TOF_PKT_20 = 0, TOF_PKT_44 = 1, TOF_PKT_52 = 2 };
+static ToFPacketMode g_packet_mode = TOF_PKT_44; // Default: 44-byte multi-target for Pi
 
 static inline bool is_valid_target_status(uint8_t st) {
   // Only ST Table 4 status 5 (100% valid), 6 (wrap around 50%), and 9 (large pulse 50%) are valid.
   // Status 10 (Valid without previous history) is treated as an error/invalid with the rest of errors.
   return (st == 5 || st == 6 || st == 9);
+}
+
+static inline void write_packet_with_xor(uint8_t *raw, size_t total_size) {
+  uint8_t chk = 0;
+  for (size_t b = 0; b < total_size - 1; b++) {
+    chk ^= raw[b];
+  }
+  raw[total_size - 1] = chk;
+  if (Serial.availableForWrite() >= (int)total_size) {
+    Serial.write(raw, total_size);
+  }
 }
 
 void send_binary_telemetry(uint8_t sensor_id, VL53L8CX_ResultsData *p_res,
@@ -607,7 +633,7 @@ void send_binary_telemetry(uint8_t sensor_id, VL53L8CX_ResultsData *p_res,
 
   uint32_t now_ms = (uint32_t)millis();
 
-  if (g_packet_mode_52) {
+  if (g_packet_mode == TOF_PKT_52) {
     ToF_Binary_Packet_52 pkt;
     pkt.header[0] = 0xAA;
     pkt.header[1] = 0x55;
@@ -622,16 +648,22 @@ void send_binary_telemetry(uint8_t sensor_id, VL53L8CX_ResultsData *p_res,
       pkt.target1_status[i] = target1_status[i];
       pkt.spad_count[i] = spad_count[i];
     }
-    uint8_t *raw = (uint8_t *)&pkt;
-    uint8_t chk = 0;
-    for (size_t b = 0; b < sizeof(ToF_Binary_Packet_52) - 1; b++) {
-      chk ^= raw[b];
+    write_packet_with_xor((uint8_t *)&pkt, sizeof(ToF_Binary_Packet_52));
+  } else if (g_packet_mode == TOF_PKT_44) {
+    ToF_Binary_Packet_44 pkt;
+    pkt.header[0] = 0xAA;
+    pkt.header[1] = 0x55;
+    pkt.sensor_id = sensor_id;
+    pkt.seq = (uint32_t)f_count;
+    pkt.ts_ms = now_ms;
+    for (int i = 0; i < 4; i++) {
+      pkt.dist_mm[i] = dist_mm[i];
+      pkt.target0_mm[i] = target0_mm[i];
+      pkt.target1_mm[i] = target1_mm[i];
+      pkt.target0_status[i] = target0_status[i];
+      pkt.target1_status[i] = target1_status[i];
     }
-    pkt.checksum = chk;
-
-    if (Serial.availableForWrite() >= (int)sizeof(ToF_Binary_Packet_52)) {
-      Serial.write(raw, sizeof(ToF_Binary_Packet_52));
-    }
+    write_packet_with_xor((uint8_t *)&pkt, sizeof(ToF_Binary_Packet_44));
   } else {
     ToF_Binary_Packet_20 pkt;
     pkt.header[0] = 0xAA;
@@ -642,16 +674,7 @@ void send_binary_telemetry(uint8_t sensor_id, VL53L8CX_ResultsData *p_res,
     for (int i = 0; i < 4; i++) {
       pkt.dist_mm[i] = dist_mm[i];
     }
-    uint8_t *raw = (uint8_t *)&pkt;
-    uint8_t chk = 0;
-    for (size_t b = 0; b < sizeof(ToF_Binary_Packet_20) - 1; b++) {
-      chk ^= raw[b];
-    }
-    pkt.checksum = chk;
-
-    if (Serial.availableForWrite() >= (int)sizeof(ToF_Binary_Packet_20)) {
-      Serial.write(raw, sizeof(ToF_Binary_Packet_20));
-    }
+    write_packet_with_xor((uint8_t *)&pkt, sizeof(ToF_Binary_Packet_20));
   }
 }
 
@@ -776,8 +799,9 @@ void setup() {
 void loop() {
   while (Serial.available() > 0) {
     char c = Serial.read();
-    if (c == 'D' || c == 'd' || c == 'M' || c == 'm') g_packet_mode_52 = true;  // Debug mode: 52B multi-target
-    else if (c == 'L' || c == 'l' || c == 'N' || c == 'n') g_packet_mode_52 = false; // Lean mode: 20B (default for Pi)
+    if (c == 'D' || c == 'd' || c == 'M' || c == 'm') g_packet_mode = TOF_PKT_52;      // Debug mode: 52B multi-target + SPAD
+    else if (c == 'T' || c == 't' || c == 'P' || c == 'p') g_packet_mode = TOF_PKT_44; // Pi mode: 44B multi-target (no SPAD)
+    else if (c == 'L' || c == 'l' || c == 'N' || c == 'n') g_packet_mode = TOF_PKT_20; // Lean mode: 20B (dist_mm only)
     else if (c == 'R' || c == 'r') {
       Serial.flush();
       ESP.restart();

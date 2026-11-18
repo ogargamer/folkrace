@@ -2164,6 +2164,61 @@
               ctx.fillText(`${Math.round(dispR * 100)}cm`, pcx + 4, pcy - 3);
             }
           }
+
+          // Fallback zone overlay: show both raw targets (slightly transparent) + status codes
+          if (
+            pkt.tof_target0_mm && pkt.tof_target1_mm &&
+            pkt.tof_target0_status && pkt.tof_target1_status &&
+            pkt.tof_target0_mm.length > i && pkt.tof_target1_mm.length > i &&
+            pkt.tof_target0_status.length > i && pkt.tof_target1_status.length > i
+          ) {
+            const d0 = pkt.tof_target0_mm[i];
+            const d1 = pkt.tof_target1_mm[i];
+            const st0 = pkt.tof_target0_status[i];
+            const st1 = pkt.tof_target1_status[i];
+            const isValidSt = (st) => (st === 5 || st === 6 || st === 9);
+            const valid0 = isValidSt(st0) && d0 > 0;
+            const valid1 = isValidSt(st1) && d1 > 0;
+
+            if (!valid0 && !valid1) {
+              const fbTargets = [
+                { idx: 0, dMm: d0, st: st0, stroke: "rgba(255, 170, 90, 0.45)", text: "rgba(255, 195, 130, 0.62)", yOff: -5 },
+                { idx: 1, dMm: d1, st: st1, stroke: "rgba(130, 190, 255, 0.42)", text: "rgba(165, 210, 255, 0.58)", yOff: 9 },
+              ];
+              ctx.font = "6.5pt Consolas, monospace";
+              for (const ft of fbTargets) {
+                if (ft.dMm > 0) {
+                  const dispT = Math.min(Math.max(ft.dMm / 1000.0, 0.02), 1.80);
+                  const [tx, ty] = toPixel(s.sx + dispT * Math.cos(s.heading), s.sy + dispT * Math.sin(s.heading));
+                  ctx.strokeStyle = ft.stroke;
+                  ctx.lineWidth = 1.5;
+                  ctx.setLineDash([3, 3]);
+                  ctx.beginPath();
+                  for (let k = 0; k < nArc; k++) {
+                    const a = (s.heading - halfFov) + (k / (nArc - 1)) * (2.0 * halfFov);
+                    const [ax, ay] = toPixel(s.sx + dispT * Math.cos(a), s.sy + dispT * Math.sin(a));
+                    if (k === 0) ctx.moveTo(ax, ay);
+                    else ctx.lineTo(ax, ay);
+                  }
+                  ctx.stroke();
+
+                  ctx.setLineDash([]);
+                  ctx.fillStyle = ft.stroke;
+                  ctx.beginPath();
+                  ctx.arc(tx, ty, 2.8, 0, 2 * Math.PI);
+                  ctx.fill();
+
+                  ctx.fillStyle = ft.text;
+                  ctx.fillText(`T${ft.idx}:${Math.round(ft.dMm / 10)}cm(s${ft.st})`, tx + 4, ty + ft.yOff);
+                } else {
+                  const labelR = 0.35 + ft.idx * 0.16;
+                  const [lx, ly] = toPixel(s.sx + labelR * Math.cos(s.heading), s.sy + labelR * Math.sin(s.heading));
+                  ctx.fillStyle = ft.text;
+                  ctx.fillText(`T${ft.idx}:--(s${ft.st})`, lx + 4, ly + ft.yOff);
+                }
+              }
+            }
+          }
           ctx.restore();
         }
       }

@@ -42,7 +42,13 @@ TOF_SIZE = struct.calcsize(TOF_FORMAT)  # 78 bytes
 TOF_SUB_FORMAT = "<2sBII4HB"
 TOF_SUB_SIZE = struct.calcsize(TOF_SUB_FORMAT)  # 20 bytes
 
-# ToF 52-byte multi-target 4-zone frame (ESP32_ToF/src/main.cpp multi-target ToF_Binary_Packet):
+# ToF 44-byte multi-target 4-zone frame (ESP32_ToF/src/main.cpp ToF_Binary_Packet_44, no SPAD):
+#      sync(2), sensor_id(B), seq(I), ts_ms(I), dist_mm(4H), target0_mm(4H), target1_mm(4H),
+#      target0_status(4B), target1_status(4B), chk(B)
+TOF_SUB44_FORMAT = "<2sBII4H4H4H4B4BB"
+TOF_SUB44_SIZE = struct.calcsize(TOF_SUB44_FORMAT)  # 44 bytes
+
+# ToF 52-byte multi-target 4-zone frame (ESP32_ToF/src/main.cpp ToF_Binary_Packet_52):
 #      sync(2), sensor_id(B), seq(I), ts_ms(I), dist_mm(4H), target0_mm(4H), target1_mm(4H),
 #      target0_status(4B), target1_status(4B), spad_count(4H), chk(B)
 TOF_SUB52_FORMAT = "<2sBII4H4H4H4B4B4HB"
@@ -160,9 +166,38 @@ def decode_tof_packet(data: bytes) -> Optional[Dict[str, Any]]:
 VALID_TOF_STATUSES = {5, 6, 9}  # ST Table 4 valid statuses (Status 10 is treated as an error/invalid)
 
 
+def _unpack_tof_sub_multi_target(data: bytes, fmt: str, has_spad: bool) -> Optional[Dict[str, Any]]:
+    """Shared decoder for 44-byte and 52-byte multi-target 4-zone ToF packets."""
+    size = len(data)
+    unpacked = struct.unpack_from(fmt, data)
+    sync, sensor_id, seq, ts_ms = unpacked[0:4]
+    if sync != MCU_SYNC or not (1 <= sensor_id <= 4):
+        return None
+
+    if calc_checksum(data[: size - 1]) != unpacked[-1]:
+        return None
+
+    clamped_mm = [max(30, d) if d < 30 else d for d in unpacked[4:8]]
+    result = {
+        "sensor_id": sensor_id,
+        "seq": seq,
+        "ts_ms": ts_ms,
+        "mcu_timestamp_us": ts_ms * 1000,
+        "distances_m": [round(d / 1000.0, 3) for d in clamped_mm],
+        "dist_mm": list(clamped_mm),
+        "target0_mm": list(unpacked[8:12]),
+        "target1_mm": list(unpacked[12:16]),
+        "target0_status": list(unpacked[16:20]),
+        "target1_status": list(unpacked[20:24]),
+    }
+    if has_spad:
+        result["spad_count"] = list(unpacked[24:28])
+    return result
+
+
 def decode_tof_sub_packet(data: bytes) -> Optional[Dict[str, Any]]:
-    """Decodes per-sensor binary ToF packet (20-byte lean frame or 52-byte multi-target frame)."""
-    # 1. Check exact 20-byte lean frame (default for Pi)
+    """Decodes per-sensor binary ToF packet (20B lean, 44B multi-target, or 52B debug frame)."""
+    # 1. Check exact 20-byte lean frame
     if len(data) == TOF_SUB_SIZE:
         unpacked = struct.unpack_from(TOF_SUB_FORMAT, data)
         sync, sensor_id, seq, ts_ms = unpacked[0:4]
@@ -186,39 +221,13 @@ def decode_tof_sub_packet(data: bytes) -> Optional[Dict[str, Any]]:
             "dist_mm": list(clamped_mm),
         }
 
-    # 2. Check exact 52-byte multi-target frame
+    # 2. Check exact 44-byte multi-target frame (Pi mode, no SPAD)
+    if len(data) == TOF_SUB44_SIZE:
+        return _unpack_tof_sub_multi_target(data, TOF_SUB44_FORMAT, has_spad=False)
+
+    # 3. Check exact 52-byte multi-target frame (debug mode, with SPAD)
     if len(data) == TOF_SUB52_SIZE:
-        unpacked = struct.unpack_from(TOF_SUB52_FORMAT, data)
-        sync, sensor_id, seq, ts_ms = unpacked[0:4]
-        if sync != MCU_SYNC or not (1 <= sensor_id <= 4):
-            return None
-
-        expected_chk = unpacked[-1]
-        actual_chk = calc_checksum(data[: TOF_SUB52_SIZE - 1])
-        if actual_chk != expected_chk:
-            return None
-
-        dist_mm = unpacked[4:8]
-        target0_mm = unpacked[8:12]
-        target1_mm = unpacked[12:16]
-        target0_status = unpacked[16:20]
-        target1_status = unpacked[20:24]
-        spad_count = unpacked[24:28]
-
-        clamped_mm = [max(30, d) if d < 30 else d for d in dist_mm]
-        return {
-            "sensor_id": sensor_id,
-            "seq": seq,
-            "ts_ms": ts_ms,
-            "mcu_timestamp_us": ts_ms * 1000,
-            "distances_m": [round(d / 1000.0, 3) for d in clamped_mm],
-            "dist_mm": list(clamped_mm),
-            "target0_mm": list(target0_mm),
-            "target1_mm": list(target1_mm),
-            "target0_status": list(target0_status),
-            "target1_status": list(target1_status),
-            "spad_count": list(spad_count),
-        }
+        return _unpack_tof_sub_multi_target(data, TOF_SUB52_FORMAT, has_spad=True)
 
     # 3. Check exact 60-byte legacy frame
     if len(data) == TOF_SUB60_SIZE:

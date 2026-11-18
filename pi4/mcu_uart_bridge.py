@@ -36,6 +36,7 @@ from mcu_telemetry_protocol import (
     CHASSIS_SIZE,
     TOF_SIZE,
     TOF_SUB_SIZE,
+    TOF_SUB44_SIZE,
     TOF_SUB52_SIZE,
     TOF_SUB60_SIZE,
     CMD_SIZE,
@@ -149,33 +150,25 @@ class BinaryStreamParser:
                 else:
                     del self.buffer[:2]
             else:
-                # ESP32-ToF Port (supports 20-byte lean frame, 52-byte multi-target, and 78-byte full array)
+                # ESP32-ToF Port (supports 44B multi-target Pi frame, 52B debug frame, 20B lean frame, and 78B full array)
                 if 1 <= msg_type_or_sensor_id <= 4:
-                    # 1. Check for 20-byte lean frame first (primary mode for Pi)
-                    if len(self.buffer) >= TOF_SUB_SIZE:
-                        chk_calc = 0
-                        for b in self.buffer[: TOF_SUB_SIZE - 1]:
-                            chk_calc ^= b
-                        if chk_calc == self.buffer[TOF_SUB_SIZE - 1]:
-                            raw_pkt = bytes(self.buffer[:TOF_SUB_SIZE])
-                            del self.buffer[:TOF_SUB_SIZE]
-                            decoded = decode_tof_sub_packet(raw_pkt)
-                            if decoded:
-                                yield (MSG_ID_TOF_SUB_TELEM, decoded)
-                                continue
+                    matched_pkt = None
+                    for pkt_size in (TOF_SUB44_SIZE, TOF_SUB52_SIZE, TOF_SUB_SIZE):
+                        if len(self.buffer) >= pkt_size:
+                            chk_calc = 0
+                            for b in self.buffer[: pkt_size - 1]:
+                                chk_calc ^= b
+                            if chk_calc == self.buffer[pkt_size - 1]:
+                                raw_pkt = bytes(self.buffer[:pkt_size])
+                                decoded = decode_tof_sub_packet(raw_pkt)
+                                if decoded:
+                                    del self.buffer[:pkt_size]
+                                    matched_pkt = decoded
+                                    break
 
-                    # 2. Check for 52-byte multi-target frame
-                    if len(self.buffer) >= TOF_SUB52_SIZE:
-                        chk_calc = 0
-                        for b in self.buffer[: TOF_SUB52_SIZE - 1]:
-                            chk_calc ^= b
-                        if chk_calc == self.buffer[TOF_SUB52_SIZE - 1]:
-                            raw_pkt = bytes(self.buffer[:TOF_SUB52_SIZE])
-                            del self.buffer[:TOF_SUB52_SIZE]
-                            decoded = decode_tof_sub_packet(raw_pkt)
-                            if decoded:
-                                yield (MSG_ID_TOF_SUB_TELEM, decoded)
-                                continue
+                    if matched_pkt is not None:
+                        yield (MSG_ID_TOF_SUB_TELEM, matched_pkt)
+                        continue
 
                     if len(self.buffer) >= TOF_SUB52_SIZE:
                         del self.buffer[:2]
@@ -429,6 +422,10 @@ class MCU_UART_Bridge:
         self.latest_chassis: Dict[str, Any] = {}
         self.latest_tof_ranges = [0.0] * 16
         self.latest_tof_ranges_raw = [0.0] * 16
+        self.latest_tof_target0_mm = [0] * 16
+        self.latest_tof_target1_mm = [0] * 16
+        self.latest_tof_target0_status = [255] * 16
+        self.latest_tof_target1_status = [255] * 16
         self.last_tof_sensor_rx: Dict[int, float] = {sid: 0.0 for sid in SENSOR_CHANNEL_SLOTS}
         self._last_debug_dispatch = 0.0
 
@@ -467,6 +464,10 @@ class MCU_UART_Bridge:
             if label == "ESP32_ToF":
                 self.latest_tof_ranges = [0.0] * 16
                 self.latest_tof_ranges_raw = [0.0] * 16
+                self.latest_tof_target0_mm = [0] * 16
+                self.latest_tof_target1_mm = [0] * 16
+                self.latest_tof_target0_status = [255] * 16
+                self.latest_tof_target1_status = [255] * 16
                 for sid in self.last_tof_sensor_rx:
                     self.last_tof_sensor_rx[sid] = 0.0
             else:
@@ -699,7 +700,7 @@ class MCU_UART_Bridge:
                 # Initialize MCU parameters without resetting or blocking
                 try:
                     if is_tof:
-                        os.write(fd, b"L\n")  # Lean mode: 20B
+                        os.write(fd, b"T\n")  # Pi multi-target mode: 44B (no SPAD)
                     else:
                         os.write(fd, b"STATUS\n")
                 except Exception:
@@ -836,9 +837,21 @@ class MCU_UART_Bridge:
                 slots = SENSOR_CHANNEL_SLOTS.get(sensor_id, [])
                 if sensor_id in self.last_tof_sensor_rx:
                     self.last_tof_sensor_rx[sensor_id] = now_rx
+                t0_mm = pkt.get("target0_mm")
+                t1_mm = pkt.get("target1_mm")
+                t0_st = pkt.get("target0_status")
+                t1_st = pkt.get("target1_status")
                 for i, slot in enumerate(slots):
                     if i < len(dists):
                         self.latest_tof_ranges_raw[slot] = dists[i]
+                    if t0_mm is not None and i < len(t0_mm):
+                        self.latest_tof_target0_mm[slot] = t0_mm[i]
+                    if t1_mm is not None and i < len(t1_mm):
+                        self.latest_tof_target1_mm[slot] = t1_mm[i]
+                    if t0_st is not None and i < len(t0_st):
+                        self.latest_tof_target0_status[slot] = t0_st[i]
+                    if t1_st is not None and i < len(t1_st):
+                        self.latest_tof_target1_status[slot] = t1_st[i]
 
                 # Zero out any individual ToF sensor whose packets have gone stale (> LINK_TIMEOUT_S)
                 for sid, s_slots in SENSOR_CHANNEL_SLOTS.items():
@@ -846,6 +859,10 @@ class MCU_UART_Bridge:
                     if t_sid <= 0.0 or (now_rx - t_sid) > LINK_TIMEOUT_S:
                         for s_idx in s_slots:
                             self.latest_tof_ranges_raw[s_idx] = 0.0
+                            self.latest_tof_target0_mm[s_idx] = 0
+                            self.latest_tof_target1_mm[s_idx] = 0
+                            self.latest_tof_target0_status[s_idx] = 255
+                            self.latest_tof_target1_status[s_idx] = 255
 
                 v_est = float(self.latest_chassis.get("v_est", self.latest_chassis.get("v_real", 0.0)))
                 gyro_z = float(self.latest_chassis.get("gyro_z", 0.0))
@@ -885,11 +902,23 @@ class MCU_UART_Bridge:
                         for s_idx in s_slots:
                             self.latest_tof_ranges_raw[s_idx] = 0.0
                             self.latest_tof_ranges[s_idx] = 0.0
+                            self.latest_tof_target0_mm[s_idx] = 0
+                            self.latest_tof_target1_mm[s_idx] = 0
+                            self.latest_tof_target0_status[s_idx] = 255
+                            self.latest_tof_target1_status[s_idx] = 255
                 tof_comp = list(self.latest_tof_ranges)
                 tof_raw = list(self.latest_tof_ranges_raw)
+                t0_mm_list = list(self.latest_tof_target0_mm)
+                t1_mm_list = list(self.latest_tof_target1_mm)
+                t0_st_list = list(self.latest_tof_target0_status)
+                t1_st_list = list(self.latest_tof_target1_status)
             else:
                 tof_comp = [0.0] * 16
                 tof_raw = [0.0] * 16
+                t0_mm_list = [0] * 16
+                t1_mm_list = [0] * 16
+                t0_st_list = [255] * 16
+                t1_st_list = [255] * 16
             telemetry["tof_ranges"] = tof_comp
             telemetry["tof_ranges_raw"] = tof_raw
             telemetry["f_tof"] = round(float(min(tof_comp)), 3) if tof_fresh and tof_comp else 0.0
@@ -910,25 +939,32 @@ class MCU_UART_Bridge:
             telemetry["mcu_main_port"] = self.assigned_ports.get("ESP32_Main") or "Offline"
             telemetry["mcu_tof_port"] = self.assigned_ports.get("ESP32_ToF") or "Offline"
 
+            debug_telemetry = None
             if send_debug:
                 self._last_debug_dispatch = now
-                telemetry["tof"] = {
+                debug_telemetry = dict(telemetry)
+                debug_telemetry["tof"] = {
                     SENSOR_NAMES[i]: round(tof_comp[i], 3)
                     for i in range(min(len(SENSOR_NAMES), len(tof_comp)))
                 }
-                telemetry["tof_raw"] = {
+                debug_telemetry["tof_raw"] = {
                     SENSOR_NAMES[i]: round(tof_raw[i], 3)
                     for i in range(min(len(SENSOR_NAMES), len(tof_raw)))
                 }
+                debug_telemetry["tof_target0_mm"] = t0_mm_list
+                debug_telemetry["tof_target1_mm"] = t1_mm_list
+                debug_telemetry["tof_target0_status"] = t0_st_list
+                debug_telemetry["tof_target1_status"] = t1_st_list
                 v_curr = float(telemetry.get("v_est", 0.0))
                 w_curr = float(telemetry.get("gyro_z", 0.0))
-                telemetry["tof_anchor_proj"] = list(self.compensator.compute_projected_anchor(v_curr, w_curr, 0.01667))
+                debug_telemetry["tof_anchor_proj"] = list(self.compensator.compute_projected_anchor(v_curr, w_curr, 0.01667))
 
         try:
             raw = json.dumps(telemetry).encode("utf-8")
-            self.udp_sock.sendto(raw, (self.udp_host, 9875))  # Real-time feed to Path Planner Core 1
-            if send_debug:
-                self.udp_sock.sendto(raw, self.udp_target)
+            self.udp_sock.sendto(raw, (self.udp_host, 9875))  # Real-time feed to Path Planner Core 1 (unchanged)
+            if debug_telemetry is not None:
+                debug_raw = json.dumps(debug_telemetry).encode("utf-8")
+                self.udp_sock.sendto(debug_raw, self.udp_target)
         except Exception:
             pass
 

@@ -419,6 +419,9 @@ def build_live_binary_packet(pkt: Dict[str, Any]) -> bytes:
         "last_action": pkt.get("last_action") or "",
         "last_cmd_sent": pkt.get("last_cmd_sent") or "",
     }
+    for tk in ("tof_target0_mm", "tof_target1_mm", "tof_target0_status", "tof_target1_status"):
+        if tk in pkt:
+            meta[tk] = pkt[tk]
     meta_bytes = json.dumps(meta).encode("utf-8")
 
     def _f(val: Any, default: float = 0.0) -> float:
@@ -1078,9 +1081,30 @@ def udp_listener_worker():
                 STATE._last_hz_calc = now
 
             is_planner = ("best_line" in pkt) or ("plan_ms" in pkt) or ("corridor_left" in pkt)
+            tof_diag_keys = (
+                "tof_target0_mm",
+                "tof_target1_mm",
+                "tof_target0_status",
+                "tof_target1_status",
+            )
+            has_attached_tof_diag = False
 
             with STATE.lock:
+                tof_diag_cache = getattr(STATE, "_latest_tof_diag", None)
+                if tof_diag_cache is None:
+                    tof_diag_cache = {}
+                    STATE._latest_tof_diag = tof_diag_cache
+
+                for tk in tof_diag_keys:
+                    if tk in pkt:
+                        tof_diag_cache[tk] = pkt[tk]
+
                 if is_planner:
+                    if tof_diag_cache:
+                        for tk, tv in tof_diag_cache.items():
+                            if tk not in pkt:
+                                pkt[tk] = tv
+                                has_attached_tof_diag = True
                     STATE.latest_pkt = pkt
                     STATE.last_planner_pkt_time = now
                 elif now - STATE.last_planner_pkt_time > 1.0:
@@ -1109,7 +1133,7 @@ def udp_listener_worker():
                         "tof_ranges",
                         "tof_ranges_raw",
                         "f_tof",
-                    ):
+                    ) + tof_diag_keys:
                         if k in pkt:
                             STATE.latest_pkt[k] = pkt[k]
 
@@ -1131,7 +1155,7 @@ def udp_listener_worker():
                 is_idle_stopped = (eff_mode in ("STOPPED", "STANDBY", "OFFLINE")) and v_cmd_val < 0.01 and v_real_val < 0.05
                 if not is_idle_stopped and (is_planner or (now - getattr(STATE, "_last_db_record", 0.0) >= 0.05)):
                     STATE._last_db_record = now
-                    STATE.recorder.record_frame(pkt, raw_bytes=data)
+                    STATE.recorder.record_frame(pkt, raw_bytes=None if has_attached_tof_diag else data)
 
         except socket.timeout:
             continue

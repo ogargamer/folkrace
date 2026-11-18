@@ -233,6 +233,7 @@ class CppCurvilinearSLMPC:
         self.nu = 2
         self._last_winner = 0
         self._active_target: Optional[Tuple[float, float]] = None
+        self._last_alt_target: Optional[Tuple[float, float]] = None
 
         # Preallocated ctypes outputs
         self._out_steer = ctypes.c_double(0.0)
@@ -325,6 +326,7 @@ class CppCurvilinearSLMPC:
     def reset_active_target(self) -> None:
         """Resets the currently tracked active corridor/target line and OSQP solver warm-start."""
         self._active_target = None
+        self._last_alt_target = None
         self._last_winner = 0
         if _lib is not None and hasattr(_lib, "sl_mpc_reset"):
             if hasattr(self, "_handle") and self._handle:
@@ -556,12 +558,12 @@ class CppCurvilinearSLMPC:
                 budget_remaining_ms = target_deadline_ms - elapsed_so_far_ms
 
                 # Hard budget allocation (calibrated to ARM64 Cortex-A72 execution profile):
-                # - High budget (6 iters, ~2.5 ms + 0.5 ms shield): ONLY IF budget_remaining >= 6.5 ms
+                # - High budget (10 iters): ONLY IF budget_remaining >= 6.5 ms
                 # - Single iter (1 iter, ~1.2 ms + 0.5 ms shield): IF budget_remaining >= 4.8 ms
                 # - Under 4.8 ms: HARD SKIP challenger to guarantee worst-case frame strictly < 16.6 ms!
                 if budget_remaining_ms >= 6.5:
                     has_challenger = True
-                    max_iter_alt = 6
+                    max_iter_alt = 10
                 elif budget_remaining_ms >= 4.8:
                     has_challenger = True
                     max_iter_alt = 1
@@ -569,6 +571,13 @@ class CppCurvilinearSLMPC:
                     has_challenger = False
 
                 if has_challenger:
+                    if hasattr(_lib, "sl_mpc_reset"):
+                        if (
+                            self._last_alt_target is None
+                            or math.hypot(tx_alt - self._last_alt_target[0], ty_alt - self._last_alt_target[1]) > 0.45
+                        ):
+                            _lib.sl_mpc_reset(self._handle_alt)
+                    self._last_alt_target = (float(tx_alt), float(ty_alt))
                     if hasattr(_lib, "sl_mpc_set_max_iter"):
                         _lib.sl_mpc_set_max_iter(self._handle_alt, max_iter_alt)
                     t_alt_0 = time.perf_counter()

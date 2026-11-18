@@ -62,8 +62,8 @@ from brain.planner_config import (
 TARGET_HZ = 60.0
 DT_STEP = 1.0 / TARGET_HZ
 LINK_TIMEOUT_S = 0.25  # 250ms link-loss failsafe (matches MCU bridge & ESP32-STM32)
-TELEM_HZ = 20.0
-TELEM_DECIMATION = int(round(TARGET_HZ / TELEM_HZ))  # Exactly 20 Hz (1 frame per 3 control steps)
+TELEM_HZ = 60.0
+TELEM_DECIMATION = int(round(TARGET_HZ / TELEM_HZ))  # Full 60 Hz for flight recorder; debug_server throttles live WS to 20 Hz
 DEBUG_UDP_PORT = int(os.environ.get("DEBUG_UDP_PORT", 9876))
 DEBUG_UDP_HOST = os.environ.get("DEBUG_UDP_HOST", "127.0.0.1")
 SENSOR_UDP_PORT = int(os.environ.get("SENSOR_UDP_PORT", 9875))
@@ -108,7 +108,7 @@ def run_path_planner():
     mcu_cmd_target = ("127.0.0.1", 9877)
 
     # Lightweight Telemetry Dispatch Worker: offloads JSON dumping and UDP socket I/O to Core 2/3
-    telem_queue = queue.Queue(maxsize=30)
+    telem_queue = queue.Queue(maxsize=90)
 
     def telemetry_worker():
         try:
@@ -349,6 +349,10 @@ def run_path_planner():
                     "plan_ms": 0.0,
                     "map_ms": 0.0,
                     "scout_ms": 0.0,
+                    "osqp_iters": 0,
+                    "osqp_iters_alt": 0,
+                    "iters_prim": 0,
+                    "iters_alt": 0,
                     "step_ms": 0.0,
                     "best_line": [],
                     "candidate_lines": [],
@@ -380,6 +384,7 @@ def run_path_planner():
                 telemetry["timestamp"] = time.time()
                 telemetry["sim_time"] = round(sim_time, 3)
                 telemetry["v_real"] = round(v_actual, 2)
+                telemetry["v_est"] = round(v_actual, 3)
                 telemetry["steer_actual_deg"] = round(steer_actual_deg, 1)
 
                 if active_mcu and "rpms_act" in active_mcu:

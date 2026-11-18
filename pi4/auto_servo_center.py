@@ -240,7 +240,10 @@ class AutoServoCenterCalibrator:
             if direction > 0 and self._check_front_obstacle(pkt):
                 return {"ok": False, "error": f"Obstacle detected ahead (<{self.MIN_FRONT_TOF_M:.2f}m)"}
 
-            v_est = float(pkt.get("v_est") or 0.0)
+            v_raw = pkt.get("v_est")
+            if v_raw is None:
+                v_raw = pkt.get("v_real")
+            v_est = float(v_raw or 0.0)
             gyro_z = float(pkt.get("gyro_z") or 0.0) - gyro_bias
 
             dist_m += abs(v_est) * dt
