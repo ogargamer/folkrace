@@ -111,6 +111,9 @@ private:
     float oversteer_confirm_timer_;
     float slip_entry_speed_;
     float diff_split_gain_;
+    float early_us_filt_;
+    float early_os_;
+    float a_lat_obs_filt_;
 };
 
 #endif // ELECTRONIC_DIFF_H

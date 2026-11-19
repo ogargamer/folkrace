@@ -25,6 +25,36 @@ constexpr float kOversteerAccelScale = 0.25f;     // Cut forward acceleration to
 constexpr float kOversteerDecelScale = 0.60f;     // Keep oversteer decel smooth to avoid rear weight transfer
 constexpr float kUndersteerAccelScale = 0.30f;    // Cut forward acceleration torque during front plow
 constexpr float kSlipSpeedFloorMps = 0.60f;       // Minimum cornering speed floor during slip throttle cap
+
+// Proactive Traction Prevention Constants
+constexpr float kProactiveCornerMuScale = 0.94f;  // Feedforward corner speed mu scale (~97% apex speed, ~34% combined-slip reserve)
+constexpr float kSteerGripMargin = 1.25f;         // Extra grip margin on speed-based steer cap (allows grippy tires up to ~1.25x mu)
+constexpr float kPeakFrontSlipRad = 0.16f;        // ~9.2 deg peak front slip angle allowance above kinematic Ackermann
+constexpr float kSteerSlewVLowMps = 1.20f;        // Speed below which turn-in uses full servo slew rate
+constexpr float kSteerSlewVHighMps = 3.80f;       // Speed where turn-in slew reaches minimum taper
+constexpr float kSteerSlewMinScale = 0.45f;       // Minimum turn-in servo slew scale at high speed (unwind stays 1.0x)
+constexpr float kAccelMinLongFraction = 0.30f;    // Minimum longitudinal accel fraction in hard cornering
+constexpr float kBrakeMinLongFraction = 0.50f;    // Minimum longitudinal braking fraction in hard cornering
+constexpr float kGeomSteerLatWeight = 0.35f;      // Baseline geometric steer utilization weight
+constexpr float kEarlyUsYawRatioHigh = 0.72f;     // Yaw ratio where incipient understeer modulation starts
+constexpr float kEarlyUsYawRatioLow = 0.45f;      // Yaw ratio where incipient understeer modulation saturates (before 0.40 latch)
+constexpr float kEarlyUsFiltTauS = 0.030f;        // 30 ms LPF on incipient understeer & observed lateral accel
+constexpr float kEarlyUsMinSpeedMps = 0.65f;      // Minimum speed to evaluate incipient front saturation
+constexpr float kEarlyUsMinSteerRad = 0.12f;      // Minimum steering angle to evaluate incipient front saturation
+constexpr float kEarlyUsMinOmegaRef = 1.00f;      // Minimum reference yaw rate for incipient front saturation
+constexpr float kEarlyUsAccelCut = 0.55f;         // Max proactive accel cut (55%) at full incipient understeer
+constexpr float kEarlyUsSpeedFloorFrac = 0.70f;   // Floor on observed-grip corner cap relative to nominal v_proactive
+constexpr float kEarlyOsStartRadS = 0.35f;        // Excess yaw (with lead) where incipient oversteer starts
+constexpr float kEarlyOsFullRadS = 0.90f;         // Excess yaw (with lead) where incipient oversteer reaches 1.0
+constexpr float kEarlyOsYawDotLeadS = 0.025f;     // 25 ms yaw-acceleration lead for snap breakaway
+constexpr float kEarlyOsRiseTauS = 0.007f;        // 7 ms rise LPF to reject single-tick kerb/chatter spikes
+constexpr float kEarlyOsDecayTauS = 0.025f;       // 25 ms smooth decay when incipient oversteer subsides
+constexpr float kEarlyOsAccelCut = 0.65f;         // Max proactive accel cut (65%) at full incipient oversteer
+constexpr float kEarlyOsDecelCut = 0.35f;         // Max proactive decel softening (35%) to prevent rear lift-off snap
+constexpr float kSlipRatioAccelMax = 0.15f;       // Peak tire longitudinal slip ratio cap (15%)
+constexpr float kSlipRatioMinCorner = 0.04f;      // Tightened cornering longitudinal slip ratio floor (4%)
+constexpr float kMinSlipLeadMps = 0.12f;          // Absolute slip lead floor (m/s) for crisp low-speed launches & exits
+constexpr float kAbsMinSpeedMps = 0.30f;          // Minimum speed for ABS wheel-lock floor
 } // namespace
 
 ElectronicDifferential4WD::ElectronicDifferential4WD(
@@ -65,7 +95,10 @@ ElectronicDifferential4WD::ElectronicDifferential4WD(
     understeer_confirm_timer_(0.0f),
     oversteer_confirm_timer_(0.0f),
     slip_entry_speed_(0.0f),
-    diff_split_gain_(1.0f) {}
+    diff_split_gain_(1.0f),
+    early_us_filt_(0.0f),
+    early_os_(0.0f),
+    a_lat_obs_filt_(0.0f) {}
 
 void ElectronicDifferential4WD::reset() {
     current_steer_rad_ = 0.0f;
@@ -82,6 +115,9 @@ void ElectronicDifferential4WD::reset() {
     oversteer_confirm_timer_ = 0.0f;
     slip_entry_speed_ = 0.0f;
     diff_split_gain_ = 1.0f;
+    early_us_filt_ = 0.0f;
+    early_os_ = 0.0f;
+    a_lat_obs_filt_ = 0.0f;
 }
 
 ElectronicDiffOutputs IRAM_ATTR ElectronicDifferential4WD::update(
@@ -97,16 +133,33 @@ ElectronicDiffOutputs IRAM_ATTR ElectronicDifferential4WD::update(
     const float safe_mu = fmaxf(0.10f, mu);
 
     // -------------------------------------------------------------------------
-    // 1. Driver Steering Intent & Grip-Capped Lagged Yaw-Rate Reference
+    // 1. Driver Steering Intent (Speed-Capped & Asymmetric Slew) & Yaw Reference
     // -------------------------------------------------------------------------
     float target_delta = fmaxf(-max_steer_rad_, fminf(target_steer_rad, max_steer_rad_));
     float max_d_steer = max_servo_rate_ * safe_dt;
 
-    float driver_diff = target_delta - driver_steer_rad_;
-    if (fabsf(driver_diff) <= max_d_steer) {
-        driver_steer_rad_ = target_delta;
+    float v_for_steer = fmaxf(fabsf(v_curr), fabsf(rate_limited_speed_));
+    float steer_cap_rad = max_steer_rad_;
+    if (v_for_steer > 0.50f) {
+        float delta_grip = atanf((kSteerGripMargin * safe_mu * GRAVITY_G_CONST * L_) / (v_for_steer * v_for_steer));
+        steer_cap_rad = fminf(max_steer_rad_, delta_grip + kPeakFrontSlipRad);
+    }
+    float capped_target_delta = fmaxf(-steer_cap_rad, fminf(target_delta, steer_cap_rad));
+
+    bool is_steer_unwinding = (fabsf(capped_target_delta) < fabsf(driver_steer_rad_)) ||
+                              (capped_target_delta * driver_steer_rad_ < 0.0f);
+    float slew_scale = 1.0f;
+    if (!is_steer_unwinding && v_for_steer > kSteerSlewVLowMps) {
+        float t = fminf(1.0f, (v_for_steer - kSteerSlewVLowMps) / (kSteerSlewVHighMps - kSteerSlewVLowMps));
+        slew_scale = 1.0f - t * (1.0f - kSteerSlewMinScale);
+    }
+    float max_d_driver = max_servo_rate_ * slew_scale * safe_dt;
+
+    float driver_diff = capped_target_delta - driver_steer_rad_;
+    if (fabsf(driver_diff) <= max_d_driver) {
+        driver_steer_rad_ = capped_target_delta;
     } else {
-        driver_steer_rad_ += copysignf(max_d_steer, driver_diff);
+        driver_steer_rad_ += copysignf(max_d_driver, driver_diff);
     }
     driver_steer_rad_ = fmaxf(-max_steer_rad_, fminf(driver_steer_rad_, max_steer_rad_));
     out.driver_steer_rad = driver_steer_rad_;
@@ -191,9 +244,50 @@ ElectronicDiffOutputs IRAM_ATTR ElectronicDifferential4WD::update(
     out.delta_gyro_rad = delta_gyro;
 
     // -------------------------------------------------------------------------
+    // 2b. Model-Free Incipient Tire-Saturation Modulation (Early US / Early OS)
+    // -------------------------------------------------------------------------
+    float raw_early_os = 0.0f;
+    if (fabsf(v_for_ref) >= v_slip_gate_ && fabsf(excess_yaw) > kGyroDeadbandRadS) {
+        float yaw_dot_lead = (excess_yaw * gyro_z_dot_filt_ > 0.0f)
+                                 ? (kEarlyOsYawDotLeadS * fabsf(gyro_z_dot_filt_))
+                                 : 0.0f;
+        float excess_lead = fabsf(excess_yaw) + yaw_dot_lead;
+        raw_early_os = fmaxf(0.0f, fminf(1.0f, (excess_lead - kEarlyOsStartRadS) /
+                                               (kEarlyOsFullRadS - kEarlyOsStartRadS)));
+    }
+    float tau_os = (raw_early_os >= early_os_) ? kEarlyOsRiseTauS : kEarlyOsDecayTauS;
+    float alpha_os = safe_dt / (tau_os + safe_dt);
+    early_os_ += alpha_os * (raw_early_os - early_os_);
+    if (early_os_ < 0.005f) {
+        early_os_ = 0.0f;
+    }
+
+    float a_lat_meas_now = fabsf(v_curr * gyro_z_rad_s);
+    float alpha_us = safe_dt / (kEarlyUsFiltTauS + safe_dt);
+    a_lat_obs_filt_ += alpha_us * (a_lat_meas_now - a_lat_obs_filt_);
+
+    float raw_early_us = 0.0f;
+    float a_lat_req_driver = fabsf(v_for_ref * omega_cmd_driver);
+    if (fabsf(v_curr) >= kEarlyUsMinSpeedMps &&
+        fabsf(driver_steer_rad_) > kEarlyUsMinSteerRad &&
+        fabsf(omega_ref_) > kEarlyUsMinOmegaRef &&
+        a_lat_req_driver > (0.35f * safe_mu * GRAVITY_G_CONST) &&
+        (gyro_z_rad_s * omega_ref_ >= 0.0f)) {
+        float yaw_ratio = fabsf(gyro_z_rad_s) / fmaxf(1e-4f, fabsf(omega_ref_));
+        if (yaw_ratio < kEarlyUsYawRatioHigh) {
+            raw_early_us = fmaxf(0.0f, fminf(1.0f, (kEarlyUsYawRatioHigh - yaw_ratio) /
+                                                   (kEarlyUsYawRatioHigh - kEarlyUsYawRatioLow)));
+        }
+    }
+    early_us_filt_ += alpha_us * (raw_early_us - early_us_filt_);
+    if (early_us_filt_ < 0.005f) {
+        early_us_filt_ = 0.0f;
+    }
+
+    // -------------------------------------------------------------------------
     // 3. Steering Slew Rate Limiter (Physical Servo Dynamics @ 22.0 rad/s)
     // -------------------------------------------------------------------------
-    float stabilized_target = fmaxf(-max_steer_rad_, fminf(target_delta + delta_gyro, max_steer_rad_));
+    float stabilized_target = fmaxf(-max_steer_rad_, fminf(driver_steer_rad_ + delta_gyro, max_steer_rad_));
     float steer_diff = stabilized_target - current_steer_rad_;
 
     if (fabsf(steer_diff) <= max_d_steer) {
@@ -216,42 +310,85 @@ ElectronicDiffOutputs IRAM_ATTR ElectronicDifferential4WD::update(
     out.servo_pulse_us = fmaxf(SERVO_PULSE_MIN_US, fminf(SERVO_PULSE_MAX_US, out.servo_pulse_us));
 
     // -------------------------------------------------------------------------
-    // 4. Slip-Coupled Speed Cap & Dynamic Traction Rate Limiter
+    // 4. Proactive + Slip-Coupled Speed Cap & Combined-Slip Friction Circle
     // -------------------------------------------------------------------------
     float effective_target_v = target_v;
+    float steer_for_cap = fmaxf(fabsf(driver_steer_rad_), fabsf(capped_target_delta));
+    float tan_steer_cap = fabsf(tanf(steer_for_cap));
+    float v_cap_total = 1e6f;
+
+    if (tan_steer_cap > 0.05f) {
+        float v_proactive = sqrtf((kProactiveCornerMuScale * safe_mu * GRAVITY_G_CONST * L_) / tan_steer_cap);
+        if (early_us_filt_ > 0.0f) {
+            float v_floor = fmaxf(kSlipSpeedFloorMps, kEarlyUsSpeedFloorFrac * v_proactive);
+            float v_obs_raw = sqrtf((fmaxf(0.50f, a_lat_obs_filt_) * L_) / tan_steer_cap);
+            float v_obs_grip = fminf(v_proactive, fmaxf(v_floor, v_obs_raw));
+            v_proactive += early_us_filt_ * (v_obs_grip - v_proactive);
+        }
+        v_cap_total = fmaxf(kSlipSpeedFloorMps, v_proactive);
+    }
+
     if (slip_state_ == SLIP_UNDERSTEER) {
         float tan_driver = fmaxf(0.05f, fabsf(tanf(driver_steer_rad_)));
         float v_corner_max = sqrtf((safe_mu * GRAVITY_G_CONST * L_) / tan_driver);
-        float v_cap = fmaxf(kSlipSpeedFloorMps, fminf(v_corner_max, kUndersteerSpeedScale * slip_entry_speed_));
-        if (effective_target_v > 0.0f) {
-            effective_target_v = fminf(effective_target_v, v_cap);
-        } else if (effective_target_v < 0.0f) {
-            effective_target_v = fmaxf(effective_target_v, -v_cap);
-        }
+        float v_us_cap = fmaxf(kSlipSpeedFloorMps, fminf(v_corner_max, kUndersteerSpeedScale * slip_entry_speed_));
+        v_cap_total = fminf(v_cap_total, v_us_cap);
     } else if (slip_state_ == SLIP_OVERSTEER) {
-        float v_cap = fmaxf(kSlipSpeedFloorMps, kOversteerSpeedScale * slip_entry_speed_);
+        float v_os_cap = fmaxf(kSlipSpeedFloorMps, kOversteerSpeedScale * slip_entry_speed_);
+        v_cap_total = fminf(v_cap_total, v_os_cap);
+    }
+
+    if (v_cap_total < 1e5f) {
         if (effective_target_v > 0.0f) {
-            effective_target_v = fminf(effective_target_v, v_cap);
+            effective_target_v = fminf(effective_target_v, v_cap_total);
         } else if (effective_target_v < 0.0f) {
-            effective_target_v = fmaxf(effective_target_v, -v_cap);
+            effective_target_v = fmaxf(effective_target_v, -v_cap_total);
         }
     }
 
-    float steer_mag = fabsf(current_steer_rad_);
-    float lateral_fraction = fminf(0.80f, fabsf(sinf(steer_mag)));
-    const float front_lat_reserve_min = 0.20f;
-    float max_longitudinal_fraction = sqrtf(fmaxf(front_lat_reserve_min * front_lat_reserve_min, 1.0f - lateral_fraction * lateral_fraction));
+    // Combined-slip friction circle using real lateral utilization (measured & predicted)
+    float v_ref_lat = fmaxf(fabsf(v_curr), fabsf(rate_limited_speed_));
+    float a_lat_meas = fabsf(v_curr * gyro_z_rad_s);
+    float a_lat_pred = fabsf(v_ref_lat * omega_cmd_driver);
+    float a_lat_eff = fmaxf(a_lat_meas, a_lat_pred);
+    float mu_g = safe_mu * GRAVITY_G_CONST;
+    float lat_util_dyn = a_lat_eff / fmaxf(0.50f, mu_g);
+    float lat_util_geom = kGeomSteerLatWeight * fabsf(sinf(current_steer_rad_));
+    float lat_util = fminf(0.96f, fmaxf(lat_util_dyn, lat_util_geom));
+    float raw_long_frac = sqrtf(fmaxf(0.0f, 1.0f - lat_util * lat_util));
+    float accel_long_frac = fmaxf(kAccelMinLongFraction, raw_long_frac);
+    float brake_long_frac = fmaxf(kBrakeMinLongFraction, raw_long_frac);
 
-    float a_limit = fminf(ACCEL_FWD_MAX, ACCEL_FWD_RATIO * safe_mu * GRAVITY_G_CONST);
-    float d_limit = fminf(BRAKE_DECEL_MAX, BRAKE_DECEL_RATIO * safe_mu * GRAVITY_G_CONST * max_longitudinal_fraction);
+    float a_limit_base = fminf(ACCEL_FWD_MAX, ACCEL_FWD_RATIO * mu_g);
+    float d_limit_base = fminf(BRAKE_DECEL_MAX, BRAKE_DECEL_RATIO * mu_g);
+    float a_limit = a_limit_base * accel_long_frac;
+    float d_limit = d_limit_base * brake_long_frac;
+
+    float proactive_accel_scale = fminf(1.0f - kEarlyUsAccelCut * early_us_filt_,
+                                        1.0f - kEarlyOsAccelCut * early_os_);
+    float proactive_decel_scale = 1.0f - kEarlyOsDecelCut * early_os_;
+    float reactive_accel_scale = 1.0f;
+    float reactive_decel_scale = 1.0f;
+    if (slip_state_ == SLIP_OVERSTEER) {
+        reactive_accel_scale = kOversteerAccelScale;
+        reactive_decel_scale = kOversteerDecelScale;
+    } else if (slip_state_ == SLIP_UNDERSTEER) {
+        reactive_accel_scale = kUndersteerAccelScale;
+    }
+    float effective_a_limit = a_limit * fminf(proactive_accel_scale, reactive_accel_scale);
+    float effective_d_limit = d_limit * fminf(proactive_decel_scale, reactive_decel_scale);
 
     // Dynamic Slip Envelope referencing physical latency (~24ms) & peak tire slip
     const float dt_lag = 0.024f;
-    float slip_ratio_accel = fminf(0.30f, fmaxf(0.08f, 0.10f * (a_limit / GRAVITY_G_CONST)));
-    float max_slip_lead = (a_limit * dt_lag) + (slip_ratio_accel * fabsf(v_curr));
+    float slip_ratio_base = fminf(kSlipRatioAccelMax, fmaxf(0.08f, 0.10f * (a_limit_base / GRAVITY_G_CONST)));
+    float slip_ratio_accel = fmaxf(kSlipRatioMinCorner, slip_ratio_base * accel_long_frac);
+    float slip_ratio_brake = fmaxf(kSlipRatioMinCorner, slip_ratio_base * brake_long_frac);
+    float max_slip_lead = fmaxf(kMinSlipLeadMps, (effective_a_limit * dt_lag) + (slip_ratio_accel * fabsf(v_curr)));
+    float max_brake_slip_lag = (effective_d_limit * dt_lag) + (slip_ratio_brake * fabsf(v_curr));
+    float nominal_slip_lead = (a_limit_base * dt_lag) + (slip_ratio_base * fabsf(v_curr));
 
     // Harmonized Instant Wall Hit / Collision Resync
-    float collision_threshold = max_slip_lead + 0.15f;
+    float collision_threshold = nominal_slip_lead + 0.15f;
     if (rate_limited_speed_ >= 0.0f) {
         if (v_curr < (rate_limited_speed_ - collision_threshold)) {
             rate_limited_speed_ = v_curr;
@@ -262,23 +399,14 @@ ElectronicDiffOutputs IRAM_ATTR ElectronicDifferential4WD::update(
         }
     }
 
-    if (target_v <= v_curr) {
+    if (effective_target_v <= v_curr) {
         if (rate_limited_speed_ > v_curr) {
             rate_limited_speed_ = v_curr;
         }
-    } else if (target_v >= v_curr) {
+    } else if (effective_target_v >= v_curr) {
         if (rate_limited_speed_ < v_curr) {
             rate_limited_speed_ = v_curr;
         }
-    }
-
-    float effective_a_limit = a_limit;
-    float effective_d_limit = d_limit;
-    if (slip_state_ == SLIP_OVERSTEER) {
-        effective_a_limit *= kOversteerAccelScale;
-        effective_d_limit *= kOversteerDecelScale;
-    } else if (slip_state_ == SLIP_UNDERSTEER) {
-        effective_a_limit *= kUndersteerAccelScale;
     }
 
     float speed_err = effective_target_v - rate_limited_speed_;
@@ -291,11 +419,17 @@ ElectronicDiffOutputs IRAM_ATTR ElectronicDifferential4WD::update(
         rate_limited_speed_ += copysignf(max_dv, speed_err);
     }
 
-    // Dynamic Traction Slip Envelope Clamping
+    // Dynamic Traction Slip Envelope Clamping (Accel TCS + Brake ABS Floor)
     if (rate_limited_speed_ > 0.0f) {
         rate_limited_speed_ = fminf(rate_limited_speed_, fmaxf(0.0f, v_curr) + max_slip_lead);
+        if (v_curr > kAbsMinSpeedMps) {
+            rate_limited_speed_ = fmaxf(rate_limited_speed_, v_curr - max_brake_slip_lag);
+        }
     } else if (rate_limited_speed_ < 0.0f) {
         rate_limited_speed_ = fmaxf(rate_limited_speed_, fminf(0.0f, v_curr) - max_slip_lead);
+        if (v_curr < -kAbsMinSpeedMps) {
+            rate_limited_speed_ = fminf(rate_limited_speed_, v_curr + max_brake_slip_lag);
+        }
     }
     out.rate_limited_v = rate_limited_speed_;
 
@@ -331,6 +465,9 @@ ElectronicDiffOutputs IRAM_ATTR ElectronicDifferential4WD::update(
         understeer_confirm_timer_ = 0.0f;
         oversteer_confirm_timer_ = 0.0f;
         slip_entry_speed_ = 0.0f;
+        early_us_filt_ = 0.0f;
+        early_os_ = 0.0f;
+        a_lat_obs_filt_ = 0.0f;
         diff_split_gain_ = fminf(1.0f, diff_split_gain_ + kDiffRiseRate * safe_dt);
         out.omega_ref = 0.0f;
         out.v_FL = out.v_FR = out.v_RL = out.v_RR = 0.0f;
@@ -402,9 +539,9 @@ ElectronicDiffOutputs IRAM_ATTR ElectronicDifferential4WD::update(
     }
     out.slip_state = slip_state_;
 
-    // Fade out rear differential speed split during oversteer so outer rear wheel
-    // does not keep feeding yaw torque into the spin.
-    float target_diff_gain = (slip_state_ == SLIP_OVERSTEER) ? 0.0f : 1.0f;
+    // Fade out rear differential speed split proactively on incipient oversteer
+    // and completely on confirmed oversteer so outer rear wheel does not feed spin.
+    float target_diff_gain = (slip_state_ == SLIP_OVERSTEER) ? 0.0f : fmaxf(0.0f, 1.0f - early_os_);
     if (target_diff_gain < diff_split_gain_) {
         diff_split_gain_ = fmaxf(target_diff_gain, diff_split_gain_ - kDiffFadeRate * safe_dt);
     } else {

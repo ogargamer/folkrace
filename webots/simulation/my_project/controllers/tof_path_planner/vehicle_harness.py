@@ -46,7 +46,13 @@ for p in [CURR_DIR, CONTROLLERS_DIR, MY_PROJECT_DIR, REPO_ROOT]:
         sys.path.insert(0, p)
 
 from brain import AutonomousBrain
-from electronic_diff_4wd import ElectronicDifferential4WD
+from electronic_diff_4wd import (
+    ElectronicDifferential4WD,
+    SLIP_RATIO_ACCEL_MAX,
+    SLIP_RATIO_MIN_CORNER,
+    MIN_SLIP_LEAD_MPS,
+    ABS_MIN_SPEED_MPS,
+)
 from traction_drift_controller import TractionDriftController
 from cpp_smart_hybrid_costmap import CppSmartHybridCostmap
 from imu_encoder_fusion import IMUEncoderFusion
@@ -99,7 +105,6 @@ from planner_config import (
     BRAKE_DECEL_RATIO,
     GRAVITY_G,
     SERVO_MAX_SPEED_RAD_S,
-    FRONT_LATERAL_RESERVE_MIN,
     ENABLE_OPTICAL_FLOW_SENSOR,
     ENABLE_TRACTION_DRIFT_CONTROL,
     ENABLE_RAMP_DETECTION,
@@ -840,6 +845,8 @@ class FolkraceVehicle:
                 self.cached_target_speed,
                 current_v=self.rate_limited_speed,
                 mu=self.mu_val,
+                target_steer_rad=effective_steer_cmd,
+                v_curr=self.v_est,
             )
             v_curr = self.v_est
 
@@ -851,24 +858,38 @@ class FolkraceVehicle:
                 elif target_v < 0.0:
                     target_v = max(target_v, -ramp_cap)
 
-            # Lateral reserve on front steering axle:
-            steer_mag = abs(float(effective_steer_cmd))
-            lateral_fraction = min(0.80, abs(math.sin(steer_mag)))
-            max_longitudinal_fraction = math.sqrt(max(FRONT_LATERAL_RESERVE_MIN ** 2, 1.0 - lateral_fraction ** 2))
+            # Combined-slip friction circle from true lateral utilization (measured & predicted)
+            accel_long_frac, brake_long_frac = self.ediff.compute_friction_circle_budgets(
+                v_curr=v_curr,
+                rate_limited_v=self.rate_limited_speed,
+                gyro_z_rad_s=live_gyro_z,
+                steer_rad=self.ediff.current_steer_rad,
+                mu=self.mu_val,
+            )
 
-            # Dynamic Acceleration Limits based on mu and front axle lateral reserve
+            # Dynamic Acceleration Limits based on mu and combined-slip lateral reserve
             dt_lag = TOTAL_LATENCY_STEPS * dt
-            a_limit = min(ACCEL_FWD_MAX, ACCEL_FWD_RATIO * self.mu_val * GRAVITY_G)
-            d_limit = min(BRAKE_DECEL_MAX, BRAKE_DECEL_RATIO * self.mu_val * GRAVITY_G * max_longitudinal_fraction)
+            a_limit_base = min(ACCEL_FWD_MAX, ACCEL_FWD_RATIO * self.mu_val * GRAVITY_G)
+            d_limit_base = min(BRAKE_DECEL_MAX, BRAKE_DECEL_RATIO * self.mu_val * GRAVITY_G)
+            a_limit = a_limit_base * accel_long_frac
+            d_limit = d_limit_base * brake_long_frac
+
+            accel_scale, decel_scale = self.ediff.get_slip_accel_decel_scales()
+            effective_a_limit = a_limit * accel_scale
+            effective_d_limit = d_limit * decel_scale
 
             # Dynamic Slip Envelope referencing physical latency & peak tire slip
-            slip_ratio_accel = min(0.30, max(0.08, 0.10 * (a_limit / GRAVITY_G)))
-            max_slip_lead = (a_limit * dt_lag) + (slip_ratio_accel * abs(v_curr))
+            slip_ratio_base = min(SLIP_RATIO_ACCEL_MAX, max(0.08, 0.10 * (a_limit_base / GRAVITY_G)))
+            slip_ratio_accel = max(SLIP_RATIO_MIN_CORNER, slip_ratio_base * accel_long_frac)
+            slip_ratio_brake = max(SLIP_RATIO_MIN_CORNER, slip_ratio_base * brake_long_frac)
+            max_slip_lead = max(MIN_SLIP_LEAD_MPS, (effective_a_limit * dt_lag) + (slip_ratio_accel * abs(v_curr)))
+            max_brake_slip_lag = (effective_d_limit * dt_lag) + (slip_ratio_brake * abs(v_curr))
+            nominal_slip_lead = (a_limit_base * dt_lag) + (slip_ratio_base * abs(v_curr))
 
             # Harmonized Instant Wall Hit / Collision Resync:
             # Preserves motor acceleration lead within tractive slip envelope, snapping immediately to v_curr
             # only if vehicle collides and decelerates abruptly below its dynamic slip envelope.
-            collision_threshold = max_slip_lead + 0.15
+            collision_threshold = nominal_slip_lead + 0.15
             if self.rate_limited_speed >= 0.0:
                 if v_curr < self.rate_limited_speed - collision_threshold:
                     self.rate_limited_speed = v_curr
@@ -885,25 +906,28 @@ class FolkraceVehicle:
                 if self.rate_limited_speed < v_curr:
                     self.rate_limited_speed = v_curr
 
-            accel_scale, decel_scale = self.ediff.get_slip_accel_decel_scales()
             speed_err = target_v - self.rate_limited_speed
             is_accel = (self.rate_limited_speed >= 0.0 and speed_err > 0.0) or (self.rate_limited_speed <= 0.0 and speed_err < 0.0)
 
             if is_accel:
-                max_dv = (a_limit * accel_scale) * dt
+                max_dv = effective_a_limit * dt
             else:
-                max_dv = (d_limit * decel_scale) * dt
+                max_dv = effective_d_limit * dt
 
             if abs(speed_err) <= max_dv:
                 self.rate_limited_speed = target_v
             else:
                 self.rate_limited_speed += math.copysign(max_dv, speed_err)
 
-            # Dynamic Traction Slip Envelope Clamping
+            # Dynamic Traction Slip Envelope Clamping (Accel TCS + Brake ABS Floor)
             if self.rate_limited_speed > 0.0:
                 self.rate_limited_speed = min(self.rate_limited_speed, max(0.0, v_curr) + max_slip_lead)
+                if v_curr > ABS_MIN_SPEED_MPS:
+                    self.rate_limited_speed = max(self.rate_limited_speed, v_curr - max_brake_slip_lag)
             elif self.rate_limited_speed < 0.0:
                 self.rate_limited_speed = max(self.rate_limited_speed, min(0.0, v_curr) - max_slip_lead)
+                if v_curr < -ABS_MIN_SPEED_MPS:
+                    self.rate_limited_speed = min(self.rate_limited_speed, v_curr + max_brake_slip_lag)
 
         # 6. Electronic Differential & Ground-Roll Clamped Actuation
         is_drift_active = (drift_res.get("mode", "GRIP") != "GRIP") or bool(drift_res.get("is_stabilizing", False))

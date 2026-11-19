@@ -70,6 +70,36 @@ OVERSTEER_DECEL_SCALE = 0.60    # Keep oversteer decel smooth to avoid rear weig
 UNDERSTEER_ACCEL_SCALE = 0.30   # Cut forward acceleration torque during front plow
 SLIP_SPEED_FLOOR_MPS = 0.60     # Minimum cornering speed floor during slip throttle cap
 
+# Proactive Traction Prevention Constants (1:1 mirror of ESP32 electronic_diff.cpp)
+PROACTIVE_CORNER_MU_SCALE = 0.94  # Feedforward corner speed mu scale (~97% apex speed)
+STEER_GRIP_MARGIN = 1.25          # Extra grip margin on speed-based steer cap
+PEAK_FRONT_SLIP_RAD = 0.16        # ~9.2 deg peak front slip angle allowance
+STEER_SLEW_V_LOW_MPS = 1.20       # Speed below which turn-in uses full servo slew rate
+STEER_SLEW_V_HIGH_MPS = 3.80      # Speed where turn-in slew reaches minimum taper
+STEER_SLEW_MIN_SCALE = 0.45       # Minimum turn-in servo slew scale at high speed
+ACCEL_MIN_LONG_FRACTION = 0.30    # Minimum longitudinal accel fraction in hard cornering
+BRAKE_MIN_LONG_FRACTION = 0.50    # Minimum longitudinal braking fraction in hard cornering
+GEOM_STEER_LAT_WEIGHT = 0.35      # Baseline geometric steer utilization weight
+EARLY_US_YAW_RATIO_HIGH = 0.72    # Yaw ratio where incipient understeer modulation starts
+EARLY_US_YAW_RATIO_LOW = 0.45     # Yaw ratio where incipient understeer modulation saturates
+EARLY_US_FILT_TAU_S = 0.030       # 30 ms LPF on incipient understeer & observed lateral accel
+EARLY_US_MIN_SPEED_MPS = 0.65     # Minimum speed to evaluate incipient front saturation
+EARLY_US_MIN_STEER_RAD = 0.12     # Minimum steering angle to evaluate incipient front saturation
+EARLY_US_MIN_OMEGA_REF = 1.00     # Minimum reference yaw rate for incipient front saturation
+EARLY_US_ACCEL_CUT = 0.55         # Max proactive accel cut (55%) at full incipient understeer
+EARLY_US_SPEED_FLOOR_FRAC = 0.70  # Floor on observed-grip corner cap relative to nominal v_proactive
+EARLY_OS_START_RAD_S = 0.35       # Excess yaw (with lead) where incipient oversteer starts
+EARLY_OS_FULL_RAD_S = 0.90        # Excess yaw (with lead) where incipient oversteer reaches 1.0
+EARLY_OS_YAW_DOT_LEAD_S = 0.025   # 25 ms yaw-acceleration lead for snap breakaway
+EARLY_OS_RISE_TAU_S = 0.007       # 7 ms rise LPF to reject single-tick kerb/chatter spikes
+EARLY_OS_DECAY_TAU_S = 0.025      # 25 ms smooth decay when incipient oversteer subsides
+EARLY_OS_ACCEL_CUT = 0.65         # Max proactive accel cut (65%) at full incipient oversteer
+EARLY_OS_DECEL_CUT = 0.35         # Max proactive decel softening (35%) to prevent rear snap
+SLIP_RATIO_ACCEL_MAX = 0.15       # Peak tire longitudinal slip ratio cap (15%)
+SLIP_RATIO_MIN_CORNER = 0.04      # Tightened cornering longitudinal slip ratio floor (4%)
+MIN_SLIP_LEAD_MPS = 0.12          # Absolute slip lead floor (m/s) for crisp low-speed launches & exits
+ABS_MIN_SPEED_MPS = 0.30          # Minimum speed for ABS wheel-lock floor
+
 SLIP_NORMAL = "NORMAL"
 SLIP_OVERSTEER = "OVERSTEER"
 SLIP_UNDERSTEER = "UNDERSTEER"
@@ -121,35 +151,107 @@ class ElectronicDifferential4WD:
         self._oversteer_confirm_timer = 0.0
         self._slip_entry_speed = 0.0
         self.diff_split_gain = 1.0
+        self.early_us_filt = 0.0
+        self.early_os = 0.0
+        self._a_lat_obs_filt = 0.0
 
-    def apply_traction_speed_cap(self, target_v: float, current_v: float, mu: float = TIRE_MU) -> float:
-        """Caps commanded velocity using fixed slip-entry speed ceiling when slip is confirmed."""
+    def _compute_capped_target_delta(self, target_steer_rad: float, v_for_steer: float, safe_mu: float) -> float:
+        """Caps driver steering command at high speed to kinematic grip limit plus peak front slip allowance."""
+        target_delta = max(-self.max_steer, min(float(target_steer_rad), self.max_steer))
+        steer_cap_rad = self.max_steer
+        if v_for_steer > 0.50:
+            delta_grip = math.atan((STEER_GRIP_MARGIN * safe_mu * GRAVITY_G * self.L) / (v_for_steer * v_for_steer))
+            steer_cap_rad = min(self.max_steer, delta_grip + PEAK_FRONT_SLIP_RAD)
+        return max(-steer_cap_rad, min(target_delta, steer_cap_rad))
+
+    def apply_traction_speed_cap(
+        self,
+        target_v: float,
+        current_v: float,
+        mu: float = TIRE_MU,
+        target_steer_rad: Optional[float] = None,
+        v_curr: Optional[float] = None,
+    ) -> float:
+        """Caps commanded velocity proactively by corner grip and reactively when slip is confirmed."""
         safe_mu = max(0.10, float(mu))
         effective_v = float(target_v)
-        entry_v = self._slip_entry_speed if self._slip_entry_speed > 0.0 else abs(current_v)
+        v_for_steer = abs(float(current_v))
+        if v_curr is not None:
+            v_for_steer = max(abs(float(v_curr)), v_for_steer)
+
+        steer_for_cap = abs(self.driver_steer_rad)
+        if target_steer_rad is not None:
+            capped_target_delta = self._compute_capped_target_delta(target_steer_rad, v_for_steer, safe_mu)
+            steer_for_cap = max(steer_for_cap, abs(capped_target_delta))
+
+        tan_steer_cap = abs(math.tan(steer_for_cap))
+        v_cap_total = 1e6
+        if tan_steer_cap > 0.05:
+            v_proactive = math.sqrt((PROACTIVE_CORNER_MU_SCALE * safe_mu * GRAVITY_G * self.L) / tan_steer_cap)
+            if self.early_us_filt > 0.0:
+                v_floor = max(SLIP_SPEED_FLOOR_MPS, EARLY_US_SPEED_FLOOR_FRAC * v_proactive)
+                v_obs_raw = math.sqrt((max(0.50, self._a_lat_obs_filt) * self.L) / tan_steer_cap)
+                v_obs_grip = min(v_proactive, max(v_floor, v_obs_raw))
+                v_proactive += self.early_us_filt * (v_obs_grip - v_proactive)
+            v_cap_total = max(SLIP_SPEED_FLOOR_MPS, v_proactive)
+
+        entry_v = self._slip_entry_speed if self._slip_entry_speed > 0.0 else abs(float(current_v))
         if self.slip_state == SLIP_UNDERSTEER:
             tan_driver = max(0.05, abs(math.tan(self.driver_steer_rad)))
             v_corner_max = math.sqrt((safe_mu * GRAVITY_G * self.L) / tan_driver)
-            v_cap = max(SLIP_SPEED_FLOOR_MPS, min(v_corner_max, UNDERSTEER_SPEED_SCALE * entry_v))
-            if effective_v > 0.0:
-                effective_v = min(effective_v, v_cap)
-            elif effective_v < 0.0:
-                effective_v = max(effective_v, -v_cap)
+            v_us_cap = max(SLIP_SPEED_FLOOR_MPS, min(v_corner_max, UNDERSTEER_SPEED_SCALE * entry_v))
+            v_cap_total = min(v_cap_total, v_us_cap)
         elif self.slip_state == SLIP_OVERSTEER:
-            v_cap = max(SLIP_SPEED_FLOOR_MPS, OVERSTEER_SPEED_SCALE * entry_v)
+            v_os_cap = max(SLIP_SPEED_FLOOR_MPS, OVERSTEER_SPEED_SCALE * entry_v)
+            v_cap_total = min(v_cap_total, v_os_cap)
+
+        if v_cap_total < 1e5:
             if effective_v > 0.0:
-                effective_v = min(effective_v, v_cap)
+                effective_v = min(effective_v, v_cap_total)
             elif effective_v < 0.0:
-                effective_v = max(effective_v, -v_cap)
+                effective_v = max(effective_v, -v_cap_total)
         return effective_v
 
+    def compute_friction_circle_budgets(
+        self,
+        v_curr: float,
+        rate_limited_v: float,
+        gyro_z_rad_s: float,
+        steer_rad: float,
+        mu: float = TIRE_MU,
+    ) -> tuple:
+        """Returns (accel_long_frac, brake_long_frac) from true combined-slip lateral utilization."""
+        safe_mu = max(0.10, float(mu))
+        v_ref_lat = max(abs(float(v_curr)), abs(float(rate_limited_v)))
+        a_lat_meas = abs(float(v_curr) * float(gyro_z_rad_s))
+        omega_pred = (v_ref_lat * math.tan(float(steer_rad))) / self.L
+        a_lat_pred = abs(v_ref_lat * omega_pred)
+        a_lat_eff = max(a_lat_meas, a_lat_pred)
+        mu_g = safe_mu * GRAVITY_G
+        lat_util_dyn = a_lat_eff / max(0.50, mu_g)
+        lat_util_geom = GEOM_STEER_LAT_WEIGHT * abs(math.sin(float(steer_rad)))
+        lat_util = min(0.96, max(lat_util_dyn, lat_util_geom))
+        raw_long_frac = math.sqrt(max(0.0, 1.0 - lat_util * lat_util))
+        return (
+            max(ACCEL_MIN_LONG_FRACTION, raw_long_frac),
+            max(BRAKE_MIN_LONG_FRACTION, raw_long_frac),
+        )
+
     def get_slip_accel_decel_scales(self) -> tuple:
-        """Returns (accel_scale, decel_scale) multipliers for the active slip state."""
+        """Returns (accel_scale, decel_scale) combining proactive early-slip and reactive slip states."""
+        proactive_accel = min(
+            1.0 - EARLY_US_ACCEL_CUT * self.early_us_filt,
+            1.0 - EARLY_OS_ACCEL_CUT * self.early_os,
+        )
+        proactive_decel = 1.0 - EARLY_OS_DECEL_CUT * self.early_os
+        reactive_accel = 1.0
+        reactive_decel = 1.0
         if self.slip_state == SLIP_OVERSTEER:
-            return (OVERSTEER_ACCEL_SCALE, OVERSTEER_DECEL_SCALE)
-        if self.slip_state == SLIP_UNDERSTEER:
-            return (UNDERSTEER_ACCEL_SCALE, 1.0)
-        return (1.0, 1.0)
+            reactive_accel = OVERSTEER_ACCEL_SCALE
+            reactive_decel = OVERSTEER_DECEL_SCALE
+        elif self.slip_state == SLIP_UNDERSTEER:
+            reactive_accel = UNDERSTEER_ACCEL_SCALE
+        return (min(proactive_accel, reactive_accel), min(proactive_decel, reactive_decel))
 
     def update(
         self,
@@ -171,12 +273,20 @@ class ElectronicDifferential4WD:
         safe_dt = dt if dt > 1e-5 else (1.0 / 120.0)
         safe_mu = max(0.10, float(mu))
 
-        # 1. Driver steering intent & grip-capped lagged yaw-rate reference
-        target_delta = max(-self.max_steer, min(target_steer_rad, self.max_steer))
-        max_d_driver = self.max_servo_rate * safe_dt
-        driver_diff = target_delta - self.driver_steer_rad
+        # 1. Driver steering intent (speed-capped & asymmetric slew) & yaw-rate reference
+        v_for_steer = max(abs(target_v), abs(float(v_curr)) if v_curr is not None else 0.0)
+        capped_target_delta = self._compute_capped_target_delta(target_steer_rad, v_for_steer, safe_mu)
+        is_steer_unwinding = (abs(capped_target_delta) < abs(self.driver_steer_rad)) or (
+            capped_target_delta * self.driver_steer_rad < 0.0
+        )
+        slew_scale = 1.0
+        if not is_steer_unwinding and v_for_steer > STEER_SLEW_V_LOW_MPS:
+            t = min(1.0, (v_for_steer - STEER_SLEW_V_LOW_MPS) / (STEER_SLEW_V_HIGH_MPS - STEER_SLEW_V_LOW_MPS))
+            slew_scale = 1.0 - t * (1.0 - STEER_SLEW_MIN_SCALE)
+        max_d_driver = self.max_servo_rate * slew_scale * safe_dt
+        driver_diff = capped_target_delta - self.driver_steer_rad
         if abs(driver_diff) <= max_d_driver:
-            self.driver_steer_rad = target_delta
+            self.driver_steer_rad = capped_target_delta
         else:
             self.driver_steer_rad += math.copysign(max_d_driver, driver_diff)
         self.driver_steer_rad = max(-self.max_steer, min(self.driver_steer_rad, self.max_steer))
@@ -241,7 +351,44 @@ class ElectronicDifferential4WD:
             self._prev_delta_gyro_rad += math.copysign(max_d_gyro, gyro_diff)
         delta_gyro = self._prev_delta_gyro_rad
 
-        stabilized_target = max(-self.max_steer, min(self.max_steer, target_delta + delta_gyro))
+        # 2b. Model-free incipient tire-saturation modulation (Early US / Early OS)
+        raw_early_os = 0.0
+        if abs(v_for_ref) >= V_SLIP_GATE and abs(excess_yaw) > GYRO_DEADBAND_RAD_S:
+            yaw_dot_lead = (
+                (EARLY_OS_YAW_DOT_LEAD_S * abs(self.gyro_z_dot_filt))
+                if (excess_yaw * self.gyro_z_dot_filt > 0.0)
+                else 0.0
+            )
+            excess_lead = abs(excess_yaw) + yaw_dot_lead
+            raw_early_os = max(0.0, min(1.0, (excess_lead - EARLY_OS_START_RAD_S) /
+                                        (EARLY_OS_FULL_RAD_S - EARLY_OS_START_RAD_S)))
+        tau_os = EARLY_OS_RISE_TAU_S if raw_early_os >= self.early_os else EARLY_OS_DECAY_TAU_S
+        alpha_os = safe_dt / (tau_os + safe_dt)
+        self.early_os += alpha_os * (raw_early_os - self.early_os)
+        if self.early_os < 0.005:
+            self.early_os = 0.0
+
+        v_obs = float(v_curr) if v_curr is not None else v_for_ref
+        a_lat_meas_now = abs(v_obs * gyro_z_rad_s)
+        alpha_us = safe_dt / (EARLY_US_FILT_TAU_S + safe_dt)
+        self._a_lat_obs_filt += alpha_us * (a_lat_meas_now - self._a_lat_obs_filt)
+
+        raw_early_us = 0.0
+        a_lat_req_driver = abs(v_for_ref * omega_cmd_driver)
+        if (abs(v_obs) >= EARLY_US_MIN_SPEED_MPS and
+                abs(self.driver_steer_rad) > EARLY_US_MIN_STEER_RAD and
+                abs(self.omega_ref) > EARLY_US_MIN_OMEGA_REF and
+                a_lat_req_driver > (0.35 * safe_mu * GRAVITY_G) and
+                (gyro_z_rad_s * self.omega_ref >= 0.0)):
+            yaw_ratio = abs(gyro_z_rad_s) / max(1e-4, abs(self.omega_ref))
+            if yaw_ratio < EARLY_US_YAW_RATIO_HIGH:
+                raw_early_us = max(0.0, min(1.0, (EARLY_US_YAW_RATIO_HIGH - yaw_ratio) /
+                                            (EARLY_US_YAW_RATIO_HIGH - EARLY_US_YAW_RATIO_LOW)))
+        self.early_us_filt += alpha_us * (raw_early_us - self.early_us_filt)
+        if self.early_us_filt < 0.005:
+            self.early_us_filt = 0.0
+
+        stabilized_target = max(-self.max_steer, min(self.max_steer, self.driver_steer_rad + delta_gyro))
 
         # 3. Apply servo horn slew rate limit (22.0 rad/s) through non-linear tie-rod linkage
         sin_horn_target = max(-1.0, min(1.0, math.sin(stabilized_target) / self._linkage_gain))
@@ -287,6 +434,9 @@ class ElectronicDifferential4WD:
             self._understeer_confirm_timer = 0.0
             self._oversteer_confirm_timer = 0.0
             self._slip_entry_speed = 0.0
+            self.early_us_filt = 0.0
+            self.early_os = 0.0
+            self._a_lat_obs_filt = 0.0
             self.diff_split_gain = min(1.0, self.diff_split_gain + DIFF_RISE_RATE * safe_dt)
             return {
                 "steer_left": steer_left,
@@ -353,7 +503,7 @@ class ElectronicDifferential4WD:
         if self.slip_state != SLIP_NORMAL and prev_slip != self.slip_state:
             self._slip_entry_speed = abs(v_for_ref)
 
-        target_diff_gain = 0.0 if self.slip_state == SLIP_OVERSTEER else 1.0
+        target_diff_gain = 0.0 if self.slip_state == SLIP_OVERSTEER else max(0.0, 1.0 - self.early_os)
         if target_diff_gain < self.diff_split_gain:
             self.diff_split_gain = max(target_diff_gain, self.diff_split_gain - DIFF_FADE_RATE * safe_dt)
         else:
