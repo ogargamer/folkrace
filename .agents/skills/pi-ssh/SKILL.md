@@ -5,7 +5,9 @@ description: SSH connection, command execution, and code deployment for Raspberr
 
 # Raspberry Pi 4 SSH
 
-- **SSH Target**: `robot` (`admin@robot`, uses `~/.ssh/id_ed25519` for login, sudo password: `l`)
+- **SSH Target (Old Wi-Fi)**: `robot` (`admin@robot`, `~/.ssh/config` hardcodes `192.168.20.120`, uses `~/.ssh/id_ed25519`, sudo password: `l`)
+- **SSH Target (Phone Hotspot)**: Dynamic IP (e.g., `10.88.202.59`). Because `~/.ssh/config` hardcodes `192.168.20.120` for `robot` and `robot.local` mDNS may not resolve on hotspots, connect with `ssh admin@<ip>` or `ssh -o HostName=<ip> robot`.
+- **Finding Hotspot IP (No Subnet Scan)**: Check the local ARP table (`arp -a`) for the Pi's MAC OUI (`dc-a6-32-...`, e.g. `dc-a6-32-f0-ce-c9`).
 - **Local Source**: `pi4/`
 - **Remote Target**: `/home/admin/folkrace/`
 

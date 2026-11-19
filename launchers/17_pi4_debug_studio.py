@@ -26,6 +26,7 @@
 """
 
 import os
+import re
 import sys
 import time
 import json
@@ -34,10 +35,11 @@ import shutil
 import urllib.request
 import urllib.error
 import argparse
+import concurrent.futures
 import webbrowser
 import subprocess
 from pathlib import Path
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any, Tuple, List
 
 # Ensure UTF-8 output on Windows terminals
 if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
@@ -51,28 +53,189 @@ PI4_DIR = os.path.join(ROOT_DIR, "pi4")
 CONTROLLERS_DIR = os.path.join(ROOT_DIR, "webots", "simulation", "my_project", "controllers", "tof_path_planner")
 PLANNER_GUI_SCRIPT = os.path.join(CONTROLLERS_DIR, "planner_gui.py")
 
-DEFAULT_CANDIDATES = ["192.168.20.120", "192.168.20.117", "robot", "robot.local", "127.0.0.1"]
+DEFAULT_WIFI_IPS = ["192.168.20.120", "192.168.20.117"]
+PI_MAC_PREFIXES = ("dc:a6:32", "b8:27:eb", "e4:5f:01", "d8:3a:dd", "2c:cf:67")
 REMOTE_DIR = "/home/admin/folkrace"
 PORT = 8080
 
 
-def resolve_pi_host(preferred_host: Optional[str] = None, timeout_s: float = 1.5) -> Tuple[Optional[str], Optional[str]]:
+def get_active_wifi_network() -> Tuple[Optional[str], Optional[str], Optional[str]]:
     """
-    Auto-detects the responsive hostname or IP for the Pi 4 debug server.
+    Detects the laptop's currently connected Wi-Fi SSID, local IPv4, and /24 prefix (e.g. '10.88.202.').
+    Returns (ssid, local_ip, subnet_prefix).
+    """
+    ssid: Optional[str] = None
+    local_ip: Optional[str] = None
+    iface_name: Optional[str] = None
+
+    if sys.platform == "win32":
+        try:
+            res = subprocess.run(
+                ["netsh", "wlan", "show", "interfaces"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=2,
+            )
+            if res.returncode == 0:
+                in_connected = False
+                for line in res.stdout.splitlines():
+                    if ":" not in line:
+                        continue
+                    key, val = [p.strip() for p in line.split(":", 1)]
+                    if key == "Name":
+                        iface_name = val
+                        in_connected = False
+                    elif key == "State" and val.lower() == "connected":
+                        in_connected = True
+                    elif key == "SSID" and in_connected and val:
+                        ssid = val
+                        break
+        except Exception:
+            pass
+
+        if iface_name and ssid:
+            try:
+                res = subprocess.run(
+                    ["netsh", "interface", "ip", "show", "addresses", iface_name],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                    timeout=2,
+                )
+                if res.returncode == 0:
+                    m = re.search(r"IP Address:\s*(\d+\.\d+\.\d+\.\d+)", res.stdout)
+                    if m:
+                        local_ip = m.group(1)
+            except Exception:
+                pass
+
+    if not local_ip:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.connect(("8.8.8.8", 80))
+                local_ip = s.getsockname()[0]
+        except Exception:
+            pass
+
+    subnet_prefix = ".".join(local_ip.split(".")[:3]) + "." if local_ip and local_ip.count(".") == 3 else None
+    return ssid, local_ip, subnet_prefix
+
+
+def discover_arp_pi_ips(subnet_prefix: Optional[str] = None) -> List[str]:
+    """Reads the local OS ARP cache for Raspberry Pi MAC prefixes on the active subnet."""
+    ips: List[str] = []
+    try:
+        res = subprocess.run(["arp", "-a"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=2)
+        if res.returncode != 0:
+            return ips
+        for line in res.stdout.splitlines():
+            m = re.search(r"(\d+\.\d+\.\d+\.\d+)\s+([0-9a-fA-F]{2}(?:[:-][0-9a-fA-F]{2}){5})", line)
+            if not m:
+                continue
+            ip, mac = m.group(1), m.group(2).lower().replace("-", ":")
+            if subnet_prefix and not ip.startswith(subnet_prefix):
+                continue
+            if mac.startswith(PI_MAC_PREFIXES) and ip not in ips:
+                ips.append(ip)
+    except Exception:
+        pass
+    return ips
+
+
+def _is_tcp_open(ip: str, port: int, timeout_s: float = 0.35) -> bool:
+    try:
+        with socket.create_connection((ip, port), timeout=timeout_s):
+            return True
+    except Exception:
+        return False
+
+
+def scan_wifi_subnet_for_pi(
+    subnet_prefix: str, local_ip: Optional[str], port: int, timeout_s: float = 0.8
+) -> List[str]:
+    """Probes the current Wi-Fi /24 subnet in parallel for hosts listening on `port`."""
+    targets = [f"{subnet_prefix}{i}" for i in range(1, 255) if f"{subnet_prefix}{i}" != local_ip]
+    open_ips: List[str] = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=64) as pool:
+        futures = {pool.submit(_is_tcp_open, ip, port, timeout_s): ip for ip in targets}
+        for fut in concurrent.futures.as_completed(futures):
+            ip = futures[fut]
+            try:
+                if fut.result():
+                    open_ips.append(ip)
+            except Exception:
+                pass
+    # Prioritize hosts whose MAC in the refreshed ARP cache matches a Raspberry Pi OUI
+    arp_pis = set(discover_arp_pi_ips(subnet_prefix))
+    open_ips.sort(key=lambda ip: (0 if ip in arp_pis else 1, ip))
+    return open_ips
+
+
+def get_candidate_hosts(preferred_host: Optional[str] = None, subnet_prefix: Optional[str] = None) -> List[str]:
+    """Returns deduplicated candidate hosts restricted to the active Wi-Fi subnet."""
+    if preferred_host:
+        return [preferred_host]
+    if subnet_prefix is None:
+        _, _, subnet_prefix = get_active_wifi_network()
+
+    ordered: List[str] = []
+    for ip in discover_arp_pi_ips(subnet_prefix):
+        if ip not in ordered:
+            ordered.append(ip)
+
+    for ip in DEFAULT_WIFI_IPS:
+        if (subnet_prefix is None or ip.startswith(subnet_prefix)) and ip not in ordered:
+            ordered.append(ip)
+
+    if subnet_prefix is None or subnet_prefix == "192.168.20.":
+        if "robot" not in ordered:
+            ordered.append("robot")
+
+    if "robot.local" not in ordered:
+        ordered.append("robot.local")
+    return ordered
+
+
+def format_ssh_target(host: Optional[str]) -> str:
+    """Formats a hostname or IP for SSH/SCP (uses 'robot' alias or 'admin@<ip>')."""
+    if not host or host in ("robot", "robot.local", "127.0.0.1"):
+        return "robot"
+    if "@" in host:
+        return host
+    return f"admin@{host}"
+
+
+def _probe_http_status(host: str, timeout_s: float = 1.0) -> Optional[str]:
+    url = f"http://{host}:{PORT}/api/status"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "FolkraceLauncher/1.0"})
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            if resp.status == 200:
+                return f"http://{host}:{PORT}"
+    except Exception:
+        pass
+    return None
+
+
+def resolve_pi_host(preferred_host: Optional[str] = None, timeout_s: float = 1.0) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Auto-detects the responsive hostname or IP for the Pi 4 debug server on the active Wi-Fi.
     Returns (hostname, base_url).
     """
-    candidates = [preferred_host] if preferred_host else DEFAULT_CANDIDATES
-    candidates = [c for c in candidates if c]
+    _, local_ip, subnet_prefix = get_active_wifi_network()
+    candidates = get_candidate_hosts(preferred_host, subnet_prefix=subnet_prefix)
 
     for host in candidates:
-        url = f"http://{host}:{PORT}/api/status"
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": "FolkraceLauncher/1.0"})
-            with urllib.request.urlopen(req, timeout=timeout_s) as resp:
-                if resp.status == 200:
-                    return host, f"http://{host}:{PORT}"
-        except Exception:
-            continue
+        base_url = _probe_http_status(host, timeout_s=timeout_s)
+        if base_url:
+            return host, base_url
+
+    if not preferred_host and subnet_prefix:
+        for ip in scan_wifi_subnet_for_pi(subnet_prefix, local_ip, PORT):
+            base_url = _probe_http_status(ip, timeout_s=timeout_s)
+            if base_url:
+                return ip, base_url
 
     return None, None
 
@@ -85,6 +248,43 @@ def check_ssh_connection(host: str = "robot", timeout_s: int = 3) -> bool:
         return res.returncode == 0 and "ok" in res.stdout
     except Exception:
         return False
+
+
+def resolve_ssh_host(preferred_host: Optional[str] = None, timeout_s: int = 3) -> str:
+    """Finds the first reachable SSH target on the active Wi-Fi (including dynamic hotspot IPs)."""
+    if preferred_host:
+        return format_ssh_target(preferred_host)
+
+    _, local_ip, subnet_prefix = get_active_wifi_network()
+    candidates = get_candidate_hosts(subnet_prefix=subnet_prefix)
+    seen = set()
+
+    def _try_hosts(hosts: List[str]) -> Optional[str]:
+        for host in hosts:
+            if host in ("127.0.0.1", "robot.local"):
+                continue
+            target = format_ssh_target(host)
+            if target in seen:
+                continue
+            seen.add(target)
+            probe_ip = "192.168.20.120" if host == "robot" else host
+            if not _is_tcp_open(probe_ip, 22, timeout_s=0.4):
+                continue
+            if check_ssh_connection(target, timeout_s=timeout_s):
+                return target
+        return None
+
+    found = _try_hosts(candidates)
+    if found:
+        return found
+
+    if subnet_prefix:
+        scanned = scan_wifi_subnet_for_pi(subnet_prefix, local_ip, 22)
+        found = _try_hosts(scanned)
+        if found:
+            return found
+
+    return "robot"
 
 
 def query_api_json(base_url: str, endpoint: str, timeout_s: float = 3.0) -> Optional[Dict[str, Any]]:
@@ -444,11 +644,11 @@ def run_full_verification(base_url: str, ssh_host: str = "robot") -> bool:
     tests = []
 
     # 1. SSH Check
-    ssh_target = "robot"
+    ssh_target = format_ssh_target(ssh_host)
     t0 = time.perf_counter()
     ssh_ok = check_ssh_connection(ssh_target, timeout_s=6)
     dt_ssh = (time.perf_counter() - t0) * 1000
-    tests.append(("SSH Connectivity (port 22)", ssh_ok, f"{dt_ssh:.1f} ms", f"Connected as admin@{ssh_target}"))
+    tests.append(("SSH Connectivity (port 22)", ssh_ok, f"{dt_ssh:.1f} ms", f"Connected as {ssh_target}"))
     if not ssh_ok:
         all_passed = False
 
@@ -626,14 +826,14 @@ def main():
 
     # 1. Handle code sync if requested
     if args.sync:
-        ssh_target = args.host or "robot"
+        ssh_target = resolve_ssh_host(args.host)
         sync_pi_stack(ssh_target)
 
     # 2. Handle remote restart/stop if requested
     if args.restart:
-        restart_remote_service(args.host or "robot")
+        restart_remote_service(resolve_ssh_host(args.host))
     if args.stop:
-        stop_remote_service(args.host or "robot")
+        stop_remote_service(resolve_ssh_host(args.host))
         return
 
     # 2b. Handle offline local --replay before requiring Pi connectivity
@@ -657,14 +857,20 @@ def main():
         return
 
     # 3. Auto-detect Pi host and verify HTTP server
+    wifi_ssid, _, wifi_prefix = get_active_wifi_network()
+    if wifi_ssid and wifi_prefix:
+        print(f"[Launcher] Active Wi-Fi: '{wifi_ssid}' ({wifi_prefix}0/24)")
+    elif wifi_prefix:
+        print(f"[Launcher] Active Network: {wifi_prefix}0/24")
     print("[Launcher] Auto-detecting Raspberry Pi 4 debug server...")
     active_host, base_url = resolve_pi_host(args.host)
 
     if not base_url:
         print(f"[Warning] Debug server not responding at port {PORT} on candidate hosts.")
-        print(f"[Launcher] Attempting to auto-start Folkrace service via SSH on 'robot'...")
+        ssh_target = resolve_ssh_host(args.host)
+        print(f"[Launcher] Attempting to auto-start Folkrace service via SSH on '{ssh_target}'...")
         try:
-            restart_remote_service("robot")
+            restart_remote_service(ssh_target)
             active_host, base_url = resolve_pi_host(args.host, timeout_s=3.0)
         except Exception as e:
             print(f"[Error] Could not auto-start remote service: {e}")
@@ -697,7 +903,7 @@ def main():
         return
 
     if args.verify:
-        run_full_verification(base_url, ssh_host=active_host if "robot" in active_host else "robot")
+        run_full_verification(base_url, ssh_host=format_ssh_target(active_host))
         return
 
     if args.profile or args.measure_browser:
