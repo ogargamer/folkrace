@@ -34,6 +34,8 @@ Hardware-dependent diagnostic launchers explicitly denote their target hardware 
 | **16** | **ESP32** | [`16_esp32_4tof_gui.py`](file:///c:/Users/nurmi/Documents/Folkrace/launchers/16_esp32_4tof_gui.py) | Physical ESP32 quad VL53L8CX live 20-byte binary stream viewer displaying 1x4 2D LiDAR ray distance strips. | ESP32-S3 (ToF Hub) |
 | **17** | **Pi 4** | [`17_pi4_debug_studio.py`](file:///c:/Users/nurmi/Documents/Folkrace/launchers/17_pi4_debug_studio.py) | Raspberry Pi 4 Dual-Core Debug Studio: Web Tactical Mission Control & SQLite Black Box with frame-by-frame time-travel scrubbing. | Pi 4 / Browser |
 | **18** | **ESP32** | [`18_esp32_imu_calib_gui.py`](file:///c:/Users/nurmi/Documents/Folkrace/launchers/18_esp32_imu_calib_gui.py) | Easy 3-step BNO086 IMU Heading & Mounting Calibration GUI (live top-down car compass, Tare All/Yaw, and permanent flash save). | ESP32-S3 (Main) |
+| **19** | **Pi 4 / Tool** | [`19_local_flight_replay.py`](file:///c:/Users/nurmi/Documents/Folkrace/launchers/19_local_flight_replay.py) | Offline 60 Hz SQLite flight log replay viewer (plus `--digest` and `--export` AI analysis modes). | Workstation / Browser |
+| **20** | **Pi 4 / AI** | [`20_ai_debug_suite.py`](file:///c:/Users/nurmi/Documents/Folkrace/launchers/20_ai_debug_suite.py) | AI Flight Debugging Suite: automated diagnostics, incident episode clustering, frame windows, ASCII ToF/MPC radar, A/B run comparison, and CSV/NPZ/JSON/Markdown export. | Workstation / CLI |
 
 ---
 
@@ -77,3 +79,13 @@ python launchers/1_champion_preview.py
 * Automatically verifies and builds `curvilinear_sl_mpc.dll` if needed.
 * Launches Webots with the dynamic obstacle world (`track_racing.wbt`).
 * Starts the companion 2D tactical radar and thought matrix telemetry viewer.
+
+### AI Flight Recording Analysis & Debugging:
+```bash
+python launchers/20_ai_debug_suite.py list
+python launchers/20_ai_debug_suite.py digest
+python launchers/20_ai_debug_suite.py episodes
+python launchers/20_ai_debug_suite.py frame 500
+```
+* Works offline on both v1 and v2 `.db` flight recordings in `Downloads/` and `data/recordings/`.
+* Runs automated powertrain, ToF sensor, timing, ramp-bias, and safety diagnostics, clusters incidents, renders 2D top-down ASCII ToF/MPC radar, compares two runs, and exports `report.md` / `digest.json` / `frames.csv` / `arrays.npz`.

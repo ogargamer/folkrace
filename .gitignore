@@ -27,5 +27,6 @@ temp/
 *.tmp
 compile_commands.json
 data/recordings/
+data/ai_exports/
 *.db
 *.sqlite

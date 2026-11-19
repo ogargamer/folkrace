@@ -466,8 +466,12 @@ def run_local_replay_server(db_path: str, prefer_app_window: bool = True, open_b
 
     if PI4_DIR not in sys.path:
         sys.path.insert(0, PI4_DIR)
-    from debug_recorder import TelemetryLogReader
+    tools_dir = os.path.join(ROOT_DIR, "tools")
+    if tools_dir not in sys.path:
+        sys.path.insert(0, tools_dir)
+    from debug_recorder import TelemetryLogReader, add_label
     from debug_server import build_live_binary_packet
+    from flight_analyzer import FlightSession
 
     html_path = os.path.join(PI4_DIR, "web_debug_gui.html")
     state_lock = threading.Lock()
@@ -476,6 +480,7 @@ def run_local_replay_server(db_path: str, prefer_app_window: bool = True, open_b
         "reader": TelemetryLogReader(db_path),
         "summary": None,
         "bounds": (1, 0, 0),
+        "flight_session": None,
     }
 
     def _reload_db(new_path: str):
@@ -488,8 +493,21 @@ def run_local_replay_server(db_path: str, prefer_app_window: bool = True, open_b
             replay_state["reader"] = new_reader
             replay_state["summary"] = summary
             replay_state["bounds"] = bounds
+            replay_state["flight_session"] = None
         if old_reader and hasattr(old_reader, "close"):
             old_reader.close()
+
+    def _get_flight_session() -> FlightSession:
+        with state_lock:
+            sess = replay_state.get("flight_session")
+            cur_db = replay_state["db_path"]
+        if sess is None or sess.db_path != cur_db:
+            new_sess = FlightSession(cur_db)
+            with state_lock:
+                if replay_state["db_path"] == cur_db:
+                    replay_state["flight_session"] = new_sess
+                sess = replay_state.get("flight_session") or new_sess
+        return sess
 
     _reload_db(db_path)
 
@@ -573,6 +591,20 @@ def run_local_replay_server(db_path: str, prefer_app_window: bool = True, open_b
                 with state_lock:
                     reader = replay_state["reader"]
                 self._send_json(reader.get_anomalies())
+            elif path == "/api/ai_report":
+                try:
+                    self._send_json(_get_flight_session().build_digest())
+                except Exception as e:
+                    self._send_json({"error": str(e)}, 500)
+            elif path == "/api/episodes":
+                try:
+                    self._send_json(_get_flight_session().extract_episodes())
+                except Exception as e:
+                    self._send_json({"error": str(e)}, 500)
+            elif path == "/api/labels":
+                with state_lock:
+                    reader = replay_state["reader"]
+                self._send_json(reader.get_labels())
             elif path == "/api/download":
                 with state_lock:
                     cur_db = replay_state["db_path"]
@@ -609,6 +641,28 @@ def run_local_replay_server(db_path: str, prefer_app_window: bool = True, open_b
                 try:
                     _reload_db(target_path)
                     self._send_json({"status": "ok", "db_path": target_path})
+                except Exception as e:
+                    self._send_json({"error": str(e)}, 400)
+            elif path == "/api/labels":
+                content_len = int(self.headers.get("Content-Length", 0))
+                if content_len <= 0:
+                    self._send_json({"error": "Empty body"}, 400)
+                    return
+                try:
+                    payload = json.loads(self.rfile.read(content_len).decode("utf-8"))
+                    start_f = int(payload["start_frame"])
+                    end_f = int(payload["end_frame"])
+                    tag = str(payload["tag"]).strip()
+                    if not tag:
+                        raise ValueError("tag must be non-empty")
+                    note = str(payload.get("note", ""))
+                    author = str(payload.get("author", "user"))
+                    with state_lock:
+                        cur_db = replay_state["db_path"]
+                    lbl_id = add_label(cur_db, start_f, end_f, tag, note=note, author=author)
+                    with state_lock:
+                        replay_state["flight_session"] = None
+                    self._send_json({"status": "ok", "label_id": lbl_id})
                 except Exception as e:
                     self._send_json({"error": str(e)}, 400)
             else:

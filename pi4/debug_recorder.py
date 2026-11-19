@@ -20,14 +20,18 @@
 """
 
 import os
+import re
 import sys
 import time
 import json
+import math
 import zlib
 import shutil
 import sqlite3
 import datetime
 import threading
+import subprocess
+from collections import deque
 from pathlib import Path
 import queue
 from typing import Dict, List, Optional, Tuple, Any
@@ -44,6 +48,192 @@ class AnomalyFlag:
     PROXIMITY = 1 << 2      # 0x04: Obstacle dangerously close
     LATENCY_SPIKE = 1 << 3  # 0x08: Planner frame exceeded 16.6ms
     STEER_JERK = 1 << 4     # 0x10: Severe steering rate / servo jump
+    SHIELD = 1 << 5         # 0x20: Safety shield active / reverse suggested
+    WRONG_WAY = 1 << 6      # 0x40: Anti-wrong-way watchdog triggered
+    LINK_DROP = 1 << 7      # 0x80: MCU / ToF / STM32 / IMU link offline
+
+
+def _open_sqlite_ro(db_path: str) -> sqlite3.Connection:
+    """Opens SQLite database read-only, falling back cleanly on Windows WAL locks."""
+    try:
+        uri = Path(db_path).resolve().as_uri() + "?mode=ro"
+        conn = sqlite3.connect(uri, uri=True)
+        # Probe schema read to catch WAL/SHM read-only permission quirks early
+        conn.execute("SELECT name FROM sqlite_master LIMIT 1;")
+        return conn
+    except Exception:
+        return sqlite3.connect(db_path)
+
+
+def _extract_f_tof_min(telemetry: Dict[str, Any]) -> float:
+    """Extracts minimum front/ray ToF distance (m), falling back to tof_ranges / tof_ranges_raw."""
+    for key in ("f_tof", "f_tof_raw"):
+        val = telemetry.get(key)
+        if val is not None:
+            try:
+                fval = float(val)
+                if math.isfinite(fval):
+                    return fval
+            except (TypeError, ValueError):
+                pass
+
+    if telemetry.get("mcu_tof_connected", True) is not False and telemetry.get("tof_front_ok", True) is not False:
+        for arr_key in ("tof_ranges", "tof_ranges_raw"):
+            arr = telemetry.get(arr_key)
+            if isinstance(arr, (list, tuple)) and arr:
+                valid = []
+                for x in arr:
+                    try:
+                        fx = float(x)
+                        if math.isfinite(fx) and fx > 0.001:
+                            valid.append(fx)
+                    except (TypeError, ValueError):
+                        pass
+                if valid:
+                    return min(valid)
+    return 1.0
+
+
+def _collect_session_metadata() -> Tuple[str, str]:
+    """Collects best-effort git commit hash, vehicle_config.json, and planner constants once at init."""
+    git_commit = ""
+    repo_candidates = [os.path.abspath(os.path.join(BASE_DIR, "..")), BASE_DIR]
+    for repo_dir in repo_candidates:
+        if os.path.exists(os.path.join(repo_dir, ".git")):
+            try:
+                res = subprocess.run(
+                    ["git", "rev-parse", "--short", "HEAD"],
+                    cwd=repo_dir,
+                    capture_output=True,
+                    text=True,
+                    timeout=0.5,
+                )
+                if res.returncode == 0:
+                    git_commit = res.stdout.strip()
+                    break
+            except Exception:
+                pass
+
+    meta: Dict[str, Any] = {}
+    cfg_candidates = [
+        os.path.join(BASE_DIR, "..", "config", "vehicle_config.json"),
+        os.path.join(BASE_DIR, "config", "vehicle_config.json"),
+    ]
+    for cfg_path in cfg_candidates:
+        if os.path.isfile(cfg_path):
+            try:
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    meta["vehicle_config"] = json.load(f)
+                break
+            except Exception:
+                pass
+
+    # Best-effort capture of planner_config scalar constants
+    try:
+        for p in (os.path.abspath(os.path.join(BASE_DIR, "..")), BASE_DIR):
+            if os.path.isdir(os.path.join(p, "brain")) and p not in sys.path:
+                sys.path.insert(0, p)
+        import importlib
+        pcfg = importlib.import_module("brain.planner_config")
+        planner_consts: Dict[str, Any] = {}
+        for name in dir(pcfg):
+            if not name.isupper() or name.startswith("_"):
+                continue
+            val = getattr(pcfg, name)
+            if isinstance(val, (bool, int, str)):
+                planner_consts[name] = val
+            elif isinstance(val, float) and math.isfinite(val):
+                planner_consts[name] = val
+        if planner_consts:
+            meta["planner_config"] = planner_consts
+    except Exception:
+        pass
+
+    try:
+        config_json = json.dumps(meta)
+    except Exception:
+        config_json = "{}"
+    return git_commit, config_json
+
+
+_LOG_ERR_RE = re.compile(
+    r"(\[(?:ERR|ERROR|WARN|FAIL)\]|"
+    r"\b(?:FAIL|FAILED|FAILURE|FAULT|FATAL|CRITICAL|FAILSAFE|DISCONN\w*|TIMEOUT|LINK\s+LOST)\b|"
+    r"\b(?:ERR(?:OR)?|OVERRUNS?)\s*[:=]\s*[1-9]\d*)"
+)
+
+
+def _classify_log_severity(msg: str) -> str:
+    """Classifies an MCU/system log line without false-matching 'Yaw Error' or 'Err: 0'."""
+    upper_msg = msg.upper()
+    if "⚠" in msg or "🛑" in msg or _LOG_ERR_RE.search(upper_msg):
+        return "ERROR"
+    return "INFO"
+
+
+def _decode_anomaly_flags(flags: int) -> List[str]:
+    """Converts AnomalyFlag bitmask into human-readable labels."""
+    labels: List[str] = []
+    if flags & AnomalyFlag.SLIP:
+        labels.append("SLIP/TRACTION")
+    if flags & AnomalyFlag.EMERGENCY:
+        labels.append("EMERGENCY/RECOVERY")
+    if flags & AnomalyFlag.PROXIMITY:
+        labels.append("NEAR_COLLISION")
+    if flags & AnomalyFlag.LATENCY_SPIKE:
+        labels.append("LATENCY_SPIKE")
+    if flags & AnomalyFlag.STEER_JERK:
+        labels.append("STEER_JERK")
+    if flags & AnomalyFlag.SHIELD:
+        labels.append("SHIELD_EVADE")
+    if flags & AnomalyFlag.WRONG_WAY:
+        labels.append("WRONG_WAY")
+    if flags & AnomalyFlag.LINK_DROP:
+        labels.append("LINK_DROP")
+    return labels
+
+
+def add_label(
+    db_path: str,
+    start_frame: int,
+    end_frame: int,
+    tag: str,
+    note: str = "",
+    author: str = "ai",
+) -> int:
+    """Writes a frame-range label into a v1 or v2 SQLite recording."""
+    if not os.path.exists(db_path):
+        raise FileNotFoundError(f"Flight database not found: {db_path}")
+    lo, hi = (int(start_frame), int(end_frame))
+    if lo > hi:
+        lo, hi = hi, lo
+    conn = sqlite3.connect(db_path)
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS labels (
+                label_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                start_frame INTEGER NOT NULL,
+                end_frame INTEGER NOT NULL,
+                tag TEXT NOT NULL,
+                note TEXT DEFAULT '',
+                author TEXT DEFAULT 'user',
+                created_at TEXT NOT NULL
+            );
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_labels_range ON labels(start_frame, end_frame);")
+        created_at = datetime.datetime.now().isoformat()
+        cur.execute(
+            """
+            INSERT INTO labels (start_frame, end_frame, tag, note, author, created_at)
+            VALUES (?, ?, ?, ?, ?, ?);
+            """,
+            (lo, hi, str(tag), str(note), str(author), created_at),
+        )
+        conn.commit()
+        return int(cur.lastrowid or 0)
+    finally:
+        conn.close()
 
 
 class TelemetryFlightRecorder:
@@ -96,6 +286,17 @@ class TelemetryFlightRecorder:
         self.dropped_frames = 0
         self.last_steer_deg = 0.0
 
+        # State tracking for compact events table
+        self._prev_mode: Optional[str] = None
+        self._prev_shield_active: int = 0
+        self._prev_wrong_way: int = 0
+        self._prev_on_ramp: int = 0
+        self._prev_link_state: Optional[Tuple[bool, bool, bool, bool, bool]] = None
+        self._seen_mcu_logs: deque = deque(maxlen=200)
+
+        # Capture provenance & config once at session start
+        self.git_commit, self.config_json = _collect_session_metadata()
+
         # Auto-clean old sessions to prevent disk bloat
         self._cleanup_old_session_files()
 
@@ -114,7 +315,7 @@ class TelemetryFlightRecorder:
         cur.execute("PRAGMA cache_size = -64000;")  # 64 MB cache
         cur.execute("PRAGMA auto_vacuum = INCREMENTAL;")
 
-        # Sessions table
+        # Sessions table (v2 adds schema_version, git_commit, config_json)
         cur.execute("""
             CREATE TABLE IF NOT EXISTS session_info (
                 session_id TEXT PRIMARY KEY,
@@ -123,7 +324,10 @@ class TelemetryFlightRecorder:
                 end_timestamp REAL,
                 total_frames INTEGER,
                 driving_seconds REAL,
-                notes TEXT
+                notes TEXT,
+                schema_version INTEGER DEFAULT 2,
+                git_commit TEXT DEFAULT '',
+                config_json TEXT DEFAULT '{}'
             );
         """)
 
@@ -161,7 +365,42 @@ class TelemetryFlightRecorder:
                 osqp_iters INTEGER,
                 f_tof_min REAL,
                 anomaly_flags INTEGER,
-                payload_compressed BLOB
+                payload_compressed BLOB,
+                v_tgt REAL,
+                step_ms REAL,
+                scout_ms REAL,
+                servo_pulse_us INTEGER,
+                status TEXT,
+                shield_active INTEGER,
+                is_on_ramp INTEGER,
+                is_wrong_way INTEGER
+            );
+        """)
+
+        # Events table: state transitions and deduplicated MCU logs
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS events (
+                event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                frame_id INTEGER,
+                timestamp REAL,
+                sim_time REAL,
+                event_type TEXT,
+                severity TEXT,
+                label TEXT,
+                details_json TEXT
+            );
+        """)
+
+        # Labels table: human and AI annotations
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS labels (
+                label_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                start_frame INTEGER NOT NULL,
+                end_frame INTEGER NOT NULL,
+                tag TEXT NOT NULL,
+                note TEXT DEFAULT '',
+                author TEXT DEFAULT 'user',
+                created_at TEXT NOT NULL
             );
         """)
 
@@ -170,12 +409,24 @@ class TelemetryFlightRecorder:
         cur.execute("CREATE INDEX IF NOT EXISTS idx_frames_driving ON frames(driving_time);")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_frames_anomaly ON frames(anomaly_flags);")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_frames_mode ON frames(mode);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_events_frame ON events(frame_id);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_labels_range ON labels(start_frame, end_frame);")
 
         # Insert session info record
         cur.execute("""
-            INSERT OR REPLACE INTO session_info (session_id, created_at, start_timestamp, total_frames, notes)
-            VALUES (?, ?, ?, 0, 'Folkrace Autonomous Flight Log');
-        """, (self.session_id, datetime.datetime.now().isoformat(), time.time()))
+            INSERT OR REPLACE INTO session_info (
+                session_id, created_at, start_timestamp, total_frames, driving_seconds,
+                notes, schema_version, git_commit, config_json
+            )
+            VALUES (?, ?, ?, 0, 0.0, 'Folkrace Autonomous Flight Log', 2, ?, ?);
+        """, (
+            self.session_id,
+            datetime.datetime.now().isoformat(),
+            time.time(),
+            self.git_commit,
+            self.config_json,
+        ))
 
         conn.commit()
         conn.close()
@@ -201,9 +452,9 @@ class TelemetryFlightRecorder:
                 cur = conn.cursor()
                 cur.execute("""
                     UPDATE session_info
-                    SET end_timestamp = ?, total_frames = ?
+                    SET end_timestamp = ?, total_frames = ?, driving_seconds = ?
                     WHERE session_id = ?;
-                """, (time.time(), self.total_frames_recorded, self.session_id))
+                """, (time.time(), self.total_frames_recorded, round(self.total_driving_seconds, 2), self.session_id))
                 conn.commit()
                 conn.close()
             except Exception as e:
@@ -241,18 +492,21 @@ class TelemetryFlightRecorder:
         if any(x in mode_str for x in ("PIVOT", "REVERSE", "DECEL", "STUCK", "EMERGENCY")):
             flags |= AnomalyFlag.EMERGENCY
 
-        # 3. Dangerous close contact (< 0.12m)
-        f_tof_val = telemetry.get("f_tof")
-        f_tof = float(1.0 if f_tof_val is None else f_tof_val)
-        if f_tof < 0.12:
+        # 3. Dangerous close contact (< 0.12m) using f_tof or tof_ranges_raw fallback
+        f_tof = _extract_f_tof_min(telemetry)
+        if (
+            mode_str not in ("STOPPED", "STANDBY", "OFFLINE")
+            and telemetry.get("mcu_tof_connected", True) is not False
+            and 0.001 < f_tof < 0.12
+        ):
             flags |= AnomalyFlag.PROXIMITY
 
         # 4. Planner latency spike (> 16.6ms)
         plan_ms_val = telemetry.get("plan_ms")
-        if plan_ms_val is None:
-            plan_ms_val = telemetry.get("step_ms")
+        step_ms_val = telemetry.get("step_ms")
         plan_ms = float(0.0 if plan_ms_val is None else plan_ms_val)
-        if plan_ms > 16.6:
+        step_ms = float(0.0 if step_ms_val is None else step_ms_val)
+        if plan_ms > 16.6 or step_ms > 16.6:
             flags |= AnomalyFlag.LATENCY_SPIKE
 
         # 5. Severe steering jerk
@@ -263,6 +517,30 @@ class TelemetryFlightRecorder:
         if abs(steer_deg - self.last_steer_deg) > 25.0:
             flags |= AnomalyFlag.STEER_JERK
         self.last_steer_deg = steer_deg
+
+        # 6. Safety shield intervention
+        shield = telemetry.get("shield")
+        if isinstance(shield, dict) and (shield.get("active") or shield.get("reverse_suggested")):
+            flags |= AnomalyFlag.SHIELD
+
+        # 7. Wrong-way watchdog
+        if telemetry.get("is_wrong_way"):
+            flags |= AnomalyFlag.WRONG_WAY
+
+        # 8. MCU / sensor link drop while planner/driving active
+        is_active_run = bool(telemetry.get("planner_running")) or (
+            mode_str not in ("STOPPED", "STANDBY", "OFFLINE", "IDLE", "WARMUP", "PAUSED")
+        )
+        if is_active_run:
+            flags_dict = telemetry.get("flags") if isinstance(telemetry.get("flags"), dict) else {}
+            if (
+                telemetry.get("mcu_main_connected") is False
+                or telemetry.get("mcu_tof_connected") is False
+                or flags_dict.get("stm32_front") is False
+                or flags_dict.get("stm32_rear") is False
+                or flags_dict.get("imu_online") is False
+            ):
+                flags |= AnomalyFlag.LINK_DROP
 
         return flags
 
@@ -300,12 +578,128 @@ class TelemetryFlightRecorder:
 
         conn.close()
 
+    def _collect_frame_events(
+        self,
+        frame_id: int,
+        ts: float,
+        sim_time: float,
+        mode: str,
+        telem: Dict[str, Any],
+        shield_dict: Dict[str, Any],
+        shield_active: int,
+        is_on_ramp: int,
+        is_wrong_way: int,
+    ) -> List[Tuple[int, float, float, str, str, str, str]]:
+        """Collects state-transition and deduplicated MCU log rows for the events table."""
+        ev_rows: List[Tuple[int, float, float, str, str, str, str]] = []
+
+        if self._prev_mode is not None and mode != self._prev_mode:
+            ev_rows.append((
+                frame_id, ts, sim_time, "MODE_CHANGE", "INFO",
+                f"{self._prev_mode} -> {mode}",
+                json.dumps({"from": self._prev_mode, "to": mode}),
+            ))
+        self._prev_mode = mode
+
+        if shield_active != self._prev_shield_active:
+            chosen = shield_dict.get("chosen_name") or ""
+            ev_rows.append((
+                frame_id, ts, sim_time, "SHIELD",
+                "WARN" if shield_active else "INFO",
+                f"SHIELD_ON:{chosen}" if shield_active else "SHIELD_OFF",
+                json.dumps({
+                    "active": bool(shield_active),
+                    "chosen_name": chosen,
+                    "reverse_suggested": bool(shield_dict.get("reverse_suggested")),
+                }),
+            ))
+        self._prev_shield_active = shield_active
+
+        if is_wrong_way != self._prev_wrong_way:
+            ev_rows.append((
+                frame_id, ts, sim_time, "WRONG_WAY",
+                "CRITICAL" if is_wrong_way else "INFO",
+                "WRONG_WAY_ON" if is_wrong_way else "WRONG_WAY_OFF",
+                "{}",
+            ))
+        self._prev_wrong_way = is_wrong_way
+
+        if is_on_ramp != self._prev_on_ramp:
+            ev_rows.append((
+                frame_id, ts, sim_time, "RAMP", "INFO",
+                "RAMP_ON" if is_on_ramp else "RAMP_OFF",
+                json.dumps({"pitch_deg": float(telem.get("pitch_deg") or 0.0)}),
+            ))
+        self._prev_on_ramp = is_on_ramp
+
+        flags_dict = telem.get("flags") if isinstance(telem.get("flags"), dict) else {}
+        link_state = (
+            telem.get("mcu_main_connected") is not False,
+            telem.get("mcu_tof_connected") is not False,
+            flags_dict.get("stm32_front") is not False,
+            flags_dict.get("stm32_rear") is not False,
+            flags_dict.get("imu_online") is not False,
+        )
+        if self._prev_link_state is None:
+            if not all(link_state):
+                ev_rows.append((
+                    frame_id, ts, sim_time, "LINK", "CRITICAL", "LINK_DEGRADED",
+                    json.dumps({
+                        "mcu_main": link_state[0],
+                        "mcu_tof": link_state[1],
+                        "stm32_front": link_state[2],
+                        "stm32_rear": link_state[3],
+                        "imu_online": link_state[4],
+                    }),
+                ))
+        elif link_state != self._prev_link_state:
+            all_ok = all(link_state)
+            ev_rows.append((
+                frame_id, ts, sim_time, "LINK",
+                "INFO" if all_ok else "CRITICAL",
+                "LINK_RESTORED" if all_ok else "LINK_DROP",
+                json.dumps({
+                    "mcu_main": link_state[0],
+                    "mcu_tof": link_state[1],
+                    "stm32_front": link_state[2],
+                    "stm32_rear": link_state[3],
+                    "imu_online": link_state[4],
+                }),
+            ))
+        self._prev_link_state = link_state
+
+        raw_logs: List[str] = []
+        mcu_log = telem.get("mcu_log")
+        if isinstance(mcu_log, list):
+            for entry in mcu_log:
+                if entry is not None:
+                    s = str(entry).strip()
+                    if s:
+                        raw_logs.append(s)
+        mcu_msg = telem.get("mcu_msg")
+        if mcu_msg is not None:
+            s_msg = str(mcu_msg).strip()
+            if s_msg and s_msg not in raw_logs:
+                raw_logs.append(s_msg)
+
+        for msg in raw_logs:
+            if msg in self._seen_mcu_logs:
+                continue
+            self._seen_mcu_logs.append(msg)
+            sev = _classify_log_severity(msg)
+            ev_rows.append((
+                frame_id, ts, sim_time, "MCU_LOG", sev, msg[:160],
+                json.dumps({"msg": msg}),
+            ))
+        return ev_rows
+
     def _flush_batch(self, cur: sqlite3.Cursor, conn: sqlite3.Connection, batch: List[Any]):
-        """Flushes a batch of telemetry frames in a single transaction."""
+        """Flushes a batch of telemetry frames and events in a single transaction."""
         if not batch:
             return
 
         rows = []
+        event_rows: List[Tuple[int, float, float, str, str, str, str]] = []
         for item in batch:
             if isinstance(item, tuple):
                 telem, raw_b = item
@@ -365,8 +759,19 @@ class TelemetryFlightRecorder:
             if iters_raw is None:
                 iters_raw = telem.get("osqp_iters")
             osqp_iters = int(0 if iters_raw is None else iters_raw)
-            f_tof_raw = telem.get("f_tof")
-            f_tof_min = float(1.0 if f_tof_raw is None else f_tof_raw)
+            f_tof_min = _extract_f_tof_min(telem)
+
+            # v2 scalar promotions
+            v_tgt_raw = telem.get("v_tgt")
+            v_tgt = float(v_cmd if v_tgt_raw is None else v_tgt_raw)
+            step_ms = float(telem.get("step_ms") or 0.0)
+            scout_ms = float(telem.get("scout_ms") or 0.0)
+            servo_pulse_us = int(telem.get("servo_pulse_us") or 1510)
+            status_str = str(telem.get("status") or "")
+            shield_dict = telem.get("shield") if isinstance(telem.get("shield"), dict) else {}
+            shield_active = 1 if (shield_dict.get("active") or shield_dict.get("reverse_suggested")) else 0
+            is_on_ramp = 1 if telem.get("is_on_ramp") else 0
+            is_wrong_way = 1 if telem.get("is_wrong_way") else 0
 
             anomaly_flags = self.detect_anomalies(telem)
 
@@ -384,18 +789,43 @@ class TelemetryFlightRecorder:
                 fl_act, fr_act, rl_act, rr_act,
                 yaw_deg, pitch_deg, roll_deg, gyro_z, accel_fwd, accel_lat,
                 slip_state, slip_ratio, plan_ms, map_ms, osqp_iters, f_tof_min,
-                anomaly_flags, compressed_payload
+                anomaly_flags, compressed_payload,
+                v_tgt, step_ms, scout_ms, servo_pulse_us, status_str,
+                shield_active, is_on_ramp, is_wrong_way,
             ))
+            event_rows.extend(
+                self._collect_frame_events(
+                    frame_id, ts, sim_time, mode, telem, shield_dict,
+                    shield_active, is_on_ramp, is_wrong_way,
+                )
+            )
             self.total_frames_recorded += 1
             self.total_bytes_written += len(compressed_payload)
 
         try:
             cur.executemany("""
-                INSERT INTO frames VALUES (
+                INSERT INTO frames (
+                    frame_id, timestamp, sim_time, driving_time, is_driving, mode,
+                    v_cmd, v_real, steer_cmd_deg, steer_actual_deg,
+                    fl_rpm_cmd, fr_rpm_cmd, rl_rpm_cmd, rr_rpm_cmd,
+                    fl_rpm_act, fr_rpm_act, rl_rpm_act, rr_rpm_act,
+                    yaw_deg, pitch_deg, roll_deg, gyro_z, accel_fwd, accel_lat,
+                    slip_state, slip_ratio, plan_ms, map_ms, osqp_iters, f_tof_min,
+                    anomaly_flags, payload_compressed,
+                    v_tgt, step_ms, scout_ms, servo_pulse_us, status,
+                    shield_active, is_on_ramp, is_wrong_way
+                ) VALUES (
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?, ?
                 );
             """, rows)
+            if event_rows:
+                cur.executemany("""
+                    INSERT INTO events (
+                        frame_id, timestamp, sim_time, event_type, severity, label, details_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?);
+                """, event_rows)
             conn.commit()
 
             # Lazy auto-deletion check: prunes oldest frames to maintain 30-min driving buffer
@@ -429,6 +859,7 @@ class TelemetryFlightRecorder:
                 cutoff_frame_id = row[0]
                 cur.execute("DELETE FROM frames WHERE frame_id < ?;", (cutoff_frame_id,))
                 pruned = cur.rowcount
+                cur.execute("DELETE FROM events WHERE frame_id < ?;", (cutoff_frame_id,))
                 conn.commit()
                 if pruned > 0:
                     self.pruned_frames_count += pruned
@@ -498,7 +929,7 @@ class TelemetryLogReader:
         """Returns a thread-local read-only SQLite connection for fast 60 Hz playback."""
         conn = getattr(self._local, "conn", None)
         if conn is None:
-            conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
+            conn = _open_sqlite_ro(self.db_path)
             self._local.conn = conn
         return conn
 
@@ -521,13 +952,42 @@ class TelemetryLogReader:
             return (1, 0, 0)
         return (int(row[0] or 1), int(row[1] or 0), int(row[2] or 0))
 
+    def get_session_info(self) -> Dict[str, Any]:
+        """Returns full session_info metadata (backward-compatible with v1 databases)."""
+        conn = _open_sqlite_ro(self.db_path)
+        try:
+            cur = conn.cursor()
+            cols = [r[1] for r in cur.execute("PRAGMA table_info(session_info);").fetchall()]
+            if not cols:
+                return {"schema_version": 1, "git_commit": "", "config": {}}
+            cur.execute(f"SELECT {', '.join(cols)} FROM session_info LIMIT 1;")
+            row = cur.fetchone()
+            if not row:
+                return {"schema_version": 1, "git_commit": "", "config": {}}
+            info = dict(zip(cols, row))
+            info.setdefault("schema_version", 1)
+            info.setdefault("git_commit", "")
+            raw_cfg = info.get("config_json") or "{}"
+            try:
+                info["config"] = json.loads(raw_cfg) if isinstance(raw_cfg, str) else (raw_cfg or {})
+            except Exception:
+                info["config"] = {}
+            return info
+        finally:
+            conn.close()
+
     def get_summary(self) -> Dict[str, Any]:
         """Returns session metadata, total frames, duration, and anomaly count."""
-        conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
+        conn = _open_sqlite_ro(self.db_path)
         cur = conn.cursor()
 
-        cur.execute("SELECT session_id, created_at, start_timestamp, end_timestamp, total_frames, notes FROM session_info LIMIT 1;")
-        sess_row = cur.fetchone()
+        cols = [r[1] for r in cur.execute("PRAGMA table_info(session_info);").fetchall()]
+        sess_row = None
+        if cols:
+            cur.execute(f"SELECT {', '.join(cols)} FROM session_info LIMIT 1;")
+            r = cur.fetchone()
+            if r:
+                sess_row = dict(zip(cols, r))
 
         cur.execute("SELECT COUNT(*), MIN(timestamp), MAX(timestamp), MIN(sim_time), MAX(sim_time) FROM frames;")
         count_row = cur.fetchone()
@@ -547,8 +1007,10 @@ class TelemetryLogReader:
         driving_s = round(float(driving_row[5]), 1) if driving_row and driving_row[5] else 0.0
 
         return {
-            "session_id": sess_row[0] if sess_row else "unknown",
-            "created_at": sess_row[1] if sess_row else "",
+            "session_id": (sess_row or {}).get("session_id", "unknown"),
+            "created_at": (sess_row or {}).get("created_at", ""),
+            "schema_version": int((sess_row or {}).get("schema_version") or 1),
+            "git_commit": (sess_row or {}).get("git_commit", "") or "",
             "total_frames": total_frames,
             "duration_s": round(duration_s, 2),
             "sim_duration_s": round((count_row[4] - count_row[3]) if count_row and count_row[4] else 0.0, 2),
@@ -577,7 +1039,7 @@ class TelemetryLogReader:
 
     def get_anomalies(self, limit: int = 500) -> List[Dict[str, Any]]:
         """Returns indexed list of all frames flagged with anomalies (bounded to recent)."""
-        conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
+        conn = _open_sqlite_ro(self.db_path)
         cur = conn.cursor()
         cur.execute("""
             SELECT frame_id, timestamp, sim_time, mode, slip_state, f_tof_min, plan_ms, anomaly_flags
@@ -592,14 +1054,7 @@ class TelemetryLogReader:
 
         results = []
         for r in rows:
-            flags = r[7]
-            labels = []
-            if flags & AnomalyFlag.SLIP: labels.append("SLIP/TRACTION")
-            if flags & AnomalyFlag.EMERGENCY: labels.append("EMERGENCY/RECOVERY")
-            if flags & AnomalyFlag.PROXIMITY: labels.append("NEAR_COLLISION")
-            if flags & AnomalyFlag.LATENCY_SPIKE: labels.append("LATENCY_SPIKE")
-            if flags & AnomalyFlag.STEER_JERK: labels.append("STEER_JERK")
-
+            flags = int(r[7] or 0)
             results.append({
                 "frame_id": r[0],
                 "timestamp": round(r[1], 3),
@@ -609,13 +1064,80 @@ class TelemetryLogReader:
                 "f_tof_min": round(r[5], 2),
                 "plan_ms": round(r[6], 2),
                 "flags": flags,
-                "reasons": labels,
+                "reasons": _decode_anomaly_flags(flags),
             })
         return results
 
+    def get_events(self, limit: int = 500) -> List[Dict[str, Any]]:
+        """Returns recorded events from v2 events table (empty list on v1 DBs)."""
+        conn = _open_sqlite_ro(self.db_path)
+        try:
+            cur = conn.cursor()
+            exists = cur.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='events' LIMIT 1;"
+            ).fetchone()
+            if not exists:
+                return []
+            cur.execute("""
+                SELECT event_id, frame_id, timestamp, sim_time, event_type, severity, label, details_json
+                FROM events
+                ORDER BY event_id ASC
+                LIMIT ?;
+            """, (limit,))
+            rows = cur.fetchall()
+            out: List[Dict[str, Any]] = []
+            for r in rows:
+                try:
+                    details = json.loads(r[7]) if r[7] else {}
+                except Exception:
+                    details = {}
+                out.append({
+                    "event_id": r[0],
+                    "frame_id": r[1],
+                    "timestamp": r[2],
+                    "sim_time": r[3],
+                    "event_type": r[4],
+                    "severity": r[5],
+                    "label": r[6],
+                    "details": details,
+                })
+            return out
+        finally:
+            conn.close()
+
+    def get_labels(self) -> List[Dict[str, Any]]:
+        """Returns human/AI frame-range labels (empty list if labels table absent)."""
+        conn = _open_sqlite_ro(self.db_path)
+        try:
+            cur = conn.cursor()
+            exists = cur.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='labels' LIMIT 1;"
+            ).fetchone()
+            if not exists:
+                return []
+            cur.execute("""
+                SELECT label_id, start_frame, end_frame, tag, note, author, created_at
+                FROM labels
+                ORDER BY start_frame ASC, label_id ASC;
+            """)
+            return [
+                {
+                    "label_id": r[0],
+                    "start_frame": r[1],
+                    "end_frame": r[2],
+                    "tag": r[3],
+                    "note": r[4],
+                    "author": r[5],
+                    "created_at": r[6],
+                }
+                for r in cur.fetchall()
+            ]
+        finally:
+            conn.close()
+
     def get_range_scalars(self, start_frame: int = 1, limit: int = 500) -> List[Dict[str, Any]]:
         """Lightweight query for timeline scrubber plots without decompressing full payloads."""
-        conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
+        conn = _open_sqlite_ro(self.db_path)
         cur = conn.cursor()
         cur.execute("""
             SELECT frame_id, timestamp, sim_time, mode, v_cmd, v_real, steer_cmd_deg, steer_actual_deg,
@@ -650,17 +1172,14 @@ class TelemetryLogReader:
 
 
 if __name__ == "__main__":
-    import os
-    import shutil
+    scratch_dir = Path("scratch") / "test_flight_recorder"
+    scratch_dir.mkdir(parents=True, exist_ok=True)
 
-    scratch_dir = Path("scratch")
-    scratch_dir.mkdir(exist_ok=True)
-    
-    print("Testing TelemetryFlightRecorder & Active Driving Auto-Deletion...")
+    print("Testing TelemetryFlightRecorder v2 & Active Driving Auto-Deletion...")
     rec = TelemetryFlightRecorder(output_dir=str(scratch_dir), max_driving_seconds=5.0)
     rec.start()
 
-    # Feed 100 frames (some idle, some driving)
+    # Feed 100 frames (some idle, some driving, with new v2 flags & tof_ranges_raw fallback)
     for i in range(100):
         is_driving = i > 20
         v = 2.0 if is_driving else 0.0
@@ -668,7 +1187,9 @@ if __name__ == "__main__":
             "timestamp": time.time(),
             "sim_time": i * 0.016,
             "mode": "CRUISE" if is_driving else "IDLE",
+            "status": "OPTIMAL_OSQP_MPC" if is_driving else "STOPPED",
             "v_cmd": v,
+            "v_tgt": v,
             "v_real": v,
             "steer_cmd_deg": 5.0,
             "steer_actual_deg": 4.8,
@@ -676,10 +1197,20 @@ if __name__ == "__main__":
             "gyro_z": 0.1,
             "slip_state": "NORMAL" if i != 50 else "OVERSTEER",
             "slip_ratio": 0.02 if i != 50 else 0.45,
-            "f_tof": 0.8,
+            "tof_ranges_raw": [0.8] * 16 if i != 60 else [0.09] + [0.8] * 15,
             "plan_ms": 4.5,
+            "step_ms": 6.2,
+            "scout_ms": 0.4,
+            "servo_pulse_us": 1510,
             "rpms_cmd": [1000, 1000, 1000, 1000],
             "rpms_act": [995, 1005, 998, 1002],
+            "shield": {"active": i == 70, "chosen_name": "k1_left" if i == 70 else None, "reverse_suggested": False},
+            "is_wrong_way": (i == 75),
+            "is_on_ramp": (i >= 80),
+            "mcu_main_connected": True,
+            "mcu_tof_connected": (i != 85),
+            "mcu_msg": "Test MCU boot message" if i < 10 else "Speed ramp engaged",
+            "mcu_log": ["Test MCU boot message"] if i < 10 else ["Test MCU boot message", "Speed ramp engaged"],
         }
         rec.record_frame(frame)
         time.sleep(0.005)
@@ -690,21 +1221,45 @@ if __name__ == "__main__":
     summary = reader.get_summary()
     print("Session Summary:", summary)
     assert summary["total_frames"] == 100, f"Expected 100 frames, got {summary['total_frames']}"
+    assert summary["schema_version"] == 2, f"Expected schema_version 2, got {summary['schema_version']}"
+
+    sess_info = reader.get_session_info()
+    assert sess_info.get("schema_version") == 2
+    assert isinstance(sess_info.get("config"), dict)
 
     # Verify frame query (i=50 is frame_id 51 in 1-based indexing)
     f51 = reader.get_frame(51)
     assert f51 is not None, "Frame 51 should exist"
     assert f51["slip_state"] == "OVERSTEER", f"Slip state mismatch, got {f51['slip_state']}"
 
-    # Verify anomalies
+    # Verify f_tof_min fallback + new anomaly flags (i=60 proximity, i=70 shield, i=75 wrong-way, i=85 link_drop)
     anomalies = reader.get_anomalies()
-    print(f"Detected {len(anomalies)} anomalies: {anomalies}")
-    assert len(anomalies) >= 1, "Expected at least 1 anomaly"
+    print(f"Detected {len(anomalies)} anomalies.")
+    all_reasons = {r for a in anomalies for r in a["reasons"]}
+    assert "SLIP/TRACTION" in all_reasons
+    assert "NEAR_COLLISION" in all_reasons
+    assert "SHIELD_EVADE" in all_reasons
+    assert "WRONG_WAY" in all_reasons
+    assert "LINK_DROP" in all_reasons
 
-    # Clean up test database
-    if os.path.exists(rec.db_path):
-        os.remove(rec.db_path)
+    # Verify events table (mode changes, shield, wrong_way, ramp, link, deduplicated MCU logs)
+    events = reader.get_events()
+    ev_types = {e["event_type"] for e in events}
+    assert "MODE_CHANGE" in ev_types
+    assert "SHIELD" in ev_types
+    assert "WRONG_WAY" in ev_types
+    assert "MCU_LOG" in ev_types
+    mcu_events = [e for e in events if e["event_type"] == "MCU_LOG"]
+    assert len(mcu_events) == 2, f"Expected 2 deduplicated MCU log events, got {len(mcu_events)}"
+
+    # Verify labels read/write
+    lbl_id = add_label(rec.db_path, 70, 76, "test_evade", note="unit test label", author="test")
+    assert lbl_id >= 1
+    labels = reader.get_labels()
+    assert len(labels) == 1 and labels[0]["tag"] == "test_evade"
+
+    reader.close()
     shutil.rmtree(scratch_dir, ignore_errors=True)
-    print("FlightRecorder tests passed successfully!")
+    print("FlightRecorder v2 tests passed successfully!")
 
 

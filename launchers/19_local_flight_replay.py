@@ -94,6 +94,8 @@ def main():
     parser.add_argument("--list", action="store_true", help="List available .db files in Downloads and data/recordings/")
     parser.add_argument("--pick", action="store_true", help="Interactively pick a recording from Downloads or data/recordings/")
     parser.add_argument("--tab", dest="browser_tab", action="store_true", help="Open in standard browser tab instead of standalone app window")
+    parser.add_argument("--digest", action="store_true", help="Print AI debugging digest for the recording and exit")
+    parser.add_argument("--export", action="store_true", help="Export AI/ML bundle to data/ai_exports/ and exit")
     parser.add_argument("--no-browser", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
 
@@ -133,6 +135,26 @@ def main():
     if not os.path.exists(target_db):
         print(f"[Replay ERROR] Database not found: {target_db}")
         sys.exit(1)
+
+    if args.digest or args.export:
+        import json
+        tools_dir = str(ROOT_DIR / "tools")
+        if tools_dir not in sys.path:
+            sys.path.insert(0, tools_dir)
+        from flight_analyzer import FlightSession, format_digest_markdown
+
+        if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
+            try:
+                sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+        sess = FlightSession(target_db)
+        if args.digest:
+            print(format_digest_markdown(sess.build_digest()))
+        if args.export:
+            outputs = sess.export_bundle()
+            print(json.dumps(outputs, indent=2))
+        return
 
     studio = _load_debug_studio_module()
     studio.run_local_replay_server(
