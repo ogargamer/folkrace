@@ -28,27 +28,27 @@ struct ToFSensor {
 static const ToFSensor SENSOR_RIG[16] = {
     // Front-Left Array (cross-pointing Right, rotated 3 deg outwards)
     // Leftmost ToF (pointing straight and right, zones 1.1 deg to 34.9 deg)
-    {"tof_front_left_4.1deg",  -0.058f, 0.092f, 1.5512f, 0.1963f, 0.001f, 1.80f},
-    {"tof_front_left_15.4deg", -0.058f, 0.092f, 1.3548f, 0.1963f, 0.001f, 1.80f},
-    {"tof_front_left_26.6deg", -0.058f, 0.092f, 1.1585f, 0.1963f, 0.001f, 1.80f},
-    {"tof_front_left_37.9deg", -0.058f, 0.092f, 0.9621f, 0.1963f, 0.001f, 1.80f},
+    {"tof_front_left_4.1deg",  -0.058f, 0.092f, 1.5512f, 0.1963f, 0.001f, 2.40f},
+    {"tof_front_left_15.4deg", -0.058f, 0.092f, 1.3548f, 0.1963f, 0.001f, 2.40f},
+    {"tof_front_left_26.6deg", -0.058f, 0.092f, 1.1585f, 0.1963f, 0.001f, 2.40f},
+    {"tof_front_left_37.9deg", -0.058f, 0.092f, 0.9621f, 0.1963f, 0.001f, 2.40f},
     // Left ToF (pointing right, zones 46.1 deg to 79.9 deg)
-    {"tof_front_left_49.1deg", -0.057f, 0.090f, 0.7658f, 0.1963f, 0.001f, 1.80f},
-    {"tof_front_left_60.4deg", -0.057f, 0.090f, 0.5694f, 0.1963f, 0.001f, 1.80f},
-    {"tof_front_left_71.6deg", -0.057f, 0.090f, 0.3731f, 0.1963f, 0.001f, 1.80f},
-    {"tof_front_left_82.9deg", -0.057f, 0.090f, 0.1767f, 0.1963f, 0.001f, 1.80f},
+    {"tof_front_left_49.1deg", -0.057f, 0.090f, 0.7658f, 0.1963f, 0.001f, 2.40f},
+    {"tof_front_left_60.4deg", -0.057f, 0.090f, 0.5694f, 0.1963f, 0.001f, 2.40f},
+    {"tof_front_left_71.6deg", -0.057f, 0.090f, 0.3731f, 0.1963f, 0.001f, 2.40f},
+    {"tof_front_left_82.9deg", -0.057f, 0.090f, 0.1767f, 0.1963f, 0.001f, 2.40f},
 
     // Front-Right Array (cross-pointing Left, mirrored along Y axis, rotated 3 deg outwards)
     // Rightmost ToF (pointing straight and left, zones 1.1 deg to 34.9 deg)
-    {"tof_front_right_4.1deg",   0.058f, 0.092f, 1.5904f, 0.1963f, 0.001f, 1.80f},
-    {"tof_front_right_15.4deg",  0.058f, 0.092f, 1.7868f, 0.1963f, 0.001f, 1.80f},
-    {"tof_front_right_26.6deg",  0.058f, 0.092f, 1.9831f, 0.1963f, 0.001f, 1.80f},
-    {"tof_front_right_37.9deg",  0.058f, 0.092f, 2.1795f, 0.1963f, 0.001f, 1.80f},
+    {"tof_front_right_4.1deg",   0.058f, 0.092f, 1.5904f, 0.1963f, 0.001f, 2.40f},
+    {"tof_front_right_15.4deg",  0.058f, 0.092f, 1.7868f, 0.1963f, 0.001f, 2.40f},
+    {"tof_front_right_26.6deg",  0.058f, 0.092f, 1.9831f, 0.1963f, 0.001f, 2.40f},
+    {"tof_front_right_37.9deg",  0.058f, 0.092f, 2.1795f, 0.1963f, 0.001f, 2.40f},
     // Right ToF (pointing left, zones 46.1 deg to 79.9 deg)
-    {"tof_front_right_49.1deg",  0.057f, 0.090f, 2.3758f, 0.1963f, 0.001f, 1.80f},
-    {"tof_front_right_60.4deg",  0.057f, 0.090f, 2.5722f, 0.1963f, 0.001f, 1.80f},
-    {"tof_front_right_71.6deg",  0.057f, 0.090f, 2.7685f, 0.1963f, 0.001f, 1.80f},
-    {"tof_front_right_82.9deg",  0.057f, 0.090f, 2.9649f, 0.1963f, 0.001f, 1.80f},
+    {"tof_front_right_49.1deg",  0.057f, 0.090f, 2.3758f, 0.1963f, 0.001f, 2.40f},
+    {"tof_front_right_60.4deg",  0.057f, 0.090f, 2.5722f, 0.1963f, 0.001f, 2.40f},
+    {"tof_front_right_71.6deg",  0.057f, 0.090f, 2.7685f, 0.1963f, 0.001f, 2.40f},
+    {"tof_front_right_82.9deg",  0.057f, 0.090f, 2.9649f, 0.1963f, 0.001f, 2.40f},
 };
 
 static inline float wrap_angle(float a) {
@@ -102,7 +102,7 @@ public:
 
     SmartHybridCostmapFront(
         float x_min_ = -1.25f, float x_max_ = 1.25f,
-        float y_min_ = 0.0f, float y_max_ = 1.90f,
+        float y_min_ = 0.0f, float y_max_ = 2.60f,
         float res_ = 0.015f, float r_inflation_m_ = 0.090f
     ) : x_min(x_min_), x_max(x_max_), y_min(y_min_), y_max(y_max_),
         res(res_), r_inflation_m(r_inflation_m_) {
@@ -433,7 +433,7 @@ public:
     ) {
         const uint8_t* active_haz = custom_hazard_mask ? custom_hazard_mask : hazard_mask.data();
         constexpr float GAP_MIN_LOOKAHEAD_M = 0.20f;
-        constexpr float GAP_MAX_LOOKAHEAD_M = 1.70f;
+        constexpr float GAP_MAX_LOOKAHEAD_M = 2.30f;
         constexpr float GAP_MIN_WIDTH_M = 0.0f;
 
         float max_r = std::min(max_lookahead_m, GAP_MAX_LOOKAHEAD_M);
@@ -661,7 +661,7 @@ public:
                 float left_neighbor_dist = (z_idx > 0 && z_idx != 8) ? ranges_16[z_idx - 1] : 0.0f;
                 float right_neighbor_dist = (z_idx < 15 && z_idx != 7) ? ranges_16[z_idx + 1] : 0.0f;
                 float min_neighbor_dist = std::max(left_neighbor_dist, right_neighbor_dist);
-                float neighbor_norm = std::min(1.80f, min_neighbor_dist) / 1.80f;
+                float neighbor_norm = std::min(2.40f, min_neighbor_dist) / 2.40f;
                 neighbor_bonus = 0.30f * w_gap_width * neighbor_norm;
             }
 

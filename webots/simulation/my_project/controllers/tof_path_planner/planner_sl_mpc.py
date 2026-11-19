@@ -25,6 +25,7 @@ try:
         MPC_R_STEER,
         MPC_R_ACCEL,
         MPC_R_STEER_RATE,
+        MPC_CENTER_BIAS,
         MPC_MU_FRICTION,
         MPC_V_CORNER_FACTOR,
         MPC_V_CRUISE_MAX,
@@ -45,6 +46,7 @@ except ImportError:
         MPC_R_STEER,
         MPC_R_ACCEL,
         MPC_R_STEER_RATE,
+        MPC_CENTER_BIAS,
         MPC_MU_FRICTION,
         MPC_V_CORNER_FACTOR,
         MPC_V_CRUISE_MAX,
@@ -109,6 +111,10 @@ if CPP_AVAILABLE and _lib is not None:
     if hasattr(_lib, "sl_mpc_set_mu"):
         _lib.sl_mpc_set_mu.argtypes = [ctypes.c_void_p, ctypes.c_double]
         _lib.sl_mpc_set_mu.restype = None
+
+    if hasattr(_lib, "sl_mpc_set_center_bias"):
+        _lib.sl_mpc_set_center_bias.argtypes = [ctypes.c_void_p, ctypes.c_double]
+        _lib.sl_mpc_set_center_bias.restype = None
 
     if hasattr(_lib, "sl_mpc_reset"):
         _lib.sl_mpc_reset.argtypes = [ctypes.c_void_p]
@@ -209,6 +215,7 @@ class CppCurvilinearSLMPC:
         alt_min_separation_m: float = MPC_ALT_MIN_SEPARATION_M,
         alt_aperture_bias: float = MPC_ALT_APERTURE_BIAS,
         w_gap_clear: float = MPC_W_GAP_CLEAR,
+        center_bias: float = MPC_CENTER_BIAS,
         **kwargs,
     ):
         self._costmap = costmap_engine
@@ -228,6 +235,7 @@ class CppCurvilinearSLMPC:
         self.alt_min_separation_m = float(alt_min_separation_m)
         self.alt_aperture_bias = float(alt_aperture_bias)
         self.w_gap_clear = float(kwargs.get("alt_lookahead_depth_weight", w_gap_clear))
+        self.center_bias = max(0.0, min(1.0, float(center_bias)))
         self.dt_actuator = DT_PLANNER
         self.nx = 7
         self.nu = 2
@@ -323,6 +331,8 @@ class CppCurvilinearSLMPC:
             if self._handle_alt:
                 _lib.sl_mpc_set_max_iter(self._handle_alt, 6)
 
+        self.set_center_bias(self.center_bias)
+
     def reset_active_target(self) -> None:
         """Resets the currently tracked active corridor/target line and OSQP solver warm-start."""
         self._active_target = None
@@ -345,6 +355,15 @@ class CppCurvilinearSLMPC:
                 _lib.sl_mpc_set_mu(self._handle, ctypes.c_double(self.mu_friction))
             if hasattr(self, "_handle_alt") and self._handle_alt:
                 _lib.sl_mpc_set_mu(self._handle_alt, ctypes.c_double(self.mu_friction))
+
+    def set_center_bias(self, center_bias: float) -> None:
+        """Updates the corridor centering blend [0.0, 1.0] on both primary and challenger C++ solvers."""
+        self.center_bias = max(0.0, min(1.0, float(center_bias)))
+        if _lib is not None and hasattr(_lib, "sl_mpc_set_center_bias"):
+            if hasattr(self, "_handle") and self._handle:
+                _lib.sl_mpc_set_center_bias(self._handle, ctypes.c_double(self.center_bias))
+            if hasattr(self, "_handle_alt") and self._handle_alt:
+                _lib.sl_mpc_set_center_bias(self._handle_alt, ctypes.c_double(self.center_bias))
 
     @property
     def alt_lookahead_depth_weight(self) -> float:

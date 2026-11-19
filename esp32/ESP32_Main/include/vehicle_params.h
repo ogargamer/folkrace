@@ -25,16 +25,16 @@
 #define VEHICLE_MAX_WHEEL_SPEED     3.84f
 
 // --- Tire Friction & Dynamic Traction Envelopes ---
-#define DEFAULT_ROAD_MU             0.75f
+#define DEFAULT_ROAD_MU             0.80f
 #define GRAVITY_G_CONST             9.80665f
 #define ACCEL_FWD_RATIO             0.95f
 #define BRAKE_DECEL_RATIO           1.00f
 #define LAT_ACCEL_RATIO             1.00f
-#define ACCEL_FWD_MAX               6.987f
-#define BRAKE_DECEL_MAX             7.355f
-#define LAT_ACCEL_MAX               7.355f
+#define ACCEL_FWD_MAX               7.453f
+#define BRAKE_DECEL_MAX             7.845f
+#define LAT_ACCEL_MAX               7.845f
 #define R_MIN_TURN_M                0.2103f
-#define V_MIN_CRUISE_MPS            1.2436f
+#define V_MIN_CRUISE_MPS            1.2844f
 #define SLIP_GATE_SPEED_MPS         0.30f
 #define SLIP_THRESH_SPIN_RAD_S      0.45f
 
@@ -58,7 +58,7 @@
 #define COSTMAP_GRID_X_MIN          -1.250f
 #define COSTMAP_GRID_X_MAX          1.250f
 #define COSTMAP_GRID_Y_MIN          0.000f
-#define COSTMAP_GRID_Y_MAX          1.900f
+#define COSTMAP_GRID_Y_MAX          2.600f
 #define COSTMAP_GRID_RES            0.015f
 #define COSTMAP_R_INFLATION_M       0.075f
 

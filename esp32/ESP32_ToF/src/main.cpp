@@ -80,6 +80,9 @@ struct ToF_Device_Context {
   unsigned long last_frame_ms;
   unsigned long last_poll_ms;
   unsigned long last_recovery_ms;
+
+  uint16_t last_valid_dist_mm[4];
+  uint8_t error_frame_streak[4];
 };
 
 SPIClass HardwareSPI(HSPI);
@@ -104,7 +107,16 @@ SPIClass HardwareSPI(HSPI);
    0,                                                                          \
    0,                                                                          \
    0,                                                                          \
-   0}
+   0,                                                                          \
+   {0, 0, 0, 0},                                                               \
+   {0, 0, 0, 0}}
+
+static inline void reset_zone_hold_state(ToF_Device_Context *ctx) {
+  for (int i = 0; i < 4; i++) {
+    ctx->last_valid_dist_mm[i] = 0;
+    ctx->error_frame_streak[i] = 0;
+  }
+}
 
 ToF_Device_Context ctxs[NUM_SENSORS] = {
     MAKE_CTX(1, ENABLE_TOF1, TOF1), MAKE_CTX(2, ENABLE_TOF2, TOF2),
@@ -264,6 +276,7 @@ bool init_and_upload_firmware(VL53L8CX_Configuration *p_dev,
 
   ctx->speed_hz = SPI_INIT_SPEED_HZ;
   ctx->first_frame = true;
+  reset_zone_hold_state(ctx);
   memset(p_dev, 0, sizeof(VL53L8CX_Configuration));
   p_dev->platform.handle = (void *)ctx;
   p_dev->platform.address = 0x29;
@@ -404,6 +417,7 @@ bool soft_recover_sensor(VL53L8CX_Configuration *p_dev,
 
   if (vl53l8cx_start_ranging(p_dev) == VL53L8CX_STATUS_OK) {
     ctx->first_frame = true;
+    reset_zone_hold_state(ctx);
     ctx->active = true;
     TOF_LOG("[RECOVERY-SOFT] %s resumed ranging!\n", ctx->name);
     return true;
@@ -433,6 +447,7 @@ bool hard_recover_sensor(VL53L8CX_Configuration *p_dev,
   if (init_sensor_with_retries(p_dev, ctx, ctx->hard_fail_count ? 1 : 2)) {
     if (vl53l8cx_start_ranging(p_dev) == VL53L8CX_STATUS_OK) {
       ctx->first_frame = true;
+      reset_zone_hold_state(ctx);
       ctx->active = true;
       ctx->soft_fail_streak = 0;
       ctx->hard_fail_count = 0;
@@ -567,6 +582,8 @@ void send_binary_telemetry(uint8_t sensor_id, VL53L8CX_ResultsData *p_res,
                            unsigned long f_count) {
   if (sensor_id < 1 || sensor_id > 4) return;
 
+  ToF_Device_Context *ctx = &ctxs[sensor_id - 1];
+
   uint16_t dist_mm[4];
   uint16_t target0_mm[4];
   uint16_t target1_mm[4];
@@ -602,24 +619,27 @@ void send_binary_telemetry(uint8_t sensor_id, VL53L8CX_ResultsData *p_res,
     bool near0 = (st0 != 0 && st0 != 255 && d0 >= 1 && d0 <= 30);
     bool near1 = (st1 != 0 && st1 != 255 && d1 >= 1 && d1 <= 30);
 
-    if (valid0 && valid1) {
-      // Both valid: choose the closer (shortest) distance
-      dist_mm[i] = (uint16_t)(d0 <= d1 ? d0 : d1);
-    } else if (valid0) {
-      dist_mm[i] = (uint16_t)d0;
-    } else if (valid1) {
-      dist_mm[i] = (uint16_t)d1;
+    if (valid0 || valid1) {
+      // Choose the closer (shortest) valid target distance
+      uint16_t chosen = (valid0 && valid1)
+                            ? (uint16_t)(d0 <= d1 ? d0 : d1)
+                            : (valid0 ? (uint16_t)d0 : (uint16_t)d1);
+      if (chosen < 30) chosen = 30;
+      dist_mm[i] = chosen;
+      ctx->last_valid_dist_mm[i] = chosen;
+      ctx->error_frame_streak[i] = 0;
+    } else if (near0 || near1 || spad == 1024) {
+      // Never delay close-proximity / lens-contact saturation reporting
+      dist_mm[i] = 30;
+      ctx->last_valid_dist_mm[i] = 30;
+      ctx->error_frame_streak[i] = 0;
     } else {
-      // 0 valid targets: fallback logic
-      // Never trigger 3000mm open space if either target reports 0-30mm even if error!
-      if (near0 && near1) {
-        dist_mm[i] = (uint16_t)(d0 <= d1 ? d0 : d1);
-      } else if (near0) {
-        dist_mm[i] = (uint16_t)d0;
-      } else if (near1) {
-        dist_mm[i] = (uint16_t)d1;
-      } else if (spad == 1024) {
-        dist_mm[i] = 30; // Lens contact / saturation error
+      // 0 valid targets: hold last valid distance for 1 frame before 3000mm open-space fallback
+      if (ctx->error_frame_streak[i] < 255) {
+        ctx->error_frame_streak[i]++;
+      }
+      if (ctx->error_frame_streak[i] <= 1 && ctx->last_valid_dist_mm[i] > 0) {
+        dist_mm[i] = ctx->last_valid_dist_mm[i];
       } else {
         dist_mm[i] = 3000; // Open space fallback
       }

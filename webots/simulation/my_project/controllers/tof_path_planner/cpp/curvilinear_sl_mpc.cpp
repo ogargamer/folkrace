@@ -31,7 +31,7 @@ static constexpr double MAX_STEERING_RAD_CONST =
     0.562285; // ~32.22 deg 45% Ackermann center limit (yields 35.0 deg
               // inner, 30.0 deg outer)
 static constexpr double MAX_SERVO_RATE_RAD_S_CONST =
-    11.16; // Half-speed 1st test (50% of 22.31 rad/s PTK 9497 tire rate)
+    22.0; // Full PTK 9497 servo slew rate (matches SERVO_MAX_SPEED_RAD_S)
 static constexpr double MPC_WEIGHT_SLACK_EPS_CONST = 500.0;
 static constexpr double MPC_FRICTION_OCTAGON_C1_CONST = 1.2;
 static constexpr double MPC_TARGET_SPEED_MPS_CONST = 4.50;
@@ -74,6 +74,7 @@ public:
   double v_cruise_max;
   double v_cruise_min;
   double dt_actuator;
+  double center_bias;
 
   int nx;
   int nu;
@@ -157,7 +158,8 @@ public:
         dt(dt_val), q_progress(q_prog), q_cte(q_lat), q_heading(q_head),
         r_steer(r_st), r_accel(r_acc), r_steer_rate(r_str_rate),
         mu_friction(mu), v_corner_factor(v_corner), v_cruise_max(v_max),
-        v_cruise_min(v_min), dt_actuator(DT_PLANNER_CONST), nx(7),
+        v_cruise_min(v_min), dt_actuator(DT_PLANNER_CONST), center_bias(0.0),
+        nx(7),
         nu(2), max_iterations(35), best_line_count(0), guide_line_count(0),
         corridor_count(0), shield_active(false), shield_chosen_id(-1),
         shield_k1_l_cnt(0), shield_k1_l_safe(false), shield_k1_r_cnt(0),
@@ -984,12 +986,20 @@ public:
         2,  6,  10, 14, 18, 22, 26, 30, 34, 38,  42,  46,  50,  54,  58, 62,
         66, 70, 74, 78, 82, 86, 90, 94, 98, 102, 106, 110, 114, 118, 122};
 
+    double center_const_offset = 0.0;
     for (int k = 0; k <= N; ++k) {
       int ix = k * nx;
       double vk_target = v_ref_k[k];
       double w_v_k = (vk_target < 2.2) ? (r_acc * 3.0) : r_acc;
       q_vec[ix + 3] += -w_v_k * vk_target;
       P_data[VX_P_INDICES[k]] = w_v_k;
+      if (k >= 1 && center_bias > 0.0) {
+        double d_center_k = 0.5 * (d_min_bounds[k] + d_max_bounds[k]);
+        double d_target_k = center_bias * d_center_k;
+        double p_d_k = P_data[4 * k + 0];
+        q_vec[ix + 1] += -p_d_k * d_target_k;
+        center_const_offset += 0.5 * p_d_k * d_target_k * d_target_k;
+      }
       int ie_c = (N + 1) * nx + N * nu + k;
       q_vec[ie_c] += MPC_WEIGHT_SLACK_EPS_CONST;
     }
@@ -1109,7 +1119,7 @@ public:
     int status_val = solver.info->status_val;
 
     *out_osqp_iters = solver.info->iter;
-    *out_best_cost = solver.info->obj_val;
+    *out_best_cost = solver.info->obj_val + center_const_offset;
 
     if (status_val == 1 || status_val == 2 || status_val == 7) {
       *out_status_code = 0; // OPTIMAL_OSQP_MPC
@@ -1168,17 +1178,18 @@ public:
       // Optimal forward speed command
       double fx_0 = solver.solution->x[(N + 1) * nx + 0];
       double cmd_speed;
-      if (fx_0 < -0.15) {
+      if (fx_0 < -0.15 && (v_ref <= v_bar + 0.10 || fx_0 < -0.50)) {
         cmd_speed = std::max(
             v_cruise_min,
             std::min(v_cruise_max,
                      v_bar + (fx_0 / VEHICLE_MASS_CONST) * dt_actuator));
       } else {
-        double max_accel = 0.85 * mu_friction * GRAVITY_G_CONST;
+        // Loose 60 Hz acceleration clamp; 400 Hz ESP32 electronic_diff enforces realistic traction ramp
+        double max_accel_loose = 1.60 * mu_friction * GRAVITY_G_CONST;
         cmd_speed = std::max(
             v_cruise_min,
             std::min(v_cruise_max,
-                     std::min(v_ref, v_bar + max_accel * dt_actuator * 2.0)));
+                     std::min(v_ref, v_bar + max_accel_loose * dt_actuator * 4.0)));
       }
 
       double mpc_x_2 = best_line_x[2];
@@ -1255,6 +1266,13 @@ SL_MPC_API void sl_mpc_set_mu(void *handle, double mu) {
   if (handle) {
     auto *planner = static_cast<CurvilinearSLMPCNative *>(handle);
     planner->mu_friction = mu;
+  }
+}
+
+SL_MPC_API void sl_mpc_set_center_bias(void *handle, double center_bias) {
+  if (handle) {
+    auto *planner = static_cast<CurvilinearSLMPCNative *>(handle);
+    planner->center_bias = std::max(0.0, std::min(1.0, center_bias));
   }
 }
 

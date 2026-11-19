@@ -427,6 +427,22 @@ def run_path_planner():
                     telemetry["mcu_tof_port"] = str(last_tof_pkt.get("mcu_tof_port", "")) if last_tof_pkt else ""
 
                 telemetry["tof_ranges_raw"] = [round(v, 3) for v in live_tof_list] if has_live_sensor_feed else [0.0] * 16
+                if has_live_sensor_feed and last_tof_pkt:
+                    for tk in (
+                        "tof_target0_mm",
+                        "tof_target1_mm",
+                        "tof_target0_status",
+                        "tof_target1_status",
+                        "tof_front_ok",
+                        "tof_sensor_online",
+                    ):
+                        if tk in last_tof_pkt:
+                            telemetry[tk] = last_tof_pkt[tk]
+                else:
+                    telemetry["tof_target0_mm"] = [0] * 16
+                    telemetry["tof_target1_mm"] = [0] * 16
+                    telemetry["tof_target0_status"] = [255] * 16
+                    telemetry["tof_target1_status"] = [255] * 16
                 telemetry["step_ms"] = round(t_ctrl_ms, 2)
                 telemetry["grid_shape"] = [int(s) for s in brain.costmap.shape]
                 telemetry["grid_bounds"] = [GRID_X_MIN, GRID_X_MAX, GRID_Y_MIN, GRID_Y_MAX]

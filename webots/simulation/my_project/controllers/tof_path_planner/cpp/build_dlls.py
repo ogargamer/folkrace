@@ -15,14 +15,20 @@ import time
 from typing import Optional, Tuple
 
 
-def find_compiler() -> Tuple[str, dict]:
-    """Locates g++ with AVX2 support from PATH or known w64devkit directories."""
-    cpp_dir = os.path.dirname(os.path.abspath(__file__))
-    controller_dir = os.path.dirname(cpp_dir)
+def _find_workspace_root(controller_dir: str) -> str:
+    """Walks up from controller_dir to locate the repository root containing .git."""
     workspace_root = os.path.abspath(os.path.join(controller_dir, *[".."] * 4))
     # If workspace_root does not contain .git, step up one more level
     if not os.path.exists(os.path.join(workspace_root, ".git")):
         workspace_root = os.path.dirname(workspace_root)
+    return workspace_root
+
+
+def find_compiler() -> Tuple[str, dict]:
+    """Locates g++ with AVX2 support from PATH or known w64devkit directories."""
+    cpp_dir = os.path.dirname(os.path.abspath(__file__))
+    controller_dir = os.path.dirname(cpp_dir)
+    workspace_root = _find_workspace_root(controller_dir)
 
     candidates = [
         # Check system PATH first
@@ -172,6 +178,21 @@ def main():
 
     if not success:
         sys.exit(1)
+
+    brain_dir = os.path.join(_find_workspace_root(output_dir), "brain")
+    if os.path.isdir(brain_dir):
+        built_dlls = []
+        if build_costmap:
+            built_dlls.append("smart_hybrid_costmap_front.dll")
+        if build_mpc:
+            built_dlls.append("curvilinear_sl_mpc.dll")
+        for dll_name in built_dlls:
+            src_dll = os.path.join(output_dir, dll_name)
+            dst_dll = os.path.join(brain_dir, dll_name)
+            if os.path.exists(src_dll):
+                shutil.copy2(src_dll, dst_dll)
+                print(f"[SYNC] Copied {dll_name} -> {dst_dll}")
+
     print("\n[ALL BUILDS COMPLETED SUCCESSFULLY]")
 
 

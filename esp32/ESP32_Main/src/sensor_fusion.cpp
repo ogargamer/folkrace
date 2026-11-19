@@ -45,9 +45,10 @@ FusionOutputs IRAM_ATTR IMUEncoderFusion::update(
 
     // 1. Convert shaft RPM to linear rolling speeds (m/s)
     // Motor direction convention: positive RPM moves vehicle forward with VEHICLE_MOTOR_DIR = 1.0
+    // FR motor/encoder is dead in 3WD hardware configuration; exclude it so 0 RPM never poisons odometry or slip.
+    (void)fr_rpm;
     const float rpm_to_mps = (2.0f * PI_F / 60.0f) * R_w_ * motor_dir_;
     float v_fl = fl_rpm * rpm_to_mps;
-    float v_fr = fr_rpm * rpm_to_mps;
     float v_rl = rl_rpm * rpm_to_mps;
     float v_rr = rr_rpm * rpm_to_mps;
 
@@ -55,34 +56,29 @@ FusionOutputs IRAM_ATTR IMUEncoderFusion::update(
     float v_rear_avg = 0.5f * (v_rl + v_rr);
     out.v_rear_avg = v_rear_avg;
 
-    // 3. Front Axle: Project steered wheels along vehicle longitudinal body axis
+    // 3. Front Axle: Project active steered wheel (FL) along vehicle longitudinal body axis
     float cos_steer = cosf(steer_rad);
     float v_fl_proj = v_fl * cos_steer;
-    float v_fr_proj = v_fr * cos_steer;
-    float v_front_avg = 0.5f * (v_fl_proj + v_fr_proj);
+    float v_front_avg = v_fl_proj;
     out.v_front_avg = v_front_avg;
 
-    // 4. Differential yaw rate correction per wheel
+    // 4. Differential yaw rate correction per active wheel
     // v_body = v_wheel +/- (track / 2) * yaw_rate
     float v_rl_body = v_rl + 0.5f * W_r_ * gyro_z_rad_s;
     float v_rr_body = v_rr - 0.5f * W_r_ * gyro_z_rad_s;
     float v_fl_body = v_fl_proj + 0.5f * W_f_ * gyro_z_rad_s;
-    float v_fr_body = v_fr_proj - 0.5f * W_f_ * gyro_z_rad_s;
 
-    // 5. Robust Outlier-Rejected Consensus: Median-of-4
-    // 5-comparison sorting network for 4 elements:
+    // 5. Robust Outlier-Rejected Consensus: Median-of-3 (RL, RR, FL)
     float w0 = v_rl_body;
     float w1 = v_rr_body;
     float w2 = v_fl_body;
-    float w3 = v_fr_body;
 
     if (w0 > w1) std::swap(w0, w1);
-    if (w2 > w3) std::swap(w2, w3);
-    if (w0 > w2) std::swap(w0, w2);
-    if (w1 > w3) std::swap(w1, w3);
     if (w1 > w2) std::swap(w1, w2);
+    if (w0 > w1) std::swap(w0, w1);
 
-    float v_wheels_robust = 0.5f * (w1 + w2);
+    float v_wheels_robust = w1;
+    out.v_wheels = v_wheels_robust;
 
     // 6. Dynamic Slip Estimation
     float rear_diff_yaw_rate = (v_rr - v_rl) / fmaxf(0.01f, W_r_);

@@ -175,7 +175,11 @@ class PoseTracker:
         dy_3 = dy_past + (sin_dp * dx_future + cos_dp * dy_future)
 
         # 4. Projected actuator state (speed v_3 and steering delta_3)
-        max_steer_delta = self.servo_max_speed * dt_act
+        # When unwinding out of a corner, project across full round-trip latency so planner
+        # doesn't throttle exit acceleration on stale steering feedback.
+        is_unwinding = (abs(steer_target) < abs(steer_current)) or (steer_target * steer_current < 0.0)
+        dt_steer = max(dt_act, dt + dt_act) if is_unwinding else dt_act
+        max_steer_delta = self.servo_max_speed * dt_steer
         delta_steer = max(-max_steer_delta, min(max_steer_delta, steer_target - steer_current))
         steer_3 = max(-self.max_steer_rad, min(self.max_steer_rad, steer_current + delta_steer))
 

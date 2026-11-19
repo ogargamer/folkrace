@@ -124,7 +124,7 @@ class DebugServerState:
             "gap": [0.0, 0.0, 0.0],
             "targets": [],
             "best_line": [],
-            "grid_bounds": [-1.25, 1.25, 0.0, 1.90],
+            "grid_bounds": [-1.25, 1.25, 0.0, 2.60],
             "grid_shape": [0, 0],
         }
         self.total_frames_received = 0
@@ -234,8 +234,8 @@ class DebugServerState:
             "gap": [0.0, 1.2, 0.45],
             "targets": [[0.0, 1.2, 0.45]],
             "best_line": [[0.0, 0.0], [0.0, 0.6], [round(0.2 * math.sin(t_sec), 2), 1.2]],
-            "grid_bounds": [-1.25, 1.25, 0.0, 1.90],
-            "grid_shape": [127, 167],
+            "grid_bounds": [-1.25, 1.25, 0.0, 2.60],
+            "grid_shape": [174, 168],
         }
 
     def _ws_broadcast_worker(self):
@@ -436,9 +436,9 @@ def build_live_binary_packet(pkt: Dict[str, Any]) -> bytes:
     if len(tof_ranges) < 16:
         tof_ranges = list(tof_ranges) + [0.0] * (16 - len(tof_ranges))
     gap = pkt.get("gap") or [0.0, 0.0, 0.0]
-    bounds = pkt.get("grid_bounds") or [-1.25, 1.25, 0.0, 1.90]
+    bounds = pkt.get("grid_bounds") or [-1.25, 1.25, 0.0, 2.60]
     if len(bounds) < 4:
-        bounds = [-1.25, 1.25, 0.0, 1.90]
+        bounds = [-1.25, 1.25, 0.0, 2.60]
 
     header_fmt = "<4s I I d 16f 4f 4f 16f 3f 2H 4f 5I"
     header_size = struct.calcsize(header_fmt)
@@ -490,7 +490,7 @@ def build_live_binary_packet(pkt: Dict[str, Any]) -> bytes:
         _f(gap[2] if len(gap) > 2 else 0.0),
         int(rows),
         int(cols),
-        _f(bounds[0], -1.25), _f(bounds[1], 1.25), _f(bounds[2], 0.0), _f(bounds[3], 1.90),
+        _f(bounds[0], -1.25), _f(bounds[1], 1.25), _f(bounds[2], 0.0), _f(bounds[3], 2.60),
         len(prob_comp_bytes),
         raw_costmap_len,
         len(haz_comp_bytes),
@@ -1087,6 +1087,23 @@ def udp_listener_worker():
                 "tof_target0_status",
                 "tof_target1_status",
             )
+            planner_merge_keys = (
+                "seq",
+                "mcu_timestamp_us",
+                "v_est",
+                "rpms_cmd",
+                "rpms_act",
+                "flags",
+                "mcu_msg",
+                "mcu_log",
+                "slip_state",
+                "slip_ratio",
+                "servo_pulse_us",
+                "mcu_main_connected",
+                "mcu_tof_connected",
+                "mcu_main_port",
+                "mcu_tof_port",
+            )
             has_attached_tof_diag = False
 
             with STATE.lock:
@@ -1099,43 +1116,27 @@ def udp_listener_worker():
                     if tk in pkt:
                         tof_diag_cache[tk] = pkt[tk]
 
+                planner_active = (now - STATE.last_planner_pkt_time <= 1.0)
                 if is_planner:
                     if tof_diag_cache:
                         for tk, tv in tof_diag_cache.items():
                             if tk not in pkt:
                                 pkt[tk] = tv
                                 has_attached_tof_diag = True
-                    STATE.latest_pkt = pkt
+                    STATE.latest_pkt = dict(pkt)
                     STATE.last_planner_pkt_time = now
-                elif now - STATE.last_planner_pkt_time > 1.0:
+                    planner_active = True
+                elif not planner_active:
                     # Planner is offline: show direct MCU / bridge telemetry
-                    STATE.latest_pkt = pkt
+                    STATE.latest_pkt = dict(pkt)
                 else:
-                    # Planner is active: non-destructively merge fresh MCU telemetry fields
-                    for k in (
-                        "seq",
-                        "mcu_timestamp_us",
-                        "v_cmd",
-                        "v_est",
-                        "rpms_cmd",
-                        "rpms_act",
-                        "flags",
-                        "mcu_msg",
-                        "mcu_log",
-                        "slip_state",
-                        "slip_ratio",
-                        "servo_pulse_us",
-                        "mcu_main_connected",
-                        "mcu_tof_connected",
-                        "mcu_main_port",
-                        "mcu_tof_port",
-                        "tof",
-                        "tof_ranges",
-                        "tof_ranges_raw",
-                        "f_tof",
-                    ) + tof_diag_keys:
+                    # Planner is active: copy before merging non-ToF live chassis/link status fields
+                    # so queued recorder dicts are never mutated in-place.
+                    updated = dict(STATE.latest_pkt)
+                    for k in planner_merge_keys:
                         if k in pkt:
-                            STATE.latest_pkt[k] = pkt[k]
+                            updated[k] = pkt[k]
+                    STATE.latest_pkt = updated
 
                 STATE.last_pkt_time = now
                 STATE.invalidate_caches()
@@ -1153,7 +1154,7 @@ def udp_listener_worker():
                 v_cmd_val = abs(float(pkt.get("v_cmd", STATE.latest_pkt.get("v_cmd", 0.0))))
                 v_real_val = abs(float(pkt.get("v_real", pkt.get("v_est", 0.0))))
                 is_idle_stopped = (eff_mode in ("STOPPED", "STANDBY", "OFFLINE")) and v_cmd_val < 0.01 and v_real_val < 0.05
-                if not is_idle_stopped and (is_planner or (now - getattr(STATE, "_last_db_record", 0.0) >= 0.05)):
+                if not is_idle_stopped and (is_planner or (not planner_active and (now - getattr(STATE, "_last_db_record", 0.0) >= 0.05))):
                     STATE._last_db_record = now
                     STATE.recorder.record_frame(pkt, raw_bytes=None if has_attached_tof_diag else data)
 

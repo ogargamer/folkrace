@@ -72,26 +72,26 @@ except ImportError:
 FRONT_TOF_SENSOR_RIG = [
     # Front-Left Array (cross-pointing Right, rotated 3 deg outwards)
     # Leftmost ToF (pointing straight and right, zones 1.1 deg to 34.9 deg)
-    ("tof_front_left_4.1deg",  -0.058, 0.092, 1.5512, 1.80),
-    ("tof_front_left_15.4deg", -0.058, 0.092, 1.3548, 1.80),
-    ("tof_front_left_26.6deg", -0.058, 0.092, 1.1585, 1.80),
-    ("tof_front_left_37.9deg", -0.058, 0.092, 0.9621, 1.80),
+    ("tof_front_left_4.1deg",  -0.058, 0.092, 1.5512, TOF_MAX_RANGE_M),
+    ("tof_front_left_15.4deg", -0.058, 0.092, 1.3548, TOF_MAX_RANGE_M),
+    ("tof_front_left_26.6deg", -0.058, 0.092, 1.1585, TOF_MAX_RANGE_M),
+    ("tof_front_left_37.9deg", -0.058, 0.092, 0.9621, TOF_MAX_RANGE_M),
     # Left ToF (pointing right, zones 46.1 deg to 79.9 deg)
-    ("tof_front_left_49.1deg", -0.057, 0.090, 0.7658, 1.80),
-    ("tof_front_left_60.4deg", -0.057, 0.090, 0.5694, 1.80),
-    ("tof_front_left_71.6deg", -0.057, 0.090, 0.3731, 1.80),
-    ("tof_front_left_82.9deg", -0.057, 0.090, 0.1767, 1.80),
+    ("tof_front_left_49.1deg", -0.057, 0.090, 0.7658, TOF_MAX_RANGE_M),
+    ("tof_front_left_60.4deg", -0.057, 0.090, 0.5694, TOF_MAX_RANGE_M),
+    ("tof_front_left_71.6deg", -0.057, 0.090, 0.3731, TOF_MAX_RANGE_M),
+    ("tof_front_left_82.9deg", -0.057, 0.090, 0.1767, TOF_MAX_RANGE_M),
     # Front-Right Array (cross-pointing Left, mirrored along Y axis, rotated 3 deg outwards)
     # Rightmost ToF (pointing straight and left, zones 1.1 deg to 34.9 deg)
-    ("tof_front_right_4.1deg",   0.058, 0.092, 1.5904, 1.80),
-    ("tof_front_right_15.4deg",  0.058, 0.092, 1.7868, 1.80),
-    ("tof_front_right_26.6deg",  0.058, 0.092, 1.9831, 1.80),
-    ("tof_front_right_37.9deg",  0.058, 0.092, 2.1795, 1.80),
+    ("tof_front_right_4.1deg",   0.058, 0.092, 1.5904, TOF_MAX_RANGE_M),
+    ("tof_front_right_15.4deg",  0.058, 0.092, 1.7868, TOF_MAX_RANGE_M),
+    ("tof_front_right_26.6deg",  0.058, 0.092, 1.9831, TOF_MAX_RANGE_M),
+    ("tof_front_right_37.9deg",  0.058, 0.092, 2.1795, TOF_MAX_RANGE_M),
     # Right ToF (pointing left, zones 46.1 deg to 79.9 deg)
-    ("tof_front_right_49.1deg",  0.057, 0.090, 2.3758, 1.80),
-    ("tof_front_right_60.4deg",  0.057, 0.090, 2.5722, 1.80),
-    ("tof_front_right_71.6deg",  0.057, 0.090, 2.7685, 1.80),
-    ("tof_front_right_82.9deg",  0.057, 0.090, 2.9649, 1.80),
+    ("tof_front_right_49.1deg",  0.057, 0.090, 2.3758, TOF_MAX_RANGE_M),
+    ("tof_front_right_60.4deg",  0.057, 0.090, 2.5722, TOF_MAX_RANGE_M),
+    ("tof_front_right_71.6deg",  0.057, 0.090, 2.7685, TOF_MAX_RANGE_M),
+    ("tof_front_right_82.9deg",  0.057, 0.090, 2.9649, TOF_MAX_RANGE_M),
 ]
 
 
@@ -168,7 +168,7 @@ class ToFGapScout:
         tof_readings: Dict[str, float],
         hazard_mask: Optional[np.ndarray] = None,
         costmap_obj: Optional[any] = None,
-        target_lookahead_m: float = 1.70,
+        target_lookahead_m: float = 2.30,
         steer_current: float = 0.0,
         prob_map: Optional[np.ndarray] = None,
         anchor_x: float = 0.0,
@@ -193,7 +193,7 @@ class ToFGapScout:
 
         if not targets:
             xg_prim = anchor_x
-            yg_prim = anchor_y + max(GAP_MIN_LOOKAHEAD_M, min(target_lookahead_m, 1.70))
+            yg_prim = anchor_y + max(GAP_MIN_LOOKAHEAD_M, min(target_lookahead_m, GAP_MAX_LOOKAHEAD_M))
             aperture = 0.45
         else:
             xg_prim, yg_prim, aperture = targets[0][:3]
@@ -415,10 +415,10 @@ class ToFGapScout:
                 left_keys = ["tof_fl_3", "tof_fr_0", "tof_fr_1", "tof_fr_2", "tof_bl_0", "tof_bl_1", "tof_bl_2", "tof_bl_3"]
                 right_keys = ["tof_fr_3", "tof_fl_0", "tof_fl_1", "tof_fl_2", "tof_br_0", "tof_br_1", "tof_br_2", "tof_br_3"]
 
-            l_vals = [tof_readings.get(k, 1.80) for k in left_keys]
-            r_vals = [tof_readings.get(k, 1.80) for k in right_keys]
-            l_total = sum(l_vals) / len(l_vals) if l_vals else 1.80
-            r_total = sum(r_vals) / len(r_vals) if r_vals else 1.80
+            l_vals = [tof_readings.get(k, TOF_MAX_RANGE_M) for k in left_keys]
+            r_vals = [tof_readings.get(k, TOF_MAX_RANGE_M) for k in right_keys]
+            l_total = sum(l_vals) / len(l_vals) if l_vals else TOF_MAX_RANGE_M
+            r_total = sum(r_vals) / len(r_vals) if r_vals else TOF_MAX_RANGE_M
             denom = max(0.25, 0.5 * (l_total + r_total))
             side_diff = (l_total - r_total) / denom
 
@@ -466,7 +466,7 @@ class ToFGapScout:
                 left_neighbor_dist = tof_readings.get(active_rig[z_idx - 1][0], 0.0) if (z_idx > 0 and z_idx != 8) else 0.0
                 right_neighbor_dist = tof_readings.get(active_rig[z_idx + 1][0], 0.0) if (z_idx < 15 and z_idx != 7) else 0.0
                 min_neighbor_dist = max(left_neighbor_dist, right_neighbor_dist)
-                neighbor_norm = min(1.80, min_neighbor_dist) / 1.80
+                neighbor_norm = min(TOF_MAX_RANGE_M, min_neighbor_dist) / TOF_MAX_RANGE_M
                 neighbor_bonus = 0.30 * self.w_gap_width * neighbor_norm
 
             # Side clearance alignment bonus:

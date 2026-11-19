@@ -61,6 +61,7 @@ try:
         BRAKE_DECEL_RATIO,
         GRAVITY_G,
         MPC_MU_FRICTION,
+        MPC_CENTER_BIAS,
         TOF_MAX_RANGE_M,
         WHEELBASE,
     )
@@ -87,6 +88,7 @@ except ImportError:
         BRAKE_DECEL_RATIO,
         GRAVITY_G,
         MPC_MU_FRICTION,
+        MPC_CENTER_BIAS,
         TOF_MAX_RANGE_M,
         WHEELBASE,
     )
@@ -221,6 +223,7 @@ class AutonomousBrain:
             alt_min_separation_m=float(genes.get("alt_min_separation_m", 0.25)),
             alt_aperture_bias=float(genes.get("alt_aperture_bias", 1.80)),
             w_gap_clear=float(genes.get("w_gap_clear", 5.00)),
+            center_bias=float(genes.get("center_bias", MPC_CENTER_BIAS)),
         )
         self.planner.costmap = self.costmap
 
@@ -587,15 +590,16 @@ class AutonomousBrain:
             target_v = target_speed
             v_curr = v_est
 
-            a_limit = min(ACCEL_FWD_MAX, ACCEL_FWD_RATIO * self.mu_val * GRAVITY_G)
-            d_limit = min(BRAKE_DECEL_MAX, BRAKE_DECEL_RATIO * self.mu_val * GRAVITY_G)
+            # Loose 60 Hz guardrail clamp; 400 Hz ESP32 electronic_diff governs physical traction ramp
+            a_limit = 2.2 * min(ACCEL_FWD_MAX, ACCEL_FWD_RATIO * self.mu_val * GRAVITY_G)
+            d_limit = 1.5 * min(BRAKE_DECEL_MAX, BRAKE_DECEL_RATIO * self.mu_val * GRAVITY_G)
 
-            # Instant crash/stop resync: if vehicle suddenly stopped against wall, resync rate_limited_speed
+            # Instant crash/stop resync: wide threshold so ESP32 400 Hz ramp lead never triggers false resyncs
             if self.rate_limited_speed >= 0.0:
-                if v_curr < (self.rate_limited_speed - 0.35):
+                if v_curr < (self.rate_limited_speed - 0.85):
                     self.rate_limited_speed = max(0.0, v_curr)
             else:
-                if v_curr > (self.rate_limited_speed + 0.35):
+                if v_curr > (self.rate_limited_speed + 0.85):
                     self.rate_limited_speed = min(0.0, v_curr)
 
             speed_err = target_v - self.rate_limited_speed

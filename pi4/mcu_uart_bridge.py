@@ -921,6 +921,10 @@ class MCU_UART_Bridge:
                 t1_st_list = [255] * 16
             telemetry["tof_ranges"] = tof_comp
             telemetry["tof_ranges_raw"] = tof_raw
+            telemetry["tof_target0_mm"] = t0_mm_list
+            telemetry["tof_target1_mm"] = t1_mm_list
+            telemetry["tof_target0_status"] = t0_st_list
+            telemetry["tof_target1_status"] = t1_st_list
             telemetry["f_tof"] = round(float(min(tof_comp)), 3) if tof_fresh and tof_comp else 0.0
             telemetry["f_tof_raw"] = round(float(min(tof_raw)), 3) if tof_fresh and tof_raw else 0.0
             telemetry["mcu_msg"] = self.latest_mcu_msg

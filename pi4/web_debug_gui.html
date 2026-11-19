@@ -1502,7 +1502,7 @@
     const X_MIN = -1.6;
     const X_MAX = 1.6;
     const Y_MIN = -0.85;
-    const Y_MAX = 1.80;
+    const Y_MAX = 2.50;
 
     // 16-Channel Physical ToF Sensor Mounting Poses (only_front_tofs.proto / planner_gui.py)
     const FRONT_TOF_SENSOR_RIG = [
@@ -1646,12 +1646,12 @@
     const CM_X_MIN = -1.25;
     const CM_X_MAX = 1.25;
     const CM_Y_MIN = 0.00;
-    const CM_Y_MAX = 1.90;
+    const CM_Y_MAX = 2.60;
     const CM_RES = 0.015;
     const CM_R_INFLATION = 0.075;
     const CM_WIDTH = Math.round((CM_X_MAX - CM_X_MIN) / CM_RES) + 1; // 168
-    const CM_HEIGHT = Math.round((CM_Y_MAX - CM_Y_MIN) / CM_RES) + 1; // 128
-    const CM_TOTAL_CELLS = CM_WIDTH * CM_HEIGHT; // 21504
+    const CM_HEIGHT = Math.round((CM_Y_MAX - CM_Y_MIN) / CM_RES) + 1; // 174
+    const CM_TOTAL_CELLS = CM_WIDTH * CM_HEIGHT; // 29232
     const CM_INFLATION_CELLS = Math.round(CM_R_INFLATION / CM_RES); // 5
 
     function wrapAngle(a) {
@@ -1700,7 +1700,7 @@
           const cellX = CM_X_MIN + c * CM_RES + CM_RES * 0.5;
           const dx = cellX - s.sx;
           const dist = Math.hypot(dx, dy);
-          if (dist < 0.001 || dist > 1.80) continue;
+          if (dist < 0.001 || dist > 2.40) continue;
 
           const phi = Math.atan2(dy, dx);
           const dth = Math.abs(wrapAngle(phi - s.heading));
@@ -1762,9 +1762,9 @@
 
       // Step 2A: Accumulate Obstacle Hit Evidence
       for (let sIdx = 0; sIdx < 16; sIdx++) {
-        const rawZ = ranges[sIdx] !== undefined ? ranges[sIdx] : 1.80;
-        const z = Math.min(1.80, Math.max(0.001, rawZ));
-        const isHit = z < 1.78;
+        const rawZ = ranges[sIdx] !== undefined ? ranges[sIdx] : 2.40;
+        const z = Math.min(2.40, Math.max(0.001, rawZ));
+        const isHit = z < 2.38;
         if (!isHit) continue;
 
         const sigmaR = Math.max(0.030 * z, CM_RES);
@@ -1786,13 +1786,13 @@
 
       // Step 2B: Strict Free-Space & Negative Cone Space-Carving
       for (let sIdx = 0; sIdx < 16; sIdx++) {
-        const rawZ = ranges[sIdx] !== undefined ? ranges[sIdx] : 1.80;
-        const z = Math.min(1.80, Math.max(0.001, rawZ));
-        const isHit = z < 1.78;
+        const rawZ = ranges[sIdx] !== undefined ? ranges[sIdx] : 2.40;
+        const z = Math.min(2.40, Math.max(0.001, rawZ));
+        const isHit = z < 2.38;
 
         let rCarveMax;
         if (!isHit) {
-          rCarveMax = 1.80;
+          rCarveMax = 2.40;
         } else {
           const sigmaR = Math.max(0.030 * z, CM_RES);
           rCarveMax = z - Math.max(0.025, 1.0 * sigmaR);
@@ -1869,7 +1869,7 @@
       ctx.fillStyle = "rgb(10, 13, 18)";
       ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-      const b = (pkt.grid_bounds && pkt.grid_bounds.length === 4) ? pkt.grid_bounds : [-1.25, 1.25, 0.00, 1.90];
+      const b = (pkt.grid_bounds && pkt.grid_bounds.length === 4) ? pkt.grid_bounds : [-1.25, 1.25, 0.00, 2.60];
       const mapXMin = b[0], mapXMax = b[1], mapYMin = b[2], mapYMax = b[3];
 
       // 1. Costmap Probability Image & C-Space Hazard Overlay (Constructed locally on laptop from binary)
@@ -2065,8 +2065,8 @@
           }
           if (rng === null || isNaN(rng) || rng <= 0.001) continue;
 
-          const dispR = Math.min(Math.max(rng, 0.02), 1.80);
-          const isHit = rng < 1.78;
+          const dispR = Math.min(Math.max(rng, 0.02), 2.40);
+          const isHit = rng < 2.38;
           const [ox, oy] = toPixel(s.sx, s.sy);
 
           const arcPts = [];
@@ -2188,7 +2188,7 @@
               ctx.font = "6.5pt Consolas, monospace";
               for (const ft of fbTargets) {
                 if (ft.dMm > 0) {
-                  const dispT = Math.min(Math.max(ft.dMm / 1000.0, 0.02), 1.80);
+                  const dispT = Math.min(Math.max(ft.dMm / 1000.0, 0.02), 2.40);
                   const [tx, ty] = toPixel(s.sx + dispT * Math.cos(s.heading), s.sy + dispT * Math.sin(s.heading));
                   ctx.strokeStyle = ft.stroke;
                   ctx.lineWidth = 1.5;

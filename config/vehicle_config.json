@@ -16,7 +16,7 @@
     "v_max_cruise_mps": 3.84
   },
   "dynamics": {
-    "tire_mu": 0.75,
+    "tire_mu": 0.80,
     "gravity_g": 9.80665,
     "accel_fwd_ratio": 0.95,
     "brake_decel_ratio": 1.00,
@@ -44,9 +44,8 @@
     "grid_x_max": 1.25,
     "grid_x_min": -1.25,
     "grid_y_min": 0.00,
-    "grid_y_max": 1.90,
+    "grid_y_max": 2.60,
     "grid_res": 0.015,
     "r_inflation_m": 0.075
   }
 }
-

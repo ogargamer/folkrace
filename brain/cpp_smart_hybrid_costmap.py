@@ -166,7 +166,7 @@ class CppSmartHybridCostmap:
 
     def __init__(
         self,
-        grid_bounds: Tuple[float, float, float, float] = (-1.25, 1.25, 0.0, 1.90),
+        grid_bounds: Tuple[float, float, float, float] = (-1.25, 1.25, 0.0, 2.60),
         resolution: float = 0.015,
         r_inflation_m: float = 0.075,
     ):
@@ -252,7 +252,7 @@ class CppSmartHybridCostmap:
             leg_name = legacy_fr[(idx - 8) // 2]
             if leg_name in readings:
                 return float(readings[leg_name])
-        return 1.80
+        return 2.40
 
     def process_tof_frame(
         self, readings: Dict[str, float], noise_pct: float = 0.0
@@ -263,9 +263,9 @@ class CppSmartHybridCostmap:
 
         for i, name in enumerate(SENSOR_NAMES):
             raw_z = self._extract_range(readings, name, i)
-            if noise_pct > 0.0 and raw_z < 1.799:
+            if noise_pct > 0.0 and raw_z < 2.399:
                 noise = np.random.uniform(-noise_pct, noise_pct) * raw_z
-                z = float(np.clip(raw_z + noise, 0.001, 1.80))
+                z = float(np.clip(raw_z + noise, 0.001, 2.40))
             else:
                 z = raw_z
             self.raw_ranges_c[i] = z
@@ -328,9 +328,9 @@ class CppSmartHybridCostmap:
         if noise_pct > 0.0:
             noisy = {}
             for k, v in readings.items():
-                if v < 1.799:
+                if v < 2.399:
                     noise = np.random.uniform(-noise_pct, noise_pct) * v
-                    noisy[k] = float(np.clip(v + noise, 0.001, 1.80))
+                    noisy[k] = float(np.clip(v + noise, 0.001, 2.40))
                 else:
                     noisy[k] = v
             p_map, _ = self.process_frame(noisy)

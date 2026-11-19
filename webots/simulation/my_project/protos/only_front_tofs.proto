@@ -279,7 +279,7 @@ PROTO only_front_tofs [
         numberOfLayers 1
         near 0.001
         minRange 0.001
-        maxRange 1.8
+        maxRange 2.4
       }
       # Front Left ToF 2 (FOV midpoint 12.4deg)
       Lidar {
@@ -291,7 +291,7 @@ PROTO only_front_tofs [
         numberOfLayers 1
         near 0.001
         minRange 0.001
-        maxRange 1.8
+        maxRange 2.4
       }
       # Front Left ToF 1 (FOV midpoint 23.6deg)
       Lidar {
@@ -303,7 +303,7 @@ PROTO only_front_tofs [
         numberOfLayers 1
         near 0.001
         minRange 0.001
-        maxRange 1.8
+        maxRange 2.4
       }
       # Front Left ToF 0 (FOV midpoint 34.9deg)
       Lidar {
@@ -315,7 +315,7 @@ PROTO only_front_tofs [
         numberOfLayers 1
         near 0.001
         minRange 0.001
-        maxRange 1.8
+        maxRange 2.4
       }
       # Front Left ToF -1 (FOV midpoint 46.1deg)
       Lidar {
@@ -327,7 +327,7 @@ PROTO only_front_tofs [
         numberOfLayers 1
         near 0.001
         minRange 0.001
-        maxRange 1.8
+        maxRange 2.4
       }
       # Front Left ToF -2 (FOV midpoint 57.4deg)
       Lidar {
@@ -339,7 +339,7 @@ PROTO only_front_tofs [
         numberOfLayers 1
         near 0.001
         minRange 0.001
-        maxRange 1.8
+        maxRange 2.4
       }
       # Front Left ToF -3 (FOV midpoint 68.6deg)
       Lidar {
@@ -351,7 +351,7 @@ PROTO only_front_tofs [
         numberOfLayers 1
         near 0.001
         minRange 0.001
-        maxRange 1.8
+        maxRange 2.4
       }
       # Front Left ToF -4 (FOV midpoint 79.9deg, outer edge 85.5deg)
       Lidar {
@@ -363,7 +363,7 @@ PROTO only_front_tofs [
         numberOfLayers 1
         near 0.001
         minRange 0.001
-        maxRange 1.8
+        maxRange 2.4
       }
       # Front Right ToF 3 (FOV midpoint 1.1deg, outer edge 4.5deg outwards)
       Lidar {
@@ -375,7 +375,7 @@ PROTO only_front_tofs [
         numberOfLayers 1
         near 0.001
         minRange 0.001
-        maxRange 1.8
+        maxRange 2.4
       }
       # Front Right ToF 2 (FOV midpoint 12.4deg)
       Lidar {
@@ -387,7 +387,7 @@ PROTO only_front_tofs [
         numberOfLayers 1
         near 0.001
         minRange 0.001
-        maxRange 1.8
+        maxRange 2.4
       }
       # Front Right ToF 1 (FOV midpoint 23.6deg)
       Lidar {
@@ -399,7 +399,7 @@ PROTO only_front_tofs [
         numberOfLayers 1
         near 0.001
         minRange 0.001
-        maxRange 1.8
+        maxRange 2.4
       }
       # Front Right ToF 0 (FOV midpoint 34.9deg)
       Lidar {
@@ -411,7 +411,7 @@ PROTO only_front_tofs [
         numberOfLayers 1
         near 0.001
         minRange 0.001
-        maxRange 1.8
+        maxRange 2.4
       }
       # Front Right ToF -1 (FOV midpoint 46.1deg)
       Lidar {
@@ -423,7 +423,7 @@ PROTO only_front_tofs [
         numberOfLayers 1
         near 0.001
         minRange 0.001
-        maxRange 1.8
+        maxRange 2.4
       }
       # Front Right ToF -2 (FOV midpoint 57.4deg)
       Lidar {
@@ -435,7 +435,7 @@ PROTO only_front_tofs [
         numberOfLayers 1
         near 0.001
         minRange 0.001
-        maxRange 1.8
+        maxRange 2.4
       }
       # Front Right ToF -3 (FOV midpoint 68.6deg)
       Lidar {
@@ -447,7 +447,7 @@ PROTO only_front_tofs [
         numberOfLayers 1
         near 0.001
         minRange 0.001
-        maxRange 1.8
+        maxRange 2.4
       }
       # Front Right ToF -4 (FOV midpoint 79.9deg, outer edge 85.5deg)
       Lidar {
@@ -459,7 +459,7 @@ PROTO only_front_tofs [
         numberOfLayers 1
         near 0.001
         minRange 0.001
-        maxRange 1.8
+        maxRange 2.4
       }
       InertialUnit {
         translation 0 -0.01 0.015

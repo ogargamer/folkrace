@@ -121,7 +121,7 @@ TOF_SENSOR_NAMES: List[str] = [
     "tof_front_right_71.6deg",
     "tof_front_right_82.9deg",
 ]
-TOF_MAX_RANGE_M: float = 1.80          # meters maximum valid ToF range
+TOF_MAX_RANGE_M: float = 2.40          # meters maximum valid ToF range
 TOF_MIN_RANGE_M: float = 0.001         # meters minimum valid ToF range
 
 # Wheel Encoders
@@ -145,7 +145,7 @@ MOVING_OBSTACLE_Z_ELEVATION: float = 0.075  # meters elevation above track groun
 
 # 4.1 Gap Aperture & Lookahead Constraints
 GAP_MIN_WIDTH_M: float = 0.0           # meters minimum passable aperture width
-GAP_MAX_LOOKAHEAD_M: float = 1.70      # meters maximum lookahead distance for gap target
+GAP_MAX_LOOKAHEAD_M: float = 2.30      # meters maximum lookahead distance for gap target
 GAP_MIN_LOOKAHEAD_M: float = 0.20      # meters minimum lookahead distance
 
 # 4.2 Candidate Evaluation Weights (GA Champion)
@@ -182,6 +182,7 @@ MPC_Q_HEADING: float = 9.685           # Weight penalizing heading error
 MPC_R_STEER: float = 4.944             # Weight penalizing steering angle magnitude
 MPC_R_ACCEL: float = 3.507             # Weight penalizing longitudinal acceleration/braking effort
 MPC_R_STEER_RATE: float = 12.310       # Weight penalizing steering rate slew
+MPC_CENTER_BIAS: float = 0.0           # Corridor centering blend in [0.0, 1.0] (0=guide line, 1=corridor midpoint)
 
 # 5.3 Traction Circle & Dynamic Speeds
 MPC_MU_FRICTION: float = TIRE_MU       # Tire friction coefficient governing grip envelope (0.86)
@@ -278,11 +279,11 @@ ALPHA_SLEW_RISE_RATE: float = 2.5              # Max alpha recovery rate (units/
 # ==============================================================================
 
 ENABLE_RAMP_DETECTION: bool = True
-RAMP_SPEED_LIMIT_MPS: float = 2.0       # Cruising speed limit (m/s) when robot is on a ramp
-RAMP_ENTER_PITCH_DEG: float = 5.0       # Pitch angle (deg) threshold to trigger ramp mode
-RAMP_ENTER_TILT_DEG: float = 6.0        # Combined tilt hypot(roll, pitch) (deg) threshold
-RAMP_EXIT_PITCH_DEG: float = 3.0        # Pitch hysteresis exit floor (deg)
-RAMP_EXIT_TILT_DEG: float = 4.0         # Tilt hysteresis exit floor (deg)
+RAMP_SPEED_LIMIT_MPS: float = 2.5       # Cruising speed limit (m/s) when robot is on a ramp
+RAMP_ENTER_PITCH_DEG: float = 8.0       # Pitch angle (deg) threshold to trigger ramp mode
+RAMP_ENTER_TILT_DEG: float = 9.0        # Combined tilt hypot(roll, pitch) (deg) threshold
+RAMP_EXIT_PITCH_DEG: float = 5.0        # Pitch hysteresis exit floor (deg)
+RAMP_EXIT_TILT_DEG: float = 6.0         # Tilt hysteresis exit floor (deg)
 RAMP_HOLD_TIME_S: float = 0.30          # Hold latch duration (s) across ramp apex / transition
 
 
@@ -359,6 +360,7 @@ def _apply_best_genome_overrides() -> None:
         "r_steer": ("MPC_R_STEER", float),
         "r_accel": ("MPC_R_ACCEL", float),
         "r_steer_rate": ("MPC_R_STEER_RATE", float),
+        "center_bias": ("MPC_CENTER_BIAS", float),
         "mu_friction": ("MPC_MU_FRICTION", float),
         "v_corner_factor": ("MPC_V_CORNER_FACTOR", float),
         "v_cruise_max": ("MPC_V_CRUISE_MAX", float),

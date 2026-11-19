@@ -28,17 +28,17 @@ V_MAX_CRUISE: float = 3.84
 # ============================================================================== #
 # 2. TIRE & VEHICLE DYNAMICS LIMITS                                              #
 # ============================================================================== #
-TIRE_MU: float = 0.75
+TIRE_MU: float = 0.8
 GRAVITY_G: float = 9.80665
-A_MAX_BASE: float = 7.3549875
+A_MAX_BASE: float = 7.84532
 ACCEL_FWD_RATIO: float = 0.95
 BRAKE_DECEL_RATIO: float = 1.0
 LAT_ACCEL_RATIO: float = 1.0
-ACCEL_FWD_MAX: float = 6.987238124999999
-BRAKE_DECEL_MAX: float = 7.3549875
-LAT_ACCEL_MAX: float = 7.3549875
+ACCEL_FWD_MAX: float = 7.453054
+BRAKE_DECEL_MAX: float = 7.84532
+LAT_ACCEL_MAX: float = 7.84532
 R_MIN_TURN: float = 0.210271646984119
-V_MIN_CRUISE: float = 1.2436017590742656
+V_MIN_CRUISE: float = 1.2843863739223678
 SLIP_GATE_SPEED_MPS: float = 0.3
 SLIP_THRESH_SPIN_RAD_S: float = 0.45
 
@@ -70,7 +70,7 @@ UART_BAUD: int = 921600
 GRID_X_MAX: float = 1.25
 GRID_X_MIN: float = -1.25
 GRID_Y_MIN: float = 0.0
-GRID_Y_MAX: float = 1.9
+GRID_Y_MAX: float = 2.6
 GRID_RES: float = 0.015
 R_INFLATION_M: float = 0.075
 

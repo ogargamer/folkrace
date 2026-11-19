@@ -250,13 +250,13 @@ class PlannerCostmapCanvas(QtWidgets.QWidget):
         self.map_x_min = -1.25
         self.map_x_max = 1.25
         self.map_y_min = 0.00
-        self.map_y_max = 1.90
+        self.map_y_max = 2.60
 
-        # Viewport metric bounds (1.80m upper bound matches maximum ToF visibility ceiling)
+        # Viewport metric bounds (2.50m upper bound covers 2.40m ToF visibility ceiling)
         self.x_min = -1.6
         self.x_max = 1.6
         self.y_min = -0.85
-        self.y_max = 1.80
+        self.y_max = 2.50
 
         # Grid data
         self.prob_map: Optional[np.ndarray] = None
@@ -502,8 +502,8 @@ class PlannerCostmapCanvas(QtWidgets.QWidget):
                 rng = self.tof_readings.get(s_name)
                 if rng is None:
                     continue
-                disp_r = min(max(float(rng), 0.02), 1.80)
-                is_hit = (float(rng) < 1.78)
+                disp_r = min(max(float(rng), 0.02), 2.40)
+                is_hit = (float(rng) < 2.38)
 
                 p_origin = self.world_to_screen(sx, sy)
 
@@ -1496,10 +1496,10 @@ class ComprehensivePlannerGUI(QMainWindow):
             l.addWidget(lbl_val, alignment=Qt.AlignCenter)
             return f, lbl_val
 
-        card_front, self.lbl_card_front = make_card("FRONT CLEARANCE", "> 1.80 m", "#00e676")
-        card_left, self.lbl_card_left = make_card("LEFT FLANK", "> 1.80 m", "#00e676")
-        card_right, self.lbl_card_right = make_card("RIGHT FLANK", "> 1.80 m", "#00e676")
-        card_min, self.lbl_card_min = make_card("MINIMUM RANGE", "> 1.80 m", "#00e676")
+        card_front, self.lbl_card_front = make_card("FRONT CLEARANCE", "> 2.40 m", "#00e676")
+        card_left, self.lbl_card_left = make_card("LEFT FLANK", "> 2.40 m", "#00e676")
+        card_right, self.lbl_card_right = make_card("RIGHT FLANK", "> 2.40 m", "#00e676")
+        card_min, self.lbl_card_min = make_card("MINIMUM RANGE", "> 2.40 m", "#00e676")
 
         summary_layout.addWidget(card_front, 0, 0)
         summary_layout.addWidget(card_left, 0, 1)
@@ -1539,8 +1539,8 @@ class ComprehensivePlannerGUI(QMainWindow):
             name_lbl.setStyleSheet("color: #ccc; min-width: 65px;")
 
             bar = QProgressBar()
-            bar.setRange(0, 180)
-            bar.setValue(180)
+            bar.setRange(0, 240)
+            bar.setValue(240)
             bar.setTextVisible(False)
             bar.setFixedHeight(12)
             bar.setStyleSheet("""
@@ -1555,7 +1555,7 @@ class ComprehensivePlannerGUI(QMainWindow):
                 }
             """)
 
-            val_lbl = QLabel("1.80m")
+            val_lbl = QLabel("2.40m")
             val_lbl.setFont(QFont("Consolas", 8))
             val_lbl.setStyleSheet("color: #00e676; min-width: 44px;")
             val_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
@@ -1589,9 +1589,9 @@ class ComprehensivePlannerGUI(QMainWindow):
         left_beams = ["tof_front_right_60.4deg", "tof_front_right_71.6deg", "tof_front_right_82.9deg", "tof_front_right_49.1deg"]
         right_beams = ["tof_front_left_60.4deg", "tof_front_left_71.6deg", "tof_front_left_82.9deg", "tof_front_left_49.1deg"]
 
-        min_f = min([float(tof.get(k, 1.80)) for k in front_beams], default=1.80)
-        min_l = min([float(tof.get(k, 1.80)) for k in left_beams], default=1.80)
-        min_r = min([float(tof.get(k, 1.80)) for k in right_beams], default=1.80)
+        min_f = min([float(tof.get(k, 2.40)) for k in front_beams], default=2.40)
+        min_l = min([float(tof.get(k, 2.40)) for k in left_beams], default=2.40)
+        min_r = min([float(tof.get(k, 2.40)) for k in right_beams], default=2.40)
 
         if not hasattr(self, "_last_bar_colors"):
             self._last_bar_colors = {}
@@ -1602,7 +1602,7 @@ class ComprehensivePlannerGUI(QMainWindow):
                 if r_m < min_overall:
                     min_overall = r_m
 
-                cm_val = int(min(max(r_m * 100.0, 0.0), 180.0))
+                cm_val = int(min(max(r_m * 100.0, 0.0), 240.0))
                 bar.setValue(cm_val)
 
                 if r_m < 0.25:
@@ -1629,8 +1629,8 @@ class ComprehensivePlannerGUI(QMainWindow):
                 val_lbl.setStyleSheet(f"color: {bar_col}; font-weight: bold; min-width: 44px;")
 
         def format_card(lbl, val_m):
-            if val_m >= 1.78:
-                lbl.setText("> 1.80 m")
+            if val_m >= 2.38:
+                lbl.setText("> 2.40 m")
                 lbl.setStyleSheet("color: #00e676; font-weight: bold;")
             elif val_m < 0.25:
                 lbl.setText(f"{val_m*100:.0f} cm")

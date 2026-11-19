@@ -27,23 +27,23 @@ from typing import Dict, List, Tuple, Union, Optional
 # Format: (name, x0, y0, heading_rad, min_range, max_range)
 SENSOR_RIG_CONFIG = [
     # Front-Left Array (cross-pointing Right)
-    ("tof_front_left_4.1deg",  -0.058, 0.092, 1.5512, 0.001, 1.80),
-    ("tof_front_left_15.4deg", -0.058, 0.092, 1.3548, 0.001, 1.80),
-    ("tof_front_left_26.6deg", -0.058, 0.092, 1.1585, 0.001, 1.80),
-    ("tof_front_left_37.9deg", -0.058, 0.092, 0.9621, 0.001, 1.80),
-    ("tof_front_left_49.1deg", -0.057, 0.090, 0.7658, 0.001, 1.80),
-    ("tof_front_left_60.4deg", -0.057, 0.090, 0.5694, 0.001, 1.80),
-    ("tof_front_left_71.6deg", -0.057, 0.090, 0.3731, 0.001, 1.80),
-    ("tof_front_left_82.9deg", -0.057, 0.090, 0.1767, 0.001, 1.80),
+    ("tof_front_left_4.1deg",  -0.058, 0.092, 1.5512, 0.001, 2.40),
+    ("tof_front_left_15.4deg", -0.058, 0.092, 1.3548, 0.001, 2.40),
+    ("tof_front_left_26.6deg", -0.058, 0.092, 1.1585, 0.001, 2.40),
+    ("tof_front_left_37.9deg", -0.058, 0.092, 0.9621, 0.001, 2.40),
+    ("tof_front_left_49.1deg", -0.057, 0.090, 0.7658, 0.001, 2.40),
+    ("tof_front_left_60.4deg", -0.057, 0.090, 0.5694, 0.001, 2.40),
+    ("tof_front_left_71.6deg", -0.057, 0.090, 0.3731, 0.001, 2.40),
+    ("tof_front_left_82.9deg", -0.057, 0.090, 0.1767, 0.001, 2.40),
     # Front-Right Array (cross-pointing Left)
-    ("tof_front_right_4.1deg",   0.058, 0.092, 1.5904, 0.001, 1.80),
-    ("tof_front_right_15.4deg",  0.058, 0.092, 1.7868, 0.001, 1.80),
-    ("tof_front_right_26.6deg",  0.058, 0.092, 1.9831, 0.001, 1.80),
-    ("tof_front_right_37.9deg",  0.058, 0.092, 2.1795, 0.001, 1.80),
-    ("tof_front_right_49.1deg",  0.057, 0.090, 2.3758, 0.001, 1.80),
-    ("tof_front_right_60.4deg",  0.057, 0.090, 2.5722, 0.001, 1.80),
-    ("tof_front_right_71.6deg",  0.057, 0.090, 2.7685, 0.001, 1.80),
-    ("tof_front_right_82.9deg",  0.057, 0.090, 2.9649, 0.001, 1.80),
+    ("tof_front_right_4.1deg",   0.058, 0.092, 1.5904, 0.001, 2.40),
+    ("tof_front_right_15.4deg",  0.058, 0.092, 1.7868, 0.001, 2.40),
+    ("tof_front_right_26.6deg",  0.058, 0.092, 1.9831, 0.001, 2.40),
+    ("tof_front_right_37.9deg",  0.058, 0.092, 2.1795, 0.001, 2.40),
+    ("tof_front_right_49.1deg",  0.057, 0.090, 2.3758, 0.001, 2.40),
+    ("tof_front_right_60.4deg",  0.057, 0.090, 2.5722, 0.001, 2.40),
+    ("tof_front_right_71.6deg",  0.057, 0.090, 2.7685, 0.001, 2.40),
+    ("tof_front_right_82.9deg",  0.057, 0.090, 2.9649, 0.001, 2.40),
 ]
 
 SENSOR_NAMES = [cfg[0] for cfg in SENSOR_RIG_CONFIG]
