@@ -163,6 +163,7 @@ class AutoServoCenterCalibrator:
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        self._tof_required: bool = False
 
         self._status: Dict[str, Any] = {
             "running": False,
@@ -310,6 +311,7 @@ class AutoServoCenterCalibrator:
             if err:
                 return {"started": False, "error": err}
 
+            self._tof_required = bool(telem.get("mcu_tof_connected"))
             self._stop_event.clear()
             base_center = float(self._get_center_us())
             initial_center = round(max(self.MIN_CENTER_US, min(self.MAX_CENTER_US, base_center + trim_off)), 1)
@@ -407,6 +409,7 @@ class AutoServoCenterCalibrator:
         tracker = _TelemetryTracker(self._get_telemetry, self.TELEM_STALE_SEC, self._now)
         brake_dist_m = 0.0
         t_start = self._now()
+        last_brake_tx = t_start
         standstill_since: Optional[float] = None
         sent_v0_fallback = False
 
@@ -423,6 +426,10 @@ class AutoServoCenterCalibrator:
                 if v_cmd_pkt is not None and abs(float(v_cmd_pkt)) > 0.02:
                     self._send_cmd(b"V 0.0\n")
                     sent_v0_fallback = True
+
+            if not sent_v0_fallback and (now - last_brake_tx) >= 0.10:
+                self._send_cmd(b"BRAKE\n")
+                last_brake_tx = now
 
             v_est = self._read_speed_est(pkt)
             if is_fresh:
@@ -504,6 +511,9 @@ class AutoServoCenterCalibrator:
                 return {"ok": False, "error": f"Telemetry stalled during {phase}"}
 
             if direction > 0:
+                if self._tof_required and (not pkt.get("mcu_tof_connected") or pkt.get("tof_front_ok") is False):
+                    self._send_cmd(b"BRAKE\n")
+                    return {"ok": False, "error": "Front ToF link lost during forward drive"}
                 obs_dist = self._check_front_obstacle(pkt, max(abs(v_cmd), abs(self._read_speed_est(pkt))))
                 if obs_dist is not None:
                     self._send_cmd(b"BRAKE\n")
@@ -854,10 +864,15 @@ class AutoServoCenterCalibrator:
             try:
                 if not self._stop_event.is_set() and abs(self._read_speed_est(self._get_telemetry() or {})) > 0.05:
                     self._send_cmd(b"BRAKE\n")
-                    t_wait = self._now() + 0.35
+                    last_brake_tx = self._now()
+                    t_wait = last_brake_tx + 0.35
                     while self._now() < t_wait and not self._stop_event.is_set():
                         if abs(self._read_speed_est(self._get_telemetry() or {})) <= 0.05:
                             break
+                        now_w = self._now()
+                        if (now_w - last_brake_tx) >= 0.10:
+                            self._send_cmd(b"BRAKE\n")
+                            last_brake_tx = now_w
                         self._sleep(0.02)
             except Exception:
                 pass

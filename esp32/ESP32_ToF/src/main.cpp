@@ -4,6 +4,7 @@
 #include "vl53l8cx_buffers.h"
 #include <Arduino.h>
 #include <SPI.h>
+#include <esp_task_wdt.h>
 
 #define ENABLE_TOF1 1
 #define ENABLE_TOF2 1
@@ -810,6 +811,8 @@ void setup() {
     ctxs[i].last_recovery_ms = t;
   }
   g_streaming = true; // From here on, Serial carries binary packets only
+  esp_task_wdt_init(5, true);
+  esp_task_wdt_add(nullptr);
 }
 
 // =========================================================================
@@ -817,6 +820,8 @@ void setup() {
 // =========================================================================
 
 void loop() {
+  esp_task_wdt_reset();
+
   while (Serial.available() > 0) {
     char c = Serial.read();
     if (c == 'D' || c == 'd' || c == 'M' || c == 'm') g_packet_mode = TOF_PKT_52;      // Debug mode: 52B multi-target + SPAD
@@ -848,7 +853,9 @@ void loop() {
     // Stall detection: fast soft recovery only (hard reset & resync disabled)
     if (ctx->active && (now - ctx->last_frame_ms > TOF_STALL_TIMEOUT_MS)) {
       if (now - ctx->last_recovery_ms > TOF_SOFT_RECOVERY_COOLDOWN_MS) {
+        esp_task_wdt_reset();
         soft_recover_sensor(&devs[i], ctx);
+        esp_task_wdt_reset();
         ctx->last_recovery_ms = millis();
       }
     }

@@ -3108,6 +3108,51 @@
     const BUTTON_DEBOUNCE_MS = 250;
     let throttleSendTimer = null;
     let steerSendTimer = null;
+    let activeManualSpeed = 0.0;
+    let manualKeepaliveTimer = null;
+
+    function sendKeepaliveSilent() {
+      fetch("/api/mcu/command", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "keepalive" }),
+        keepalive: true
+      }).catch(() => {});
+    }
+
+    function syncManualKeepalive() {
+      const needKeepalive = (Math.abs(activeManualSpeed) > 0.001) || fakeDataActive;
+      if (needKeepalive && !manualKeepaliveTimer) {
+        manualKeepaliveTimer = setInterval(sendKeepaliveSilent, 150);
+      } else if (!needKeepalive && manualKeepaliveTimer) {
+        clearInterval(manualKeepaliveTimer);
+        manualKeepaliveTimer = null;
+      }
+    }
+
+    function stopManualKeepaliveAndZero() {
+      activeManualSpeed = 0.0;
+      syncManualKeepalive();
+    }
+
+    function sendBeaconStopOnUnload() {
+      if (Math.abs(activeManualSpeed) > 0.001 || fakeDataActive) {
+        stopManualKeepaliveAndZero();
+        const payload = JSON.stringify({ action: "motors", enable: false });
+        if (navigator.sendBeacon) {
+          navigator.sendBeacon("/api/mcu/command", new Blob([payload], { type: "application/json" }));
+        } else {
+          fetch("/api/mcu/command", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: payload,
+            keepalive: true
+          }).catch(() => {});
+        }
+      }
+    }
+    window.addEventListener("pagehide", sendBeaconStopOnUnload);
+    window.addEventListener("beforeunload", sendBeaconStopOnUnload);
 
     async function sendMcuCommand(payload) {
       const statusEl = document.getElementById("motorActionStatus");
@@ -3167,12 +3212,18 @@
     }
 
     function enableMotors(enable) {
+      if (!enable) {
+        document.getElementById("throttleSlider").value = 0.0;
+        document.getElementById("throttleVal").innerText = "0.00 m/s";
+        stopManualKeepaliveAndZero();
+      }
       executeButtonCommand(null, { action: "motors", enable: enable });
     }
 
     function emergencyStop() {
       document.getElementById("throttleSlider").value = 0.0;
       document.getElementById("throttleVal").innerText = "0.00 m/s";
+      stopManualKeepaliveAndZero();
       executeButtonCommand(null, { action: "estop" });
     }
 
@@ -3216,6 +3267,11 @@
 
     async function togglePlannerRun() {
       const nextState = !plannerRunning;
+      if (nextState) {
+        document.getElementById("throttleSlider").value = 0.0;
+        document.getElementById("throttleVal").innerText = "0.00 m/s";
+        stopManualKeepaliveAndZero();
+      }
       plannerRunning = nextState;
       lastPlannerToggleMs = performance.now();
       syncPlannerRunButton(plannerRunning);
@@ -3274,6 +3330,13 @@
       if (benchBtn) { benchBtn.disabled = true; benchBtn.style.opacity = "0.5"; }
 
       fakeDataActive = !fakeDataActive;
+      if (!fakeDataActive) {
+        document.getElementById("throttleSlider").value = 0.0;
+        document.getElementById("throttleVal").innerText = "0.00 m/s";
+        stopManualKeepaliveAndZero();
+      } else {
+        syncManualKeepalive();
+      }
       syncFakeDataButtons(fakeDataActive);
       appendMcuConsole(`>>> Toggling Synthetic Fake Data / Live Sensors mode: ${fakeDataActive ? "FAKE DATA (BENCH)" : "LIVE SENSORS"}...`);
 
@@ -3282,6 +3345,7 @@
         if (res && typeof res.fake_data === "boolean") {
           fakeDataActive = res.fake_data;
           syncFakeDataButtons(fakeDataActive);
+          syncManualKeepalive();
         }
       } catch (e) {
         appendMcuConsole(`[WARN] Fake data toggle error: ${e.message}`);
@@ -3313,6 +3377,7 @@
       document.getElementById("throttleVal").innerText = "0.00 m/s";
       document.getElementById("steerSlider").value = 0.0;
       document.getElementById("steerSliderVal").innerText = "0.0°";
+      stopManualKeepaliveAndZero();
       executeButtonCommand(null, { action: "reset" });
     }
 
@@ -3324,14 +3389,23 @@
     function setSpeed(v) {
       document.getElementById("throttleSlider").value = v;
       document.getElementById("throttleVal").innerText = `${Number(v).toFixed(2)} m/s`;
+      activeManualSpeed = Number(v) || 0.0;
+      syncManualKeepalive();
       executeButtonCommand(null, { action: "speed", v: v });
     }
 
     function onThrottleInput(v) {
       document.getElementById("throttleVal").innerText = `${Number(v).toFixed(2)} m/s`;
+      const speedVal = parseFloat(v) || 0.0;
+      if (Math.abs(speedVal) <= 0.001) {
+        stopManualKeepaliveAndZero();
+      } else {
+        activeManualSpeed = speedVal;
+        syncManualKeepalive();
+      }
       if (throttleSendTimer) clearTimeout(throttleSendTimer);
       throttleSendTimer = setTimeout(() => {
-        sendMcuCommand({ action: "speed", v: parseFloat(v) });
+        sendMcuCommand({ action: "speed", v: speedVal });
       }, 100);
     }
 

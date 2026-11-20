@@ -16,6 +16,7 @@
 import os
 import sys
 import time
+import signal
 import json
 import math
 import zlib
@@ -85,6 +86,11 @@ def create_nonblocking_udp_socket() -> socket.socket:
 
 
 def run_path_planner():
+    def _handle_sigterm(_signum, _frame):
+        raise KeyboardInterrupt()
+
+    signal.signal(signal.SIGTERM, _handle_sigterm)
+
     print("=" * 70)
     print("  FOLKRACE PI 4: REAL-TIME PATH PLANNER (CORE 1 DEDICATED)")
     print("=" * 70)
@@ -172,6 +178,8 @@ def run_path_planner():
     planner_running = False
     was_mcu_main_connected = False
     was_driving_links_ok = False
+    seen_stm32_front = False
+    seen_stm32_rear = False
     brake_until = 0.0
 
     live_tof_list: List[float] = [0.0] * 16
@@ -250,7 +258,7 @@ def run_path_planner():
             latest_mcu_pkt = None
             raw_mcu_bytes = None
             raw_tof_bytes = None
-            now_mono = time.time()
+            now_mono = time.monotonic()
             while True:
                 try:
                     raw_bytes, _ = sensor_sock.recvfrom(4096)
@@ -324,12 +332,32 @@ def run_path_planner():
 
             # Ensure hardware starts in safe stopped state when ESP32 Main first connects
             mcu_main_now = bool(active_mcu and active_mcu.get("mcu_main_connected", False))
+            flags_dict = (active_mcu.get("flags") or {}) if isinstance(active_mcu, dict) else {}
+            if not isinstance(flags_dict, dict):
+                flags_dict = {}
+            stm32_front_now = bool(flags_dict.get("stm32_front", False))
+            stm32_rear_now = bool(flags_dict.get("stm32_rear", False))
             if mcu_main_now and not was_mcu_main_connected and not planner_running:
                 dispatch_stop_hw()
             was_mcu_main_connected = mcu_main_now
 
-            # 2. Execute Shared Autonomous Brain Step (only when started AND both Main & ToF links are live)
-            driving_links_ok = has_live_sensor_feed and mcu_main_now
+            if not planner_running:
+                seen_stm32_front = False
+                seen_stm32_rear = False
+            elif mcu_main_now:
+                if stm32_front_now:
+                    seen_stm32_front = True
+                if stm32_rear_now:
+                    seen_stm32_rear = True
+
+            axles_ok = (
+                (not seen_stm32_front or stm32_front_now)
+                and (not seen_stm32_rear or stm32_rear_now)
+                and (stm32_front_now or stm32_rear_now)
+            )
+
+            # 2. Execute Shared Autonomous Brain Step (only when started AND Main, ToF & STM32 links are live)
+            driving_links_ok = has_live_sensor_feed and mcu_main_now and axles_ok
             if planner_running and driving_links_ok:
                 was_driving_links_ok = True
                 steer_rad = math.radians(steer_actual_deg)
@@ -504,6 +532,8 @@ def run_path_planner():
 
     except KeyboardInterrupt:
         print("\n[Planner Core 1] Stopped by user.")
+    finally:
+        dispatch_stop_hw()
 
 
 if __name__ == "__main__":

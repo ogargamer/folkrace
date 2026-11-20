@@ -152,9 +152,10 @@ bool BNO08xIMU::update() {
 
     bool got_new_data = false;
 
-    // Drain all pending SHTP packets available from SparkFun BNO08x driver
+    // Drain pending SHTP packets from SparkFun BNO08x driver (bounded to prevent Core 0 hang)
     uint16_t report_id = 0;
-    while ((report_id = bno08x_.getReadings()) != 0) {
+    int drained = 0;
+    while (drained++ < 8 && (report_id = bno08x_.getReadings()) != 0) {
         got_new_data = true;
         data_.last_update_ms = millis();
         data_.updated = true;

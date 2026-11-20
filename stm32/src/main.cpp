@@ -75,6 +75,9 @@ static constexpr uint32_t FOC_TRACE_DECIMATION = FOC_COMMUTATION_HZ / FOC_TRACE_
 
 static uint32_t last_esp_packet_ms = 0;
 static bool esp_link_active = false;
+static volatile uint32_t g_esp_rx_seq_isr = 0;
+static volatile bool g_esp_link_active_isr = false;
+volatile bool g_estop_active = false;
 static constexpr size_t ESP_COMMAND_BYTE_BUDGET = 128;
 static uint32_t esp_rx_bytes = 0;
 static uint32_t esp_pkts_ok = 0;
@@ -363,6 +366,7 @@ struct IndustrialStallGuard {
     float energy_accumulator = 0.0f;
     uint32_t state_timer = 0;
     uint8_t recovery_attempts = 0;
+    uint8_t enc_fault_ticks = 0;
     bool latched_fault = false;
 
     void reset() {
@@ -370,6 +374,7 @@ struct IndustrialStallGuard {
         energy_accumulator = 0.0f;
         state_timer = 0;
         recovery_attempts = 0;
+        enc_fault_ticks = 0;
         latched_fault = false;
     }
 };
@@ -551,6 +556,49 @@ extern "C" void SystemClock_Config(void) {
     if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_4) != HAL_OK) {
         Error_Handler();
     }
+}
+
+// ----------------------------------------------------------------------------
+// Immediate Bare-Metal Safety Kill, Cortex-M Fault Handlers & IWDG
+// ----------------------------------------------------------------------------
+static inline void hardwareKillMotorsImmediate() {
+    GPIOA->BSRR = (GPIO_BSRR_BR3 | GPIO_BSRR_BR7); // PA3 (M1_EN), PA7 (M2_EN) LOW
+    TIM2->CR1 &= ~TIM_CR1_UDIS;
+    TIM2->CCR1 = 0; TIM2->CCR2 = 0; TIM2->CCR3 = 0;
+    TIM2->EGR  = TIM_EGR_UG;
+    TIM3->CR1 &= ~TIM_CR1_UDIS;
+    TIM3->CCR1 = 0; TIM3->CCR2 = 0; TIM3->CCR3 = 0;
+    TIM3->EGR  = TIM_EGR_UG;
+    m1_enabled = false;
+    m2_enabled = false;
+    motor1.enabled = 0;
+    motor2.enabled = 0;
+    motor1.voltage.q = 0.0f;
+    motor1.voltage.d = 0.0f;
+    motor2.voltage.q = 0.0f;
+    motor2.voltage.d = 0.0f;
+}
+
+extern "C" {
+void HardFault_Handler(void)  { __disable_irq(); hardwareKillMotorsImmediate(); NVIC_SystemReset(); while (1) {} }
+void MemManage_Handler(void)  { __disable_irq(); hardwareKillMotorsImmediate(); NVIC_SystemReset(); while (1) {} }
+void BusFault_Handler(void)   { __disable_irq(); hardwareKillMotorsImmediate(); NVIC_SystemReset(); while (1) {} }
+void UsageFault_Handler(void) { __disable_irq(); hardwareKillMotorsImmediate(); NVIC_SystemReset(); while (1) {} }
+}
+
+static inline void iwdgKick() {
+    IWDG->KR = 0xAAAAU;
+}
+
+static void iwdgInit500ms() {
+    IWDG->KR = 0xCCCCU;
+    IWDG->KR = 0x5555U;
+    IWDG->PR = 0x03U;
+    IWDG->RLR = 500U;
+    uint32_t t0 = millis();
+    while ((IWDG->SR != 0U) && ((millis() - t0) < 50U)) {
+    }
+    IWDG->KR = 0xAAAAU;
 }
 
 // ----------------------------------------------------------------------------
@@ -806,6 +854,42 @@ void focTimerISR() {
             motor2.shaft_velocity = (float)motor2.sensor_direction * motor2.LPF_velocity(encoder2.getVelocity());
             m2_ctrl.resetIsrState(motor2.shaft_velocity);
         }
+    } else if (phase == 1U) {
+        // 5.0 kHz (200 us) ISR-level ESP32 command-age watchdog: disarms motors in
+        // <= 100 ms even if loop() stalls while TIM6 keeps ticking.
+        static uint32_t s_isr_last_esp_seq = 0;
+        static uint32_t s_isr_esp_silent_ticks = 0;
+        if (g_esp_link_active_isr) {
+            uint32_t rx_seq = g_esp_rx_seq_isr;
+            if (rx_seq != s_isr_last_esp_seq) {
+                s_isr_last_esp_seq = rx_seq;
+                s_isr_esp_silent_ticks = 0;
+            } else if (m1_enabled || m2_enabled) {
+                s_isr_esp_silent_ticks++;
+                if (s_isr_esp_silent_ticks >= 500U) {
+                    esp_wdog_trips++;
+                    g_estop_active = true;
+                    hardwareKillMotorsImmediate();
+                    m1_ctrl.cmd_omega_rad_s = 0.0f;
+                    m1_ctrl.cmd_vtrq_min = -MOTOR_VOLTAGE_LIMIT;
+                    m1_ctrl.cmd_vtrq_max = MOTOR_VOLTAGE_LIMIT;
+                    m1_ctrl.cmd_vtrq_ff = 0.0f;
+                    m1_ctrl.cmd_seq++;
+                    m1_ctrl.resetIsrState(motor1.shaft_velocity);
+                    m2_ctrl.cmd_omega_rad_s = 0.0f;
+                    m2_ctrl.cmd_vtrq_min = -MOTOR_VOLTAGE_LIMIT;
+                    m2_ctrl.cmd_vtrq_max = MOTOR_VOLTAGE_LIMIT;
+                    m2_ctrl.cmd_vtrq_ff = 0.0f;
+                    m2_ctrl.cmd_seq++;
+                    m2_ctrl.resetIsrState(motor2.shaft_velocity);
+                    m1_target_rpm = 0.0f;
+                    m2_target_rpm = 0.0f;
+                    s_isr_esp_silent_ticks = 0;
+                }
+            } else {
+                s_isr_esp_silent_ticks = 0;
+            }
+        }
     }
     uint32_t c3 = DWT->CYCCNT;
 
@@ -981,7 +1065,6 @@ void sendBinaryTelemetry(); // Forward declaration for real-time telemetry strea
 // ----------------------------------------------------------------------------
 // Global Emergency Stop & Calibration Abort Engine
 // ----------------------------------------------------------------------------
-volatile bool g_estop_active = false;
 static bool s_calib_isolation_active = false;
 static bool s_saved_telemetry_state = true;
 
@@ -1011,6 +1094,9 @@ void disableBothDrivers() {
 }
 
 void triggerGlobalEmergencyStop() {
+    bool already_stopped = g_estop_active && !m1_enabled && !m2_enabled &&
+                           !m1_calib_active && !m2_calib_active &&
+                           !s_calib_isolation_active;
     g_estop_active = true;
     m1_calib_active = false;
     m2_calib_active = false;
@@ -1027,18 +1113,25 @@ void triggerGlobalEmergencyStop() {
 
     while (Serial.available()) Serial.read();
 
-    Serial.println("\n>>> 🛑 GLOBAL EMERGENCY STOP: ALL MOTORS SHUT DOWN UNCONDITIONALLY! <<<");
-    Serial.println("[CALIB_FAILED]:ABORTED_BY_ESTOP");
-    Serial.flush();
+    if (!already_stopped) {
+        Serial.println("\n>>> 🛑 GLOBAL EMERGENCY STOP: ALL MOTORS SHUT DOWN UNCONDITIONALLY! <<<");
+        Serial.println("[CALIB_FAILED]:ABORTED_BY_ESTOP");
+    }
 }
 
 void processESP32Link();
 void sendESP32Feedback();
 
 static inline bool checkCalibrationAbort() {
+    iwdgKick();
     if (g_estop_active) return true;
     processESP32Link();
     if (g_estop_active) return true;
+    if (esp_link_active && (millis() >= last_esp_packet_ms) &&
+        (millis() - last_esp_packet_ms > 250)) {
+        triggerGlobalEmergencyStop();
+        return true;
+    }
     while (Serial.available() > 0) {
         char c = (char)Serial.read();
         // Dedicated single-byte instant emergency stop hotkey: ESC (ASCII 27)
@@ -1327,6 +1420,7 @@ bool saveConfigToFlash() {
     resetMotorTorqueCtrl(m1_ctrl, m1_target_rpm, motor1.shaft_velocity, true);
     resetMotorTorqueCtrl(m2_ctrl, m2_target_rpm, motor2.shaft_velocity, true);
 
+    iwdgKick();
     if (foc_timer) foc_timer->pause();
     __disable_irq();
 
@@ -1342,6 +1436,7 @@ bool saveConfigToFlash() {
     EraseInitStruct.Page = page_idx;
     EraseInitStruct.NbPages = 1;
 
+    iwdgKick();
     status = HAL_FLASHEx_Erase(&EraseInitStruct, &pageError);
     if (status != HAL_OK) {
         HAL_FLASH_Lock();
@@ -1356,6 +1451,7 @@ bool saveConfigToFlash() {
     size_t total_bytes = (sizeof(PersistentFOCConfig) + 7) & ~7;
     const uint64_t *src = (const uint64_t *)&cfg;
     for (size_t offset = 0; offset < total_bytes; offset += 8) {
+        iwdgKick();
         uint64_t dword = *src++;
         status = HAL_FLASH_Program(FLASH_TYPEPROGRAM_DOUBLEWORD, page_addr + offset, dword);
         if (status != HAL_OK) {
@@ -1372,6 +1468,7 @@ bool saveConfigToFlash() {
     isr_last_c0 = 0;
     __enable_irq();
     if (foc_timer) foc_timer->resume();
+    iwdgKick();
 
     // Verify written data
     if (memcmp((const void *)page_addr, &cfg, sizeof(PersistentFOCConfig)) != 0) {
@@ -3184,6 +3281,7 @@ void processCommand(const char *cmd) {
 // Uses decoupled winding effort V_trq (never total V_q = Ke*w + V_trq)
 // ----------------------------------------------------------------------------
 void updateStallGuard(int id, BLDCMotor &motor, FastBLDCDriver3PWM &driver,
+                      MT6816Sensor &encoder, int en_pin,
                       MotorTorqueCtrl &ctrl,
                       volatile bool &enabled, volatile float &target_rpm,
                       IndustrialStallGuard &guard, float dt) {
@@ -3195,9 +3293,32 @@ void updateStallGuard(int id, BLDCMotor &motor, FastBLDCDriver3PWM &driver,
 
     if (guard.latched_fault) {
         enabled = false;
+        motor.disable();
         driver.disable();
+        digitalWrite(en_pin, LOW);
         resetMotorTorqueCtrl(ctrl, target_rpm, motor.shaft_velocity, true);
         return;
+    }
+
+    bool enc_bad = !encoder.is_connected || encoder.last_no_mag ||
+                   (!encoder.last_parity_ok && encoder.consecutive_parity_errors >= 50);
+    if (enc_bad) {
+        if (guard.enc_fault_ticks < 255) {
+            guard.enc_fault_ticks++;
+        }
+        if (guard.enc_fault_ticks >= 5) {
+            guard.state = StallState::LATCHED_FAULT;
+            guard.latched_fault = true;
+            enabled = false;
+            motor.disable();
+            driver.disable();
+            digitalWrite(en_pin, LOW);
+            resetMotorTorqueCtrl(ctrl, target_rpm, motor.shaft_velocity, true);
+            Serial.print("[ENC_FAULT]:M"); Serial.println(id);
+            return;
+        }
+    } else {
+        guard.enc_fault_ticks = 0;
     }
 
     float actual_rpm = motor.shaftVelocity() * 9.54929659f;
@@ -3301,10 +3422,10 @@ void checkStallWatchdog() {
     if (dt > 0.05f) dt = 0.05f;
 
     if (!m1_calib_active) {
-        updateStallGuard(1, motor1, driver1, m1_ctrl, m1_enabled, m1_target_rpm, stall_guard1, dt);
+        updateStallGuard(1, motor1, driver1, encoder1, M1_EN, m1_ctrl, m1_enabled, m1_target_rpm, stall_guard1, dt);
     }
     if (!m2_calib_active) {
-        updateStallGuard(2, motor2, driver2, m2_ctrl, m2_enabled, m2_target_rpm, stall_guard2, dt);
+        updateStallGuard(2, motor2, driver2, encoder2, M2_EN, m2_ctrl, m2_enabled, m2_target_rpm, stall_guard2, dt);
     }
 }
 
@@ -3466,6 +3587,8 @@ void processESP32Link() {
                     const STM32MotorCommandPacket *pkt = (const STM32MotorCommandPacket *)rx_buf;
                     last_esp_packet_ms = millis();
                     esp_link_active = true;
+                    g_esp_link_active_isr = true;
+                    g_esp_rx_seq_isr++;
                     have_valid_packet = true;
                     esp_pkts_ok++;
 
@@ -3491,6 +3614,7 @@ void processESP32Link() {
                             break;
 
                         case STM32_CMD_ESTOP:
+                            have_latest_drive = false;
                             triggerGlobalEmergencyStop();
                             break;
 
@@ -3512,6 +3636,7 @@ void processESP32Link() {
 
                         case STM32_CMD_DISABLE:
                             if (!s_calib_isolation_active) {
+                                have_latest_drive = false;
                                 disableBothDrivers();
                             }
                             break;
@@ -3549,6 +3674,7 @@ void processESP32Link() {
 
                         case STM32_CMD_ENTER_DFU:
                             if (!s_calib_isolation_active) {
+                                disableBothDrivers();
                                 delay(20);
                                 __HAL_RCC_PWR_CLK_ENABLE();
                                 HAL_PWR_EnableBkUpAccess();
@@ -3762,12 +3888,14 @@ void setup() {
     last_led_time = millis();
 
     printHelp();
+    iwdgInit500ms();
 }
 
 // ----------------------------------------------------------------------------
 // Background Task Loop (Serial Parsing, Telemetry, Safety)
 // ----------------------------------------------------------------------------
 void loop() {
+    iwdgKick();
     uint32_t now = millis();
 
     // 0. High-Speed 400 Hz Bidirectional Binary Link to ESP32
@@ -3785,16 +3913,8 @@ void loop() {
     if (esp_link_active && (m1_enabled || m2_enabled) &&
         (now >= last_esp_packet_ms) && (now - last_esp_packet_ms > 100)) {
         esp_wdog_trips++;
-        m1_enabled = false;
-        m2_enabled = false;
-        motor1.disable();
-        motor2.disable();
-        driver1.disable();
-        driver2.disable();
-        digitalWrite(M1_EN, LOW);
-        digitalWrite(M2_EN, LOW);
-        resetMotorTorqueCtrl(m1_ctrl, m1_target_rpm, motor1.shaft_velocity, true);
-        resetMotorTorqueCtrl(m2_ctrl, m2_target_rpm, motor2.shaft_velocity, true);
+        g_estop_active = true;
+        disableBothDrivers();
     }
 
     // 1. Process Incoming Serial Characters into Line Buffer

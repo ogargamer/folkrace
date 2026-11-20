@@ -16,6 +16,7 @@
 import os
 import sys
 import time
+import signal
 import socket
 import select
 import json
@@ -438,12 +439,12 @@ class MCU_UART_Bridge:
         t_rx = self.last_rx_timestamp.get(label, 0.0)
         if t_rx <= 0.0:
             return False
-        t_now = time.time() if now is None else now
+        t_now = time.monotonic() if now is None else now
         return (t_now - t_rx) <= LINK_TIMEOUT_S
 
     def _are_front_tofs_fresh(self, now: Optional[float] = None) -> bool:
         """True only when ALL critical front ToF sensors (2 & 4) have reported within LINK_TIMEOUT_S."""
-        t_now = time.time() if now is None else now
+        t_now = time.monotonic() if now is None else now
         for sid in CRITICAL_TOF_SENSORS:
             t_rx = self.last_tof_sensor_rx.get(sid, 0.0)
             if t_rx <= 0.0 or (t_now - t_rx) > LINK_TIMEOUT_S:
@@ -452,7 +453,7 @@ class MCU_UART_Bridge:
 
     def trigger_tof_reboot(self, reason: str = "Front ToF failure") -> bool:
         """Pulses EN on ESP32_ToF only (with cooldown) without disrupting ESP32_Main."""
-        now = time.time()
+        now = time.monotonic()
         if (now - self._last_tof_reboot_ts) < TOF_REBOOT_COOLDOWN_S:
             return False
         self._last_tof_reboot_ts = now
@@ -558,6 +559,7 @@ class MCU_UART_Bridge:
         t_tof.start()
 
     def stop(self):
+        self.send_to_main_mcu(b"ESTOP\n")
         self.running = False
 
     def _command_listener_worker(self):
@@ -714,7 +716,7 @@ class MCU_UART_Bridge:
                 print(f"[MCU Bridge] Connected to {label} ({port}). Waiting for valid telemetry...")
                 # Do NOT mark link_active=True until a checksum-validated packet arrives
                 self.link_active[label] = False
-                last_pkt_time = time.time()
+                last_pkt_time = time.monotonic()
                 connect_time = last_pkt_time
                 my_gen = self.reconnect_gen
                 my_tof_gen = self.tof_reconnect_gen
@@ -738,7 +740,7 @@ class MCU_UART_Bridge:
 
                     # Event-driven wait: wakes immediately (<0.1ms) when USB URB arrives
                     rlist, _, _ = select.select([fd], [], [], 0.020)
-                    now = time.time()
+                    now = time.monotonic()
                     if rlist:
                         data = os.read(fd, 4096)
                         if not data:
@@ -816,7 +818,7 @@ class MCU_UART_Bridge:
                 self.last_rx_timestamp[label] = 0.0
                 self.assigned_ports[label] = None
                 self._clear_link_state(label)
-                self._dispatch_telemetry(time.time())
+                self._dispatch_telemetry(time.monotonic())
                 print(f"[MCU Bridge] {label} disconnected. Re-probing in 0.25s...")
                 time.sleep(0.25)
 
@@ -845,7 +847,7 @@ class MCU_UART_Bridge:
                 self.latest_chassis = pkt
                 return True
             elif msg_type == MSG_ID_TOF_SUB_TELEM:
-                now_rx = time.time()
+                now_rx = time.monotonic()
                 sensor_id = pkt.get("sensor_id", 0)
                 dists = pkt.get("distances_m", [])
                 slots = SENSOR_CHANNEL_SLOTS.get(sensor_id, [])
@@ -885,7 +887,7 @@ class MCU_UART_Bridge:
                 )
                 return True
             elif msg_type == MSG_ID_TOF_TELEM:
-                now_rx = time.time()
+                now_rx = time.monotonic()
                 dists = pkt.get("distances_m", [])
                 if len(dists) == 16:
                     for sid in self.last_tof_sensor_rx:
@@ -907,7 +909,7 @@ class MCU_UART_Bridge:
         front_tofs_ok = tof_fresh and self._are_front_tofs_fresh(now)
         with self.lock:
             telemetry = dict(self.latest_chassis) if main_fresh else {}
-            telemetry["timestamp"] = now
+            telemetry["timestamp"] = time.time()
             if tof_fresh:
                 # Zero any individual sensor slots that have gone stale (> LINK_TIMEOUT_S)
                 for sid, s_slots in SENSOR_CHANNEL_SLOTS.items():
@@ -998,6 +1000,11 @@ if __name__ == "__main__":
     parser.add_argument("--tof", default="auto", help="ESP32 ToF Hub serial device (auto-detects /dev/ttyUSB1, /dev/ttyACM1, etc.)")
     parser.add_argument("--baud", type=int, default=UART_BAUD, help="UART baud rate")
     args = parser.parse_args()
+
+    def _handle_sigterm(_signum, _frame):
+        raise KeyboardInterrupt()
+
+    signal.signal(signal.SIGTERM, _handle_sigterm)
 
     bridge = MCU_UART_Bridge(main_port=args.main, tof_port=args.tof, baud=args.baud)
     bridge.start()

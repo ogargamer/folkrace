@@ -928,7 +928,7 @@ class ServoBenchGUI(QMainWindow):
     def disable_output(self):
         self.is_enabled = False
         self.arc_dial.update_state(self.current_angle, self.current_pulse, False)
-        self.worker.send_command("DISABLE")
+        self.worker.send_command("D")
 
     def enable_output(self):
         self.is_enabled = True

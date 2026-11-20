@@ -20,6 +20,7 @@
 import os
 import sys
 import time
+import signal
 import json
 import zlib
 import base64
@@ -709,6 +710,8 @@ class DebugHTTPRequestHandler(BaseHTTPRequestHandler):
                     "auto_servo_center": STATE.auto_servo_center.get_status(),
                 })
                 return
+            elif action == "keepalive":
+                cmd_str = "CLI_KEEPALIVE\n"
             elif action == "raw":
                 cmd_str = f"{data.get('cmd', '').strip()}\n"
             else:
@@ -769,8 +772,9 @@ class DebugHTTPRequestHandler(BaseHTTPRequestHandler):
                         STATE.latest_pkt["flags"] = {}
                     STATE.latest_pkt["flags"]["fake_data"] = STATE.fake_data_active
                     STATE.invalidate_caches()
-                STATE.latest_pkt["last_action"] = action
-                STATE.latest_pkt["last_cmd_sent"] = cmd_str.strip()
+                if action != "keepalive":
+                    STATE.latest_pkt["last_action"] = action
+                    STATE.latest_pkt["last_cmd_sent"] = cmd_str.strip()
 
             self._send_json({
                 "status": "dispatched" if ok else "failed",
@@ -1200,6 +1204,11 @@ def udp_listener_worker():
 
 def run_debug_server():
     """Main launcher for Debug Server & Flight Recorder on Core 2."""
+    def _handle_sigterm(_signum, _frame):
+        raise KeyboardInterrupt()
+
+    signal.signal(signal.SIGTERM, _handle_sigterm)
+
     print("=" * 70)
     print("  FOLKRACE PI 4: REAL-TIME DEBUG SERVER & FLIGHT RECORDER")
     print("=" * 70)
@@ -1228,6 +1237,9 @@ def run_debug_server():
     except KeyboardInterrupt:
         print("\n[DebugServer] Shutting down...")
     finally:
+        if STATE.auto_servo_center.is_running():
+            STATE.auto_servo_center.stop("DebugServer shutting down")
+        send_mcu_cmd(b"ESTOP\n")
         httpd.server_close()
         if STATE.recorder:
             STATE.recorder.stop()

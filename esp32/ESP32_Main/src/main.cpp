@@ -8,7 +8,9 @@
 #include "stm32_link.h"
 #include <Arduino.h>
 #include <Preferences.h>
+#include <atomic>
 #include <esp_cpu.h>
+#include <esp_task_wdt.h>
 #include <esp_timer.h>
 
 // =============================================================================
@@ -111,6 +113,30 @@ static volatile bool s_estop_latched = false;
 static volatile bool s_drive_stopped = true;
 static volatile bool s_imu_usb_stream = false;
 
+static constexpr int64_t CORE0_HEARTBEAT_TIMEOUT_US = 150000LL;
+static constexpr int64_t AUTO_CMD_TIMEOUT_US = 150000LL;
+static constexpr int64_t CLI_DRIVE_TIMEOUT_US = 500000LL;
+
+enum PendingSTM32Op : uint32_t {
+  STM32_OP_ENABLE     = (1u << 0),
+  STM32_OP_SET_PID    = (1u << 1),
+  STM32_OP_SAVE_FLASH = (1u << 2),
+  STM32_OP_ENTER_DFU  = (1u << 3),
+  STM32_OP_CALIB      = (1u << 4),
+};
+
+static std::atomic<int64_t> s_core0_heartbeat_us{0};
+static std::atomic<int64_t> s_last_binary_cmd_us{0};
+static std::atomic<int64_t> s_last_cli_drive_us{0};
+static std::atomic<uint32_t> s_stm32_pending_ops{0};
+static float s_pending_pid_kp = 0.1f;
+static float s_pending_pid_ki = 1.5f;
+static bool s_pending_dfu_front = true;
+static bool s_pending_dfu_rear = true;
+static uint8_t s_pending_calib_axle = 0;
+static int s_pending_calib_motor = 1;
+static float s_pending_calib_v = 4.0f;
+
 static inline float servoPulseToAngle(float pulse_us) {
   if (pulse_us <= SERVO_PULSE_NEUTRAL_US) {
     if (pulse_us < SERVO_PULSE_MIN_US)
@@ -198,6 +224,7 @@ static void IRAM_ATTR onControlTimerAlarm(void *arg) {
 // =============================================================================
 static void IRAM_ATTR realTimeControlTask(void *pvParameters) {
   s_controlTaskHandle = xTaskGetCurrentTaskHandle();
+  esp_task_wdt_add(nullptr);
 
   // Start 400 Hz High-Resolution Hardware Timer (2500 microseconds)
   const esp_timer_create_args_t timer_args = {.callback = &onControlTimerAlarm,
@@ -217,10 +244,13 @@ static void IRAM_ATTR realTimeControlTask(void *pvParameters) {
   float max_jitter_us = 0.0f;
   static ElectronicDiffOutputs s_prev_diff = {};
   static bool s_prev_diff_valid = false;
+  static bool s_front_seen_online = false;
+  static bool s_rear_seen_online = false;
 
   for (;;) {
     // Wait for deterministic hardware timer notification
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    esp_task_wdt_reset();
 
     int64_t now_us = esp_timer_get_time();
     int64_t period_us = now_us - last_tick_time_us;
@@ -240,6 +270,37 @@ static void IRAM_ATTR realTimeControlTask(void *pvParameters) {
     // 1b. Drain STM32 feedback inside the deterministic task so the UART link
     // is never delayed by IMU SPI waits / USB shell work on Core 0.
     s_stm32Link.update();
+
+    bool front_conn = s_stm32Link.isFrontConnected();
+    bool rear_conn = s_stm32Link.isRearConnected();
+    if (s_drive_stopped) {
+      s_front_seen_online = front_conn;
+      s_rear_seen_online = rear_conn;
+    } else {
+      if (front_conn) s_front_seen_online = true;
+      if (rear_conn) s_rear_seen_online = true;
+    }
+
+    int64_t core0_hb = s_core0_heartbeat_us.load(std::memory_order_acquire);
+    bool core0_stale = (core0_hb > 0) && ((now_us - core0_hb) > CORE0_HEARTBEAT_TIMEOUT_US);
+    bool auto_stale = !inputs.fake_data_mode && inputs.override_active &&
+                      !s_cli_override_active &&
+                      ((now_us - s_last_binary_cmd_us.load(std::memory_order_acquire)) > AUTO_CMD_TIMEOUT_US);
+    bool cli_stale = !s_drive_stopped && (s_cli_override_active || inputs.fake_data_mode) &&
+                     ((now_us - s_last_cli_drive_us.load(std::memory_order_acquire)) > CLI_DRIVE_TIMEOUT_US);
+    bool front_lost = s_front_seen_online && !front_conn;
+    bool rear_lost = s_rear_seen_online && !rear_conn;
+    bool axle_fault = (front_conn && s_stm32Link.getFront().hasFault()) ||
+                      (rear_conn && s_stm32Link.getRear().hasFault());
+    bool hard_fault_trip = core0_stale || (!s_drive_stopped && (front_lost || rear_lost || axle_fault));
+    bool cmd_timeout_trip = auto_stale || cli_stale;
+    if (hard_fault_trip || cmd_timeout_trip) {
+      if (!s_drive_stopped && (front_lost || rear_lost || axle_fault)) {
+        s_estop_latched = true;
+      }
+      s_drive_stopped = true;
+      s_prev_diff_valid = false;
+    }
 
     // Working variables
     float target_v;
@@ -273,9 +334,9 @@ static void IRAM_ATTR realTimeControlTask(void *pvParameters) {
       rr_rpm = sim_rpm;
     } else {
       // Live Sensor Inputs from Core 0
-      target_v = inputs.override_active ? s_manual_v : inputs.target_v;
+      target_v = inputs.override_active ? inputs.target_v : 0.0f;
       target_steer =
-          inputs.override_active ? s_manual_steer : inputs.target_steer_rad;
+          inputs.override_active ? inputs.target_steer_rad : 0.0f;
       gyro_z = inputs.gyro_z;
       gyro_seq = inputs.gyro_seq;
       gyro_ts_us = inputs.gyro_timestamp_us;
@@ -363,9 +424,33 @@ static void IRAM_ATTR realTimeControlTask(void *pvParameters) {
     }
     cycle_counter++;
 
-    // 6b. Dispatch velocity + torque-voltage command to STM32s at jitter-free 400 Hz
-    if (s_estop_latched || s_drive_stopped) {
+    // 6b. Dispatch serialized one-shot STM32 ops and 400 Hz command (Core 1 sole TX owner)
+    uint32_t pending_ops = s_stm32_pending_ops.exchange(0, std::memory_order_acq_rel);
+    if (pending_ops & STM32_OP_SET_PID) {
+      s_stm32Link.setPID(s_pending_pid_kp, s_pending_pid_ki);
+    }
+    if (pending_ops & STM32_OP_SAVE_FLASH) {
+      s_stm32Link.saveFlash();
+    }
+    if (pending_ops & STM32_OP_CALIB) {
+      s_stm32Link.startCalibration(s_pending_calib_axle, s_pending_calib_motor, s_pending_calib_v);
+    }
+    if (pending_ops & STM32_OP_ENTER_DFU) {
       s_stm32Link.emergencyStop();
+      s_stm32Link.enterDFU(s_pending_dfu_front, s_pending_dfu_rear);
+    }
+    if ((pending_ops & STM32_OP_ENABLE) && !s_estop_latched && !s_drive_stopped &&
+        !hard_fault_trip && !cmd_timeout_trip) {
+      s_stm32Link.enableDrivers();
+    }
+
+    if (s_estop_latched || hard_fault_trip) {
+      s_stm32Link.emergencyStop();
+      s_prev_diff_valid = false;
+    } else if (s_drive_stopped || cmd_timeout_trip) {
+      if (!(pending_ops & (STM32_OP_CALIB | STM32_OP_ENTER_DFU))) {
+        s_stm32Link.disableDrivers();
+      }
       s_prev_diff_valid = false;
     } else {
       STM32WheelCmd cmd_fl = mapWheelToSTM32(diff.rpm_FL, diff.vtrq_min_FL,
@@ -447,11 +532,16 @@ static void handleAsciiCommand(const char *raw_line) {
     return;
 
   if (line.equalsIgnoreCase("PING")) {
+    s_last_cli_drive_us.store(esp_timer_get_time(), std::memory_order_release);
     Serial.println("PONG");
-  } else if (line.equalsIgnoreCase("D") || line.equalsIgnoreCase("DISABLE")) {
+  } else if (line.equalsIgnoreCase("CLI_KEEPALIVE")) {
+    s_last_cli_drive_us.store(esp_timer_get_time(), std::memory_order_release);
+  } else if (line.equalsIgnoreCase("D") || line.equalsIgnoreCase("SERVO_DISABLE")) {
     s_manual_v = 0.0f;
     s_manual_override = false;
     s_cli_override_active = false;
+    s_fake_data_active = false;
+    s_drive_stopped = true;
     s_manual_servo_direct = true;
     s_servo.disable();
     sendServoTelemetry();
@@ -481,8 +571,9 @@ static void handleAsciiCommand(const char *raw_line) {
                            (SERVO_PULSE_MAX_US - SERVO_PULSE_NEUTRAL_US)) *
                          VEHICLE_MAX_STEER_RAD;
       }
-      s_cli_override_active = true;
-      s_manual_override = true;
+      if (s_cli_override_active) {
+        s_manual_override = true;
+      }
       sendServoTelemetry();
     } else {
       Serial.printf(
@@ -495,13 +586,17 @@ static void handleAsciiCommand(const char *raw_line) {
     if (s_fake_data_active) {
       s_cli_override_active = false;
       s_manual_override = false;
-      if (!s_estop_latched && s_drive_stopped) {
-        s_stm32Link.enableDrivers();
-        s_drive_stopped = false;
+      if (!s_estop_latched) {
+        s_last_cli_drive_us.store(esp_timer_get_time(), std::memory_order_release);
+        if (s_drive_stopped) {
+          s_drive_stopped = false;
+          s_stm32_pending_ops.fetch_or(STM32_OP_ENABLE, std::memory_order_release);
+        }
+      } else {
+        s_fake_data_active = false;
       }
     } else {
       s_drive_stopped = true;
-      s_stm32Link.emergencyStop();
     }
     Serial.printf("\n>>> [MODE] Synthetic 400Hz Benchmark Mode: %s\n",
                   s_fake_data_active ? "ENABLED (Fake Data)"
@@ -588,62 +683,82 @@ static void handleAsciiCommand(const char *raw_line) {
     s_fake_data_active = false;
     s_estop_latched = true;
     s_drive_stopped = true;
-    s_stm32Link.emergencyStop();
     Serial.println(F(">>> 🛑 EMERGENCY STOP BROADCAST TO ALL STM32s!"));
   } else if (line.equalsIgnoreCase("MOTORS") ||
              line.equalsIgnoreCase("START")) {
     s_estop_latched = false;
     s_drive_stopped = false;
-    s_stm32Link.enableDrivers();
+    s_stm32_pending_ops.fetch_or(STM32_OP_ENABLE, std::memory_order_release);
     Serial.println(F(">>> ⚡ MOTORS ENABLED ON ALL STM32s."));
-  } else if (line.equalsIgnoreCase("DISABLE")) {
+  } else if (line.equalsIgnoreCase("DISABLE") ||
+             line.equalsIgnoreCase("DISARM")) {
     s_manual_v = 0.0f;
     s_manual_override = false;
     s_cli_override_active = false;
     s_fake_data_active = false;
     s_drive_stopped = true;
-    s_stm32Link.emergencyStop();
     Serial.println(F(">>> 🔌 MOTOR DRIVERS DISABLED ON ALL STM32s."));
   } else if (line.startsWith("PID ") || line.startsWith("pid ")) {
     float kp = 0.1f, ki = 1.5f;
     sscanf(line.c_str() + 4, "%f %f", &kp, &ki);
-    s_stm32Link.setPID(kp, ki);
+    s_pending_pid_kp = kp;
+    s_pending_pid_ki = ki;
+    s_stm32_pending_ops.fetch_or(STM32_OP_SET_PID, std::memory_order_release);
     Serial.printf(">>> Velocity PID Dispatched to STM32s: Kp=%.3f, Ki=%.3f\n",
                   kp, ki);
   } else if (line.equalsIgnoreCase("SAVE")) {
-    s_stm32Link.saveFlash();
+    s_stm32_pending_ops.fetch_or(STM32_OP_SAVE_FLASH, std::memory_order_release);
     Serial.println(F(">>> 💾 FLASH SAVE DISPATCHED TO ALL STM32s."));
   } else if (line.equalsIgnoreCase("DFU")) {
-    s_stm32Link.enterDFU(true, true);
+    s_manual_v = 0.0f;
+    s_manual_override = false;
+    s_cli_override_active = false;
+    s_fake_data_active = false;
+    s_drive_stopped = true;
+    s_pending_dfu_front = true;
+    s_pending_dfu_rear = true;
+    s_stm32_pending_ops.fetch_or(STM32_OP_ENTER_DFU, std::memory_order_release);
     Serial.println(F(">>> 🔄 DFU BOOTLOADER REBOOT DISPATCHED TO ALL STM32s."));
   } else if (line.startsWith("CALIB ") || line.startsWith("calib ")) {
     int axle = 0, motor = 1;
     float v = 4.0f;
     sscanf(line.c_str() + 6, "%d %d %f", &axle, &motor, &v);
-    s_stm32Link.startCalibration(axle, motor, v);
+    s_pending_calib_axle = (uint8_t)axle;
+    s_pending_calib_motor = motor;
+    s_pending_calib_v = v;
+    s_stm32_pending_ops.fetch_or(STM32_OP_CALIB, std::memory_order_release);
     Serial.printf(">>> Calibration Dispatched: Axle %d, Motor %d @ %.1fV\n",
                   axle, motor, v);
   } else if (line.startsWith("V ") || line.startsWith("v ")) {
     s_manual_v = line.substring(2).toFloat();
-    s_cli_override_active = (fabsf(s_manual_v) > 0.001f);
-    s_manual_override = s_cli_override_active;
+    bool nonzero = (fabsf(s_manual_v) > 0.001f);
     s_fake_data_active = false;
-    if (!s_cli_override_active) {
+    if (!nonzero || s_estop_latched) {
+      s_manual_v = 0.0f;
+      s_cli_override_active = false;
+      s_manual_override = false;
       s_drive_stopped = true;
-      s_stm32Link.emergencyStop();
-    } else if (!s_estop_latched && s_drive_stopped) {
-      s_stm32Link.enableDrivers();
-      s_drive_stopped = false;
+    } else {
+      s_cli_override_active = true;
+      s_manual_override = true;
+      s_last_cli_drive_us.store(esp_timer_get_time(), std::memory_order_release);
+      if (s_drive_stopped) {
+        s_drive_stopped = false;
+        s_stm32_pending_ops.fetch_or(STM32_OP_ENABLE, std::memory_order_release);
+      }
     }
     Serial.printf(">>> Manual Speed Setpoint: %.2f m/s\n", s_manual_v);
   } else if (line.equalsIgnoreCase("BRAKE")) {
     s_manual_v = 0.0f;
-    s_cli_override_active = true;
-    s_manual_override = true;
     s_fake_data_active = false;
-    if (!s_estop_latched && s_drive_stopped) {
-      s_stm32Link.enableDrivers();
-      s_drive_stopped = false;
+    if (!s_estop_latched) {
+      s_cli_override_active = true;
+      s_manual_override = true;
+      s_last_cli_drive_us.store(esp_timer_get_time(), std::memory_order_release);
+      if (s_drive_stopped) {
+        s_drive_stopped = false;
+        s_stm32_pending_ops.fetch_or(STM32_OP_ENABLE, std::memory_order_release);
+      }
     }
     Serial.println(F(">>> Active Brake Hold (0.00 m/s, drivers enabled)"));
   } else if (line.charAt(0) == 'A' || line.charAt(0) == 'a') {
@@ -661,8 +776,9 @@ static void handleAsciiCommand(const char *raw_line) {
       // Map 0..180 deg dial (0=Left 1294us -> +MAX_STEER, 90=Center 1565us ->
       // 0, 180=Right 1836us -> -MAX_STEER)
       s_manual_steer = ((90.0f - deg) / 90.0f) * VEHICLE_MAX_STEER_RAD;
-      s_cli_override_active = true;
-      s_manual_override = true;
+      if (s_cli_override_active) {
+        s_manual_override = true;
+      }
       sendServoTelemetry();
     } else {
       Serial.printf("{\"error\":\"Angle out of bounds (0-180 deg): %.1f\"}\n",
@@ -694,8 +810,8 @@ static void handleAsciiCommand(const char *raw_line) {
     s_manual_override = false;
     s_cli_override_active = false;
     s_manual_servo_direct = false;
+    s_fake_data_active = false;
     s_drive_stopped = true;
-    s_stm32Link.emergencyStop();
     s_ediff.reset();
     s_fusion.reset();
     s_servo.setPulseUs(fmaxf(
@@ -757,6 +873,7 @@ static void handleAsciiCommand(const char *raw_line) {
 // CORE 0: Communications & Peripheral Task (Priority 15)
 // =============================================================================
 static void ioTask(void *pvParameters) {
+  esp_task_wdt_add(nullptr);
   uint32_t last_report_ms = millis();
   static uint32_t s_last_cmd_time_ms = 0;
   static uint8_t s_rx_buf[256];
@@ -765,6 +882,8 @@ static void ioTask(void *pvParameters) {
   static size_t s_ascii_len = 0;
 
   for (;;) {
+    esp_task_wdt_reset();
+    s_core0_heartbeat_us.store(esp_timer_get_time(), std::memory_order_release);
     uint32_t now = millis();
 
     // 1. Non-Blocking Ingestion: Binary Motion Commands (Pi 4) & ASCII Shell
@@ -809,14 +928,16 @@ static void ioTask(void *pvParameters) {
                 const MotionCommandPacket *cmd =
                     (const MotionCommandPacket *)frame;
                 s_last_cmd_time_ms = millis();
+                s_last_binary_cmd_us.store(esp_timer_get_time(),
+                                           std::memory_order_release);
                 if (cmd->run_mode == 2) {
                   // Emergency brake
                   s_manual_v = 0.0f;
                   s_manual_override = false;
                   s_cli_override_active = false;
+                  s_fake_data_active = false;
                   s_estop_latched = true;
                   s_drive_stopped = true;
-                  s_stm32Link.emergencyStop();
                 } else if (!s_cli_override_active) {
                   if (cmd->run_mode == 1 || cmd->run_mode == 3) {
                     s_manual_v = (float)cmd->target_v_mm_s / 1000.0f;
@@ -826,20 +947,15 @@ static void ioTask(void *pvParameters) {
                     s_fake_data_active = false;
                     if (cmd->target_v_mm_s != 0 && !s_estop_latched &&
                         s_drive_stopped) {
-                      s_stm32Link.enableDrivers();
                       s_drive_stopped = false;
+                      s_stm32_pending_ops.fetch_or(STM32_OP_ENABLE,
+                                                   std::memory_order_release);
                     }
                   } else {
                     s_manual_v = 0.0f;
                     s_manual_steer = 0.0f;
                     s_manual_override = false;
                     s_drive_stopped = true;
-                    if (s_stm32Link.getFront().isM1Enabled() ||
-                        s_stm32Link.getFront().isM2Enabled() ||
-                        s_stm32Link.getRear().isM1Enabled() ||
-                        s_stm32Link.getRear().isM2Enabled()) {
-                      s_stm32Link.emergencyStop();
-                    }
                   }
                 }
                 pos += sizeof(MotionCommandPacket);
@@ -897,20 +1013,26 @@ static void ioTask(void *pvParameters) {
 
     // 3. STM32 UART RX/TX now runs in the 400 Hz control task (Core 1).
 
-    // Command Loss Watchdog (Dead-Man Switch @ 150 ms timeout for autonomous
-    // stream)
-    if (s_manual_override && !s_cli_override_active &&
-        (millis() - s_last_cmd_time_ms > 150)) {
+    // Command Loss Watchdog:
+    // 1) 150 ms dead-man switch for autonomous binary stream
+    int64_t wdt_now_us = esp_timer_get_time();
+    if (s_manual_override && !s_cli_override_active && !s_fake_data_active &&
+        ((wdt_now_us - s_last_binary_cmd_us.load(std::memory_order_acquire)) >
+         AUTO_CMD_TIMEOUT_US)) {
       s_manual_v = 0.0f;
       s_manual_steer = 0.0f;
       s_manual_override = false;
       s_drive_stopped = true;
-      if (s_stm32Link.getFront().isM1Enabled() ||
-          s_stm32Link.getFront().isM2Enabled() ||
-          s_stm32Link.getRear().isM1Enabled() ||
-          s_stm32Link.getRear().isM2Enabled()) {
-        s_stm32Link.emergencyStop();
-      }
+    }
+    // 2) 500 ms dead-man switch for CLI manual drive / BRAKE / BENCH mode
+    if (!s_drive_stopped && (s_cli_override_active || s_fake_data_active) &&
+        ((wdt_now_us - s_last_cli_drive_us.load(std::memory_order_acquire)) >
+         CLI_DRIVE_TIMEOUT_US)) {
+      s_manual_v = 0.0f;
+      s_manual_override = false;
+      s_cli_override_active = false;
+      s_fake_data_active = false;
+      s_drive_stopped = true;
     }
 
     // 4. Update Shared Sensor Inputs for Core 1
@@ -1103,8 +1225,10 @@ void setup() {
         F("[!] BNO086 IMU not detected. Operating in live mode without IMU."));
   }
 
-  // 4. Pin Core 1 Task: Deterministic 400 Hz Real-Time Control & Kinematics
-  // (Priority 24)
+  // 4. Configure Task Watchdog and Pin Core 1 / Core 0 Tasks
+  esp_task_wdt_init(2, true);
+  s_core0_heartbeat_us.store(esp_timer_get_time(), std::memory_order_release);
+
   xTaskCreatePinnedToCore(realTimeControlTask, "RealTimeControl", 8192, nullptr,
                           24, // High priority (preempts background tasks)
                           &s_controlTaskHandle,

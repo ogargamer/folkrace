@@ -42,6 +42,11 @@ def check_core_assignment(pid: int) -> str:
 
 
 def main():
+    def _handle_sigterm(_signum, _frame):
+        raise KeyboardInterrupt()
+
+    signal.signal(signal.SIGTERM, _handle_sigterm)
+
     print("=" * 70)
     print("  FOLKRACE PI 4: DUAL-CORE HARDWARE ISOLATION LAUNCHER")
     print("=" * 70)

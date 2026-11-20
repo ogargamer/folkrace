@@ -398,6 +398,38 @@ class TestAutoServoCenter(unittest.TestCase):
         self.assertNotIn("TRIM_SAVE", sim_worse.commands)
         self.assertAlmostEqual(st_worse["servo_center_us"], BASE_SERVO_NEUTRAL_US, delta=0.1)
 
+    def test_mid_leg_tof_loss_aborts_and_restores_assists(self) -> None:
+        sim = SimulatedVehicle(true_center_us=BASE_SERVO_NEUTRAL_US + 20.0, tof_dist_m=3.0)
+
+        def drop_tof(s: SimulatedVehicle) -> None:
+            if s.fwd_travel_m >= 0.30:
+                s.step_hook = None
+                with s.lock:
+                    s.override_pkt["mcu_tof_connected"] = False
+
+        sim.step_hook = drop_tof
+        cal = self._make_cal(sim)
+        self.assertTrue(cal.start(drive_distance_m=1.0)["started"])
+        st = _wait_done(cal)
+        self.assertEqual(st["phase"], "ERROR", st)
+        self.assertIn("ToF", st["message"])
+        self.assertIn("BRAKE", sim.commands)
+        self.assertIn("GYRO 1", sim.commands)
+        self.assertIn("TV 1", sim.commands)
+        self.assertIn("RESET", sim.commands)
+        self.assertTrue(sim.gyro_assist)
+        self.assertTrue(sim.tv_enabled)
+
+    def test_active_brake_sends_periodic_keepalive(self) -> None:
+        sim = SimulatedVehicle(true_center_us=BASE_SERVO_NEUTRAL_US, brake_decel_mps2=1.0)
+        cal = self._make_cal(sim)
+        sim.v_cmd = 0.80
+        sim.v_est = 0.80
+        res = cal._active_brake_stop(+1, "BRAKE_FWD", 0.5, 1.0)
+        self.assertTrue(res["ok"], res)
+        brake_count = sum(1 for c in sim.commands if c == "BRAKE")
+        self.assertGreaterEqual(brake_count, 3, sim.commands)
+
 
 if __name__ == "__main__":
     unittest.main()
