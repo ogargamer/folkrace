@@ -4,6 +4,16 @@
 #include <Arduino.h>
 #include "config.h"
 
+struct STM32WheelCmd {
+    float rpm;
+    float vtrq_min;
+    float vtrq_max;
+    float vtrq_ff;
+
+    STM32WheelCmd(float r = 0.0f, float vmin = 0.0f, float vmax = 0.0f, float vff = 0.0f)
+        : rpm(r), vtrq_min(vmin), vtrq_max(vmax), vtrq_ff(vff) {}
+};
+
 class STM32Channel {
 public:
     STM32Channel();
@@ -11,8 +21,17 @@ public:
     void begin(HardwareSerial *serial, uint32_t baud, int rxPin, int txPin);
     
     // Command Dispatch
-    void sendPacket(uint8_t mode, float param1 = 0.0f, float param2 = 0.0f);
+    void sendPacket(uint8_t mode,
+                    float param1 = 0.0f,
+                    float param2 = 0.0f,
+                    int16_t m1_vmin_mv = -12000,
+                    int16_t m1_vmax_mv = 12000,
+                    int16_t m1_vff_mv = 0,
+                    int16_t m2_vmin_mv = -12000,
+                    int16_t m2_vmax_mv = 12000,
+                    int16_t m2_vff_mv = 0);
     void sendDrive(float m1_rpm, float m2_rpm) { sendPacket(STM32_CMD_DRIVE, m1_rpm, m2_rpm); }
+    void sendDriveTorque(const STM32WheelCmd &m1, const STM32WheelCmd &m2);
     void sendCommand(float m1_rpm, float m2_rpm) { sendDrive(m1_rpm, m2_rpm); } // backwards compatibility
     void emergencyStop() { sendPacket(STM32_CMD_ESTOP); }
     void enableDrivers() { sendPacket(STM32_CMD_ENABLE); }
@@ -71,6 +90,10 @@ public:
 
     // 400 Hz Synchronized Drive Dispatch
     void sendDrive(float fl_rpm, float fr_rpm, float rl_rpm, float rr_rpm);
+    void sendDriveTorque(const STM32WheelCmd &fl,
+                         const STM32WheelCmd &fr,
+                         const STM32WheelCmd &rl,
+                         const STM32WheelCmd &rr);
     void sendCommands(float fl_rpm, float fr_rpm, float rl_rpm, float rr_rpm) { // backwards compatibility
         sendDrive(fl_rpm, fr_rpm, rl_rpm, rr_rpm);
     }

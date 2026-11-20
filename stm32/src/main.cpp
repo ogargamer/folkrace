@@ -75,7 +75,7 @@ static constexpr uint32_t FOC_TRACE_DECIMATION = FOC_COMMUTATION_HZ / FOC_TRACE_
 
 static uint32_t last_esp_packet_ms = 0;
 static bool esp_link_active = false;
-static constexpr size_t ESP_COMMAND_BYTE_BUDGET = 64;
+static constexpr size_t ESP_COMMAND_BYTE_BUDGET = 128;
 static uint32_t esp_rx_bytes = 0;
 static uint32_t esp_pkts_ok = 0;
 static uint32_t esp_chk_err = 0;
@@ -92,7 +92,7 @@ static uint32_t esp_drive_zero = 0;
 #define STM32_FEEDBACK_SYNC_2      0x55
 
 enum STM32CommandMode : uint8_t {
-    STM32_CMD_DRIVE      = 0x00, // Regular 400Hz velocity command (param1=m1_rpm, param2=m2_rpm)
+    STM32_CMD_DRIVE      = 0x00, // Regular 400Hz velocity+torque command
     STM32_CMD_ESTOP      = 0x01, // Immediate E-stop: cut PWM, zero voltage, disable drivers
     STM32_CMD_ENABLE     = 0x02, // Enable motor drivers
     STM32_CMD_DISABLE    = 0x03, // Disable motor drivers (Hi-Z, non-latched stop)
@@ -104,13 +104,19 @@ enum STM32CommandMode : uint8_t {
 };
 
 struct __attribute__((packed)) STM32MotorCommandPacket {
-    uint8_t header[2];  // 0xAA, 0x55 (STM32_CMD_SYNC_1, STM32_CMD_SYNC_2)
-    uint8_t cmd_mode;   // STM32CommandMode
-    float   param1;     // m1 target RPM / Kp / align_voltage
-    float   param2;     // m2 target RPM / Ki
-    uint8_t checksum;   // XOR of bytes 2..10 (cmd_mode, param1, param2)
+    uint8_t header[2];       // 0xAA, 0x55 (STM32_CMD_SYNC_1, STM32_CMD_SYNC_2)
+    uint8_t cmd_mode;        // STM32CommandMode
+    float   param1;          // m1 target RPM / Kp / align_voltage
+    float   param2;          // m2 target RPM / Ki
+    int16_t m1_vtrq_min_mv;  // M1 min torque voltage (mV)
+    int16_t m1_vtrq_max_mv;  // M1 max torque voltage (mV)
+    int16_t m1_vtrq_ff_mv;   // M1 feedforward torque voltage (mV)
+    int16_t m2_vtrq_min_mv;  // M2 min torque voltage (mV)
+    int16_t m2_vtrq_max_mv;  // M2 max torque voltage (mV)
+    int16_t m2_vtrq_ff_mv;   // M2 feedforward torque voltage (mV)
+    uint8_t checksum;        // XOR of bytes 2..22
 };
-static_assert(sizeof(STM32MotorCommandPacket) == 12, "STM32MotorCommandPacket must be 12 bytes");
+static_assert(sizeof(STM32MotorCommandPacket) == 24, "STM32MotorCommandPacket must be 24 bytes");
 
 #define STM32_STATUS_M1_ENABLED     (1 << 0)
 #define STM32_STATUS_M2_ENABLED     (1 << 1)
@@ -212,6 +218,96 @@ volatile bool m2_calibrated = false;
 
 volatile float m1_target_rpm = 0.0f;
 volatile float m2_target_rpm = 0.0f;
+
+// ----------------------------------------------------------------------------
+// 5 kHz Decoupled Back-EMF + Slew-Limited Torque-Envelope Control State
+// ----------------------------------------------------------------------------
+struct MotorTorqueCtrl {
+    // Mailbox updated atomically from main loop
+    float cmd_omega_rad_s = 0.0f;
+    float cmd_vtrq_min    = -MOTOR_VOLTAGE_LIMIT;
+    float cmd_vtrq_max    =  MOTOR_VOLTAGE_LIMIT;
+    float cmd_vtrq_ff     = 0.0f;
+    volatile uint32_t cmd_seq = 0;
+
+    // ISR-owned state (5 kHz)
+    uint32_t isr_last_seq = 0;
+    float omega_ref_interp = 0.0f;
+    float omega_step_per_tick = 0.0f;
+    uint8_t interp_ticks_rem = 0;
+    float integral_v = 0.0f;
+    float err_prev = 0.0f;
+    float v_trq_slewed = 0.0f;
+    float last_v_bemf = 0.0f;
+
+    // Config & guard state
+    float i_clamp_v = DEFAULT_PID_I_CLAMP_V;
+    float stall_vtrq_cap = MOTOR_VOLTAGE_LIMIT;
+    float ke_q = BEMF_KE_SAFETY_SCALE / (MOTOR_KV_RATING * _SQRT3 * _RPM_TO_RADS);
+
+    void updateKe(float kv_rating) {
+        float kv = (kv_rating > 10.0f) ? kv_rating : MOTOR_KV_RATING;
+        ke_q = BEMF_KE_SAFETY_SCALE / (kv * _SQRT3 * _RPM_TO_RADS);
+    }
+
+    void resetIsrState(float current_omega = 0.0f) {
+        isr_last_seq = cmd_seq;
+        omega_ref_interp = current_omega;
+        omega_step_per_tick = 0.0f;
+        interp_ticks_rem = 0;
+        integral_v = 0.0f;
+        err_prev = 0.0f;
+        v_trq_slewed = 0.0f;
+        last_v_bemf = ke_q * current_omega;
+    }
+};
+
+static MotorTorqueCtrl m1_ctrl;
+static MotorTorqueCtrl m2_ctrl;
+
+static inline void setMotorCommand(MotorTorqueCtrl &ctrl,
+                                   volatile float &target_rpm_var,
+                                   float target_rpm,
+                                   float v_min,
+                                   float v_max,
+                                   float v_ff) {
+    if (isnan(target_rpm) || isinf(target_rpm)) target_rpm = 0.0f;
+    if (isnan(v_min) || isinf(v_min)) v_min = -MOTOR_VOLTAGE_LIMIT;
+    if (isnan(v_max) || isinf(v_max)) v_max =  MOTOR_VOLTAGE_LIMIT;
+    if (isnan(v_ff)  || isinf(v_ff))  v_ff  = 0.0f;
+    if (v_min > v_max) {
+        float mid = 0.5f * (v_min + v_max);
+        v_min = mid;
+        v_max = mid;
+    }
+    float omega = target_rpm * _RPM_TO_RADS;
+    __disable_irq();
+    target_rpm_var = target_rpm;
+    ctrl.cmd_omega_rad_s = omega;
+    ctrl.cmd_vtrq_min = v_min;
+    ctrl.cmd_vtrq_max = v_max;
+    ctrl.cmd_vtrq_ff = v_ff;
+    ctrl.cmd_seq++;
+    __enable_irq();
+}
+
+static inline void resetMotorTorqueCtrl(MotorTorqueCtrl &ctrl,
+                                        volatile float &target_rpm_var,
+                                        float current_omega = 0.0f,
+                                        bool reset_bounds = true) {
+    __disable_irq();
+    if (reset_bounds) {
+        target_rpm_var = 0.0f;
+        ctrl.cmd_omega_rad_s = 0.0f;
+        ctrl.cmd_vtrq_min = -MOTOR_VOLTAGE_LIMIT;
+        ctrl.cmd_vtrq_max =  MOTOR_VOLTAGE_LIMIT;
+        ctrl.cmd_vtrq_ff  = 0.0f;
+        ctrl.cmd_seq++;
+    }
+    ctrl.stall_vtrq_cap = MOTOR_VOLTAGE_LIMIT;
+    ctrl.resetIsrState(current_omega);
+    __enable_irq();
+}
 
 volatile float m1_base_zero_angle = 0.0f;
 volatile float m2_base_zero_angle = 0.0f;
@@ -524,21 +620,122 @@ static inline void fastLoopFOC(BLDCMotor &motor, MT6816Sensor &encoder, FastBLDC
 }
 
 // ----------------------------------------------------------------------------
-// Direct Inlined 5.0 kHz Staggered Velocity Motion Control (< 45 cycles)
-// Eliminates virtual dispatch, _micros() division, and 20 kHz quantization hiss
+// Direct Inlined 5.0 kHz Staggered Velocity/Torque Control
+// Decouples Ke*omega_meas, interpolates 400Hz->5kHz, clamps I, slews V_trq
 // ----------------------------------------------------------------------------
-static inline void fastMoveVelocity(BLDCMotor &motor, MT6816Sensor &encoder, float target_rad_s) __attribute__((always_inline));
+static inline void fastMoveVelocity(BLDCMotor &motor, MT6816Sensor &encoder, MotorTorqueCtrl &ctrl) __attribute__((always_inline));
 
-static inline void fastMoveVelocity(BLDCMotor &motor, MT6816Sensor &encoder, float target_rad_s) {
-    motor.target = target_rad_s;
+static inline void fastMoveVelocity(BLDCMotor &motor, MT6816Sensor &encoder, MotorTorqueCtrl &ctrl) {
+    constexpr float dt = 0.0002f; // 5.0 kHz
     motor.shaft_angle = (float)motor.sensor_direction * encoder.getFastAngle() - motor.sensor_offset;
     float raw_vel = encoder.getVelocity();
     motor.shaft_velocity = (float)motor.sensor_direction * motor.LPF_velocity(raw_vel);
-    if (!motor.enabled) return;
+    if (!motor.enabled) {
+        ctrl.resetIsrState(motor.shaft_velocity);
+        return;
+    }
 
-    motor.shaft_velocity_sp = target_rad_s;
-    motor.current_sp = motor.PID_velocity(target_rad_s - motor.shaft_velocity);
-    motor.voltage.q = _constrain(motor.current_sp, -motor.voltage_limit, motor.voltage_limit);
+    uint32_t seq = ctrl.cmd_seq;
+    float cmd_omega = ctrl.cmd_omega_rad_s;
+    float raw_vmin  = ctrl.cmd_vtrq_min;
+    float raw_vmax  = ctrl.cmd_vtrq_max;
+    float raw_vff   = ctrl.cmd_vtrq_ff;
+
+    // 1. Linear interpolation of 400 Hz commands across 12.5 ticks (2.5 ms)
+    if (seq != ctrl.isr_last_seq) {
+        ctrl.isr_last_seq = seq;
+        ctrl.omega_step_per_tick = (cmd_omega - ctrl.omega_ref_interp) * (1.0f / CMD_INTERP_TICKS);
+        ctrl.interp_ticks_rem = 13U;
+    }
+    if (ctrl.interp_ticks_rem > 0U) {
+        float next_omega = ctrl.omega_ref_interp + ctrl.omega_step_per_tick;
+        if ((ctrl.omega_step_per_tick >= 0.0f && next_omega >= cmd_omega) ||
+            (ctrl.omega_step_per_tick <= 0.0f && next_omega <= cmd_omega) ||
+            ctrl.interp_ticks_rem == 1U) {
+            ctrl.omega_ref_interp = cmd_omega;
+            ctrl.interp_ticks_rem = 0U;
+        } else {
+            ctrl.omega_ref_interp = next_omega;
+            ctrl.interp_ticks_rem--;
+        }
+    } else {
+        ctrl.omega_ref_interp = cmd_omega;
+    }
+    motor.target = cmd_omega;
+    motor.shaft_velocity_sp = ctrl.omega_ref_interp;
+
+    // 2. Back-EMF decoupling using measured velocity (SVPWM phase-peak Ke)
+    float v_bemf = ctrl.ke_q * motor.shaft_velocity;
+    ctrl.last_v_bemf = v_bemf;
+
+    // 3. Torque voltage envelope constrained by motor limit & stall foldback cap
+    float v_cap = fast_fminf(motor.voltage_limit, ctrl.stall_vtrq_cap);
+    float v_min = _constrain(raw_vmin, -v_cap, v_cap);
+    float v_max = _constrain(raw_vmax, -v_cap, v_cap);
+    if (v_min > v_max) {
+        float mid = 0.5f * (v_min + v_max);
+        v_min = mid;
+        v_max = mid;
+    }
+
+    // 4. Overspeed-guarded feedforward + viscous-LSD PI with tight I-clamp
+    float err = ctrl.omega_ref_interp - motor.shaft_velocity;
+    float p_term = motor.PID_velocity.P * err;
+
+    float v_ff_eff = raw_vff;
+    if (v_ff_eff > 0.0f && err < 0.0f) {
+        float scale = 1.0f + err * (1.0f / FF_OVERSPEED_TAPER_RAD_S);
+        v_ff_eff *= (scale > 0.0f) ? scale : 0.0f;
+    } else if (v_ff_eff < 0.0f && err > 0.0f) {
+        float scale = 1.0f - err * (1.0f / FF_OVERSPEED_TAPER_RAD_S);
+        v_ff_eff *= (scale > 0.0f) ? scale : 0.0f;
+    }
+
+    float i_lo = fast_fmaxf(-ctrl.i_clamp_v, v_min);
+    float i_hi = fast_fminf( ctrl.i_clamp_v, v_max);
+    float integral_new = ctrl.integral_v;
+    if (i_lo > i_hi) {
+        integral_new = 0.5f * (v_min + v_max);
+    } else {
+        float cand_i = ctrl.integral_v + motor.PID_velocity.I * dt * 0.5f * (err + ctrl.err_prev);
+        cand_i = _constrain(cand_i, i_lo, i_hi);
+        float pre_sat = v_ff_eff + p_term + cand_i;
+        if ((pre_sat > v_max && err > 0.0f && cand_i > ctrl.integral_v) ||
+            (pre_sat < v_min && err < 0.0f && cand_i < ctrl.integral_v)) {
+            integral_new = _constrain(ctrl.integral_v, i_lo, i_hi);
+        } else {
+            integral_new = cand_i;
+        }
+    }
+    ctrl.integral_v = integral_new;
+
+    float d_term = (motor.PID_velocity.D > 0.0f)
+                       ? (motor.PID_velocity.D * (err - ctrl.err_prev) * (1.0f / dt))
+                       : 0.0f;
+    ctrl.err_prev = err;
+
+    float v_trq_target = _constrain(v_ff_eff + p_term + integral_new + d_term, v_min, v_max);
+
+    // 5. Slew-rate limit V_trq ONLY (never total V_q)
+    float ramp = motor.PID_velocity.output_ramp;
+    if (ramp > 0.0f) {
+        float max_dv = ramp * dt;
+        float dv = v_trq_target - ctrl.v_trq_slewed;
+        if (dv > max_dv) {
+            ctrl.v_trq_slewed += max_dv;
+        } else if (dv < -max_dv) {
+            ctrl.v_trq_slewed -= max_dv;
+        } else {
+            ctrl.v_trq_slewed = v_trq_target;
+        }
+    } else {
+        ctrl.v_trq_slewed = v_trq_target;
+    }
+    ctrl.v_trq_slewed = _constrain(ctrl.v_trq_slewed, -v_cap, v_cap);
+
+    // 6. Locked 90-deg commutation (Iq only, Vd = 0)
+    motor.current_sp = ctrl.v_trq_slewed;
+    motor.voltage.q = _constrain(v_bemf + ctrl.v_trq_slewed, -motor.voltage_limit, motor.voltage_limit);
     motor.voltage.d = 0.0f;
 }
 
@@ -593,19 +790,21 @@ void focTimerISR() {
     encoder2.update();
     uint32_t c2 = DWT->CYCCNT;
 
-    // 2. Staggered 5.0 kHz Velocity Filtering & PID Control (downsample = 4, 200 us period)
+    // 2. Staggered 5.0 kHz Velocity Filtering & Decoupled Torque Control (downsample = 4, 200 us period)
     uint32_t phase = foc_tick_count & 3U;
     if (phase == 0U && !m1_calib_active) {
         if (m1_enabled) {
-            fastMoveVelocity(motor1, encoder1, m1_target_rpm * 0.104719755f);
+            fastMoveVelocity(motor1, encoder1, m1_ctrl);
         } else {
             motor1.shaft_velocity = (float)motor1.sensor_direction * motor1.LPF_velocity(encoder1.getVelocity());
+            m1_ctrl.resetIsrState(motor1.shaft_velocity);
         }
     } else if (phase == 2U && !m2_calib_active) {
         if (m2_enabled) {
-            fastMoveVelocity(motor2, encoder2, m2_target_rpm * 0.104719755f);
+            fastMoveVelocity(motor2, encoder2, m2_ctrl);
         } else {
             motor2.shaft_velocity = (float)motor2.sensor_direction * motor2.LPF_velocity(encoder2.getVelocity());
+            m2_ctrl.resetIsrState(motor2.shaft_velocity);
         }
     }
     uint32_t c3 = DWT->CYCCNT;
@@ -756,15 +955,19 @@ void initMotorFOC(int motor_id) {
     BLDCMotor &motor = (motor_id == 1) ? motor1 : motor2;
     FastBLDCDriver3PWM &driver = (motor_id == 1) ? driver1 : driver2;
     MT6816Sensor &encoder = (motor_id == 1) ? encoder1 : encoder2;
+    MotorTorqueCtrl &ctrl = (motor_id == 1) ? m1_ctrl : m2_ctrl;
+    volatile float &target_rpm_var = (motor_id == 1) ? m1_target_rpm : m2_target_rpm;
     volatile bool &calibrated = (motor_id == 1) ? m1_calibrated : m2_calibrated;
     volatile bool &enabled = (motor_id == 1) ? m1_enabled : m2_enabled;
 
+    ctrl.updateKe(motor.KV_rating);
     driver.enable();
     motor.enable();
     motor.voltage.q = 0.0f;
     motor.voltage.d = 0.0f;
     encoder.update();
     motor.shaft_angle = (float)motor.sensor_direction * encoder.getFastAngle() - motor.sensor_offset;
+    resetMotorTorqueCtrl(ctrl, target_rpm_var, motor.shaft_velocity, true);
     enabled = true;
     calibrated = true;
     Serial.print("[OK]:INIT_M"); Serial.println(motor_id);
@@ -785,8 +988,8 @@ static bool s_saved_telemetry_state = true;
 void disableBothDrivers() {
     m1_enabled = false;
     m2_enabled = false;
-    m1_target_rpm = 0.0f;
-    m2_target_rpm = 0.0f;
+    resetMotorTorqueCtrl(m1_ctrl, m1_target_rpm, motor1.shaft_velocity, true);
+    resetMotorTorqueCtrl(m2_ctrl, m2_target_rpm, motor2.shaft_velocity, true);
 
     motor1.voltage.q = 0.0f;
     motor1.voltage.d = 0.0f;
@@ -886,12 +1089,13 @@ void enterCalibrationIsolation(int motor_id) {
     int other_id = (motor_id == 1) ? 2 : 1;
     BLDCMotor &other_motor = (motor_id == 1) ? motor2 : motor1;
     BLDCDriver3PWM &other_driver = (motor_id == 1) ? driver2 : driver1;
+    MotorTorqueCtrl &other_ctrl = (motor_id == 1) ? m2_ctrl : m1_ctrl;
     volatile bool &other_enabled = (motor_id == 1) ? m2_enabled : m1_enabled;
     volatile float &other_target_rpm = (motor_id == 1) ? m2_target_rpm : m1_target_rpm;
 
     // 1. Completely disable the other motor and inverter hardware (Hi-Z, zero switching/ripple/EMI)
     other_enabled = false;
-    other_target_rpm = 0.0f;
+    resetMotorTorqueCtrl(other_ctrl, other_target_rpm, other_motor.shaft_velocity, true);
     other_motor.voltage.q = 0.0f;
     other_motor.voltage.d = 0.0f;
     other_motor.setPhaseVoltage(0.0f, 0.0f, 0.0f);
@@ -1120,6 +1324,8 @@ bool saveConfigToFlash() {
     motor2.PID_velocity.limit = motor2.voltage_limit;
     m1_enabled = false;
     m2_enabled = false;
+    resetMotorTorqueCtrl(m1_ctrl, m1_target_rpm, motor1.shaft_velocity, true);
+    resetMotorTorqueCtrl(m2_ctrl, m2_target_rpm, motor2.shaft_velocity, true);
 
     if (foc_timer) foc_timer->pause();
     __disable_irq();
@@ -1196,6 +1402,7 @@ bool loadConfigFromFlash() {
     motor1.sensor_direction = (ptr->m1_direction == 1) ? Direction::CW : Direction::CCW;
     m1_lag_comp_us = ptr->m1_lag_comp_us;
     if (ptr->m1_kv_rating > 10.0f) motor1.KV_rating = ptr->m1_kv_rating;
+    m1_ctrl.updateKe(motor1.KV_rating);
     if (ptr->m1_pid_p > 0.0f) motor1.PID_velocity.P = ptr->m1_pid_p;
     if (ptr->m1_pid_i > 0.0f) motor1.PID_velocity.I = ptr->m1_pid_i;
     motor1.PID_velocity.D = ptr->m1_pid_d;
@@ -1213,6 +1420,7 @@ bool loadConfigFromFlash() {
     motor2.sensor_direction = (ptr->m2_direction == 1) ? Direction::CW : Direction::CCW;
     m2_lag_comp_us = ptr->m2_lag_comp_us;
     if (ptr->m2_kv_rating > 10.0f) motor2.KV_rating = ptr->m2_kv_rating;
+    m2_ctrl.updateKe(motor2.KV_rating);
     if (ptr->m2_pid_p > 0.0f) motor2.PID_velocity.P = ptr->m2_pid_p;
     if (ptr->m2_pid_i > 0.0f) motor2.PID_velocity.I = ptr->m2_pid_i;
     motor2.PID_velocity.D = ptr->m2_pid_d;
@@ -2108,7 +2316,9 @@ void resetDefaults(int motor_id) {
         motor1.LPF_velocity.Ts = 0.0002f;
         m1_lag_comp_us = DEFAULT_LAG_COMP_US;
         m1_lag_filt_vel = 0.0f;
-        m1_target_rpm = 0.0f;
+        m1_ctrl.i_clamp_v = DEFAULT_PID_I_CLAMP_V;
+        m1_ctrl.updateKe(MOTOR_KV_RATING);
+        resetMotorTorqueCtrl(m1_ctrl, m1_target_rpm, motor1.shaft_velocity, true);
         encoder1.setDWTWindowMs(DEFAULT_DWT_WINDOW_MS);
         encoder1.resetErrors();
         stall_guard1.reset();
@@ -2127,7 +2337,9 @@ void resetDefaults(int motor_id) {
         motor2.LPF_velocity.Ts = 0.0002f;
         m2_lag_comp_us = DEFAULT_LAG_COMP_US;
         m2_lag_filt_vel = 0.0f;
-        m2_target_rpm = 0.0f;
+        m2_ctrl.i_clamp_v = DEFAULT_PID_I_CLAMP_V;
+        m2_ctrl.updateKe(MOTOR_KV_RATING);
+        resetMotorTorqueCtrl(m2_ctrl, m2_target_rpm, motor2.shaft_velocity, true);
         encoder2.setDWTWindowMs(DEFAULT_DWT_WINDOW_MS);
         encoder2.resetErrors();
         stall_guard2.reset();
@@ -2148,12 +2360,7 @@ void printHelp() {
     Serial.print(m1_enabled ? "ON" : "OFF");
     Serial.print(" M2:");
     Serial.print(m2_enabled ? "ON" : "OFF");
-    Serial.println("]. Cmds: E/D[1/2], STOP, T[1/2] <rpm>, CALIB 1/2, DUMP_LUT 1/2, SAVE, EXPORT");
-    Serial.print("FOLKRACE G474 FOC [M1:");
-    Serial.print(m1_enabled ? "ON" : "OFF");
-    Serial.print(" M2:");
-    Serial.print(m2_enabled ? "ON" : "OFF");
-    Serial.println("]. Cmds: E/D[1/2], STOP, T[1/2] <rpm>, CALIB 1/2, DUMP_LUT 1/2, SAVE, EXPORT");
+    Serial.println("]. Cmds: E/D[1/2], STOP, T[1/2] <rpm>, COAST[1/2], TRQ[1/2] <min> <max> [ff], ICLAMP[1/2] <V>, CALIB 1/2, SAVE, EXPORT");
 }
 
 // ----------------------------------------------------------------------------
@@ -2340,6 +2547,8 @@ void processCommand(const char *cmd) {
         stall_guard1.reset();
         motor1.voltage_limit = MOTOR_VOLTAGE_LIMIT;
         motor1.PID_velocity.limit = motor1.voltage_limit;
+        m1_ctrl.updateKe(motor1.KV_rating);
+        resetMotorTorqueCtrl(m1_ctrl, m1_target_rpm, motor1.shaft_velocity, true);
         m1_enabled = true;
         driver1.enable();
         motor1.enable();
@@ -2352,6 +2561,8 @@ void processCommand(const char *cmd) {
         stall_guard2.reset();
         motor2.voltage_limit = MOTOR_VOLTAGE_LIMIT;
         motor2.PID_velocity.limit = motor2.voltage_limit;
+        m2_ctrl.updateKe(motor2.KV_rating);
+        resetMotorTorqueCtrl(m2_ctrl, m2_target_rpm, motor2.shaft_velocity, true);
         m2_enabled = true;
         driver2.enable();
         motor2.enable();
@@ -2367,6 +2578,10 @@ void processCommand(const char *cmd) {
         motor1.PID_velocity.limit = motor1.voltage_limit;
         motor2.voltage_limit = MOTOR_VOLTAGE_LIMIT;
         motor2.PID_velocity.limit = motor2.voltage_limit;
+        m1_ctrl.updateKe(motor1.KV_rating);
+        m2_ctrl.updateKe(motor2.KV_rating);
+        resetMotorTorqueCtrl(m1_ctrl, m1_target_rpm, motor1.shaft_velocity, true);
+        resetMotorTorqueCtrl(m2_ctrl, m2_target_rpm, motor2.shaft_velocity, true);
         m1_enabled = true;
         m2_enabled = true;
         driver1.enable();
@@ -2384,7 +2599,7 @@ void processCommand(const char *cmd) {
         motor1.disable();
         driver1.disable();
         digitalWrite(M1_EN, LOW);
-        m1_target_rpm = 0.0f;
+        resetMotorTorqueCtrl(m1_ctrl, m1_target_rpm, motor1.shaft_velocity, true);
         motor1.voltage.q = 0.0f;
         motor1.voltage.d = 0.0f;
         stall_guard1.reset();
@@ -2398,7 +2613,7 @@ void processCommand(const char *cmd) {
         motor2.disable();
         driver2.disable();
         digitalWrite(M2_EN, LOW);
-        m2_target_rpm = 0.0f;
+        resetMotorTorqueCtrl(m2_ctrl, m2_target_rpm, motor2.shaft_velocity, true);
         motor2.voltage.q = 0.0f;
         motor2.voltage.d = 0.0f;
         stall_guard2.reset();
@@ -2416,8 +2631,8 @@ void processCommand(const char *cmd) {
         driver2.disable();
         digitalWrite(M1_EN, LOW);
         digitalWrite(M2_EN, LOW);
-        m1_target_rpm = 0.0f;
-        m2_target_rpm = 0.0f;
+        resetMotorTorqueCtrl(m1_ctrl, m1_target_rpm, motor1.shaft_velocity, true);
+        resetMotorTorqueCtrl(m2_ctrl, m2_target_rpm, motor2.shaft_velocity, true);
         motor1.voltage.q = 0.0f;
         motor1.voltage.d = 0.0f;
         motor2.voltage.q = 0.0f;
@@ -2481,6 +2696,8 @@ void processCommand(const char *cmd) {
         if (stall_guard1.latched_fault || stall_guard2.latched_fault) {
             stall_guard1.reset();
             stall_guard2.reset();
+            m1_ctrl.stall_vtrq_cap = MOTOR_VOLTAGE_LIMIT;
+            m2_ctrl.stall_vtrq_cap = MOTOR_VOLTAGE_LIMIT;
             motor1.voltage_limit = MOTOR_VOLTAGE_LIMIT;
             motor1.PID_velocity.limit = motor1.voltage_limit;
             motor2.voltage_limit = MOTOR_VOLTAGE_LIMIT;
@@ -2535,21 +2752,92 @@ void processCommand(const char *cmd) {
         return;
     }
 
+    if (strcasecmp(cmd, "COAST1") == 0) {
+        setMotorCommand(m1_ctrl, m1_target_rpm, m1_target_rpm, 0.0f, 0.0f, 0.0f);
+        Serial.println(">>> M1: FREEWHEEL COAST (Vtrq = [0.00, 0.00])");
+        return;
+    }
+    if (strcasecmp(cmd, "COAST2") == 0) {
+        setMotorCommand(m2_ctrl, m2_target_rpm, m2_target_rpm, 0.0f, 0.0f, 0.0f);
+        Serial.println(">>> M2: FREEWHEEL COAST (Vtrq = [0.00, 0.00])");
+        return;
+    }
+    if (strcasecmp(cmd, "COAST") == 0) {
+        setMotorCommand(m1_ctrl, m1_target_rpm, m1_target_rpm, 0.0f, 0.0f, 0.0f);
+        setMotorCommand(m2_ctrl, m2_target_rpm, m2_target_rpm, 0.0f, 0.0f, 0.0f);
+        Serial.println(">>> BOTH MOTORS: FREEWHEEL COAST (Vtrq = [0.00, 0.00])");
+        return;
+    }
+    if (strncasecmp(cmd, "TRQ1", 4) == 0) {
+        const char *p = skip_ws(cmd + 4);
+        const char *next = nullptr;
+        float vmin = fast_atof(p, &next);
+        if (next != p) {
+            p = skip_ws(next);
+            float vmax = fast_atof(p, &next);
+            if (next != p) {
+                p = skip_ws(next);
+                const char *ff_end = nullptr;
+                float vff = fast_atof(p, &ff_end);
+                if (ff_end == p) vff = 0.0f;
+                setMotorCommand(m1_ctrl, m1_target_rpm, m1_target_rpm, vmin, vmax, vff);
+                Serial.print(">>> M1 Vtrq ["); Serial.print(vmin, 2);
+                Serial.print(", "); Serial.print(vmax, 2);
+                Serial.print("] ff="); Serial.println(vff, 2);
+            }
+        }
+        return;
+    }
+    if (strncasecmp(cmd, "TRQ2", 4) == 0) {
+        const char *p = skip_ws(cmd + 4);
+        const char *next = nullptr;
+        float vmin = fast_atof(p, &next);
+        if (next != p) {
+            p = skip_ws(next);
+            float vmax = fast_atof(p, &next);
+            if (next != p) {
+                p = skip_ws(next);
+                const char *ff_end = nullptr;
+                float vff = fast_atof(p, &ff_end);
+                if (ff_end == p) vff = 0.0f;
+                setMotorCommand(m2_ctrl, m2_target_rpm, m2_target_rpm, vmin, vmax, vff);
+                Serial.print(">>> M2 Vtrq ["); Serial.print(vmin, 2);
+                Serial.print(", "); Serial.print(vmax, 2);
+                Serial.print("] ff="); Serial.println(vff, 2);
+            }
+        }
+        return;
+    }
+    if (strncasecmp(cmd, "ICLAMP1", 7) == 0) {
+        float val = _constrain(fast_atof(cmd + 7), 0.1f, 6.0f);
+        m1_ctrl.i_clamp_v = val;
+        Serial.print(">>> M1 I-Clamp: +/-"); Serial.print(val, 2); Serial.println(" V");
+        return;
+    }
+    if (strncasecmp(cmd, "ICLAMP2", 7) == 0) {
+        float val = _constrain(fast_atof(cmd + 7), 0.1f, 6.0f);
+        m2_ctrl.i_clamp_v = val;
+        Serial.print(">>> M2 I-Clamp: +/-"); Serial.print(val, 2); Serial.println(" V");
+        return;
+    }
+
     // Parameter tuning with float parsing
     if (strncmp(cmd, "T1", 2) == 0) {
-        m1_target_rpm = fast_atof(cmd + 2);
+        float val = fast_atof(cmd + 2);
+        setMotorCommand(m1_ctrl, m1_target_rpm, val, m1_ctrl.cmd_vtrq_min, m1_ctrl.cmd_vtrq_max, m1_ctrl.cmd_vtrq_ff);
         Serial.print(">>> M1 Target Speed: "); Serial.print(m1_target_rpm, 1); Serial.println(" RPM");
         return;
     }
     if (strncmp(cmd, "T2", 2) == 0) {
-        m2_target_rpm = fast_atof(cmd + 2);
+        float val = fast_atof(cmd + 2);
+        setMotorCommand(m2_ctrl, m2_target_rpm, val, m2_ctrl.cmd_vtrq_min, m2_ctrl.cmd_vtrq_max, m2_ctrl.cmd_vtrq_ff);
         Serial.print(">>> M2 Target Speed: "); Serial.print(m2_target_rpm, 1); Serial.println(" RPM");
         return;
     }
     if (strncmp(cmd, "T", 1) == 0) {
         float val = fast_atof(cmd + 1);
-        m1_target_rpm = val;
-        m2_target_rpm = val;
+        setMotorCommand(m1_ctrl, m1_target_rpm, val, m1_ctrl.cmd_vtrq_min, m1_ctrl.cmd_vtrq_max, m1_ctrl.cmd_vtrq_ff);
+        setMotorCommand(m2_ctrl, m2_target_rpm, val, m2_ctrl.cmd_vtrq_min, m2_ctrl.cmd_vtrq_max, m2_ctrl.cmd_vtrq_ff);
         Serial.print(">>> Coupled Target Speed: "); Serial.print(val, 1); Serial.println(" RPM");
         return;
     }
@@ -2662,12 +2950,12 @@ void processCommand(const char *cmd) {
 
     if (strncasecmp(cmd, "KV1", 3) == 0) {
         float val = fast_atof(cmd + 3);
-        if (val > 0.0f) { motor1.KV_rating = val; Serial.print(">>> M1 KV: "); Serial.println(val, 1); }
+        if (val > 0.0f) { motor1.KV_rating = val; m1_ctrl.updateKe(val); Serial.print(">>> M1 KV: "); Serial.println(val, 1); }
         return;
     }
     if (strncasecmp(cmd, "KV2", 3) == 0) {
         float val = fast_atof(cmd + 3);
-        if (val > 0.0f) { motor2.KV_rating = val; Serial.print(">>> M2 KV: "); Serial.println(val, 1); }
+        if (val > 0.0f) { motor2.KV_rating = val; m2_ctrl.updateKe(val); Serial.print(">>> M2 KV: "); Serial.println(val, 1); }
         return;
     }
 
@@ -2893,11 +3181,14 @@ void processCommand(const char *cmd) {
 
 // ----------------------------------------------------------------------------
 // Autonomous Industry-Grade Stall Protection Watchdog (Thermal I^2*t + FSM)
+// Uses decoupled winding effort V_trq (never total V_q = Ke*w + V_trq)
 // ----------------------------------------------------------------------------
 void updateStallGuard(int id, BLDCMotor &motor, FastBLDCDriver3PWM &driver,
+                      MotorTorqueCtrl &ctrl,
                       volatile bool &enabled, volatile float &target_rpm,
                       IndustrialStallGuard &guard, float dt) {
     if (!enabled) {
+        ctrl.stall_vtrq_cap = MOTOR_VOLTAGE_LIMIT;
         guard.reset();
         return;
     }
@@ -2905,27 +3196,27 @@ void updateStallGuard(int id, BLDCMotor &motor, FastBLDCDriver3PWM &driver,
     if (guard.latched_fault) {
         enabled = false;
         driver.disable();
-        target_rpm = 0.0f;
+        resetMotorTorqueCtrl(ctrl, target_rpm, motor.shaft_velocity, true);
         return;
     }
 
     float actual_rpm = motor.shaftVelocity() * 9.54929659f;
     float abs_actual = fabsf(actual_rpm);
     float abs_target = fabsf(target_rpm);
-    float abs_uq = fabsf(motor.voltage.q);
+    float abs_effort = fabsf(ctrl.v_trq_slewed);
     float vel_error = fabsf(target_rpm - actual_rpm);
 
     // Effort-motion co-incidence and reversal masking
     bool is_reversing = (target_rpm * actual_rpm < 0.0f) && (abs_actual > STALL_VELOCITY_FLOOR_RPM);
-    bool effort_active = (abs_uq >= STALL_MIN_EFFORT_VOLTS);
+    bool effort_active = (abs_effort >= STALL_MIN_EFFORT_VOLTS);
     bool motion_stalled = (abs_target >= STALL_VELOCITY_FLOOR_RPM) && (abs_actual < STALL_VELOCITY_FLOOR_RPM);
-    bool severe_lag = (abs_uq >= STALL_SATURATION_VOLTS) && (vel_error > STALL_VELOCITY_LAG_RPM);
+    bool severe_lag = (abs_effort >= STALL_SATURATION_VOLTS) && (vel_error > STALL_VELOCITY_LAG_RPM);
 
     bool stall_qualified = effort_active && !is_reversing && (motion_stalled || severe_lag);
 
     // Thermal I^2*t leaky energy accumulator
     if (stall_qualified) {
-        float excess = (abs_uq * abs_uq) - (STALL_I2T_CONT_VOLTS * STALL_I2T_CONT_VOLTS);
+        float excess = (abs_effort * abs_effort) - (STALL_I2T_CONT_VOLTS * STALL_I2T_CONT_VOLTS);
         if (excess > 0.0f) {
             guard.energy_accumulator += excess * dt;
         }
@@ -2936,48 +3227,49 @@ void updateStallGuard(int id, BLDCMotor &motor, FastBLDCDriver3PWM &driver,
     // Progressive Multi-Stage Mitigation FSM
     switch (guard.state) {
         case StallState::NORMAL:
+            ctrl.stall_vtrq_cap = MOTOR_VOLTAGE_LIMIT;
             if (guard.energy_accumulator >= (STALL_I2T_TRIP_ENERGY * 0.60f)) {
                 guard.state = StallState::WARNING;
             }
             break;
 
         case StallState::WARNING:
+            ctrl.stall_vtrq_cap = MOTOR_VOLTAGE_LIMIT;
             if (guard.energy_accumulator < (STALL_I2T_TRIP_ENERGY * 0.30f)) {
                 guard.state = StallState::NORMAL;
             } else if (guard.energy_accumulator >= STALL_I2T_TRIP_ENERGY) {
                 guard.state = StallState::FOLDBACK;
                 guard.state_timer = millis();
-                motor.voltage_limit = STALL_FOLDBACK_VOLTS;
-                motor.PID_velocity.limit = STALL_FOLDBACK_VOLTS;
+                ctrl.stall_vtrq_cap = STALL_FOLDBACK_VOLTS;
                 Serial.print("[STALL_FOLDBACK]:M"); Serial.println(id);
             }
             break;
 
         case StallState::FOLDBACK:
-            motor.voltage_limit = STALL_FOLDBACK_VOLTS;
-            motor.PID_velocity.limit = STALL_FOLDBACK_VOLTS;
+            ctrl.stall_vtrq_cap = STALL_FOLDBACK_VOLTS;
             if (millis() - guard.state_timer >= 300) {
                 if (guard.recovery_attempts < STALL_MAX_RECOVERY_TRIES) {
                     guard.recovery_attempts++;
                     guard.state = StallState::UNWEDGE_DITHER;
                     guard.state_timer = millis();
-                    target_rpm = -target_rpm * 0.5f;
+                    setMotorCommand(ctrl, target_rpm, -target_rpm * 0.5f,
+                                    -STALL_FOLDBACK_VOLTS, STALL_FOLDBACK_VOLTS, 0.0f);
                 } else {
                     guard.state = StallState::LATCHED_FAULT;
                     guard.latched_fault = true;
                     enabled = false;
                     driver.disable();
-                    target_rpm = 0.0f;
+                    resetMotorTorqueCtrl(ctrl, target_rpm, motor.shaft_velocity, true);
                     Serial.print("[STALL_FAULT]:M"); Serial.println(id);
                 }
             }
             break;
 
         case StallState::UNWEDGE_DITHER:
+            ctrl.stall_vtrq_cap = STALL_FOLDBACK_VOLTS;
             if (abs_actual >= STALL_VELOCITY_FLOOR_RPM * 2.0f) {
                 guard.reset();
-                motor.voltage_limit = MOTOR_VOLTAGE_LIMIT;
-                motor.PID_velocity.limit = MOTOR_VOLTAGE_LIMIT;
+                ctrl.stall_vtrq_cap = MOTOR_VOLTAGE_LIMIT;
                 Serial.print("[STALL_CLEAR]:M"); Serial.println(id);
             } else if (millis() - guard.state_timer >= STALL_DITHER_PULSE_MS) {
                 guard.state = StallState::FOLDBACK;
@@ -2988,7 +3280,7 @@ void updateStallGuard(int id, BLDCMotor &motor, FastBLDCDriver3PWM &driver,
         case StallState::LATCHED_FAULT:
             enabled = false;
             driver.disable();
-            target_rpm = 0.0f;
+            resetMotorTorqueCtrl(ctrl, target_rpm, motor.shaft_velocity, true);
             break;
     }
 }
@@ -3009,10 +3301,10 @@ void checkStallWatchdog() {
     if (dt > 0.05f) dt = 0.05f;
 
     if (!m1_calib_active) {
-        updateStallGuard(1, motor1, driver1, m1_enabled, m1_target_rpm, stall_guard1, dt);
+        updateStallGuard(1, motor1, driver1, m1_ctrl, m1_enabled, m1_target_rpm, stall_guard1, dt);
     }
     if (!m2_calib_active) {
-        updateStallGuard(2, motor2, driver2, m2_enabled, m2_target_rpm, stall_guard2, dt);
+        updateStallGuard(2, motor2, driver2, m2_ctrl, m2_enabled, m2_target_rpm, stall_guard2, dt);
     }
 }
 
@@ -3127,6 +3419,12 @@ void processESP32Link() {
     static bool sync_found = false;
     float latest_drive_m1 = 0.0f;
     float latest_drive_m2 = 0.0f;
+    int16_t latest_m1_vmin_mv = -12000;
+    int16_t latest_m1_vmax_mv =  12000;
+    int16_t latest_m1_vff_mv  =  0;
+    int16_t latest_m2_vmin_mv = -12000;
+    int16_t latest_m2_vmax_mv =  12000;
+    int16_t latest_m2_vff_mv  =  0;
     bool have_latest_drive = false;
     bool have_valid_packet = false;
     size_t bytes_processed = 0;
@@ -3159,7 +3457,7 @@ void processESP32Link() {
                 sync_found = false;
                 rx_idx = 0;
 
-                // Verify XOR checksum over bytes [2 .. 10]
+                // Verify XOR checksum over bytes [2 .. 22]
                 uint8_t chk = 0;
                 for (size_t i = 2; i < sizeof(STM32MotorCommandPacket) - 1; i++) {
                     chk ^= rx_buf[i];
@@ -3177,8 +3475,14 @@ void processESP32Link() {
                                 // Keep only the newest drive target from this
                                 // service pass. This bounds PID-target churn
                                 // when UART bytes arrive in a burst.
-                                latest_drive_m1 = pkt->param1;
-                                latest_drive_m2 = pkt->param2;
+                                latest_drive_m1   = pkt->param1;
+                                latest_drive_m2   = pkt->param2;
+                                latest_m1_vmin_mv = pkt->m1_vtrq_min_mv;
+                                latest_m1_vmax_mv = pkt->m1_vtrq_max_mv;
+                                latest_m1_vff_mv  = pkt->m1_vtrq_ff_mv;
+                                latest_m2_vmin_mv = pkt->m2_vtrq_min_mv;
+                                latest_m2_vmax_mv = pkt->m2_vtrq_max_mv;
+                                latest_m2_vff_mv  = pkt->m2_vtrq_ff_mv;
                                 have_latest_drive = true;
                                 if ((m1_enabled || m2_enabled) && pkt->param1 == 0.0f && pkt->param2 == 0.0f) {
                                     esp_drive_zero++;
@@ -3193,6 +3497,10 @@ void processESP32Link() {
                         case STM32_CMD_ENABLE:
                             if (!s_calib_isolation_active) {
                                 g_estop_active = false;
+                                m1_ctrl.updateKe(motor1.KV_rating);
+                                m2_ctrl.updateKe(motor2.KV_rating);
+                                resetMotorTorqueCtrl(m1_ctrl, m1_target_rpm, motor1.shaft_velocity, true);
+                                resetMotorTorqueCtrl(m2_ctrl, m2_target_rpm, motor2.shaft_velocity, true);
                                 m1_enabled = true;
                                 m2_enabled = true;
                                 driver1.enable();
@@ -3254,7 +3562,7 @@ void processESP32Link() {
                     }
                 } else {
                     esp_chk_err++;
-                    // Checksum mismatch on false sync: rescan rx_buf[1..11] so real header isn't lost
+                    // Checksum mismatch on false sync: rescan rx_buf[1..23] so real header isn't lost
                     for (uint8_t shift = 1; shift < sizeof(STM32MotorCommandPacket); shift++) {
                         if (rx_buf[shift] == STM32_CMD_SYNC_1) {
                             if (shift + 1 < sizeof(STM32MotorCommandPacket)) {
@@ -3280,16 +3588,26 @@ void processESP32Link() {
     }
 
     if (have_latest_drive && !g_estop_active && !s_calib_isolation_active) {
-        m1_target_rpm = latest_drive_m1;
-        m2_target_rpm = latest_drive_m2;
-        // Never auto-enable disabled drivers on a 0 RPM command; only enable
-        // when an actual non-zero velocity is commanded.
-        if (fabsf(latest_drive_m1) > 0.01f && !m1_enabled) {
+        setMotorCommand(m1_ctrl, m1_target_rpm, latest_drive_m1,
+                        (float)latest_m1_vmin_mv * 0.001f,
+                        (float)latest_m1_vmax_mv * 0.001f,
+                        (float)latest_m1_vff_mv * 0.001f);
+        setMotorCommand(m2_ctrl, m2_target_rpm, latest_drive_m2,
+                        (float)latest_m2_vmin_mv * 0.001f,
+                        (float)latest_m2_vmax_mv * 0.001f,
+                        (float)latest_m2_vff_mv * 0.001f);
+
+        // Never auto-enable disabled drivers on an idle (0, 0, 0) command.
+        if (((fabsf(latest_drive_m1) > 0.01f) || (latest_m1_vmin_mv != 0) || (latest_m1_vmax_mv != 0)) && !m1_enabled) {
+            m1_ctrl.updateKe(motor1.KV_rating);
+            resetMotorTorqueCtrl(m1_ctrl, m1_target_rpm, motor1.shaft_velocity, false);
             m1_enabled = true;
             driver1.enable();
             motor1.enable();
         }
-        if (fabsf(latest_drive_m2) > 0.01f && !m2_enabled) {
+        if (((fabsf(latest_drive_m2) > 0.01f) || (latest_m2_vmin_mv != 0) || (latest_m2_vmax_mv != 0)) && !m2_enabled) {
+            m2_ctrl.updateKe(motor2.KV_rating);
+            resetMotorTorqueCtrl(m2_ctrl, m2_target_rpm, motor2.shaft_velocity, false);
             m2_enabled = true;
             driver2.enable();
             motor2.enable();
@@ -3427,6 +3745,9 @@ void setup() {
         }
     }
 
+    m1_ctrl.updateKe(motor1.KV_rating);
+    m2_ctrl.updateKe(motor2.KV_rating);
+
     // Ensure both motors and gate drivers start disabled by default
     disableBothDrivers();
 
@@ -3464,16 +3785,16 @@ void loop() {
     if (esp_link_active && (m1_enabled || m2_enabled) &&
         (now >= last_esp_packet_ms) && (now - last_esp_packet_ms > 100)) {
         esp_wdog_trips++;
-        m1_target_rpm = 0.0f;
-        m2_target_rpm = 0.0f;
+        m1_enabled = false;
+        m2_enabled = false;
         motor1.disable();
         motor2.disable();
         driver1.disable();
         driver2.disable();
         digitalWrite(M1_EN, LOW);
         digitalWrite(M2_EN, LOW);
-        m1_enabled = false;
-        m2_enabled = false;
+        resetMotorTorqueCtrl(m1_ctrl, m1_target_rpm, motor1.shaft_velocity, true);
+        resetMotorTorqueCtrl(m2_ctrl, m2_target_rpm, motor2.shaft_velocity, true);
     }
 
     // 1. Process Incoming Serial Characters into Line Buffer

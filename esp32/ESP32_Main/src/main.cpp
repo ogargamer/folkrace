@@ -15,20 +15,22 @@
 // Inter-Core Shared Memory Structures (Allocated in Internal SRAM)
 // =============================================================================
 struct SharedSensorInputs {
-  float target_v;         // Commanded forward velocity (m/s)
-  float target_steer_rad; // Commanded center steering angle (rad)
-  float gyro_z;           // IMU body yaw rate (rad/s)
-  float accel_fwd;        // IMU forward linear acceleration (m/s^2)
-  float accel_lat;        // IMU lateral acceleration (m/s^2)
-  float roll_deg;         // IMU Euler roll
-  float pitch_deg;        // IMU Euler pitch
-  float yaw_deg;          // IMU Euler yaw
-  float fl_rpm;           // Front-Left motor actual RPM
-  float fr_rpm;           // Front-Right motor actual RPM
-  float rl_rpm;           // Rear-Left motor actual RPM
-  float rr_rpm;           // Rear-Right motor actual RPM
-  bool override_active;   // Manual override flag
-  bool fake_data_mode;    // Synthetic benchmark mode
+  float target_v;             // Commanded forward velocity (m/s)
+  float target_steer_rad;     // Commanded center steering angle (rad)
+  float gyro_z;               // IMU body yaw rate (rad/s)
+  uint32_t gyro_seq;          // Fresh IMU gyro report counter
+  uint64_t gyro_timestamp_us; // IMU gyro report timestamp (us)
+  float accel_fwd;            // IMU forward linear acceleration (m/s^2)
+  float accel_lat;            // IMU lateral acceleration (m/s^2)
+  float roll_deg;             // IMU Euler roll
+  float pitch_deg;            // IMU Euler pitch
+  float yaw_deg;              // IMU Euler yaw
+  float fl_rpm;               // Front-Left motor actual RPM
+  float fr_rpm;               // Front-Right motor actual RPM
+  float rl_rpm;               // Rear-Left motor actual RPM
+  float rr_rpm;               // Rear-Right motor actual RPM
+  bool override_active;       // Manual override flag
+  bool fake_data_mode;        // Synthetic benchmark mode
 };
 
 struct SharedControlOutputs {
@@ -49,6 +51,17 @@ struct SharedControlOutputs {
   float scale_factor;
   VehicleSlipState slip_state;
   float yaw_error;
+
+  // Torque Envelope & Rear TV Diagnostics
+  float delta_omega_tv;
+  float delta_vtrq_tv;
+  float vtrq_max_FL;
+  float vtrq_max_RL;
+  float vtrq_max_RR;
+  float vtrq_ff_FL;
+  float vtrq_ff_RL;
+  float vtrq_ff_RR;
+  bool is_countersteering;
 
   // Fused Odometry
   float v_est;
@@ -141,6 +154,31 @@ static void sendServoTelemetry() {
                 s_servo.isEnabled() ? "true" : "false");
 }
 
+static inline STM32WheelCmd mapWheelToSTM32(float rpm,
+                                            float v_min,
+                                            float v_max,
+                                            float v_ff,
+                                            float sign) {
+  if (sign >= 0.0f) {
+    return {rpm, v_min, v_max, v_ff};
+  }
+  return {-rpm, -v_max, -v_min, -v_ff};
+}
+
+static inline float estimateWheelVtrq(float omega_cmd,
+                                      float v_min,
+                                      float v_max,
+                                      float v_ff,
+                                      float omega_meas) {
+  if (v_min > v_max) {
+    float mid = 0.5f * (v_min + v_max);
+    v_min = mid;
+    v_max = mid;
+  }
+  float est = v_ff + 0.10f * (omega_cmd - omega_meas);
+  return fmaxf(v_min, fminf(v_max, est));
+}
+
 // =============================================================================
 // Hardware Timer ISR Callback (Fires periodically every 2500 us / 400 Hz)
 // =============================================================================
@@ -174,6 +212,8 @@ static void IRAM_ATTR realTimeControlTask(void *pvParameters) {
   float avg_exec_us = 0.0f;
   int64_t last_tick_time_us = esp_timer_get_time();
   float max_jitter_us = 0.0f;
+  static ElectronicDiffOutputs s_prev_diff = {};
+  static bool s_prev_diff_valid = false;
 
   for (;;) {
     // Wait for deterministic hardware timer notification
@@ -202,6 +242,8 @@ static void IRAM_ATTR realTimeControlTask(void *pvParameters) {
     float target_v;
     float target_steer;
     float gyro_z;
+    uint32_t gyro_seq = 0;
+    uint64_t gyro_ts_us = 0;
     float accel_fwd;
     float fl_rpm, fr_rpm, rl_rpm, rr_rpm;
 
@@ -209,22 +251,16 @@ static void IRAM_ATTR realTimeControlTask(void *pvParameters) {
       // -----------------------------------------------------------------
       // SYNTHETIC BENCHMARK SIGNAL GENERATOR (Fake Data Mode)
       // -----------------------------------------------------------------
-      // Dynamic velocity sweep: -1.5 m/s to +4.5 m/s
       float t_sec = (float)cycle_counter * CONTROL_LOOP_DT_S;
       target_v = 1.5f + 3.0f * sinf(t_sec * 0.5f);
-
-      // Dynamic steering sweep: +/- 0.45 rad (+/- 25.8 deg)
       target_steer = 0.45f * sinf(t_sec * 1.2f);
-
-      // Realistic kinematic IMU yaw rate: omega = (v * tan(delta)) / L + noise
       float clean_omega = (target_v * tanf(target_steer)) / VEHICLE_WHEELBASE_M;
       gyro_z = clean_omega + 0.03f * sinf(t_sec * 10.0f);
-
-      // Synthetic forward acceleration: dv/dt + noise
+      gyro_seq = cycle_counter + 1U;
+      gyro_ts_us = (uint64_t)now_us;
       accel_fwd =
           (3.0f * 0.5f * cosf(t_sec * 0.5f)) + 0.1f * sinf(t_sec * 15.0f);
 
-      // Synthetic motor feedback matching commanded velocity
       float rad_to_rpm = 60.0f / (2.0f * 3.14159265f);
       float sim_rpm = (target_v / VEHICLE_WHEEL_RADIUS_M) * rad_to_rpm *
                       (VEHICLE_MOTOR_DIR);
@@ -238,11 +274,13 @@ static void IRAM_ATTR realTimeControlTask(void *pvParameters) {
       target_steer =
           inputs.override_active ? s_manual_steer : inputs.target_steer_rad;
       gyro_z = inputs.gyro_z;
+      gyro_seq = inputs.gyro_seq;
+      gyro_ts_us = inputs.gyro_timestamp_us;
       accel_fwd = inputs.accel_fwd;
-      fl_rpm = s_stm32Link.getFL_RPM();  // FL +RPM = fwd
-      fr_rpm = s_stm32Link.getFR_RPM();  // FR encoder active (freewheeling, +RPM = fwd)
-      rl_rpm = s_stm32Link.getRL_RPM();
-      rr_rpm = -s_stm32Link.getRR_RPM();
+      fl_rpm = WHEEL_SIGN_FL * s_stm32Link.getFL_RPM();
+      fr_rpm = WHEEL_SIGN_FR * s_stm32Link.getFR_RPM();
+      rl_rpm = WHEEL_SIGN_RL * s_stm32Link.getRL_RPM();
+      rr_rpm = WHEEL_SIGN_RR * s_stm32Link.getRR_RPM();
 
       // Hardware Ramp Speed Governor (Safety speed ceiling on incline/pitch)
       const float ramp_pitch_threshold_deg = 8.0f;
@@ -256,13 +294,39 @@ static void IRAM_ATTR realTimeControlTask(void *pvParameters) {
       }
     }
 
-    // 2. Execute 4WD Electronic Differential & Ackermann Kinematics
+    // 2. Estimate axle torque effort from previous tick's commanded V_trq bounds & FF
+    float front_vtrq_avg = 0.0f;
+    float rear_vtrq_avg = 0.0f;
+    if (s_prev_diff_valid && !s_estop_latched && !s_drive_stopped) {
+      constexpr float rpm_to_rad_s = (2.0f * 3.14159265f) / 60.0f;
+      float vtrq_fl = estimateWheelVtrq(s_prev_diff.omega_FL, s_prev_diff.vtrq_min_FL,
+                                        s_prev_diff.vtrq_max_FL, s_prev_diff.vtrq_ff_FL,
+                                        fl_rpm * rpm_to_rad_s);
+      float vtrq_fr = estimateWheelVtrq(s_prev_diff.omega_FR, s_prev_diff.vtrq_min_FR,
+                                        s_prev_diff.vtrq_max_FR, s_prev_diff.vtrq_ff_FR,
+                                        fr_rpm * rpm_to_rad_s);
+      float vtrq_rl = estimateWheelVtrq(s_prev_diff.omega_RL, s_prev_diff.vtrq_min_RL,
+                                        s_prev_diff.vtrq_max_RL, s_prev_diff.vtrq_ff_RL,
+                                        rl_rpm * rpm_to_rad_s);
+      float vtrq_rr = estimateWheelVtrq(s_prev_diff.omega_RR, s_prev_diff.vtrq_min_RR,
+                                        s_prev_diff.vtrq_max_RR, s_prev_diff.vtrq_ff_RR,
+                                        rr_rpm * rpm_to_rad_s);
+#if TEMP_3WD_FR_DEAD
+      (void)vtrq_fr;
+      front_vtrq_avg = vtrq_fl;
+#else
+      front_vtrq_avg = 0.5f * (vtrq_fl + vtrq_fr);
+#endif
+      rear_vtrq_avg = 0.5f * (vtrq_rl + vtrq_rr);
+    }
+
+    // 3. Execute 4WD Electronic Differential, Axle Envelopes & Rear TV
     static float s_last_v_est = 0.0f;
     ElectronicDiffOutputs diff =
         s_ediff.update(target_v, target_steer, gyro_z, CONTROL_LOOP_DT_S,
-                       DEFAULT_ROAD_MU, s_last_v_est);
+                       DEFAULT_ROAD_MU, s_last_v_est, gyro_seq, gyro_ts_us);
 
-    // 3. Command Single Steering Servo on LEDC PWM (GPIO 21 @ 333 Hz)
+    // 4. Command Single Steering Servo on LEDC PWM (GPIO 21 @ 333 Hz)
     float servo_pulse_cmd =
         (s_manual_servo_direct ? s_direct_servo_pulse : diff.servo_pulse_us) +
         s_servo_trim_us;
@@ -270,13 +334,14 @@ static void IRAM_ATTR realTimeControlTask(void *pvParameters) {
         fmaxf(SERVO_HARD_MIN_US, fminf(SERVO_HARD_MAX_US, servo_pulse_cmd));
     s_servo.setPulseUs(servo_pulse_cmd);
 
-    // 4. Execute 4-Wheel Median Odometry + IMU Complementary Sensor Fusion
+    // 5. Execute Torque-Gated Reference Odometry + IMU Complementary Sensor Fusion
     FusionOutputs fusion =
         s_fusion.update(fl_rpm, fr_rpm, rl_rpm, rr_rpm, gyro_z, accel_fwd,
-                        diff.steer_rad, CONTROL_LOOP_DT_S);
+                        diff.steer_rad, CONTROL_LOOP_DT_S, front_vtrq_avg,
+                        rear_vtrq_avg);
     s_last_v_est = fusion.v_est;
 
-    // 5. Measure Compute Latency (Cycles -> Microseconds @ 240 MHz)
+    // 6. Measure Compute Latency (Cycles -> Microseconds @ 240 MHz)
     uint32_t t_exec_cycles = esp_cpu_get_ccount() - t_start_cycles;
     float exec_us = (float)t_exec_cycles * (1.0f / 240.0f);
 
@@ -295,17 +360,33 @@ static void IRAM_ATTR realTimeControlTask(void *pvParameters) {
     }
     cycle_counter++;
 
-    // 5b. Dispatch drive command to STM32 immediately at a jitter-free 400 Hz
-    // (3WD: FL + RL + RR; RR has inverted rotation vs FL/RL, FR driver is dead).
-    // When stopped or E-STOPped, keep drivers disabled instead of holding 0
-    // RPM.
+    // 6b. Dispatch velocity + torque-voltage command to STM32s at jitter-free 400 Hz
     if (s_estop_latched || s_drive_stopped) {
       s_stm32Link.emergencyStop();
+      s_prev_diff_valid = false;
     } else {
-      s_stm32Link.sendDrive(diff.rpm_FL, 0.0f, diff.rpm_RL, -diff.rpm_RR);
+      STM32WheelCmd cmd_fl = mapWheelToSTM32(diff.rpm_FL, diff.vtrq_min_FL,
+                                             diff.vtrq_max_FL, diff.vtrq_ff_FL,
+                                             WHEEL_SIGN_FL);
+#if TEMP_3WD_FR_DEAD
+      STM32WheelCmd cmd_fr = {0.0f, 0.0f, 0.0f, 0.0f};
+#else
+      STM32WheelCmd cmd_fr = mapWheelToSTM32(diff.rpm_FR, diff.vtrq_min_FR,
+                                             diff.vtrq_max_FR, diff.vtrq_ff_FR,
+                                             WHEEL_SIGN_FR);
+#endif
+      STM32WheelCmd cmd_rl = mapWheelToSTM32(diff.rpm_RL, diff.vtrq_min_RL,
+                                             diff.vtrq_max_RL, diff.vtrq_ff_RL,
+                                             WHEEL_SIGN_RL);
+      STM32WheelCmd cmd_rr = mapWheelToSTM32(diff.rpm_RR, diff.vtrq_min_RR,
+                                             diff.vtrq_max_RR, diff.vtrq_ff_RR,
+                                             WHEEL_SIGN_RR);
+      s_stm32Link.sendDriveTorque(cmd_fl, cmd_fr, cmd_rl, cmd_rr);
+      s_prev_diff = diff;
+      s_prev_diff_valid = true;
     }
 
-    // 6. Commit outputs to Core 0 via lock-free triple buffer
+    // 7. Commit outputs to Core 0 via lock-free triple buffer
     SharedControlOutputs &out = s_controlOutputs.getWriteBuffer();
     out.fl_target_rpm = diff.rpm_FL;
     out.fr_target_rpm = diff.rpm_FR;
@@ -324,6 +405,16 @@ static void IRAM_ATTR realTimeControlTask(void *pvParameters) {
     out.scale_factor = diff.scale_factor;
     out.slip_state = diff.slip_state;
     out.yaw_error = diff.yaw_error;
+
+    out.delta_omega_tv = diff.delta_omega_tv;
+    out.delta_vtrq_tv = diff.delta_vtrq_tv;
+    out.vtrq_max_FL = diff.vtrq_max_FL;
+    out.vtrq_max_RL = diff.vtrq_max_RL;
+    out.vtrq_max_RR = diff.vtrq_max_RR;
+    out.vtrq_ff_FL = diff.vtrq_ff_FL;
+    out.vtrq_ff_RL = diff.vtrq_ff_RL;
+    out.vtrq_ff_RR = diff.vtrq_ff_RR;
+    out.is_countersteering = diff.is_countersteering;
 
     out.v_est = fusion.v_est;
     out.v_wheels = fusion.v_wheels;
@@ -442,11 +533,27 @@ static void handleAsciiCommand(const char *raw_line) {
                   "Dist = %.2f m\n",
                   c.v_est, c.v_wheels, c.total_distance_m);
     Serial.printf(
-        " Slip State: %s (Slip Ratio: %.2f, Yaw Error: %+.2f rad/s)\n",
+        " Slip State: %s (Slip Ratio: %.2f, Yaw Error: %+.2f rad/s, Countersteer: %s)\n",
         c.slip_state == SLIP_OVERSTEER
             ? "OVERSTEER"
             : (c.slip_state == SLIP_UNDERSTEER ? "UNDERSTEER" : "NORMAL"),
-        c.slip_ratio, c.yaw_error);
+        c.slip_ratio, c.yaw_error, c.is_countersteering ? "YES" : "NO");
+    Serial.printf(
+        " Traction Ctrl: GYRO=%d TV=%d FENV=%d OS_MU=%.2f | TV(Kp=%.2f Kd=%.3f Vff=%.2f) | dOmegaTV=%+.2f rad/s dVff=%+.2f V\n",
+        s_ediff.isGyroAssistEnabled() ? 1 : 0,
+        s_ediff.isRearTVEnabled() ? 1 : 0,
+        s_ediff.isFrontEnvelopeEnabled() ? 1 : 0,
+        s_ediff.getOversteerMuCap(),
+        s_ediff.getTvKpPsi(),
+        s_ediff.getTvKdPsi(),
+        s_ediff.getTvMaxVff(),
+        c.delta_omega_tv,
+        c.delta_vtrq_tv);
+    Serial.printf(
+        " Vtrq Envelope: FL(max=%.2f ff=%+.2f) RL(max=%.2f ff=%+.2f) RR(max=%.2f ff=%+.2f)\n",
+        c.vtrq_max_FL, c.vtrq_ff_FL,
+        c.vtrq_max_RL, c.vtrq_ff_RL,
+        c.vtrq_max_RR, c.vtrq_ff_RR);
     Serial.printf(" STM32 Front (FL/FR): %s | Actual RPM: %+.1f / %+.1f | "
                   "Pkts: %u (Err: %u) | En: %d/%d | Prog: %u%%\n",
                   s_stm32Link.isFrontConnected() ? "ONLINE" : "OFFLINE",
@@ -591,6 +698,34 @@ static void handleAsciiCommand(const char *raw_line) {
     s_imu.saveTare(Serial);
   } else if (line.equalsIgnoreCase("IMU_CLEAR")) {
     s_imu.clearTare(Serial);
+  } else if (line.startsWith("GYRO ") || line.startsWith("gyro ")) {
+    bool en = (line.substring(5).toInt() != 0);
+    s_ediff.setGyroAssistEnabled(en);
+    Serial.printf(">>> Servo Gyro Countersteer: %s\n", en ? "ENABLED" : "DISABLED");
+  } else if (line.startsWith("TV ") || line.startsWith("tv ")) {
+    bool en = (line.substring(3).toInt() != 0);
+    s_ediff.setRearTVEnabled(en);
+    Serial.printf(">>> Rear Torque Vectoring: %s\n", en ? "ENABLED" : "DISABLED");
+  } else if (line.startsWith("FENV ") || line.startsWith("fenv ")) {
+    bool en = (line.substring(5).toInt() != 0);
+    s_ediff.setFrontEnvelopeEnabled(en);
+    Serial.printf(">>> Front Steering Torque Envelope: %s\n", en ? "ENABLED" : "DISABLED");
+  } else if (line.startsWith("TV_GAINS ") || line.startsWith("tv_gains ")) {
+    float kp = s_ediff.getTvKpPsi();
+    float kd = s_ediff.getTvKdPsi();
+    float max_vff = s_ediff.getTvMaxVff();
+    int n = sscanf(line.c_str() + 9, "%f %f %f", &kp, &kd, &max_vff);
+    if (n >= 2) {
+      s_ediff.setRearTVGains(kp, kd, max_vff);
+      Serial.printf(">>> Rear TV Gains: Kp=%.3f, Kd=%.4f, MaxVff=%.2fV\n",
+                    s_ediff.getTvKpPsi(), s_ediff.getTvKdPsi(), s_ediff.getTvMaxVff());
+    }
+  } else if (line.startsWith("OS_MU ") || line.startsWith("os_mu ")) {
+    float mu_os = line.substring(6).toFloat();
+    if (mu_os >= 0.40f && mu_os <= 2.50f) {
+      s_ediff.setOversteerMuCap(mu_os);
+      Serial.printf(">>> Oversteer Mu Cap: %.2f\n", s_ediff.getOversteerMuCap());
+    }
   }
 }
 
@@ -676,6 +811,7 @@ static void ioTask(void *pvParameters) {
                     s_manual_override = false;
                     s_drive_stopped = true;
                     if (s_stm32Link.getFront().isM1Enabled() ||
+                        s_stm32Link.getFront().isM2Enabled() ||
                         s_stm32Link.getRear().isM1Enabled() ||
                         s_stm32Link.getRear().isM2Enabled()) {
                       s_stm32Link.emergencyStop();
@@ -746,6 +882,7 @@ static void ioTask(void *pvParameters) {
       s_manual_override = false;
       s_drive_stopped = true;
       if (s_stm32Link.getFront().isM1Enabled() ||
+          s_stm32Link.getFront().isM2Enabled() ||
           s_stm32Link.getRear().isM1Enabled() ||
           s_stm32Link.getRear().isM2Enabled()) {
         s_stm32Link.emergencyStop();
@@ -763,6 +900,8 @@ static void ioTask(void *pvParameters) {
       if (s_imu.isInitialized()) {
         const auto &imu_data = s_imu.getData();
         inputs.gyro_z = imu_data.gyro_z;
+        inputs.gyro_seq = imu_data.gyro_seq;
+        inputs.gyro_timestamp_us = imu_data.gyro_timestamp_us;
         inputs.accel_fwd = imu_data.lin_accel_x; // local body forward
         inputs.accel_lat = imu_data.lin_accel_y;
         inputs.roll_deg = imu_data.roll_deg;
@@ -770,6 +909,8 @@ static void ioTask(void *pvParameters) {
         inputs.yaw_deg = imu_data.yaw_deg;
       } else {
         inputs.gyro_z = 0.0f;
+        inputs.gyro_seq = 0;
+        inputs.gyro_timestamp_us = 0;
         inputs.accel_fwd = 0.0f;
         inputs.accel_lat = 0.0f;
         inputs.roll_deg = 0.0f;
@@ -778,10 +919,10 @@ static void ioTask(void *pvParameters) {
       }
     }
 
-    inputs.fl_rpm = s_stm32Link.getFL_RPM();  // FL +RPM = fwd
-    inputs.fr_rpm = s_stm32Link.getFR_RPM();  // FR encoder active (freewheeling, +RPM = fwd)
-    inputs.rl_rpm = s_stm32Link.getRL_RPM();
-    inputs.rr_rpm = -s_stm32Link.getRR_RPM();
+    inputs.fl_rpm = WHEEL_SIGN_FL * s_stm32Link.getFL_RPM();
+    inputs.fr_rpm = WHEEL_SIGN_FR * s_stm32Link.getFR_RPM();
+    inputs.rl_rpm = WHEEL_SIGN_RL * s_stm32Link.getRL_RPM();
+    inputs.rr_rpm = WHEEL_SIGN_RR * s_stm32Link.getRR_RPM();
     s_sensorInputs.commitWrite();
 
     // 5. Receive latest control outputs from Core 1 and dispatch to STM32s @

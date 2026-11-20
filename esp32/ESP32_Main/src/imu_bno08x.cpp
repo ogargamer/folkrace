@@ -1,5 +1,6 @@
 #include "imu_bno08x.h"
 #include <cmath>
+#include <esp_timer.h>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846f
@@ -194,11 +195,15 @@ bool BNO08xIMU::update() {
             case SENSOR_REPORTID_GYROSCOPE:
                 rotateImuToBody(bno08x_.getGyroX(), bno08x_.getGyroY(), bno08x_.getGyroZ(),
                                 data_.gyro_x, data_.gyro_y, data_.gyro_z);
+                data_.gyro_seq++;
+                data_.gyro_timestamp_us = (uint64_t)esp_timer_get_time();
                 break;
 
             case SENSOR_REPORTID_UNCALIBRATED_GYRO:
                 rotateImuToBody(bno08x_.getUncalibratedGyroX(), bno08x_.getUncalibratedGyroY(), bno08x_.getUncalibratedGyroZ(),
                                 data_.gyro_x, data_.gyro_y, data_.gyro_z);
+                data_.gyro_seq++;
+                data_.gyro_timestamp_us = (uint64_t)esp_timer_get_time();
                 break;
 
             case SENSOR_REPORTID_MAGNETIC_FIELD:
@@ -209,6 +214,7 @@ bool BNO08xIMU::update() {
             case SENSOR_REPORTID_LINEAR_ACCELERATION:
                 rotateImuToBody(bno08x_.getLinAccelX(), bno08x_.getLinAccelY(), bno08x_.getLinAccelZ(),
                                 data_.lin_accel_x, data_.lin_accel_y, data_.lin_accel_z);
+                data_.lin_accel_seq++;
                 break;
 
             case SENSOR_REPORTID_GRAVITY:

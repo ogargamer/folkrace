@@ -2,6 +2,14 @@
 
 namespace {
 constexpr size_t STM32_FEEDBACK_BYTE_BUDGET = 64;
+
+int16_t voltsToMillivoltsClamped(float volts) {
+    if (isnan(volts) || isinf(volts)) return 0;
+    float mv = volts * 1000.0f;
+    if (mv > 30000.0f) return 30000;
+    if (mv < -30000.0f) return -30000;
+    return (int16_t)lroundf(mv);
+}
 }
 
 STM32Channel::STM32Channel()
@@ -24,7 +32,15 @@ void STM32Channel::begin(HardwareSerial *serial, uint32_t baud, int rxPin, int t
     serial_->begin(baud, SERIAL_8N1, rxPin, txPin);
 }
 
-void STM32Channel::sendPacket(uint8_t mode, float param1, float param2) {
+void STM32Channel::sendPacket(uint8_t mode,
+                              float param1,
+                              float param2,
+                              int16_t m1_vmin_mv,
+                              int16_t m1_vmax_mv,
+                              int16_t m1_vff_mv,
+                              int16_t m2_vmin_mv,
+                              int16_t m2_vmax_mv,
+                              int16_t m2_vff_mv) {
     if (!serial_) return;
 
     // Non-blocking guard
@@ -38,6 +54,12 @@ void STM32Channel::sendPacket(uint8_t mode, float param1, float param2) {
     pkt.cmd_mode = mode;
     pkt.param1 = param1;
     pkt.param2 = param2;
+    pkt.m1_vtrq_min_mv = m1_vmin_mv;
+    pkt.m1_vtrq_max_mv = m1_vmax_mv;
+    pkt.m1_vtrq_ff_mv  = m1_vff_mv;
+    pkt.m2_vtrq_min_mv = m2_vmin_mv;
+    pkt.m2_vtrq_max_mv = m2_vmax_mv;
+    pkt.m2_vtrq_ff_mv  = m2_vff_mv;
 
     uint8_t chk = 0;
     const uint8_t *p = (const uint8_t *)&pkt;
@@ -47,6 +69,18 @@ void STM32Channel::sendPacket(uint8_t mode, float param1, float param2) {
     pkt.checksum = chk;
 
     serial_->write((const uint8_t *)&pkt, sizeof(pkt));
+}
+
+void STM32Channel::sendDriveTorque(const STM32WheelCmd &m1, const STM32WheelCmd &m2) {
+    sendPacket(STM32_CMD_DRIVE,
+               m1.rpm,
+               m2.rpm,
+               voltsToMillivoltsClamped(m1.vtrq_min),
+               voltsToMillivoltsClamped(m1.vtrq_max),
+               voltsToMillivoltsClamped(m1.vtrq_ff),
+               voltsToMillivoltsClamped(m2.vtrq_min),
+               voltsToMillivoltsClamped(m2.vtrq_max),
+               voltsToMillivoltsClamped(m2.vtrq_ff));
 }
 
 bool STM32Channel::update() {
@@ -142,6 +176,14 @@ void STM32DualLink::begin(uint32_t baud, int front_rx, int front_tx, int rear_rx
 void STM32DualLink::sendDrive(float fl_rpm, float fr_rpm, float rl_rpm, float rr_rpm) {
     front_.sendDrive(fl_rpm, fr_rpm);
     rear_.sendDrive(rl_rpm, rr_rpm);
+}
+
+void STM32DualLink::sendDriveTorque(const STM32WheelCmd &fl,
+                                    const STM32WheelCmd &fr,
+                                    const STM32WheelCmd &rl,
+                                    const STM32WheelCmd &rr) {
+    front_.sendDriveTorque(fl, fr);
+    rear_.sendDriveTorque(rl, rr);
 }
 
 void STM32DualLink::emergencyStop() {

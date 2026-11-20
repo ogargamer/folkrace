@@ -43,6 +43,14 @@
 // servo pulses, slip thresholds, and friction parameters are synchronized from
 // config/vehicle_config.json via include/vehicle_params.h.
 
+// --- 4WD Wheel Polarity & Temporary 3WD Toggle ---
+// Physical shaft polarity so +RPM always drives the chassis forward.
+#define WHEEL_SIGN_FL     ( 1.0f)
+#define WHEEL_SIGN_FR     ( 1.0f) // Verify on bench when FR driver is restored
+#define WHEEL_SIGN_RL     ( 1.0f)
+#define WHEEL_SIGN_RR     (-1.0f) // Inverted physical mount vs FL/RL
+#define TEMP_3WD_FR_DEAD  1       // Temporary 3WD workaround: flip to 0 once FR driver is fixed
+
 // =============================================================================
 // STM32 FOC Dual-Motor Real-Time 400 Hz Protocol
 // =============================================================================
@@ -52,7 +60,7 @@
 #define STM32_FEEDBACK_SYNC_2      0x55
 
 enum STM32CommandMode : uint8_t {
-    STM32_CMD_DRIVE      = 0x00, // Regular 400Hz velocity command (param1=m1_rpm, param2=m2_rpm)
+    STM32_CMD_DRIVE      = 0x00, // Regular 400Hz velocity+torque command
     STM32_CMD_ESTOP      = 0x01, // Immediate E-stop: cut PWM, zero voltage, disable drivers
     STM32_CMD_ENABLE     = 0x02, // Enable motor drivers
     STM32_CMD_DISABLE    = 0x03, // Disable motor drivers (Hi-Z, non-latched stop)
@@ -63,15 +71,21 @@ enum STM32CommandMode : uint8_t {
     STM32_CMD_ENTER_DFU  = 0xDF  // Reboot into ROM DFU bootloader
 };
 
-// 12-Byte Robust Command Packet (transmitted from ESP32 to each STM32 at 400 Hz)
+// 24-Byte Robust Command Packet (transmitted from ESP32 to each STM32 at 400 Hz)
 struct __attribute__((__packed__)) STM32MotorCommandPacket {
-    uint8_t header[2];  // 0xAA, 0x55 (STM32_CMD_SYNC_1, STM32_CMD_SYNC_2)
-    uint8_t cmd_mode;   // STM32CommandMode
-    float   param1;     // m1 target RPM / Kp / align_voltage
-    float   param2;     // m2 target RPM / Ki
-    uint8_t checksum;   // XOR of bytes 2..10 (cmd_mode, param1, param2)
+    uint8_t header[2];       // 0xAA, 0x55 (STM32_CMD_SYNC_1, STM32_CMD_SYNC_2)
+    uint8_t cmd_mode;        // STM32CommandMode
+    float   param1;          // m1 target RPM / Kp / align_voltage
+    float   param2;          // m2 target RPM / Ki
+    int16_t m1_vtrq_min_mv;  // M1 min torque voltage (mV)
+    int16_t m1_vtrq_max_mv;  // M1 max torque voltage (mV)
+    int16_t m1_vtrq_ff_mv;   // M1 feedforward torque voltage (mV)
+    int16_t m2_vtrq_min_mv;  // M2 min torque voltage (mV)
+    int16_t m2_vtrq_max_mv;  // M2 max torque voltage (mV)
+    int16_t m2_vtrq_ff_mv;   // M2 feedforward torque voltage (mV)
+    uint8_t checksum;        // XOR of bytes 2..22
 };
-static_assert(sizeof(STM32MotorCommandPacket) == 12, "STM32MotorCommandPacket must be 12 bytes");
+static_assert(sizeof(STM32MotorCommandPacket) == 24, "STM32MotorCommandPacket must be 24 bytes");
 
 // Status Flags Bitfield (from STM32)
 #define STM32_STATUS_M1_ENABLED     (1 << 0)

@@ -39,12 +39,31 @@ struct ElectronicDiffOutputs {
     float rpm_RL;
     float rpm_RR;
 
+    // Per-wheel torque voltage bounds & feedforward (V, robot forward convention)
+    float vtrq_min_FL;
+    float vtrq_max_FL;
+    float vtrq_ff_FL;
+    float vtrq_min_FR;
+    float vtrq_max_FR;
+    float vtrq_ff_FR;
+    float vtrq_min_RL;
+    float vtrq_max_RL;
+    float vtrq_ff_RL;
+    float vtrq_min_RR;
+    float vtrq_max_RR;
+    float vtrq_ff_RR;
+
     // Kinematics & Health
     float omega_cmd;          // Theoretical kinematic yaw rate from physical steer (rad/s)
-    float omega_ref;          // Grip-capped, lagged reference yaw rate (rad/s)
+    float omega_ref;          // Grip-capped, lagged reference yaw rate for oversteer/gyro (rad/s)
+    float omega_tv_target;    // Short-lag uncapped kinematic yaw target for Rear TV (rad/s)
+    float delta_omega_tv;     // Rear TV bounded slip bias (rad/s)
+    float delta_vtrq_tv;      // Rear TV feedforward torque differential (V)
+    float yaw_accel_filt;     // Clock-beat-guarded filtered yaw acceleration (rad/s^2)
     float scale_factor;       // RPM saturation scale factor (1.0 = nominal)
     VehicleSlipState slip_state;
     float yaw_error;          // Measured gyro_z minus omega_ref (rad/s)
+    bool is_countersteering;  // True when steering is opposing active oversteer spin
 };
 
 class ElectronicDifferential4WD {
@@ -67,7 +86,7 @@ public:
     void reset();
 
     /**
-     * @brief Computes 4WD electronic differential setpoints at 400 Hz.
+     * @brief Computes 4WD electronic differential & torque envelope setpoints at 400 Hz.
      * Guaranteed single-precision math (float) with zero dynamic allocation.
      */
     ElectronicDiffOutputs update(
@@ -76,8 +95,30 @@ public:
         float gyro_z_rad_s,
         float dt = CONTROL_LOOP_DT_S,
         float mu = DEFAULT_ROAD_MU,
-        float v_curr = 0.0f
+        float v_curr = 0.0f,
+        uint32_t gyro_seq = 0,
+        uint64_t gyro_ts_us = 0
     );
+
+    void setGyroAssistEnabled(bool enabled) { gyro_assist_enabled_ = enabled; }
+    void setRearTVEnabled(bool enabled) { rear_tv_enabled_ = enabled; }
+    void setFrontEnvelopeEnabled(bool enabled) { front_env_enabled_ = enabled; }
+    void setRearTVGains(float kp_psi, float kd_psi, float max_vff) {
+        tv_kp_psi_ = fmaxf(0.0f, kp_psi);
+        tv_kd_psi_ = fmaxf(0.0f, kd_psi);
+        tv_max_vff_ = fmaxf(0.0f, max_vff);
+    }
+    void setOversteerMuCap(float mu_os_cap) {
+        mu_os_cap_ = fmaxf(0.40f, mu_os_cap);
+    }
+
+    bool isGyroAssistEnabled() const { return gyro_assist_enabled_; }
+    bool isRearTVEnabled() const { return rear_tv_enabled_; }
+    bool isFrontEnvelopeEnabled() const { return front_env_enabled_; }
+    float getTvKpPsi() const { return tv_kp_psi_; }
+    float getTvKdPsi() const { return tv_kd_psi_; }
+    float getTvMaxVff() const { return tv_max_vff_; }
+    float getOversteerMuCap() const { return mu_os_cap_; }
 
     float getCurrentSteerRad() const { return current_steer_rad_; }
     float getRateLimitedSpeed() const { return rate_limited_speed_; }
@@ -102,18 +143,25 @@ private:
     float prev_delta_gyro_rad_;
     float rate_limited_speed_;
     float omega_ref_;
+    float omega_tv_target_;
     float prev_gyro_z_;
     float gyro_z_dot_filt_;
+    uint32_t prev_gyro_seq_;
+    uint64_t prev_gyro_ts_us_;
     bool has_prev_gyro_;
     VehicleSlipState slip_state_;
     float slip_hold_timer_;
     float understeer_confirm_timer_;
     float oversteer_confirm_timer_;
-    float slip_entry_speed_;
-    float diff_split_gain_;
-    float early_us_filt_;
-    float early_os_;
-    float a_lat_obs_filt_;
+
+    // Tunable runtime bring-up flags & gains
+    bool gyro_assist_enabled_;
+    bool rear_tv_enabled_;
+    bool front_env_enabled_;
+    float tv_kp_psi_;
+    float tv_kd_psi_;
+    float tv_max_vff_;
+    float mu_os_cap_;
 };
 
 #endif // ELECTRONIC_DIFF_H

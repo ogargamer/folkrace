@@ -46,6 +46,9 @@ struct IMUData {
     int16_t raw_mag_x = 0, raw_mag_y = 0, raw_mag_z = 0;
 
     uint32_t last_update_ms = 0;
+    uint32_t gyro_seq = 0;
+    uint64_t gyro_timestamp_us = 0;
+    uint32_t lin_accel_seq = 0;
     bool updated = false;
 };
 

@@ -23,9 +23,9 @@ from typing import Optional
 BAUD = 921_600
 COMMAND_HZ = 400
 CONTROL_PERIOD_US = 2_500
-COMMAND_SIZE = 12
+COMMAND_SIZE = 24
 FEEDBACK_SIZE = 13
-DEFAULT_BYTE_BUDGET = 64
+DEFAULT_BYTE_BUDGET = 128
 
 
 def xor_checksum(data: bytes) -> int:
@@ -36,7 +36,18 @@ def xor_checksum(data: bytes) -> int:
 
 
 def make_command(sequence: int) -> bytes:
-    payload = struct.pack("<Bff", 0, float(sequence), float(-sequence))
+    payload = struct.pack(
+        "<Bffhhhhhh",
+        0,
+        float(sequence),
+        float(-sequence),
+        -12000,
+        12000,
+        0,
+        -12000,
+        12000,
+        0,
+    )
     return b"\xAA\x55" + payload + bytes((xor_checksum(payload),))
 
 

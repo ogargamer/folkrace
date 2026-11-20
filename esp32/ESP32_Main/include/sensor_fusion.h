@@ -41,7 +41,9 @@ public:
         float gyro_z_rad_s,
         float accel_fwd_m_s2,
         float steer_rad,
-        float dt = CONTROL_LOOP_DT_S
+        float dt = CONTROL_LOOP_DT_S,
+        float front_vtrq_avg = 0.0f,
+        float rear_vtrq_avg = 0.0f
     );
 
     float getVelocityEst() const { return v_est_; }
