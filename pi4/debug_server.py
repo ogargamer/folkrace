@@ -35,10 +35,18 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from typing import Dict, List, Optional, Any, Set, Tuple
 
-# Ensure pi4 folder is in sys.path
+# Ensure pi4 folder and repo root are in sys.path
 CURR_DIR = os.path.dirname(os.path.abspath(__file__))
+ROOT_DIR = os.path.dirname(CURR_DIR)
 if CURR_DIR not in sys.path:
     sys.path.insert(0, CURR_DIR)
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
+
+try:
+    from core.vehicle_params import SERVO_PULSE_NEUTRAL_US as _CFG_SERVO_NEUTRAL_US
+except Exception:
+    _CFG_SERVO_NEUTRAL_US = 1510.0
 
 from core_manager import set_core_affinity, get_core_affinity, get_system_cpu_stats
 from debug_recorder import TelemetryFlightRecorder, TelemetryLogReader
@@ -52,7 +60,7 @@ HOST_BIND = "0.0.0.0"
 
 HTML_PATH = os.path.join(CURR_DIR, "web_debug_gui.html")
 SERVO_TRIM_CFG_PATH = os.path.join(CURR_DIR, "servo_trim.json")
-BASE_SERVO_NEUTRAL_US = 1510.0
+BASE_SERVO_NEUTRAL_US = float(_CFG_SERVO_NEUTRAL_US)
 SERVO_PULSE_MIN_US = 500.0
 SERVO_PULSE_MAX_US = 2500.0
 
@@ -87,7 +95,9 @@ class DebugServerState:
         self.fake_data_active: bool = False
         self.planner_running: bool = False
         self._bench_t0: float = time.time()
+        self._has_saved_trim_file: bool = os.path.exists(SERVO_TRIM_CFG_PATH)
         self.servo_center_us: float = self._load_servo_center()
+        self.esp_servo_center_us: Optional[float] = None
         self.latest_pkt: Dict[str, Any] = {
             "time_step": 0,
             "timestamp": time.time(),
@@ -161,6 +171,7 @@ class DebugServerState:
         with self.lock:
             snap = dict(self.latest_pkt)
             snap["planner_running"] = self.planner_running
+            snap["_pkt_age_s"] = round(time.time() - self.last_pkt_time, 3) if self.last_pkt_time > 0 else 999.0
             return snap
 
     def get_servo_center_us(self) -> float:
@@ -184,6 +195,7 @@ class DebugServerState:
         clamped = round(max(SERVO_PULSE_MIN_US, min(SERVO_PULSE_MAX_US, float(center_us))), 1)
         with self.lock:
             self.servo_center_us = clamped
+            self._has_saved_trim_file = True
         try:
             with open(SERVO_TRIM_CFG_PATH, "w", encoding="utf-8") as f:
                 json.dump({"servo_center_us": clamped}, f, indent=2)
@@ -408,7 +420,7 @@ def build_live_binary_packet(pkt: Dict[str, Any]) -> bytes:
         "total_frames": pkt.get("_total_frames") or 0,
         "flags": flags,
         "planner_running": bool(pkt.get("planner_running") if pkt.get("planner_running") is not None else flags.get("planner_running", False)),
-        "servo_pulse_us": pkt.get("servo_pulse_us") if pkt.get("servo_pulse_us") is not None else 1565,
+        "servo_pulse_us": pkt.get("servo_pulse_us") if pkt.get("servo_pulse_us") is not None else int(round(BASE_SERVO_NEUTRAL_US)),
         "mcu_msg": pkt.get("mcu_msg") or "",
         "mcu_log": pkt.get("mcu_log") or [],
         "mcu_main_connected": bool(pkt.get("mcu_main_connected", False)),
@@ -645,7 +657,7 @@ class DebugHTTPRequestHandler(BaseHTTPRequestHandler):
                 total_trim_us = max(-500.0, min(500.0, new_center - BASE_SERVO_NEUTRAL_US))
                 cmd_str = f"TRIM {total_trim_us:.1f}\n"
             elif action == "pulse":
-                pulse = float(data.get("pulse", 1565.0))
+                pulse = float(data.get("pulse", BASE_SERVO_NEUTRAL_US))
                 cmd_str = f"P {pulse:.0f}\n"
             elif action == "bench":
                 if "enabled" in data:
@@ -668,6 +680,9 @@ class DebugHTTPRequestHandler(BaseHTTPRequestHandler):
                     res = STATE.auto_servo_center.start(
                         max_iterations=data.get("max_iterations"),
                         cruise_speed=data.get("cruise_speed"),
+                        drive_distance_m=data.get("drive_distance_m"),
+                        tolerance_deg_per_m=data.get("tolerance_deg_per_m"),
+                        trim_offset_us=data.get("trim_offset_us"),
                     )
                     self._send_json({
                         "status": "started" if res.get("started") else "error",
@@ -700,7 +715,7 @@ class DebugHTTPRequestHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": f"Unknown action: {action}"}, 400)
                 return
 
-            if action in ("estop", "reset") or (action == "motors" and not data.get("enable", True)) or (action == "planner" and data.get("enable", False)):
+            if action in ("estop", "reset", "speed", "steer", "pulse", "bench") or (action == "motors" and not data.get("enable", True)) or (action == "planner" and data.get("enable", False)):
                 if STATE.auto_servo_center.is_running():
                     STATE.auto_servo_center.stop(f"Aborted due to {action}")
 
@@ -719,7 +734,7 @@ class DebugHTTPRequestHandler(BaseHTTPRequestHandler):
                     ok_mcu = True
                 ok = ok_planner and ok_mcu
             elif action == "save_trim_center":
-                ok = send_mcu_cmd(cmd_str.encode("utf-8")) and send_mcu_cmd(b"TRIM_SAVE\n")
+                ok = send_mcu_cmd(cmd_str.encode("utf-8")) and send_mcu_cmd(b"TRIM_SAVE\n") and send_mcu_cmd(b"TRIM_GET\n")
             else:
                 ok = send_mcu_cmd(cmd_str.encode("utf-8"))
 
@@ -874,6 +889,7 @@ class DebugHTTPRequestHandler(BaseHTTPRequestHandler):
             "loop_hz": round(STATE.loop_hz, 1),
             "cpu_affinity": list(get_core_affinity()),
             "servo_center_us": STATE.servo_center_us,
+            "esp_servo_center_us": STATE.esp_servo_center_us,
             "auto_servo_center": STATE.auto_servo_center.get_status(),
         }
         self._send_json(data)
@@ -1109,10 +1125,21 @@ def udp_listener_worker():
                 "mcu_tof_connected",
                 "mcu_main_port",
                 "mcu_tof_port",
+                "esp_servo_center_us",
+                "esp_servo_trim_us",
             )
             has_attached_tof_diag = False
 
             with STATE.lock:
+                if pkt.get("esp_servo_center_us") is not None:
+                    try:
+                        esp_c = float(pkt["esp_servo_center_us"])
+                        if SERVO_PULSE_MIN_US <= esp_c <= SERVO_PULSE_MAX_US:
+                            STATE.esp_servo_center_us = round(esp_c, 1)
+                            if not STATE._has_saved_trim_file and not STATE.auto_servo_center.is_running():
+                                STATE.servo_center_us = STATE.esp_servo_center_us
+                    except Exception:
+                        pass
                 tof_diag_cache = getattr(STATE, "_latest_tof_diag", None)
                 if tof_diag_cache is None:
                     tof_diag_cache = {}

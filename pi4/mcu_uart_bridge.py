@@ -420,6 +420,8 @@ class MCU_UART_Bridge:
         self.compensator = ToFLatencyCompensator()
         self.lock = threading.Lock()
         self.latest_chassis: Dict[str, Any] = {}
+        self.latest_esp_servo_center_us: Optional[float] = None
+        self.latest_esp_servo_trim_us: Optional[float] = None
         self.latest_tof_ranges = [0.0] * 16
         self.latest_tof_ranges_raw = [0.0] * 16
         self.latest_tof_target0_mm = [0] * 16
@@ -472,6 +474,8 @@ class MCU_UART_Bridge:
                     self.last_tof_sensor_rx[sid] = 0.0
             else:
                 self.latest_chassis = {}
+                self.latest_esp_servo_center_us = None
+                self.latest_esp_servo_trim_us = None
 
     @property
     def main_port(self) -> Optional[str]:
@@ -703,6 +707,7 @@ class MCU_UART_Bridge:
                         os.write(fd, b"T\n")  # Pi multi-target mode: 44B (no SPAD)
                     else:
                         os.write(fd, b"STATUS\n")
+                        os.write(fd, b"TRIM_GET\n")
                 except Exception:
                     pass
 
@@ -824,6 +829,15 @@ class MCU_UART_Bridge:
                 self.mcu_log.append(text)
                 if len(self.mcu_log) > 50:
                     self.mcu_log = self.mcu_log[-50:]
+                if text.startswith("{") and "servo_center_us" in text:
+                    try:
+                        trim_obj = json.loads(text)
+                        if isinstance(trim_obj, dict) and "servo_center_us" in trim_obj:
+                            self.latest_esp_servo_center_us = float(trim_obj["servo_center_us"])
+                            if "servo_trim_us" in trim_obj:
+                                self.latest_esp_servo_trim_us = float(trim_obj["servo_trim_us"])
+                    except Exception:
+                        pass
                 print(f"[MCU Main Text] {text}")
                 return True
 
@@ -942,6 +956,10 @@ class MCU_UART_Bridge:
             }
             telemetry["mcu_main_port"] = self.assigned_ports.get("ESP32_Main") or "Offline"
             telemetry["mcu_tof_port"] = self.assigned_ports.get("ESP32_ToF") or "Offline"
+            if main_fresh and self.latest_esp_servo_center_us is not None:
+                telemetry["esp_servo_center_us"] = self.latest_esp_servo_center_us
+                if self.latest_esp_servo_trim_us is not None:
+                    telemetry["esp_servo_trim_us"] = self.latest_esp_servo_trim_us
 
             debug_telemetry = None
             if send_debug:

@@ -143,8 +143,11 @@ static inline float servoAngleToPulse(float angle_deg) {
 }
 
 static void sendServoTelemetry() {
-  float cur_pulse = s_manual_servo_direct ? s_direct_servo_pulse
-                                          : s_servo.getCurrentPulseUs();
+  float cur_pulse = s_manual_servo_direct
+                        ? fmaxf(SERVO_HARD_MIN_US,
+                                fminf(SERVO_HARD_MAX_US,
+                                      s_direct_servo_pulse + s_servo_trim_us))
+                        : s_servo.getCurrentPulseUs();
   float angle = servoPulseToAngle(cur_pulse);
   float period_us = 1000000.0f / (float)SERVO_PWM_FREQ_HZ;
   Serial.printf("{\"pin\":%d,\"pulse_us\":%d,\"angle\":%.2f,\"freq_hz\":%d,"
@@ -463,7 +466,10 @@ static void handleAsciiCommand(const char *raw_line) {
       s_direct_servo_pulse = us;
       s_manual_servo_direct = true;
       s_servo.enable();
-      s_servo.setPulseUs(us);
+      float trimmed_us = fmaxf(
+          SERVO_HARD_MIN_US,
+          fminf(SERVO_HARD_MAX_US, s_direct_servo_pulse + s_servo_trim_us));
+      s_servo.setPulseUs(trimmed_us);
       // Map 1294..1836 us (1294=Left +MAX_STEER, 1565=Center 0, 1836=Right
       // -MAX_STEER)
       if (us <= SERVO_PULSE_NEUTRAL_US) {
@@ -521,8 +527,8 @@ static void handleAsciiCommand(const char *raw_line) {
     Serial.printf(" Jitter: %.2f us | Deadline Overruns: %u / %u cycles\n",
                   c.jitter_us, c.overrun_count, c.cycle_count);
     Serial.printf(
-        " Steering: %.2f deg (%.4f rad) | Servo PWM: %.1f us (GPIO %d)\n",
-        c.steer_deg, c.steer_rad, c.servo_pulse_us, SERVO_STEER_PWM_PIN);
+        " Steering: %.2f deg (%.4f rad) | Servo PWM: %.1f us | Trim: %+.1f us (GPIO %d)\n",
+        c.steer_deg, c.steer_rad, c.servo_pulse_us, s_servo_trim_us, SERVO_STEER_PWM_PIN);
     Serial.printf(
         " Speed Cmd: %.2f m/s (Rate-Limited: %.2f m/s) | Scale: %.2f\n",
         s_manual_v, c.rate_limited_v, c.scale_factor);
@@ -630,6 +636,16 @@ static void handleAsciiCommand(const char *raw_line) {
       s_drive_stopped = false;
     }
     Serial.printf(">>> Manual Speed Setpoint: %.2f m/s\n", s_manual_v);
+  } else if (line.equalsIgnoreCase("BRAKE")) {
+    s_manual_v = 0.0f;
+    s_cli_override_active = true;
+    s_manual_override = true;
+    s_fake_data_active = false;
+    if (!s_estop_latched && s_drive_stopped) {
+      s_stm32Link.enableDrivers();
+      s_drive_stopped = false;
+    }
+    Serial.println(F(">>> Active Brake Hold (0.00 m/s, drivers enabled)"));
   } else if (line.charAt(0) == 'A' || line.charAt(0) == 'a') {
     String valStr = line.substring(1);
     valStr.trim();
@@ -638,7 +654,10 @@ static void handleAsciiCommand(const char *raw_line) {
       s_direct_servo_pulse = servoAngleToPulse(deg);
       s_manual_servo_direct = true;
       s_servo.enable();
-      s_servo.setPulseUs(s_direct_servo_pulse);
+      float trimmed_us = fmaxf(
+          SERVO_HARD_MIN_US,
+          fminf(SERVO_HARD_MAX_US, s_direct_servo_pulse + s_servo_trim_us));
+      s_servo.setPulseUs(trimmed_us);
       // Map 0..180 deg dial (0=Left 1294us -> +MAX_STEER, 90=Center 1565us ->
       // 0, 180=Right 1836us -> -MAX_STEER)
       s_manual_steer = ((90.0f - deg) / 90.0f) * VEHICLE_MAX_STEER_RAD;
@@ -664,6 +683,11 @@ static void handleAsciiCommand(const char *raw_line) {
     Serial.printf(
         ">>> Servo neutral trim saved to NVS: %+.1f us (effective neutral: %.1f us)\n",
         s_servo_trim_us, SERVO_PULSE_NEUTRAL_US + s_servo_trim_us);
+  } else if (line.equalsIgnoreCase("TRIM_GET")) {
+    Serial.printf(
+        "{\"servo_trim_us\":%.1f,\"servo_neutral_us\":%.1f,\"servo_center_us\":%.1f}\n",
+        s_servo_trim_us, SERVO_PULSE_NEUTRAL_US,
+        SERVO_PULSE_NEUTRAL_US + s_servo_trim_us);
   } else if (line.equalsIgnoreCase("RESET")) {
     s_manual_v = 0.0f;
     s_manual_steer = 0.0f;
