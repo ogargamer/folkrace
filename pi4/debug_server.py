@@ -704,13 +704,19 @@ class DebugHTTPRequestHandler(BaseHTTPRequestHandler):
                 if STATE.auto_servo_center.is_running():
                     STATE.auto_servo_center.stop(f"Aborted due to {action}")
 
+            planner_active = False
             if action == "planner":
                 enable = bool(data.get("enable", False))
+                with STATE.lock:
+                    planner_active = (time.time() - STATE.last_planner_pkt_time <= 1.0)
                 ok_planner = send_planner_cmd(cmd_str.encode("utf-8"))
                 if enable:
                     ok_mcu = send_mcu_cmd(b"E\n") and send_mcu_cmd(b"MOTORS\n")
-                else:
+                elif not planner_active:
                     ok_mcu = send_mcu_cmd(b"ESTOP\n") and send_mcu_cmd(b"RESET\n")
+                else:
+                    # Path planner handles 2.0s active braking before disabling motor drivers
+                    ok_mcu = True
                 ok = ok_planner and ok_mcu
             elif action == "save_trim_center":
                 ok = send_mcu_cmd(cmd_str.encode("utf-8")) and send_mcu_cmd(b"TRIM_SAVE\n")
@@ -735,7 +741,7 @@ class DebugHTTPRequestHandler(BaseHTTPRequestHandler):
                     if "flags" not in STATE.latest_pkt or not isinstance(STATE.latest_pkt["flags"], dict):
                         STATE.latest_pkt["flags"] = {}
                     STATE.latest_pkt["flags"]["planner_running"] = enable
-                    STATE.latest_pkt["mode"] = "DRIVE" if enable else "STOPPED"
+                    STATE.latest_pkt["mode"] = "DRIVE" if enable else ("BRAKING" if planner_active else "STOPPED")
                     if not enable:
                         STATE.latest_pkt["v_cmd"] = 0.0
                         STATE.latest_pkt["steer_cmd_deg"] = 0.0

@@ -62,6 +62,7 @@ from brain.planner_config import (
 TARGET_HZ = 60.0
 DT_STEP = 1.0 / TARGET_HZ
 LINK_TIMEOUT_S = 0.25  # 250ms link-loss failsafe (matches MCU bridge & ESP32-STM32)
+BRAKE_DURATION_S = 2.0  # Active braking hold duration before disabling motor drivers
 TELEM_HZ = 60.0
 TELEM_DECIMATION = int(round(TARGET_HZ / TELEM_HZ))  # Full 60 Hz for flight recorder; debug_server throttles live WS to 20 Hz
 DEBUG_UDP_PORT = int(os.environ.get("DEBUG_UDP_PORT", 9876))
@@ -171,6 +172,7 @@ def run_path_planner():
     planner_running = False
     was_mcu_main_connected = False
     was_driving_links_ok = False
+    brake_until = 0.0
 
     live_tof_list: List[float] = [0.0] * 16
     has_live_sensor_feed = False
@@ -205,22 +207,39 @@ def run_path_planner():
                     p_cmd_bytes, _ = planner_cmd_sock.recvfrom(512)
                     p_cmd = p_cmd_bytes.decode("utf-8", errors="ignore").strip().upper()
                     if p_cmd == "START":
+                        brake_until = 0.0
                         if not planner_running:
                             planner_running = True
                             dispatch_start_hw()
                             print("[Planner Core 1] ▶ STARTED (Line calc active, motor drivers enabled)")
                     elif p_cmd == "STOP":
-                        planner_running = False
-                        dispatch_stop_hw()
-                        print("[Planner Core 1] ⏹ STOPPED (Line calc stopped, motors disabled, servo centered)")
-                    elif p_cmd == "TOGGLE":
-                        planner_running = not planner_running
                         if planner_running:
+                            planner_running = False
+                            if was_driving_links_ok or was_mcu_main_connected:
+                                brake_until = time.perf_counter() + BRAKE_DURATION_S
+                                print(f"[Planner Core 1] 🛑 STOPPING — Braking for {BRAKE_DURATION_S:.1f}s before disabling motor drivers...")
+                            else:
+                                brake_until = 0.0
+                                dispatch_stop_hw()
+                                print("[Planner Core 1] ⏹ STOPPED (Line calc stopped, motors disabled, servo centered)")
+                        elif brake_until == 0.0:
+                            dispatch_stop_hw()
+                            print("[Planner Core 1] ⏹ STOPPED (Line calc stopped, motors disabled, servo centered)")
+                    elif p_cmd == "TOGGLE":
+                        if not planner_running:
+                            brake_until = 0.0
+                            planner_running = True
                             dispatch_start_hw()
                             print("[Planner Core 1] ▶ STARTED (Line calc active, motor drivers enabled)")
                         else:
-                            dispatch_stop_hw()
-                            print("[Planner Core 1] ⏹ STOPPED (Line calc stopped, motors disabled, servo centered)")
+                            planner_running = False
+                            if was_driving_links_ok or was_mcu_main_connected:
+                                brake_until = time.perf_counter() + BRAKE_DURATION_S
+                                print(f"[Planner Core 1] 🛑 STOPPING — Braking for {BRAKE_DURATION_S:.1f}s before disabling motor drivers...")
+                            else:
+                                brake_until = 0.0
+                                dispatch_stop_hw()
+                                print("[Planner Core 1] ⏹ STOPPED (Line calc stopped, motors disabled, servo centered)")
                 except (BlockingIOError, socket.error):
                     break
                 except Exception:
@@ -330,20 +349,35 @@ def run_path_planner():
                 run_mode_val = 1
             else:
                 if planner_running and was_driving_links_ok:
-                    print("[Planner Core 1] ⚠ FAILSAFE: MCU/ToF link lost — zeroing drive & resetting recovery state.")
-                    dispatch_stop_hw()
+                    print(f"[Planner Core 1] ⚠ FAILSAFE: MCU/ToF link lost — braking {BRAKE_DURATION_S:.1f}s before disabling drivers.")
+                    if mcu_main_now:
+                        brake_until = time.perf_counter() + BRAKE_DURATION_S
+                    else:
+                        brake_until = 0.0
+                        dispatch_stop_hw()
                 was_driving_links_ok = False
                 v_cmd = 0.0
                 steer_cmd_rad = 0.0
                 steer_cmd_deg = 0.0
-                run_mode_val = 0
+                if brake_until > 0.0:
+                    if time.perf_counter() < brake_until:
+                        run_mode_val = 1
+                    else:
+                        brake_until = 0.0
+                        dispatch_stop_hw()
+                        run_mode_val = 0
+                        print("[Planner Core 1] ⏹ STOPPED (Brake complete, motor drivers disabled, servo centered)")
+                else:
+                    run_mode_val = 0
                 brain.rate_limited_speed = 0.0
                 brain.cached_target_speed = 0.0
                 brain.cached_target_steer = 0.0
                 brain.recovery_manager.reset()
+                mode_str = "BRAKING" if run_mode_val == 1 else ("STOPPED" if not planner_running else "STANDBY")
+                status_str = "BRAKING" if run_mode_val == 1 else ("STOPPED" if not planner_running else "OFFLINE")
                 brain_telem = {
-                    "mode": "STOPPED" if not planner_running else "STANDBY",
-                    "status": "STOPPED" if not planner_running else "OFFLINE",
+                    "mode": mode_str,
+                    "status": status_str,
                     "v_cmd": 0.0,
                     "steer_cmd_deg": 0.0,
                     "plan_ms": 0.0,
