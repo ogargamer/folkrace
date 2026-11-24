@@ -196,6 +196,15 @@ MPC_ALT_MIN_SEPARATION_M: float = ALT_MIN_SEPARATION_M        # Minimum lateral 
 MPC_ALT_APERTURE_BIAS: float = ALT_APERTURE_BIAS              # Challenger aperture width bias multiplier
 MPC_W_GAP_CLEAR: float = 10.0                                 # Lookahead depth credit & clear horizon weight (m)
 
+# 5.5 Track-Aware Cornering & Corridor Flow Parameters (Neutral Defaults = Baseline)
+MPC_USE_CORRIDOR_FLOW: int = 0                                # 1 = corridor-aware blockage & narrow-gap flow, 0 = baseline
+MPC_TRACK_WIDTH_CAP_M: float = 1.25                           # One-sided track-width corridor clamp (m; >=1.25 off)
+MPC_CORNER_OUTER_BIAS: float = 0.0                            # Soft outside-entry bias inside free corridor on turns
+MPC_INNER_CORNER_MARGIN_M: float = 0.0                        # Inner-apex kinematic turn-radius clearance margin (m)
+MPC_BLIND_TURN_KAPPA: float = 0.0                             # Blind 90-deg corner curvature floor (1/m)
+MPC_BRAKE_DECEL_SCALE: float = 1.0                            # Backward braking deceleration multiplier
+MPC_NARROW_CORRIDOR_V_GAIN: float = 0.0                       # Speed moderation in narrow (<0.48m) corridors
+
 
 # ==============================================================================
 # 6. NON-BLOCKING STUCK & REVERSE RECOVERY MANAGER
@@ -367,6 +376,13 @@ def _apply_best_genome_overrides() -> None:
         "v_cruise_min": ("MPC_V_CRUISE_MIN", float),
         "alt_switch_hysteresis": ("MPC_ALT_SWITCH_HYSTERESIS", float),
         "w_gap_clear": ("MPC_W_GAP_CLEAR", float),
+        "use_corridor_flow": ("MPC_USE_CORRIDOR_FLOW", int),
+        "track_width_cap_m": ("MPC_TRACK_WIDTH_CAP_M", float),
+        "corner_outer_bias": ("MPC_CORNER_OUTER_BIAS", float),
+        "inner_corner_margin_m": ("MPC_INNER_CORNER_MARGIN_M", float),
+        "blind_turn_kappa": ("MPC_BLIND_TURN_KAPPA", float),
+        "brake_decel_scale": ("MPC_BRAKE_DECEL_SCALE", float),
+        "narrow_corridor_v_gain": ("MPC_NARROW_CORRIDOR_V_GAIN", float),
         "recovery_steer_angle_rad": ("RECOVERY_STEER_ANGLE_RAD", float),
         "recovery_clearance_exit_m": ("RECOVERY_CLEARANCE_EXIT_M", float),
         "recovery_arc_lookahead_m": ("RECOVERY_ARC_LOOKAHEAD_M", float),

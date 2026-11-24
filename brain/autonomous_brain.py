@@ -224,7 +224,7 @@ class AutonomousBrain:
             alt_aperture_bias=float(genes.get("alt_aperture_bias", 1.80)),
             w_gap_clear=float(genes.get("w_gap_clear", 5.00)),
             center_bias=float(genes.get("center_bias", MPC_CENTER_BIAS)),
-            track_width_cap_m=float(genes.get("track_width_cap_m", 0.0)),
+            track_width_cap_m=float(genes.get("track_width_cap_m", 1.25)),
             corner_outer_bias=float(genes.get("corner_outer_bias", 0.0)),
             inner_corner_margin_m=float(genes.get("inner_corner_margin_m", 0.0)),
             blind_turn_kappa=float(genes.get("blind_turn_kappa", 0.0)),

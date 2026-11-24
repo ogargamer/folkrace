@@ -153,6 +153,14 @@ OPTION_2_SL_MPC_GENE_SPECS: List[Tuple[str, float, float, type, float, str]] = [
     ("recovery_clearance_exit_m", 0.25, 0.25, float, 0.25,   "Front clearance threshold (m) to conclude reverse and center steering"),
     ("recovery_steer_angle_rad",0.5623, 0.5623, float, 0.5623, "Recovery pivot steering angle (rad)"),
     ("recovery_arc_lookahead_m",0.10, 0.15,  float,  0.139,  "Kinematic escape arc lookahead length (m) on costmap"),
+    # Track-Aware Cornering & Corridor Flow (4-Robot Validated SL-MPC Extensions; Neutral Defaults = Baseline)
+    ("use_corridor_flow",        0.00,   1.00,    int,   0.0,   "Enable corridor-aware blockage and narrow-gap speed flow (0=baseline, 1=flow)"),
+    ("track_width_cap_m",        0.82,   1.25,  float,  1.25,   "One-sided 1.0m track-width corridor clamp (m; 1.25=off)"),
+    ("corner_outer_bias",        0.00,   0.75,  float,  0.00,   "Soft outside-entry bias inside free corridor on turns"),
+    ("inner_corner_margin_m",    0.00,   0.08,  float,  0.00,   "Inner-apex kinematic turn-radius clearance margin (m)"),
+    ("blind_turn_kappa",         0.00,   1.40,  float,  0.00,   "Blind 90-deg corner curvature floor (1/m)"),
+    ("brake_decel_scale",        0.60,   1.25,  float,  1.00,   "Backward braking deceleration multiplier"),
+    ("narrow_corridor_v_gain",   0.00,   1.00,  float,  0.00,   "Speed moderation in genuinely narrow (<0.48m) corridors"),
 ]
 
 

@@ -34,6 +34,13 @@ try:
         MPC_ALT_MIN_SEPARATION_M,
         MPC_ALT_APERTURE_BIAS,
         MPC_W_GAP_CLEAR,
+        MPC_USE_CORRIDOR_FLOW,
+        MPC_TRACK_WIDTH_CAP_M,
+        MPC_CORNER_OUTER_BIAS,
+        MPC_INNER_CORNER_MARGIN_M,
+        MPC_BLIND_TURN_KAPPA,
+        MPC_BRAKE_DECEL_SCALE,
+        MPC_NARROW_CORRIDOR_V_GAIN,
         DT_PLANNER,
     )
 except ImportError:
@@ -55,6 +62,13 @@ except ImportError:
         MPC_ALT_MIN_SEPARATION_M,
         MPC_ALT_APERTURE_BIAS,
         MPC_W_GAP_CLEAR,
+        MPC_USE_CORRIDOR_FLOW,
+        MPC_TRACK_WIDTH_CAP_M,
+        MPC_CORNER_OUTER_BIAS,
+        MPC_INNER_CORNER_MARGIN_M,
+        MPC_BLIND_TURN_KAPPA,
+        MPC_BRAKE_DECEL_SCALE,
+        MPC_NARROW_CORRIDOR_V_GAIN,
         DT_PLANNER,
     )
 
@@ -237,13 +251,13 @@ class CppCurvilinearSLMPC:
         alt_aperture_bias: float = MPC_ALT_APERTURE_BIAS,
         w_gap_clear: float = MPC_W_GAP_CLEAR,
         center_bias: float = MPC_CENTER_BIAS,
-        track_width_cap_m: float = 0.0,
-        corner_outer_bias: float = 0.0,
-        inner_corner_margin_m: float = 0.0,
-        blind_turn_kappa: float = 0.0,
-        brake_decel_scale: float = 1.0,
-        narrow_corridor_v_gain: float = 0.0,
-        use_corridor_flow: int = 0,
+        track_width_cap_m: float = MPC_TRACK_WIDTH_CAP_M,
+        corner_outer_bias: float = MPC_CORNER_OUTER_BIAS,
+        inner_corner_margin_m: float = MPC_INNER_CORNER_MARGIN_M,
+        blind_turn_kappa: float = MPC_BLIND_TURN_KAPPA,
+        brake_decel_scale: float = MPC_BRAKE_DECEL_SCALE,
+        narrow_corridor_v_gain: float = MPC_NARROW_CORRIDOR_V_GAIN,
+        use_corridor_flow: int = MPC_USE_CORRIDOR_FLOW,
         **kwargs,
     ):
         self._costmap = costmap_engine
