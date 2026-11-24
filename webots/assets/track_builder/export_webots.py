@@ -98,7 +98,7 @@ def build_track_wall_polygons(track_data, step_size=0.04):
                 
     return np.array(left_wall), np.array(right_wall), np.array(centerline)
 
-def build_indexed_faceset_wall(pts, name, color_str, wall_height=0.30):
+def build_indexed_faceset_wall(pts, name, color_str, wall_height=0.12):
     """
     Builds watertight 3D wall node in ENU coordinates (Z is Up).
     """
@@ -128,6 +128,7 @@ def build_indexed_faceset_wall(pts, name, color_str, wall_height=0.30):
 
     node = f'''Solid {{
   name "{name}"
+  contactMaterial "wall"
   children [
     Shape {{
       appearance PBRAppearance {{
@@ -152,7 +153,7 @@ def build_indexed_faceset_wall(pts, name, color_str, wall_height=0.30):
 }}'''
     return node
 
-def convert_json_to_webots_wbt(json_path, output_wbt_path=None, wall_height=0.30):
+def convert_json_to_webots_wbt(json_path, output_wbt_path=None, wall_height=0.12):
     with open(json_path, "r", encoding="utf-8") as f:
         track_data = json.load(f)
 
@@ -195,16 +196,66 @@ def convert_json_to_webots_wbt(json_path, output_wbt_path=None, wall_height=0.30
         'EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/backgrounds/protos/TexturedBackground.proto"',
         'EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/backgrounds/protos/TexturedBackgroundLight.proto"',
         'EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/floors/protos/RectangleArena.proto"',
+        'EXTERNPROTO "../protos/only_front_tofs.proto"',
         '',
         'WorldInfo {',
         '  info [',
-        '    "Folkrace Modular Race Track Studio World",',
+        '    "Folkrace Modular Race Track Studio World"',
         '    "Coordinate System: ENU (East-North-Up Standard, Z is Elevation)"',
         '  ]',
         '  title "Folkrace Track World"',
-        '  basicTimeStep 10',
-        '  FPS 60',
-        '  coordinateSystem "ENU"',
+        '  basicTimeStep 8.333333',
+        '  contactProperties [',
+        '    ContactProperties {',
+        '      material1 "tire"',
+        '      coulombFriction [',
+        '        0.8',
+        '      ]',
+        '      bounce 0',
+        '      softERP 0.35',
+        '    }',
+        '    ContactProperties {',
+        '      material1 "tire"',
+        '      material2 "wall"',
+        '      coulombFriction [',
+        '        0.6',
+        '      ]',
+        '      bounce 0',
+        '      softERP 0.3',
+        '      softCFM 0.0005',
+        '    }',
+        '    ContactProperties {',
+        '      material1 "chassis"',
+        '      material2 "wall"',
+        '      coulombFriction [',
+        '        0.25',
+        '      ]',
+        '      bounce 0',
+        '    }',
+        '    ContactProperties {',
+        '      material1 "chassis"',
+        '      coulombFriction [',
+        '        0.25',
+        '      ]',
+        '      bounce 0',
+        '    }',
+        '    ContactProperties {',
+        '      material1 "chassis"',
+        '      material2 "chassis"',
+        '      coulombFriction [',
+        '        0.15',
+        '      ]',
+        '      bounce 0.05',
+        '    }',
+        '    ContactProperties {',
+        '      material1 "tire"',
+        '      material2 "chassis"',
+        '      coulombFriction [',
+        '        0.25',
+        '      ]',
+        '      bounce 0.02',
+        '    }',
+        '  ]',
         '}',
         'Viewpoint {',
         '  orientation 0.65 0.35 0.67 1.85',
@@ -242,6 +293,7 @@ def convert_json_to_webots_wbt(json_path, output_wbt_path=None, wall_height=0.30
             r = float(obs.get("radius", 0.10))
             wbt_lines.append(f'''Solid {{
   name "slalom_pillar_{idx}"
+  contactMaterial "wall"
   translation {cx:.4f} {cy:.4f} {(wall_height / 2.0):.4f}
   children [
     Shape {{
@@ -272,6 +324,7 @@ def convert_json_to_webots_wbt(json_path, output_wbt_path=None, wall_height=0.30
             h = abs(y2 - y1)
             wbt_lines.append(f'''Solid {{
   name "obstacle_box_{idx}"
+  contactMaterial "wall"
   translation {cx:.4f} {cy:.4f} {(wall_height / 2.0):.4f}
   children [
     Shape {{
@@ -295,7 +348,7 @@ def convert_json_to_webots_wbt(json_path, output_wbt_path=None, wall_height=0.30
         sy = float(start_line.get("y", blocks[0].get("startY", 0.0))) if start_line else float(blocks[0].get("startY", 0.0))
         sh = float(start_line.get("heading", blocks[0].get("startHeading", 0))) if start_line else float(blocks[0].get("startHeading", 0))
         syaw = sh * (math.pi / 2.0)
-        wbt_lines.append(f'''Transform {{
+        wbt_lines.append(f'''Pose {{
   translation {sx:.4f} {sy:.4f} 0.002
   rotation 0 0 1 {syaw:.4f}
   children [
@@ -311,57 +364,13 @@ def convert_json_to_webots_wbt(json_path, output_wbt_path=None, wall_height=0.30
   ]
 }}''')
 
-    # Robot with MS200k LiDAR
-    wbt_lines.append(f'''Robot {{
-  name "da_winna_robot"
-  translation {start_x:.4f} {start_y:.4f} 0.05
-  rotation 0 0 1 {start_yaw:.4f}
-  children [
-    Shape {{
-      appearance PBRAppearance {{
-        baseColor 1.0 0.85 0.0
-        metalness 0.6
-        roughness 0.2
-      }}
-      geometry Box {{
-        size 0.20 0.15 0.05
-      }}
-    }}
-    Transform {{
-      translation 0.09 0.0 0.015
-      children [
-        Shape {{
-          appearance PBRAppearance {{
-            baseColor 1.0 0.0 0.45
-            roughness 0.2
-          }}
-          geometry Box {{
-            size 0.03 0.08 0.02
-          }}
-        }}
-      ]
-    }}
-    Solid {{
-      translation 0.0 0.0 0.04
-      children [
-        Lidar {{
-          name "ms200k_lidar"
-          fieldOfView 6.2831853
-          horizontalResolution 450
-          numberOfLayers 1
-          minRange 0.12
-          maxRange 5.0
-          noise 0.0
-          type "fixed"
-        }}
-      ]
-    }}
-    InertialUnit {{
-      name "bno08x_imu"
-      noise 0.001
-    }}
-  ]
-  controller "robot_lidar_collector"
+    # Autonomous Folkrace Robot (only_front_tofs proto, front is local +Y so yaw=0 -> -pi/2)
+    robot_rot_z = start_yaw - (math.pi / 2.0)
+    wbt_lines.append(f'''only_front_tofs {{
+  translation {start_x:.4f} {start_y:.4f} 0.0275
+  rotation 0 0 1 {robot_rot_z:.4f}
+  name "Folkrace"
+  controller "tof_path_planner"
   supervisor TRUE
 }}''')
 
@@ -379,7 +388,7 @@ def main():
     parser = argparse.ArgumentParser(description="Convert Modular Track JSON to Webots .wbt world file")
     parser.add_argument("json_file", help="Path to track layout JSON file")
     parser.add_argument("-o", "--output", help="Output .wbt file path", default=None)
-    parser.add_argument("--wall-height", help="Wall height in meters (default: 0.30)", type=float, default=0.30)
+    parser.add_argument("--wall-height", help="Wall height in meters (default: 0.12)", type=float, default=0.12)
     args = parser.parse_args()
 
     if not os.path.exists(args.json_file):

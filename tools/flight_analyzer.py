@@ -1811,8 +1811,8 @@ def format_digest_markdown(digest: Dict[str, Any]) -> str:
         for e in eps[:2]:
             w0 = max(1, e["start_frame"] - lead_frames)
             w1 = e["end_frame"] + 15
-            lines.append(f"- `python launchers/20_ai_debug_suite.py window \"{s['db_path']}\" {w0} {w1}`  # Inspect {e['episode_id']} ({e['category']} + ~1.5s lead-in)")
-            lines.append(f"- `python launchers/20_ai_debug_suite.py frame \"{s['db_path']}\" {e['start_frame']}`  # Radar at episode start")
+            lines.append(f"- `python tools/ai_debug_suite.py window \"{s['db_path']}\" {w0} {w1}`  # Inspect {e['episode_id']} ({e['category']} + ~1.5s lead-in)")
+            lines.append(f"- `python tools/ai_debug_suite.py frame \"{s['db_path']}\" {e['start_frame']}`  # Radar at episode start")
     return "\n".join(lines)
 
 

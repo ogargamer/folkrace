@@ -154,15 +154,15 @@ pio device monitor -e esp32_tof
 
 ## 5. Diagnostic Launchers
 
-* **Quad ToF 2D Costmap & Radar**:
+* **Quad VL53L8CX ToF Multi-Target Telemetry & Radar**:
   ```bash
-  python launchers/16_esp32_4tof_costmap_gui.py
+  python launchers/6_esp32_tof_gui.py
+  ```
+* **BNO086 9-DOF IMU 3D Mission Dashboard**:
+  ```bash
+  python launchers/7_esp32_imu_gui.py
   ```
 * **High-Rate Digital Steering Servo Bench**:
   ```bash
-  python launchers/15_esp32_servo_gui.py
-  ```
-* **Single ToF Matrix Visualizer**:
-  ```bash
-  python launchers/3_esp32_tof_gui.py
+  python launchers/8_esp32_servo_gui.py
   ```

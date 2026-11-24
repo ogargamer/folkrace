@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ================================================================================
-  6. LAUNCHER: ESP32 BNO086 9-DOF IMU 3D MISSION DASHBOARD
+  LAUNCHER: ESP32 BNO086 9-DOF IMU 3D MISSION DASHBOARD
 ================================================================================
   Connects over USB serial to the ESP32-S3 Master running the BNO086 SPI driver.
   Features:
@@ -13,7 +13,7 @@
     - Hardware Tare / Zero Yaw calibration
 
   Usage:
-    python 6_esp32_imu_gui.py
+    python launchers/7_esp32_imu_gui.py
 ================================================================================
 """
 

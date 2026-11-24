@@ -107,7 +107,7 @@ if now >= target_duration_seconds:
 | Mode | Script | Execution Type | Target / Objective |
 |---|---|---|---|
 | **Champion Preview** | `launchers/1_champion_preview.py` | Real-time 3D Webots + GUI | High-speed multi-car race on `track_racing.wbt` with live 2D telemetry GUI. |
-| **Fast Champion Drive** | `launchers/13_fast_champion_drive.py` | Real-time 3D Webots (Headless GUI) | Ultra-lean champion 3D drive launcher for maximum real-time performance. |
+| **Fast Champion Drive** | `launchers/2_fast_champion_drive.py` | Real-time 3D Webots (Headless GUI) | Ultra-lean champion 3D drive launcher for maximum real-time performance. |
 
 ### Track Race Deployment:
 To evaluate the full autonomous racing pipeline (ToF Gap Scout + Curvilinear SL-MPC + Anti-Wrong-Way Watchdog) on the full walled circuit with opponent cars:
@@ -116,7 +116,7 @@ python launchers/1_champion_preview.py
 ```
 For ultra-fast simulation without GUI overhead:
 ```pwsh
-python launchers/13_fast_champion_drive.py
+python launchers/2_fast_champion_drive.py
 ```
 
 ---

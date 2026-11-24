@@ -1,6 +1,6 @@
 """
 ================================================================================
-  5. LAUNCHER: STM32G474 DUAL-MOTOR 20.0 kHz SIMPLEFOC BENCH & LIVE GUI
+  LAUNCHER: STM32G474 DUAL-MOTOR 20.0 kHz SIMPLEFOC BENCH & LIVE GUI
 ================================================================================
   Connects over USB CDC serial (921600 baud) to the STM32G474 dual-motor FOC
   controller with MT6816 dual magnetic angle encoders on shared SPI1.
@@ -8,7 +8,7 @@
   stepped 128-point LUT calibration, live parameter tuning, and global E-stop.
 
   Usage:
-    python 5_stm32_encoder_motor_gui.py
+    python launchers/9_stm32_encoder_motor_gui.py
 ================================================================================
 """
 

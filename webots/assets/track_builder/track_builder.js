@@ -1,5 +1,5 @@
 /**
- * Modular Race Track Studio & Cartographer 2D Map Exporter
+ * Modular Race Track Studio & Webots/Map Exporter
  * Fully Parameterized: Customizable Tile Size, Track Width, 100% Seamless Wall Alignment,
  * Exact Mouse-Aligned Obstacle Drawing & Down-Arrow Undo.
  */
@@ -21,7 +21,7 @@ let drawingItem = null;
 let TILE_SIZE = 1.2;     // 1200mm
 let TRACK_WIDTH = 1.0;   // 1000mm
 let WALL_MARGIN = 0.1;   // 100mm (computed: (TILE_SIZE - TRACK_WIDTH) / 2)
-let WALL_HEIGHT = 0.30;  // 300mm (for 3D Webots World export)
+let WALL_HEIGHT = 0.12;  // 120mm (for 3D Webots World export)
 
 // Track Definition
 // Block Types: 'straight', 'turn_left', 'turn_right'
@@ -98,7 +98,7 @@ function updateParametersFromInputs() {
     const tileSizeInput = parseFloat(document.getElementById('input-tile-size').value) || 1200;
     const trackWidthInput = parseFloat(document.getElementById('input-track-width').value) || 1000;
     const wallHeightEl = document.getElementById('input-wall-height');
-    const wallHeightInput = wallHeightEl ? parseFloat(wallHeightEl.value) || 300 : 300;
+    const wallHeightInput = wallHeightEl ? parseFloat(wallHeightEl.value) || 120 : 120;
 
     TILE_SIZE = Math.max(0.3, tileSizeInput / 1000.0);
     TRACK_WIDTH = Math.max(0.1, Math.min(TILE_SIZE - 0.05, trackWidthInput / 1000.0));
@@ -827,7 +827,10 @@ function setupEventListeners() {
     const btnWebotsSide = document.getElementById('btn-export-webots-side');
     if (btnWebotsSide) btnWebotsSide.addEventListener('click', exportWebotsWorld);
 
-    document.getElementById('btn-deploy-pi').addEventListener('click', deployMapToPi);
+    const btnSaveBundle = document.getElementById('btn-save-bundle');
+    if (btnSaveBundle) btnSaveBundle.addEventListener('click', saveLocalBundle);
+    const btnDeployPi = document.getElementById('btn-deploy-pi');
+    if (btnDeployPi) btnDeployPi.addEventListener('click', saveLocalBundle);
 
     // Mouse Interaction with getCanvasMousePos() for exact alignment
     canvas.addEventListener('mousedown', onMouseDown);
@@ -1460,7 +1463,7 @@ function loadTrackJSONData(data) {
             if (inputWidth) inputWidth.value = Math.round(TRACK_WIDTH * 1000);
         }
         if (data.parameters.wallHeight) {
-            WALL_HEIGHT = parseFloat(data.parameters.wallHeight) || 0.30;
+            WALL_HEIGHT = parseFloat(data.parameters.wallHeight) || 0.12;
             const inputWallH = document.getElementById('input-wall-height');
             if (inputWallH) inputWallH.value = Math.round(WALL_HEIGHT * 1000);
         }
@@ -1617,6 +1620,7 @@ function buildIndexedFaceSetWall(pts, name, colorStr, wallHeight) {
 
     return `Solid {
   name "${name}"
+  contactMaterial "wall"
   children [
     Shape {
       appearance PBRAppearance {
@@ -1692,22 +1696,73 @@ function generateWebotsWBT() {
     const viewDist = Math.max(7.0, Math.max(spanX, spanY) * 1.35);
 
     const yawRad = robotStartPose.yaw_deg * (Math.PI / 180.0);
+    const robotRotZ = yawRad - (Math.PI / 2.0);
 
     const lines = [
         '#VRML_SIM R2025a utf8',
         'EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/backgrounds/protos/TexturedBackground.proto"',
         'EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/backgrounds/protos/TexturedBackgroundLight.proto"',
         'EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/floors/protos/RectangleArena.proto"',
+        'EXTERNPROTO "../protos/only_front_tofs.proto"',
         '',
         'WorldInfo {',
         '  info [',
-        '    "Folkrace Modular Race Track Studio World",',
+        '    "Folkrace Modular Race Track Studio World"',
         '    "Coordinate System: ENU (East-North-Up Standard, Z is Elevation)"',
         '  ]',
         '  title "Folkrace Track World"',
-        '  basicTimeStep 10',
-        '  FPS 60',
-        '  coordinateSystem "ENU"',
+        '  basicTimeStep 8.333333',
+        '  contactProperties [',
+        '    ContactProperties {',
+        '      material1 "tire"',
+        '      coulombFriction [',
+        '        0.8',
+        '      ]',
+        '      bounce 0',
+        '      softERP 0.35',
+        '    }',
+        '    ContactProperties {',
+        '      material1 "tire"',
+        '      material2 "wall"',
+        '      coulombFriction [',
+        '        0.6',
+        '      ]',
+        '      bounce 0',
+        '      softERP 0.3',
+        '      softCFM 0.0005',
+        '    }',
+        '    ContactProperties {',
+        '      material1 "chassis"',
+        '      material2 "wall"',
+        '      coulombFriction [',
+        '        0.25',
+        '      ]',
+        '      bounce 0',
+        '    }',
+        '    ContactProperties {',
+        '      material1 "chassis"',
+        '      coulombFriction [',
+        '        0.25',
+        '      ]',
+        '      bounce 0',
+        '    }',
+        '    ContactProperties {',
+        '      material1 "chassis"',
+        '      material2 "chassis"',
+        '      coulombFriction [',
+        '        0.15',
+        '      ]',
+        '      bounce 0.05',
+        '    }',
+        '    ContactProperties {',
+        '      material1 "tire"',
+        '      material2 "chassis"',
+        '      coulombFriction [',
+        '        0.25',
+        '      ]',
+        '      bounce 0.02',
+        '    }',
+        '  ]',
         '}',
         'Viewpoint {',
         '  orientation 0.65 0.35 0.67 1.85',
@@ -1740,6 +1795,7 @@ function generateWebotsWBT() {
         if (obs.type === 'circle') {
             lines.push(`Solid {
   name "slalom_pillar_${idx}"
+  contactMaterial "wall"
   translation ${obs.cx.toFixed(4)} ${obs.cy.toFixed(4)} ${(wallHeight / 2.0).toFixed(4)}
   children [
     Shape {
@@ -1766,6 +1822,7 @@ function generateWebotsWBT() {
             const h = Math.abs(obs.y2 - obs.y1);
             lines.push(`Solid {
   name "obstacle_box_${idx}"
+  contactMaterial "wall"
   translation ${cx.toFixed(4)} ${cy.toFixed(4)} ${(wallHeight / 2.0).toFixed(4)}
   children [
     Shape {
@@ -1792,7 +1849,7 @@ function generateWebotsWBT() {
         const sH = startLine ? startLine.heading : trackBlocks[0].startHeading;
         const sYaw = sH * (Math.PI / 2.0);
 
-        lines.push(`Transform {
+        lines.push(`Pose {
   translation ${sX.toFixed(4)} ${sY.toFixed(4)} 0.002
   rotation 0 0 1 ${sYaw.toFixed(4)}
   children [
@@ -1809,60 +1866,12 @@ function generateWebotsWBT() {
 }`);
     }
 
-    // Autonomous Robot with 2D Planar LiDAR (ENU Coordinate System)
-    lines.push(`Robot {
-  name "da_winna_robot"
-  translation ${robotStartPose.x.toFixed(4)} ${robotStartPose.y.toFixed(4)} 0.05
-  rotation 0 0 1 ${yawRad.toFixed(4)}
-  children [
-    # Golden Yellow Carbon Chassis
-    Shape {
-      appearance PBRAppearance {
-        baseColor 1.0 0.85 0.0
-        metalness 0.6
-        roughness 0.2
-      }
-      geometry Box {
-        size 0.20 0.15 0.05
-      }
-    }
-    # Front Directional Indicator
-    Transform {
-      translation 0.09 0.0 0.015
-      children [
-        Shape {
-          appearance PBRAppearance {
-            baseColor 1.0 0.0 0.45
-            roughness 0.2
-          }
-          geometry Box {
-            size 0.03 0.08 0.02
-          }
-        }
-      ]
-    }
-    # MS200k 2D Planar LiDAR (Zero-Noise / Horizontal scan in XY plane)
-    Solid {
-      translation 0.0 0.0 0.04
-      children [
-        Lidar {
-          name "ms200k_lidar"
-          fieldOfView 6.2831853
-          horizontalResolution 450
-          numberOfLayers 1
-          minRange 0.12
-          maxRange 5.0
-          noise 0.0
-          type "fixed"
-        }
-      ]
-    }
-    InertialUnit {
-      name "bno08x_imu"
-      noise 0.001
-    }
-  ]
-  controller "robot_lidar_collector"
+    // Autonomous Folkrace Robot (only_front_tofs proto, front is local +Y so yaw=0 -> -pi/2)
+    lines.push(`only_front_tofs {
+  translation ${robotStartPose.x.toFixed(4)} ${robotStartPose.y.toFixed(4)} 0.0275
+  rotation 0 0 1 ${robotRotZ.toFixed(4)}
+  name "Folkrace"
+  controller "tof_path_planner"
   supervisor TRUE
 }`);
 
@@ -1881,7 +1890,7 @@ function exportWebotsWorld() {
     showToast('Exported Webots .wbt World (ENU Standard)', 'success');
 }
 
-async function deployMapToPi() {
+async function saveLocalBundle() {
     const grid = generateOccupancyGrid();
     if (!grid) return;
 
@@ -1893,7 +1902,7 @@ origin: [${grid.originX.toFixed(3)}, ${grid.originY.toFixed(3)}, 0.0]
 negate: 0
 occupied_thresh: 0.65
 free_thresh: 0.25
-# Initial Robot Spawn Pose (ROS 2 / Cartographer / Nav2 standard)
+# Initial Robot Spawn Pose (ROS 2 / Nav2 standard)
 initial_pose:
   x: ${robotStartPose.x.toFixed(3)}
   y: ${robotStartPose.y.toFixed(3)}
@@ -1901,14 +1910,17 @@ initial_pose:
   yaw: ${yawRad}
 `;
 
+    const wbtContent = generateWebotsWBT();
     const payload = {
         png_b64: pngBase64,
         yaml: yamlContent,
+        wbt: wbtContent || '',
         track_json: JSON.stringify({
             parameters: {
                 tileSize: TILE_SIZE,
                 trackWidth: TRACK_WIDTH,
-                wallMargin: WALL_MARGIN
+                wallMargin: WALL_MARGIN,
+                wallHeight: WALL_HEIGHT
             },
             initial_pose: {
                 x: robotStartPose.x,
@@ -1922,10 +1934,10 @@ initial_pose:
         }, null, 2)
     };
 
-    showToast('Deploying map & initial pose to Raspberry Pi 5...', 'success');
+    showToast('Saving track bundle to data/maps/...', 'success');
 
     try {
-        const resp = await fetch('/api/deploy_to_pi', {
+        const resp = await fetch('/api/save_local', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload)
@@ -1938,7 +1950,7 @@ initial_pose:
             showToast('Error: ' + res.message, 'error');
         }
     } catch (err) {
-        showToast('Deployment error: ' + err.message, 'error');
+        showToast('Save error: ' + err.message, 'error');
     }
 }
 

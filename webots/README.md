@@ -71,6 +71,9 @@ Launch the full simulation stack with live telemetry from the repository root:
 # Launch champion drive with 3 dynamic obstacles and live telemetry GUI
 python launchers/1_champion_preview.py
 
-# Launch headless Genetic Algorithm optimizer
-python launchers/2_ga_dashboard.py
+# Launch ultra-lean champion drive without GUI overhead
+python launchers/2_fast_champion_drive.py
+
+# Launch headless Genetic Algorithm optimizer dashboard
+python launchers/3_ga_dashboard.py
 ```

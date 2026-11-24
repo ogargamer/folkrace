@@ -1,6 +1,6 @@
 """
 ================================================================================
-  3. LAUNCHER: ESP32 QUAD VL53L8CX 4-ZONE MULTI-TARGET TELEMETRY GUI
+  LAUNCHER: ESP32 QUAD VL53L8CX 4-ZONE MULTI-TARGET TELEMETRY GUI
 ================================================================================
   Connects over USB serial (921600 baud) to the ESP32 ToF Hub, displaying
   complete multi-target telemetry on one screen for the 4 dedicated zones
@@ -12,7 +12,7 @@
     - Live 2D Vehicle Tactical Radar with 16 Ray Projections
 
   Usage:
-    python launchers/3_esp32_tof_gui.py
+    python launchers/6_esp32_tof_gui.py
 ================================================================================
 """
 

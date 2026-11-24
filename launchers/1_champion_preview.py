@@ -1,6 +1,6 @@
 """
 ================================================================================
-  1. LAUNCHER: C++ SL-MPC CHAMPION 3D REPLAY PREVIEW (DYNAMIC OBSTACLES)
+  LAUNCHER: C++ SL-MPC CHAMPION 3D REPLAY PREVIEW (DYNAMIC OBSTACLES)
 ================================================================================
   Launches Webots real-time mode with track_racing.wbt AND spawns the live
   PyQt5 2D Telemetry GUI alongside it by default.
@@ -8,8 +8,8 @@
   evaluates lap times with full 3D visual preview.
 
   Usage:
-    python 1_champion_preview.py             (Launches Webots + Live GUI)
-    python 1_champion_preview.py --no-gui    (Webots only)
+    python launchers/1_champion_preview.py             (Launches Webots + Live GUI)
+    python launchers/1_champion_preview.py --no-gui    (Webots only)
 ================================================================================
 """
 

@@ -131,7 +131,7 @@ pio run -e stm32_dual_foc -t upload
 
 * **Closed-Loop Bench Calibration GUI**:
   ```bash
-  python launchers/5_stm32_encoder_motor_gui.py
+  python launchers/9_stm32_encoder_motor_gui.py
   ```
   Provides a real-time oscilloscope, target RPM sliders, 128-point LUT calibration routines, and harmonic distortion analysis.
 

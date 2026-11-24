@@ -130,7 +130,12 @@ To run the dual-core path planning and debug server on the Pi 4:
 
 * **Host PC Studio Launcher**:
   ```bash
-  python launchers/17_pi4_debug_studio.py
+  python launchers/4_pi4_debug_studio.py
+  ```
+
+* **Offline 60 Hz Flight Log Replay**:
+  ```bash
+  python launchers/5_local_flight_replay.py
   ```
 
 * **Webots Champion Preview & Telemetry**:
@@ -143,5 +148,5 @@ To run the dual-core path planning and debug server on the Pi 4:
   ```
 * **Track Studio (Web Design UI)**:
   ```bash
-  python launchers/8_track_studio.py
+  python launchers/10_track_studio.py
   ```

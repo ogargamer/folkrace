@@ -63,7 +63,7 @@
                     </div>
                     <div style="display: flex; justify-content: space-between; align-items: center;">
                         <label style="font-size: 11px; color: var(--text-muted); font-weight: 600;">Wall Height (mm)</label>
-                        <input type="number" id="input-wall-height" value="300" step="50" min="50" max="2000" style="width: 85px; background: var(--bg-card); border: 1px solid var(--border-color); color: var(--accent-amber); padding: 5px 8px; border-radius: 5px; font-family: 'JetBrains Mono', monospace; font-weight: 700; font-size: 12px; text-align: right;" title="3D Wall Height for Webots Simulation">
+                        <input type="number" id="input-wall-height" value="120" step="50" min="50" max="2000" style="width: 85px; background: var(--bg-card); border: 1px solid var(--border-color); color: var(--accent-amber); padding: 5px 8px; border-radius: 5px; font-family: 'JetBrains Mono', monospace; font-weight: 700; font-size: 12px; text-align: right;" title="3D Wall Height for Webots Simulation">
                     </div>
                     <div style="display: flex; justify-content: space-between; align-items: center; padding-top: 4px; border-top: 1px dashed rgba(255,255,255,0.08);">
                         <label style="font-size: 11px; color: var(--text-muted); font-weight: 600;">Wall Margin</label>
@@ -196,31 +196,31 @@
                 </div>
             </div>
 
-            <!-- Section 4: Export directly to Pi Cartographer -->
+            <!-- Section 5: Local Export Bundle -->
             <div class="panel-section" style="margin-top: auto; border-top: 1px solid var(--border-color); border-bottom: none;">
                 <div class="section-title">
-                    <span>4. Pi 5 Integration</span>
-                    <span class="badge" style="background: rgba(0, 255, 136, 0.15); color: var(--accent-green); border-color: rgba(0, 255, 136, 0.3);">Cartographer 2D</span>
+                    <span>5. Local Export Bundle</span>
+                    <span class="badge" style="background: rgba(0, 255, 136, 0.15); color: var(--accent-green); border-color: rgba(0, 255, 136, 0.3);">data/maps/</span>
                 </div>
-                <button class="btn-deploy" id="btn-deploy-pi">
-                    <span>🚀</span> Deploy Map to Pi 5 Cartographer
+                <button class="btn-deploy" id="btn-save-bundle">
+                    <span>💾</span> Save Bundle to data/maps/
                 </button>
                 <div style="font-size: 11px; color: var(--text-muted); margin-top: 8px; text-align: center;">
-                    Uploads directly to /home/admin/cartographer/maps/
+                    Saves PNG, map.yaml, layout.json & .wbt locally
                 </div>
             </div>
 
-            <!-- Section 5: Webots 3D World Simulation Export -->
+            <!-- Section 6: Webots 3D World Simulation Export -->
             <div class="panel-section" style="border-top: 1px solid var(--border-color); border-bottom: none; padding-top: 10px;">
                 <div class="section-title">
-                    <span>5. Webots 3D Simulation</span>
+                    <span>6. Webots 3D Simulation</span>
                     <span class="badge" style="background: rgba(0, 240, 255, 0.12); color: var(--accent-cyan); border-color: rgba(0, 240, 255, 0.3);">ENU Z-Up (.wbt)</span>
                 </div>
                 <button class="btn-block" id="btn-export-webots-side" style="background: linear-gradient(135deg, rgba(0, 240, 255, 0.15), rgba(255, 0, 122, 0.15)); border: 1px solid rgba(0, 240, 255, 0.4); color: var(--text-main); font-weight: 700; height: 38px; display: flex; align-items: center; justify-content: center; gap: 8px; border-radius: 6px; cursor: pointer;">
                     <span>🌐</span> Export Webots World (.wbt)
                 </button>
                 <div style="font-size: 11px; color: var(--text-muted); margin-top: 6px; text-align: center;">
-                    Watertight IndexedFaceSet Walls & 2D MS200k LiDAR
+                    Watertight Walls & only_front_tofs (tof_path_planner)
                 </div>
             </div>
 

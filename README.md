@@ -167,14 +167,14 @@ pio run -e esp32_tof -t upload
 All diagnostic GUIs and simulation suites are centralized in [`launchers/`](file:///c:/Users/nurmi/Documents/Folkrace/launchers/README.md):
 
 ```bash
-# Launch physical 4-ToF 2D dynamic costmap visualizer
-python launchers/16_esp32_4tof_costmap_gui.py
+# Launch physical quad VL53L8CX ToF multi-target visualizer
+python launchers/6_esp32_tof_gui.py
 
 # Launch physical high-rate steering servo calibration bench
-python launchers/15_esp32_servo_gui.py
+python launchers/8_esp32_servo_gui.py
 
 # Launch physical STM32 motor closed-loop FOC & encoder GUI
-python launchers/5_stm32_encoder_motor_gui.py
+python launchers/9_stm32_encoder_motor_gui.py
 
 # Launch Webots 3D simulation with Curvilinear SL-MPC & dynamic obstacles
 python launchers/1_champion_preview.py

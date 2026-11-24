@@ -1,6 +1,6 @@
 """
 ================================================================================
-  17. LAUNCHER: PI 4 DUAL-CORE DEBUG STUDIO & FLIGHT RECORDER
+  LAUNCHER: PI 4 DUAL-CORE DEBUG STUDIO & FLIGHT RECORDER
 ================================================================================
   Connects to Raspberry Pi 4 ('robot'):
     - Auto-detects and connects to Pi debug server over HTTP port 8080.
@@ -12,16 +12,16 @@
       terminal telemetry monitoring (--stream), and log downloading (--download).
 
   Usage:
-    python launchers/17_pi4_debug_studio.py              # Opens Tactical Mission Control standalone GUI (default)
-    python launchers/17_pi4_debug_studio.py --tab        # Opens Tactical Mission Control in standard browser tab
-    python launchers/17_pi4_debug_studio.py --reconnect  # Triggers remote ESP32 USB serial re-probe & reconnect
-    python launchers/17_pi4_debug_studio.py --desktop    # Launches legacy PyQt5 simulation planner GUI
-    python launchers/17_pi4_debug_studio.py --verify     # Tests all Pi server endpoints
-    python launchers/17_pi4_debug_studio.py --stream     # Live terminal telemetry dashboard
-    python launchers/17_pi4_debug_studio.py --download   # Downloads active SQLite flight log
-    python launchers/17_pi4_debug_studio.py --replay     # Downloads (or opens latest) .db for 60Hz offline replay
-    python launchers/17_pi4_debug_studio.py --restart    # Restarts remote Folkrace service
-    python launchers/17_pi4_debug_studio.py --sync       # Syncs pi4 code to robot before launch
+    python launchers/4_pi4_debug_studio.py              # Opens Tactical Mission Control standalone GUI (default)
+    python launchers/4_pi4_debug_studio.py --tab        # Opens Tactical Mission Control in standard browser tab
+    python launchers/4_pi4_debug_studio.py --reconnect  # Triggers remote ESP32 USB serial re-probe & reconnect
+    python launchers/4_pi4_debug_studio.py --desktop    # Launches legacy PyQt5 simulation planner GUI
+    python launchers/4_pi4_debug_studio.py --verify     # Tests all Pi server endpoints
+    python launchers/4_pi4_debug_studio.py --stream     # Live terminal telemetry dashboard
+    python launchers/4_pi4_debug_studio.py --download   # Downloads active SQLite flight log
+    python launchers/4_pi4_debug_studio.py --replay     # Downloads (or opens latest) .db for 60Hz offline replay
+    python launchers/4_pi4_debug_studio.py --restart    # Restarts remote Folkrace service
+    python launchers/4_pi4_debug_studio.py --sync       # Syncs pi4 code to robot before launch
 ================================================================================
 """
 
@@ -934,7 +934,7 @@ def main():
         print(f"  Please ensure:")
         print(f"  1. Pi 4 is powered on and connected to local Wi-Fi.")
         print(f"  2. Service is running: ssh robot 'systemctl status folkrace'")
-        print(f"  3. You can manually specify the IP: python launchers/17_pi4_debug_studio.py --host <pi-ip>")
+        print(f"  3. You can manually specify the IP: python launchers/{os.path.basename(__file__)} --host <pi-ip>")
         sys.exit(1)
 
     # 4. Query System Status

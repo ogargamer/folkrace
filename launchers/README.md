@@ -1,18 +1,21 @@
 # Folkrace Launcher Suite
 
-This directory contains consolidated, one-click launchers for 3D physics simulation, Genetic Algorithm parameter optimization, physical microcontroller bench testing (ESP32 and STM32), track design, and high-rate sensor calibration.
+This directory contains consolidated, human-facing one-click launchers for 3D physics simulation, Genetic Algorithm parameter optimization, Raspberry Pi 4 flight operations, and physical microcontroller bench testing (ESP32 and STM32).
 
 > [!NOTE]
-> All runnable scripts, dashboards, and hardware test interfaces must reside exclusively in this directory per project file hygiene rules.
+> All human-facing runnable GUIs and hardware test launchers reside in this directory per project file hygiene rules. AI/automation CLI utilities live in [`tools/`](file:///c:/Users/nurmi/Documents/Folkrace/tools/) (e.g., [`tools/ai_debug_suite.py`](file:///c:/Users/nurmi/Documents/Folkrace/tools/ai_debug_suite.py)).
 
 ---
 
-## 1. Hardware & Platform Conventions
+## 1. Ordering & Future Renumbering
 
-Hardware-dependent diagnostic launchers explicitly denote their target hardware platform in their filename:
-* **`esp32`**: ESP32-S3 microcontroller firmware / sensors (ESP32 Main dynamics, servo, IMU, and ESP32 ToF Hub quad VL53L8CX sensors).
-* **`stm32`**: STM32G474 microcontroller firmware / motor suites (dual-motor direct-drive FOC & MT6816 magnetic encoders).
-* **`simulation` / `tool`**: Workstation or companion computer (Raspberry Pi 4) simulation and path planning utilities.
+Launchers use leading numeric prefixes (`1_`–`9_`) to preserve workflow order in file explorers and terminals:
+* **`1–3` — Simulation & Training**: Webots 3D previews and GA / CMA-ES optimization dashboard.
+* **`4–5` — Pi 4 Operations & Replay**: Live Tactical Mission Control and offline 60 Hz flight log replay.
+* **`6–8` — ESP32 Benches**: Quad VL53L8CX ToF Hub, BNO086 9-DOF IMU dashboard, and 333 Hz digital steering servo.
+* **`9` — STM32 Bench**: Dual-motor direct-drive FOC & MT6816 magnetic encoders.
+
+Internal cross-imports (e.g., [`5_local_flight_replay.py`](file:///c:/Users/nurmi/Documents/Folkrace/launchers/5_local_flight_replay.py) and [`tools/ai_debug_suite.py`](file:///c:/Users/nurmi/Documents/Folkrace/tools/ai_debug_suite.py)) discover `*pi4_debug_studio.py` dynamically, so reordering numeric prefixes in the future will not break Python imports.
 
 ---
 
@@ -21,71 +24,48 @@ Hardware-dependent diagnostic launchers explicitly denote their target hardware 
 | # | Category | Launcher Script | Description | Primary Target |
 | :---: | :--- | :--- | :--- | :--- |
 | **1** | Simulation | [`1_champion_preview.py`](file:///c:/Users/nurmi/Documents/Folkrace/launchers/1_champion_preview.py) | Launches Webots 3D champion preview (`track_racing.wbt`) with dynamic obstacle avoidance AND live 2D telemetry radar simultaneously. | Webots / Python |
-| **2** | GA Training | [`2_ga_dashboard.py`](file:///c:/Users/nurmi/Documents/Folkrace/launchers/2_ga_dashboard.py) | Standalone real-time Genetic Algorithm / CMA-ES convergence, fitness progress, and generational metric dashboard. | Workstation |
-| **3** | **ESP32** | [`3_esp32_tof_gui.py`](file:///c:/Users/nurmi/Documents/Folkrace/launchers/3_esp32_tof_gui.py) | Physical ESP32 VL53L8CX 16-channel ToF sensor live distance matrix visualizer and calibration GUI over USB serial. | ESP32-S3 (ToF Hub) |
-| **4** | **ESP32** | [`4_esp32_encoder_motor_gui.py`](file:///c:/Users/nurmi/Documents/Folkrace/launchers/4_esp32_encoder_motor_gui.py) | ESP32 MT6816 SPI magnetic angle encoder & motor closed-loop bench calibration GUI (SimpleFOC single-motor bench). | ESP32-S3 |
-| **5** | **STM32** | [`5_stm32_encoder_motor_gui.py`](file:///c:/Users/nurmi/Documents/Folkrace/launchers/5_stm32_encoder_motor_gui.py) | STM32G474 MT6816 SPI magnetic angle encoder & motor closed-loop bench calibration GUI (Dual-motor FOC tuning). | STM32G474 (Axle MCUs) |
-| **6** | **ESP32** | [`6_esp32_imu_gui.py`](file:///c:/Users/nurmi/Documents/Folkrace/launchers/6_esp32_imu_gui.py) | Physical ESP32 BNO086 9-DOF IMU 3D mission dashboard, artificial horizon, compass, G-force, and real-time waveform GUI. | ESP32-S3 (Main) |
-| **8** | Tool | [`8_track_studio.py`](file:///c:/Users/nurmi/Documents/Folkrace/launchers/8_track_studio.py) | Modular 1200mm Race Track Designer Studio (Local Web UI on port 8088) for designing standard Folkrace courses. | Browser / Flask |
-| **9** | Simulation | [`9_wrong_way_studio.py`](file:///c:/Users/nurmi/Documents/Folkrace/launchers/9_wrong_way_studio.py) | Anti-Wrong-Way Watchdog & 180-Degree Auto-Correction Studio (`test_wrong_way.wbt` + 2D Tactical Radar & Thought Matrix GUI). | Webots / Python |
-| **13** | Simulation | [`13_fast_champion_drive.py`](file:///c:/Users/nurmi/Documents/Folkrace/launchers/13_fast_champion_drive.py) | Ultra-lean champion 3D drive launcher for maximum real-time rendering & physics performance (zero GUI, zero UDP/HUD overhead). | Webots |
-| **14** | **ESP32** | [`14_esp32_tof_arc_gui.py`](file:///c:/Users/nurmi/Documents/Folkrace/launchers/14_esp32_tof_arc_gui.py) | Physical ESP32 dual VL53L8CX 8-zone 90-degree top-down 2D radar visualizer with proximity blind-spot / open-space fallback. | ESP32-S3 (ToF Hub) |
-| **15** | **ESP32** | [`15_esp32_servo_gui.py`](file:///c:/Users/nurmi/Documents/Folkrace/launchers/15_esp32_servo_gui.py) | Physical ESP32 333 Hz high-rate digital steering servo test bench, center trimming, and dynamic frequency sweep GUI. | ESP32-S3 (Main) |
-| **16** | **ESP32** | [`16_esp32_4tof_gui.py`](file:///c:/Users/nurmi/Documents/Folkrace/launchers/16_esp32_4tof_gui.py) | Physical ESP32 quad VL53L8CX live 20-byte binary stream viewer displaying 1x4 2D LiDAR ray distance strips. | ESP32-S3 (ToF Hub) |
-| **17** | **Pi 4** | [`17_pi4_debug_studio.py`](file:///c:/Users/nurmi/Documents/Folkrace/launchers/17_pi4_debug_studio.py) | Raspberry Pi 4 Dual-Core Debug Studio: Web Tactical Mission Control & SQLite Black Box with frame-by-frame time-travel scrubbing. | Pi 4 / Browser |
-| **18** | **ESP32** | [`18_esp32_imu_calib_gui.py`](file:///c:/Users/nurmi/Documents/Folkrace/launchers/18_esp32_imu_calib_gui.py) | Easy 3-step BNO086 IMU Heading & Mounting Calibration GUI (live top-down car compass, Tare All/Yaw, and permanent flash save). | ESP32-S3 (Main) |
-| **19** | **Pi 4 / Tool** | [`19_local_flight_replay.py`](file:///c:/Users/nurmi/Documents/Folkrace/launchers/19_local_flight_replay.py) | Offline 60 Hz SQLite flight log replay viewer (plus `--digest` and `--export` AI analysis modes). | Workstation / Browser |
-| **20** | **Pi 4 / AI** | [`20_ai_debug_suite.py`](file:///c:/Users/nurmi/Documents/Folkrace/launchers/20_ai_debug_suite.py) | AI Flight Debugging Suite: automated diagnostics, incident episode clustering, frame windows, ASCII ToF/MPC radar, A/B run comparison, and CSV/NPZ/JSON/Markdown export. | Workstation / CLI |
+| **2** | Simulation | [`2_fast_champion_drive.py`](file:///c:/Users/nurmi/Documents/Folkrace/launchers/2_fast_champion_drive.py) | Ultra-lean champion 3D drive launcher for maximum real-time rendering & physics performance (zero GUI, zero UDP/HUD overhead). | Webots |
+| **3** | GA Training | [`3_ga_dashboard.py`](file:///c:/Users/nurmi/Documents/Folkrace/launchers/3_ga_dashboard.py) | Standalone real-time Genetic Algorithm / CMA-ES convergence, fitness progress, and generational metric dashboard. | Workstation |
+| **4** | **Pi 4** | [`4_pi4_debug_studio.py`](file:///c:/Users/nurmi/Documents/Folkrace/launchers/4_pi4_debug_studio.py) | Raspberry Pi 4 Dual-Core Debug Studio: Web Tactical Mission Control & SQLite Black Box with frame-by-frame time-travel scrubbing. | Pi 4 / Browser |
+| **5** | **Pi 4** | [`5_local_flight_replay.py`](file:///c:/Users/nurmi/Documents/Folkrace/launchers/5_local_flight_replay.py) | Offline 60 Hz SQLite flight log replay viewer (plus `--digest` and `--export` analysis modes). | Workstation / Browser |
+| **6** | **ESP32** | [`6_esp32_tof_gui.py`](file:///c:/Users/nurmi/Documents/Folkrace/launchers/6_esp32_tof_gui.py) | Physical ESP32 quad VL53L8CX 4-zone multi-target telemetry visualizer, SPAD saturation alerts, and live 2D tactical radar over USB serial. | ESP32-S3 (ToF Hub) |
+| **7** | **ESP32** | [`7_esp32_imu_gui.py`](file:///c:/Users/nurmi/Documents/Folkrace/launchers/7_esp32_imu_gui.py) | Physical ESP32 BNO086 9-DOF IMU 3D mission dashboard, artificial horizon, compass, G-force, and real-time waveform GUI. | ESP32-S3 (Main) |
+| **8** | **ESP32** | [`8_esp32_servo_gui.py`](file:///c:/Users/nurmi/Documents/Folkrace/launchers/8_esp32_servo_gui.py) | Physical ESP32 333 Hz high-rate digital steering servo test bench, center trimming, and dynamic frequency sweep GUI. | ESP32-S3 (Main) |
+| **9** | **STM32** | [`9_stm32_encoder_motor_gui.py`](file:///c:/Users/nurmi/Documents/Folkrace/launchers/9_stm32_encoder_motor_gui.py) | STM32G474 MT6816 SPI magnetic angle encoder & motor closed-loop bench calibration GUI (Dual-motor FOC tuning). | STM32G474 (Axle MCUs) |
+| **10** | Tool | [`10_track_studio.py`](file:///c:/Users/nurmi/Documents/Folkrace/launchers/10_track_studio.py) | Modular 1200mm Race Track Designer Studio (Local Web UI on port 8088) for designing standard Folkrace courses, exporting ToF Webots `.wbt` worlds, and saving local `data/maps/` bundles. | Browser / http.server |
 
 ---
 
 ## 3. Quick Usage Examples
 
-### Benchmarking Physical STM32 Direct-Drive Motors:
-```bash
-python launchers/5_stm32_encoder_motor_gui.py
-```
-* Connects over native USB CDC or UART.
-* Visualizes real-time MT6816 magnetic angle readout, electrical angle offset, and RPM response.
-* Runs automated 128-point LUT calibration to eliminate motor cogging torque.
-
-### Benchmarking Quad VL53L8CX ToF Array (16-Zone Costmap):
-```bash
-python launchers/16_esp32_4tof_costmap_gui.py
-```
-* Connects to the ESP32 ToF Hub over USB serial (921,600 baud).
-* Displays polar and Cartesian obstacle radar reflecting all 4 Time-of-Flight sensors simultaneously.
-* Validates noise rejection and closest-target identification before feeding data into the path planner.
-
-### High-Rate Digital Steering Servo Calibration:
-```bash
-python launchers/15_esp32_servo_gui.py
-```
-* Connects to ESP32 Main over USB serial.
-* Allows fine-tuning center trim, maximum deflection limits (plus or minus 30 degrees), and high-frequency (333 Hz) response dynamics.
-
-### Raspberry Pi 4 Dual-Core Debug Studio & Flight Black Box:
-```bash
-python launchers/17_pi4_debug_studio.py
-```
-* Connects to the Pi 4 (`robot`), verifies Core 1 (Planner) and Core 2 (Debug Server) isolation.
-* Automatically opens the Web Mission Control GUI (`http://robot:8080`) in the browser.
-* Enables frame-by-frame time-travel scrubbing, anomaly jump review, and session downloading.
-
 ### Running 3D Simulation with Curvilinear SL-MPC:
 ```bash
 python launchers/1_champion_preview.py
 ```
-* Automatically verifies and builds `curvilinear_sl_mpc.dll` if needed.
-* Launches Webots with the dynamic obstacle world (`track_racing.wbt`).
-* Starts the companion 2D tactical radar and thought matrix telemetry viewer.
+* Launches Webots with the dynamic obstacle world (`track_racing.wbt`) and companion 2D telemetry radar GUI.
+* Use `python launchers/2_fast_champion_drive.py` for maximum real-time FPS without GUI/UDP overhead.
 
-### AI Flight Recording Analysis & Debugging:
+### Raspberry Pi 4 Dual-Core Debug Studio & Offline Replay:
 ```bash
-python launchers/20_ai_debug_suite.py list
-python launchers/20_ai_debug_suite.py digest
-python launchers/20_ai_debug_suite.py episodes
-python launchers/20_ai_debug_suite.py frame 500
+python launchers/4_pi4_debug_studio.py
+python launchers/5_local_flight_replay.py
 ```
-* Works offline on both v1 and v2 `.db` flight recordings in `Downloads/` and `data/recordings/`.
-* Runs automated powertrain, ToF sensor, timing, ramp-bias, and safety diagnostics, clusters incidents, renders 2D top-down ASCII ToF/MPC radar, compares two runs, and exports `report.md` / `digest.json` / `frames.csv` / `arrays.npz`.
+* Auto-detects the Pi 4 (`robot`), opens Web Tactical Mission Control (`http://<pi>:8080`), and supports flight log downloads and offline 60 Hz scrubbing.
+
+### Benchmarking Quad VL53L8CX ToF Array:
+```bash
+python launchers/6_esp32_tof_gui.py
+```
+* Connects to the ESP32 ToF Hub over USB serial (921,600 baud) and visualizes all 4 ToF sensors (16 ray projections, multi-target status, and SPAD counts).
+
+### High-Rate Digital Steering Servo Calibration:
+```bash
+python launchers/8_esp32_servo_gui.py
+```
+* Connects to ESP32 Main over USB serial to tune center trim, deflection limits, and 333 Hz response dynamics.
+
+### Benchmarking Physical STM32 Direct-Drive Motors:
+```bash
+python launchers/9_stm32_encoder_motor_gui.py
+```
+* Connects over native USB CDC or UART, visualizes MT6816 magnetic angle and RPM response, and runs automated 128-point LUT calibration.

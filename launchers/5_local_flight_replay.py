@@ -1,17 +1,17 @@
 """
 ================================================================================
-  19. LAUNCHER: OFFLINE 60 HZ FLIGHT LOG REPLAY VIEWER
+  LAUNCHER: OFFLINE 60 HZ FLIGHT LOG REPLAY VIEWER
 ================================================================================
   Opens downloaded SQLite flight recordings (.db) locally on your laptop
   at full 60 Hz using the Tactical Mission Control GUI—without requiring
   a connection to the Raspberry Pi 4.
 
   Usage:
-    python launchers/19_local_flight_replay.py                  # Opens latest .db in Downloads or data/recordings/
-    python launchers/19_local_flight_replay.py path/to/file.db  # Opens a specific .db file
-    python launchers/19_local_flight_replay.py --list           # Lists available local recordings
-    python launchers/19_local_flight_replay.py --pick           # Choose a recording interactively
-    python launchers/19_local_flight_replay.py --tab            # Opens in standard browser tab
+    python launchers/5_local_flight_replay.py                  # Opens latest .db in Downloads or data/recordings/
+    python launchers/5_local_flight_replay.py path/to/file.db  # Opens a specific .db file
+    python launchers/5_local_flight_replay.py --list           # Lists available local recordings
+    python launchers/5_local_flight_replay.py --pick           # Choose a recording interactively
+    python launchers/5_local_flight_replay.py --tab            # Opens in standard browser tab
 ================================================================================
 """
 
@@ -34,9 +34,18 @@ RECORDINGS_DIR = ROOT_DIR / "data" / "recordings"
 SEARCH_DIRS = (DOWNLOADS_DIR, RECORDINGS_DIR)
 
 
+def _find_debug_studio_path() -> Path:
+    """Finds the Pi 4 debug studio launcher regardless of numeric prefix."""
+    launchers_dir = Path(__file__).resolve().parent
+    matches = sorted(launchers_dir.glob("*pi4_debug_studio.py"))
+    if not matches:
+        raise FileNotFoundError(f"Could not locate *pi4_debug_studio.py in {launchers_dir}")
+    return matches[0]
+
+
 def _load_debug_studio_module():
-    """Imports 17_pi4_debug_studio.py to reuse its local replay server."""
-    studio_path = Path(__file__).resolve().parent / "17_pi4_debug_studio.py"
+    """Imports the Pi 4 debug studio launcher to reuse its local replay server."""
+    studio_path = _find_debug_studio_path()
     spec = importlib.util.spec_from_file_location("pi4_debug_studio", str(studio_path))
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
@@ -108,7 +117,7 @@ def main():
     if args.list:
         if not dbs:
             print(f"[Replay] No recordings found in {DOWNLOADS_DIR} or {RECORDINGS_DIR}")
-            print("  Download one from the Pi with: python launchers/17_pi4_debug_studio.py --download")
+            print(f"  Download one from the Pi with: python launchers/{_find_debug_studio_path().name} --download")
         else:
             print_recordings(dbs)
         return
@@ -117,7 +126,7 @@ def main():
     if not target_db:
         if not dbs:
             print(f"[Replay ERROR] No .db recordings found in {DOWNLOADS_DIR} or {RECORDINGS_DIR}")
-            print("  Download one from the Pi with: python launchers/17_pi4_debug_studio.py --download")
+            print(f"  Download one from the Pi with: python launchers/{_find_debug_studio_path().name} --download")
             sys.exit(1)
 
         if args.pick and len(dbs) > 1:

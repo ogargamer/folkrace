@@ -1,23 +1,23 @@
 """
 ================================================================================
-  20. LAUNCHER: AI FLIGHT DEBUGGING SUITE & TELEMETRY ANALYZER
+  AI FLIGHT DEBUGGING SUITE & TELEMETRY ANALYZER
 ================================================================================
   Zero-boilerplate CLI for analyzing Pi 4 SQLite flight recordings (.db) by
   humans and AI agents. Works on both v1 and v2 recording schemas.
 
   Usage:
-    python launchers/20_ai_debug_suite.py list
-    python launchers/20_ai_debug_suite.py digest [db]
-    python launchers/20_ai_debug_suite.py episodes [db] [--category ...] [--severity ...]
-    python launchers/20_ai_debug_suite.py window [db] <start> <end> [--by-time] [--stride N]
-    python launchers/20_ai_debug_suite.py window [db] --around <frame> [--radius 15]
-    python launchers/20_ai_debug_suite.py frame [db] <frame_id> [--no-radar] [--raw]
-    python launchers/20_ai_debug_suite.py query [db] [--mode ...] [--shield] [--max-tof ...]
-    python launchers/20_ai_debug_suite.py compare <db_a> <db_b>
-    python launchers/20_ai_debug_suite.py export [db] [--out-dir ...] [--formats md,json,csv,npz]
-    python launchers/20_ai_debug_suite.py tag [db] <start_frame> <end_frame> <tag> [--note ...]
-    python launchers/20_ai_debug_suite.py labels [db]
-    python launchers/20_ai_debug_suite.py pull [--host ...] [--digest] [--export]
+    python tools/ai_debug_suite.py list
+    python tools/ai_debug_suite.py digest [db]
+    python tools/ai_debug_suite.py episodes [db] [--category ...] [--severity ...]
+    python tools/ai_debug_suite.py window [db] <start> <end> [--by-time] [--stride N]
+    python tools/ai_debug_suite.py window [db] --around <frame> [--radius 15]
+    python tools/ai_debug_suite.py frame [db] <frame_id> [--no-radar] [--raw]
+    python tools/ai_debug_suite.py query [db] [--mode ...] [--shield] [--max-tof ...]
+    python tools/ai_debug_suite.py compare <db_a> <db_b>
+    python tools/ai_debug_suite.py export [db] [--out-dir ...] [--formats md,json,csv,npz]
+    python tools/ai_debug_suite.py tag [db] <start_frame> <end_frame> <tag> [--note ...]
+    python tools/ai_debug_suite.py labels [db]
+    python tools/ai_debug_suite.py pull [--host ...] [--digest] [--export]
 ================================================================================
 """
 
@@ -63,7 +63,11 @@ def _print_json(obj: Any):
 
 
 def _load_debug_studio_module():
-    studio_path = Path(__file__).resolve().parent / "17_pi4_debug_studio.py"
+    launchers_dir = ROOT_DIR / "launchers"
+    matches = sorted(launchers_dir.glob("*pi4_debug_studio.py"))
+    if not matches:
+        raise FileNotFoundError(f"Could not locate *pi4_debug_studio.py in {launchers_dir}")
+    studio_path = matches[0]
     spec = importlib.util.spec_from_file_location("pi4_debug_studio", str(studio_path))
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)

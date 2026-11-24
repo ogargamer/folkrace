@@ -1,6 +1,6 @@
 """
 ================================================================================
-  13. LAUNCHER: FAST CHAMPION PURE 3D DRIVE (MAX REAL-TIME PERFORMANCE)
+  LAUNCHER: FAST CHAMPION PURE 3D DRIVE (MAX REAL-TIME PERFORMANCE)
 ================================================================================
   Launches Webots real-time mode with track_racing.wbt for direct 3D visual
   driving evaluation with dynamic moving obstacles.
@@ -10,7 +10,7 @@
   physics and real-time driving performance.
 
   Usage:
-    python 13_fast_champion_drive.py
+    python launchers/2_fast_champion_drive.py
 ================================================================================
 """
 
@@ -53,7 +53,7 @@ def activate_champion_config() -> bool:
         laps = metrics.get("laps_completed", "N/A")
 
         print("=" * 80)
-        print("  13. FAST CHAMPION PURE 3D DRIVE - MAX REAL-TIME PERFORMANCE")
+        print("  FAST CHAMPION PURE 3D DRIVE - MAX REAL-TIME PERFORMANCE")
         print("=" * 80)
         print(f"[Ready] Activated Champion: {title}")
         print(f"        Fitness: {fitness} | Dist: {dist}m | Speed: {speed}m/s | Laps: {laps}")

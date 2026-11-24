@@ -5,7 +5,7 @@ description: Analyze Folkrace Pi 4 SQLite flight recordings (.db) for crashes, a
 
 # AI Flight Debugging Suite
 
-Use `launchers/20_ai_debug_suite.py` instead of writing ad-hoc SQLite/zlib scripts (supports both v1 and v2 `.db` files in `Downloads/` and `data/recordings/`).
+Use `tools/ai_debug_suite.py` instead of writing ad-hoc SQLite/zlib scripts (supports both v1 and v2 `.db` files in `Downloads/` and `data/recordings/`).
 
 ## Workflow
 1. Run `digest` first as a triage index (diagnostics, KPIs, top episodes, deduplicated MCU logs).
@@ -14,16 +14,16 @@ Use `launchers/20_ai_debug_suite.py` instead of writing ad-hoc SQLite/zlib scrip
 
 ## Commands
 ```powershell
-python launchers/20_ai_debug_suite.py list
-python launchers/20_ai_debug_suite.py digest [db]                 # omit [db] for latest
-python launchers/20_ai_debug_suite.py episodes [db] [--category SHIELD|STALL|LINK_DROP]
-python launchers/20_ai_debug_suite.py window [db] <start> <end> [--by-time] [--stride N]
-python launchers/20_ai_debug_suite.py frame [db] <frame_id>       # full state + ASCII radar
-python launchers/20_ai_debug_suite.py query [db] --shield --max-tof 0.25 --limit 20
-python launchers/20_ai_debug_suite.py compare <db_a> <db_b>
-python launchers/20_ai_debug_suite.py export [db] [--formats md,json,csv,npz]
-python launchers/20_ai_debug_suite.py tag [db] <start> <end> <tag> --note "..."
-python launchers/20_ai_debug_suite.py pull --digest               # download from Pi 4 + digest
+python tools/ai_debug_suite.py list
+python tools/ai_debug_suite.py digest [db]                 # omit [db] for latest
+python tools/ai_debug_suite.py episodes [db] [--category SHIELD|STALL|LINK_DROP]
+python tools/ai_debug_suite.py window [db] <start> <end> [--by-time] [--stride N]
+python tools/ai_debug_suite.py frame [db] <frame_id>       # full state + ASCII radar
+python tools/ai_debug_suite.py query [db] --shield --max-tof 0.25 --limit 20
+python tools/ai_debug_suite.py compare <db_a> <db_b>
+python tools/ai_debug_suite.py export [db] [--formats md,json,csv,npz]
+python tools/ai_debug_suite.py tag [db] <start> <end> <tag> --note "..."
+python tools/ai_debug_suite.py pull --digest               # download from Pi 4 + digest
 ```
 
 ## Folkrace Telemetry & Verification Guardrails

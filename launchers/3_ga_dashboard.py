@@ -1,12 +1,12 @@
 """
 ================================================================================
-  2. LAUNCHER: REAL-TIME GENETIC ALGORITHM PERFORMANCE DASHBOARD
+  LAUNCHER: REAL-TIME GENETIC ALGORITHM PERFORMANCE DASHBOARD
 ================================================================================
   Launches the real-time PyQt5 GA Dashboard GUI with live Matplotlib plots,
   pause/resume controls, and multi-generation tracking.
 
   Usage:
-    python 2_ga_dashboard.py
+    python launchers/3_ga_dashboard.py
 ================================================================================
 """
 

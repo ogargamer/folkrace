@@ -1,6 +1,6 @@
 """
 ================================================================================
-  15. LAUNCHER: ESP32 HIGH-RATE 333Hz DIGITAL SERVO TEST BENCH GUI
+  LAUNCHER: ESP32 HIGH-RATE 333Hz DIGITAL SERVO TEST BENCH GUI
 ================================================================================
   Connects over USB serial to the ESP32D N4 running the 333Hz servo firmware.
   Features:
@@ -12,7 +12,7 @@
     - PWM power disable/enable safety control
 
   Usage:
-    python 15_esp32_servo_gui.py
+    python launchers/8_esp32_servo_gui.py
 ================================================================================
 """
 

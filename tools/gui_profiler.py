@@ -4,7 +4,7 @@
 GUI PERFORMANCE PROFILER & BENCHMARK SUITE
 ===============================================================================
 A high-precision performance analysis tool for PyQt GUI applications in the
-Folkrace project (specifically optimizing launchers/16_esp32_4tof_gui.py).
+Folkrace project (profiling esp32/ESP32_ToF/tof_4x_gui.py and launchers/4_pi4_debug_studio.py).
 
 Features:
   1. Synthetic Packet Generation: Simulates ESP32 4x VL53L8CX binary telemetry
@@ -357,7 +357,7 @@ def profile_pi4_studio(host: str = None, duration_sec: float = 2.0):
 
     print("\n" + "=" * 78)
     print(" FOLKRACE GUI PERFORMANCE PROFILER: PI 4 DEBUG STUDIO & STREAMER")
-    print(" Target: launchers/17_pi4_debug_studio.py (Pi 4 Dual-Core Telemetry)")
+    print(" Target: launchers/4_pi4_debug_studio.py (Pi 4 Dual-Core Telemetry)")
     print("=" * 78)
 
     # 1. Resolve Pi 4 Host
@@ -556,7 +556,7 @@ def profile_pi4_studio(host: str = None, duration_sec: float = 2.0):
 
 def main():
     parser = argparse.ArgumentParser(description="Folkrace GUI Performance Profiler & Benchmark")
-    parser.add_argument("--studio", "--pi4", dest="studio", action="store_true", help="Profile Pi 4 Debug Studio (17_pi4_debug_studio.py) live stream & local reconstruction")
+    parser.add_argument("--studio", "--pi4", dest="studio", action="store_true", help="Profile Pi 4 Debug Studio (4_pi4_debug_studio.py) live stream & local reconstruction")
     parser.add_argument("--host", default=None, help="Target Pi 4 IP or hostname (auto-detects if omitted)")
     parser.add_argument("--fps", type=float, default=60.0, help="Simulated sensor packet rate (Hz)")
     parser.add_argument("--duration", type=float, default=2.5, help="Duration of each benchmark run in seconds")
@@ -584,7 +584,7 @@ def main():
 
     print("\n" + "=" * 78)
     print(" FOLKRACE GUI PERFORMANCE PROFILER & BENCHMARK SUITE")
-    print(" Target: esp32/ESP32_ToF/tof_4x_gui.py (launchers/16_esp32_4tof_gui.py)")
+    print(" Target: esp32/ESP32_ToF/tof_4x_gui.py")
     print("=" * 78)
 
     gui = tof_4x_gui.FourToFStreamGUI()
