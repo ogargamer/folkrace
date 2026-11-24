@@ -103,7 +103,7 @@ public:
     SmartHybridCostmapFront(
         float x_min_ = -1.25f, float x_max_ = 1.25f,
         float y_min_ = 0.0f, float y_max_ = 2.60f,
-        float res_ = 0.015f, float r_inflation_m_ = 0.090f
+        float res_ = 0.015f, float r_inflation_m_ = 0.075f
     ) : x_min(x_min_), x_max(x_max_), y_min(y_min_), y_max(y_max_),
         res(res_), r_inflation_m(r_inflation_m_) {
 
@@ -488,7 +488,7 @@ public:
                 float rel_angle = wrap_angle(std::atan2(d_anchor_x, d_anchor_y) - anchor_yaw);
                 float steer_equiv = -rel_angle;
                 float aperture_m = std::max(GAP_MIN_WIDTH_M, std::min(1.20f, total_dist * 0.35f));
-                bool is_clear = (!hit_obs) && (ranges_16[i] >= 1.79f || total_dist >= (max_r - 0.05f));
+                bool is_clear = (!hit_obs) && (ranges_16[i] >= (max_range - 0.01f) || total_dist >= (max_r - 0.05f));
 
                 candidates[n_cand++] = {tx, ty, total_dist, aperture_m, steer_equiv, rel_angle, is_clear};
             }

@@ -19,7 +19,7 @@ class ToFSensor:
     heading_rad: float
     fov_rad: float = 0.19634954  # 11.25 degrees
     min_range: float = 0.001
-    max_range: float = 1.80
+    max_range: float = 2.40
 
 SENSOR_RIG = [
     # Front-Left Array (cross-pointing Right, rotated 3 deg outwards)
@@ -53,8 +53,8 @@ SENSOR_RIG = [
 class CppCostmapAdapter:
     def __init__(
         self,
-        grid_bounds: Tuple[float, float, float, float] = (-1.25, 1.25, 0.0, 1.90),
-        resolution: float = 0.010,
+        grid_bounds: Tuple[float, float, float, float] = (-1.25, 1.25, 0.0, 2.60),
+        resolution: float = 0.015,
         r_inflation_m: float = 0.075,
     ):
         from cpp_smart_hybrid_costmap import CppSmartHybridCostmap
@@ -145,12 +145,12 @@ def _intersect_ray_cylinder(
     c = fx * fx + fy * fy - radius * radius
     disc = b * b - 4.0 * a * c
     if disc < 0.0:
-        return 1.80
+        return 2.40
     sqrt_disc = math.sqrt(disc)
     t1 = (-b - sqrt_disc) / (2.0 * a)
     t2 = (-b + sqrt_disc) / (2.0 * a)
-    hits = [t for t in (t1, t2) if 0.02 <= t <= 1.80]
-    return min(hits) if hits else 1.80
+    hits = [t for t in (t1, t2) if 0.02 <= t <= 2.40]
+    return min(hits) if hits else 2.40
 
 
 def _intersect_ray_box(
@@ -161,7 +161,7 @@ def _intersect_ray_box(
     x_min, x_max = cx - half_w, cx + half_w
     y_min, y_max = cy - half_w, cy + half_w
 
-    t_min, t_max = 0.02, 1.80
+    t_min, t_max = 0.02, 2.40
     if abs(dx) > 1e-6:
         tx1 = (x_min - x0) / dx
         tx2 = (x_max - x0) / dx
@@ -169,7 +169,7 @@ def _intersect_ray_box(
         t_max = min(t_max, max(tx1, tx2))
     else:
         if x0 < x_min or x0 > x_max:
-            return 1.80
+            return 2.40
 
     if abs(dy) > 1e-6:
         ty1 = (y_min - y0) / dy
@@ -178,11 +178,11 @@ def _intersect_ray_box(
         t_max = min(t_max, max(ty1, ty2))
     else:
         if y0 < y_min or y0 > y_max:
-            return 1.80
+            return 2.40
 
     if t_min <= t_max and t_max >= 0.02:
         return max(t_min, 0.02)
-    return 1.80
+    return 2.40
 
 
 def generate_simulated_dataset(
@@ -191,7 +191,7 @@ def generate_simulated_dataset(
     size_m: float,
     grid_step_m: Optional[float] = None,
     x_range: Tuple[float, float] = (-0.925, 0.925),
-    y_range: Tuple[float, float] = (0.150, 1.800),
+    y_range: Tuple[float, float] = (0.150, 2.400),
     num_sub_rays: int = 10,
 ):
     """Generates synthetic ToF range readings with exact Webots optical characteristics."""
@@ -273,7 +273,7 @@ def fact_check_dataset(
         y_gt = float(row["y_m"])
 
         readings = {k: float(row[k]) for k in sensor_keys if k in row}
-        active_sensors = [k for k, v in readings.items() if v < 1.79]
+        active_sensors = [k for k, v in readings.items() if v < 2.39]
 
         if not active_sensors:
             continue

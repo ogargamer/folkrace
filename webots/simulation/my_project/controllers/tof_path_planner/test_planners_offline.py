@@ -84,7 +84,7 @@ _TOF_SENSOR_RIG = [
 ]
 
 
-def _raycast_parallel_walls(x_left: float, x_right: float, max_range: float = 1.80) -> dict:
+def _raycast_parallel_walls(x_left: float, x_right: float, max_range: float = 2.40) -> dict:
     readings = {}
     for name, x0, _y0, heading in _TOF_SENSOR_RIG:
         dx = float(np.cos(heading))

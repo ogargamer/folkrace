@@ -1286,10 +1286,10 @@ class ComprehensivePlannerGUI(QMainWindow):
         tune_layout.addWidget(QLabel("Cruising Speed Target (m/s):"))
         spd_row = QHBoxLayout()
         self.slider_speed = QSlider(Qt.Horizontal)
-        self.slider_speed.setRange(8, 55)  # 0.8 to 5.5 m/s
-        self.slider_speed.setValue(55)
+        self.slider_speed.setRange(8, 39)  # 0.8 to 3.9 m/s (physical V_max = 3.84 m/s)
+        self.slider_speed.setValue(38)
         self.slider_speed.valueChanged.connect(self._on_speed_slider)
-        self.lbl_speed = QLabel("5.50 m/s")
+        self.lbl_speed = QLabel("3.84 m/s")
         self.lbl_speed.setFont(QFont("Consolas", 10, QFont.Bold))
         spd_row.addWidget(self.slider_speed)
         spd_row.addWidget(self.lbl_speed)

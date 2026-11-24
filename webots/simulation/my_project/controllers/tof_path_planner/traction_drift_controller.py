@@ -133,7 +133,7 @@ class TractionDriftController:
         beta_rear: float,
         gyro_z: float,
         target_steer_rad: float,
-        base_mu: float = 0.86,
+        base_mu: float = 0.80,
         dt: float = 0.008,
     ) -> Dict[str, Any]:
         """

@@ -113,9 +113,9 @@ OPTION_2_SL_MPC_GENE_SPECS: List[Tuple[str, float, float, type, float, str]] = [
     # Horizon & Discretization (Fixed at N=30, dt=1/60s to match native C++ OSQP codegen & 60 Hz Pi/ToF loop)
     ("horizon_N",           30.0,   30.0,    int,   30.0,    "MPC prediction horizon steps (fixed at 30 in native QP tables)"),
     ("dt",                   0.016667, 0.016667, float, 0.016667, "MPC prediction discretization timestep (s)"),
-    # Tire Friction & Costmap Inflation (Real-world MU = 0.80, real-world inflation = 0.090 m)
+    # Tire Friction & Costmap Inflation (Real-world MU = 0.80, real-world inflation = 0.075 m)
     ("mu_friction",          0.80,   0.80,   float,  0.80,   "Tire friction coefficient governing steer vs brake loads"),
-    ("r_inflation_m",        0.090,  0.090,  float,  0.090,  "ToF obstacle expansion / inflation radius (m, real-world costmap)"),
+    ("r_inflation_m",        0.075,  0.075,  float,  0.075,  "ToF obstacle expansion / inflation radius (m, real-world costmap)"),
     # MPC Objective Weights (Defaulted to best_planner_genome.json)
     ("q_progress",           0.50,  40.00,   float, 25.143,  "Longitudinal progress reward weight"),
     ("q_cte",                1.00,  60.00,   float, 59.998,  "Cross-track error penalty weight"),
@@ -124,9 +124,9 @@ OPTION_2_SL_MPC_GENE_SPECS: List[Tuple[str, float, float, type, float, str]] = [
     ("r_accel",              0.01,   6.00,   float,  1.722,  "Acceleration/braking effort penalty weight"),
     ("r_steer_rate",         0.50,  35.00,   float,  2.020,  "Steering rate slew penalty weight"),
     ("v_corner_factor",      0.60,   0.98,   float,  0.677,  "Friction circle speed scaling for curvature"),
-    ("center_bias",          0.00,   1.00,   float,  0.000,  "Corridor centering blend (0=guide line, 1=corridor midpoint)"),
+    ("center_bias",          0.00,   0.50,   float,  0.000,  "Corridor centering blend (0=guide line, 1=corridor midpoint)"),
     # Gap Scout Parameters (Defaulted to best_planner_genome.json)
-    ("target_lookahead_m",   1.72,   1.72,   float,  1.72,   "Scout lookahead target projection distance (m)"),
+    ("target_lookahead_m",   2.30,   2.30,   float,  2.30,   "Scout lookahead target projection distance (m)"),
     ("w_gap_distance",       1.00,  10.00,   float,  8.198,  "Gap scout distance reward weight"),
     ("w_gap_width",          0.20,   4.00,   float,  0.542,  "Gap scout aperture width reward weight"),
     ("w_gap_steer",          0.20,   4.00,   float,  1.805,  "Gap scout steering alignment penalty weight"),
@@ -145,7 +145,7 @@ OPTION_2_SL_MPC_GENE_SPECS: List[Tuple[str, float, float, type, float, str]] = [
     ("alt_switch_hysteresis",1.00,  50.00,   float, 18.330,  "MPC cost reduction threshold needed to switch lines"),
     ("w_gap_clear",          0.00,  50.00,   float, 13.997,  "Lookahead projection depth credit and clear gap weight in dual-line arbitration"),
     # Straight Quieting & Anti-Oscillation Adaptive Steering Response
-    ("aggr_dist_far_m",      1.72,   1.72,   float,  1.72,   "Forward clearance distance (m) to engage max straight quieting"),
+    ("aggr_dist_far_m",      2.30,   2.30,   float,  2.30,   "Forward clearance distance (m) to engage max straight quieting"),
     ("aggr_dist_close_m",    0.80,   1.30,   float,  1.042,  "Emergency distance threshold (m) below which 100% steering authority is engaged"),
     ("aggr_min_scale",       0.70,   1.00,   float,  0.719,  "Minimal steering authority scale on open straights"),
     ("steer_deadband_rad",   0.000,  0.005,  float,  0.002,  "Steering error deadband (rad) for sensor noise quieting"),
@@ -200,7 +200,11 @@ class BasePlannerGenome:
             if vtype is int:
                 val = int(round(val))
             elif vtype is float:
-                val = round(float(val), 3)
+                if min_v == max_v:
+                    # Preserve full precision for fixed physical constants (e.g. dt=0.016667, recovery_steer=0.5623)
+                    val = float(min_v)
+                else:
+                    val = round(float(val), 3)
             self.values[name] = vtype(val)
 
     def get_bounds(self) -> Tuple[np.ndarray, np.ndarray]:
@@ -262,65 +266,65 @@ def generate_logical_initial_population(
     archetypes = [
         # 0. Cyan Champion Calibrated Baseline
         {
-            "v_cruise_max": 5.50, "v_cruise_min": 1.223,
+            "v_cruise_max": 3.84, "v_cruise_min": 1.223,
             "horizon_N": 30, "dt": 0.016667,
-            "mu_friction": 0.85, "r_inflation_m": 0.075,
+            "mu_friction": 0.80, "r_inflation_m": 0.075,
             "q_progress": 15.0, "q_cte": 18.0, "q_heading": 8.0,
             "r_steer": 5.0, "r_accel": 2.0, "r_steer_rate": 10.0,
             "v_corner_factor": 0.95,
             "center_bias": 0.0,
-            "target_lookahead_m": 1.70, "w_gap_distance": 3.00, "w_gap_width": 1.50,
+            "target_lookahead_m": 2.30, "w_gap_distance": 3.00, "w_gap_width": 1.50,
             "w_gap_steer": 1.00, "w_gap_straight": 0.50,
             "w_side_clearance": 2.80,
             "gap_dist_exp_k": 0.60, "gap_dist_thresh_m": 0.95,
             "gap_latch_hysteresis": 1.25, "gap_latch_dist_m": 0.28,
             "alt_min_separation_m": 0.15, "alt_aperture_bias": 1.80, "alt_switch_hysteresis": 8.00,
             "w_gap_clear": 5.00,
-            "aggr_dist_far_m": 1.70, "aggr_dist_close_m": 1.00, "aggr_min_scale": 0.30,
+            "aggr_dist_far_m": 2.30, "aggr_dist_close_m": 1.00, "aggr_min_scale": 0.72,
             "steer_deadband_rad": 0.002,
-            "recovery_clearance_exit_m": 0.28, "recovery_steer_angle_rad": 0.5623,
+            "recovery_clearance_exit_m": 0.25, "recovery_steer_angle_rad": 0.5623,
             "recovery_arc_lookahead_m": 0.13,
         },
         # 1. High-Momentum Apex Striker
         {
-            "v_cruise_max": 5.50, "v_cruise_min": 1.50,
+            "v_cruise_max": 3.84, "v_cruise_min": 1.50,
             "horizon_N": 30, "dt": 0.016667,
-            "mu_friction": 0.88, "r_inflation_m": 0.075,
+            "mu_friction": 0.80, "r_inflation_m": 0.075,
             "q_progress": 18.0, "q_cte": 14.0, "q_heading": 6.0,
             "r_steer": 3.5, "r_accel": 1.5, "r_steer_rate": 8.0,
             "v_corner_factor": 0.95,
             "center_bias": 0.0,
-            "target_lookahead_m": 1.60, "w_gap_distance": 4.00, "w_gap_width": 1.80,
+            "target_lookahead_m": 2.30, "w_gap_distance": 4.00, "w_gap_width": 1.80,
             "w_gap_steer": 0.80, "w_gap_straight": 0.50,
             "w_side_clearance": 2.50,
             "gap_dist_exp_k": 0.70, "gap_dist_thresh_m": 0.95,
             "gap_latch_hysteresis": 1.10, "gap_latch_dist_m": 0.25,
             "alt_min_separation_m": 0.15, "alt_aperture_bias": 1.80, "alt_switch_hysteresis": 7.00,
             "w_gap_clear": 6.00,
-            "aggr_dist_far_m": 1.68, "aggr_dist_close_m": 1.10, "aggr_min_scale": 0.35,
+            "aggr_dist_far_m": 2.30, "aggr_dist_close_m": 1.10, "aggr_min_scale": 0.75,
             "steer_deadband_rad": 0.002,
-            "recovery_clearance_exit_m": 0.30, "recovery_steer_angle_rad": 0.5623,
+            "recovery_clearance_exit_m": 0.25, "recovery_steer_angle_rad": 0.5623,
             "recovery_arc_lookahead_m": 0.12,
         },
         # 2. Safe High-Clearance Sentinel
         {
-            "v_cruise_max": 4.80, "v_cruise_min": 1.15,
+            "v_cruise_max": 3.84, "v_cruise_min": 1.15,
             "horizon_N": 30, "dt": 0.016667,
-            "mu_friction": 0.82, "r_inflation_m": 0.080,
+            "mu_friction": 0.80, "r_inflation_m": 0.075,
             "q_progress": 10.0, "q_cte": 22.0, "q_heading": 10.0,
             "r_steer": 6.0, "r_accel": 2.5, "r_steer_rate": 12.0,
             "v_corner_factor": 0.90,
             "center_bias": 0.40,
-            "target_lookahead_m": 1.50, "w_gap_distance": 3.00, "w_gap_width": 2.20,
+            "target_lookahead_m": 2.30, "w_gap_distance": 3.00, "w_gap_width": 2.20,
             "w_gap_steer": 1.10, "w_gap_straight": 0.40,
             "w_side_clearance": 3.20,
             "gap_dist_exp_k": 0.50, "gap_dist_thresh_m": 0.98,
             "gap_latch_hysteresis": 1.50, "gap_latch_dist_m": 0.32,
             "alt_min_separation_m": 0.20, "alt_aperture_bias": 2.00, "alt_switch_hysteresis": 12.00,
             "w_gap_clear": 4.00,
-            "aggr_dist_far_m": 1.75, "aggr_dist_close_m": 1.20, "aggr_min_scale": 0.40,
+            "aggr_dist_far_m": 2.30, "aggr_dist_close_m": 1.20, "aggr_min_scale": 0.80,
             "steer_deadband_rad": 0.003,
-            "recovery_clearance_exit_m": 0.25, "recovery_steer_angle_rad": 0.550,
+            "recovery_clearance_exit_m": 0.25, "recovery_steer_angle_rad": 0.5623,
             "recovery_arc_lookahead_m": 0.15,
         },
     ]

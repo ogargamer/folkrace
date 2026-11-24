@@ -522,6 +522,7 @@ class StuckRecoveryManager:
         cached_tofs: Optional[Any] = None,
         is_left_pinned: Optional[bool] = None,
         is_right_pinned: Optional[bool] = None,
+        is_wrong_way: Optional[bool] = None,
         **kwargs,
     ):
         """Immediately engages recovery maneuver.
@@ -541,7 +542,7 @@ class StuckRecoveryManager:
         yaw_diff = 0.0
         if target_breadcrumb_yaw is not None:
             yaw_diff = wrap_to_pi(target_breadcrumb_yaw - current_yaw)
-            is_facing_wrong_way = abs(yaw_diff) > math.radians(75.0)
+            is_facing_wrong_way = bool(is_wrong_way) if is_wrong_way is not None else (abs(yaw_diff) > math.radians(75.0))
 
         # Front is considered open if clearance >= 0.22m and not pinned on both sides
         is_front_open = (d_front >= 0.22) and not (is_left_pinned and is_right_pinned)
@@ -661,6 +662,7 @@ class StuckRecoveryManager:
         current_yaw: float = 0.0,
         target_breadcrumb_yaw: Optional[float] = None,
         early_exit_available: bool = False,
+        is_wrong_way: Optional[bool] = None,
         **kwargs,
     ) -> Tuple[bool, float, float]:
         """Updates recovery state machine."""
@@ -699,7 +701,7 @@ class StuckRecoveryManager:
                 y_diff = 0.0
                 if target_breadcrumb_yaw is not None:
                     y_diff = wrap_to_pi(target_breadcrumb_yaw - current_yaw)
-                    is_facing_ww = abs(y_diff) > math.radians(75.0)
+                    is_facing_ww = bool(is_wrong_way) if is_wrong_way is not None else (abs(y_diff) > math.radians(75.0))
 
                 if is_facing_ww and tof.d_straight >= 0.22 and not (is_l_pinned and is_r_pinned):
                     arc_cl = self.evaluate_costmap_escape_arcs(hazard_mask, costmap_obj)

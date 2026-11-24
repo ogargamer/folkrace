@@ -24,8 +24,8 @@ class IMUEncoderFusion:
     def __init__(
         self,
         wheel_radius: float = 0.0275,
-        track_rear: float = 0.1000,
-        track_front: float = 0.0822,
+        track_rear: float = 0.1130,
+        track_front: float = 0.0980,
         wheelbase: float = 0.1325,
         dt: float = 1.0 / 120.0,
     ):
@@ -119,13 +119,17 @@ class IMUEncoderFusion:
         self,
         dt: Optional[float] = None,
         steer_rad: float = 0.0,
+        front_vtrq_avg: float = 0.0,
+        rear_vtrq_avg: float = 0.0,
     ) -> Tuple[float, float, float]:
         """
-        Executes one 120 Hz fusion cycle.
+        Executes one 120 Hz fusion cycle matching ESP32 sensor_fusion.cpp (4WD).
 
         Args:
             dt: Timestep duration (seconds)
             steer_rad: Current active steering angle of the front wheels (radians)
+            front_vtrq_avg: Average front-axle torque voltage command (V)
+            rear_vtrq_avg: Average rear-axle torque voltage command (V)
 
         Returns:
             Tuple[float, float, float]: (v_est [m/s], yaw_rate [rad/s], yaw [rad])
@@ -222,20 +226,22 @@ class IMUEncoderFusion:
         # Axle discrepancy
         axle_discrepancy = abs(v_front_avg - v_rear_avg)
 
-        # Robust wheel speed consensus:
-        # Outlier-rejected median of all 4 wheels (rejects single-wheel spin or lift)
+        # Reference wheel selection by torque sign (1:1 mirror of ESP32 sensor_fusion.cpp)
         all_wheel_estimates = sorted([v_rl_body, v_rr_body, v_fl_body, v_fr_body])
-        v_wheels_robust = 0.5 * (all_wheel_estimates[1] + all_wheel_estimates[2])
-        self.v_wheels = v_wheels_robust
+        v_trq_avg = 0.5 * (float(front_vtrq_avg) + float(rear_vtrq_avg))
+        if v_trq_avg > 0.35:
+            # Positive drive: 2nd-lowest (rejects rear spin + 1 faulty low outlier)
+            v_wheel_ref = all_wheel_estimates[1]
+        elif v_trq_avg < -0.35:
+            # Braking: 2nd-highest (rejects locking wheels + 1 faulty high outlier)
+            v_wheel_ref = all_wheel_estimates[2]
+        else:
+            # Coasting / light load: median of 4
+            v_wheel_ref = 0.5 * (all_wheel_estimates[1] + all_wheel_estimates[2])
+        self.v_wheels = v_wheel_ref
 
-        # 7. Inertial Prediction & Adaptive Slip Weighting
-        v_pred = self.v_est + self.a_forward * step_dt
-
-        # Crash Impact Check (handles both forward and reverse high-G impacts)
-        is_crash_impact = (abs(self.v_wheels) < 0.20 and abs(self.a_forward) > 20.0)
-
-        # Slip detection index [0.0, 1.0]
-        wheel_accel = (v_wheels_robust - self.v_est) / max(1e-4, step_dt)
+        # 7. Inertial Prediction & Torque/Slip-Gated Complementary Fusion
+        wheel_accel = (v_wheel_ref - self.v_est) / max(1e-4, step_dt)
         accel_mismatch = abs(wheel_accel - self.a_forward)
 
         slip_indicator = min(
@@ -246,21 +252,27 @@ class IMUEncoderFusion:
         )
         self.slip_ratio = float(slip_indicator)
 
-        # Standstill lock
-        if abs(self.v_wheels) < 0.02 and abs(self.a_forward) < 0.20:
+        min_axle_vtrq = min(abs(float(front_vtrq_avg)), abs(float(rear_vtrq_avg)))
+        max_axle_vtrq = max(abs(float(front_vtrq_avg)), abs(float(rear_vtrq_avg)))
+        trq_t = min(1.0, max(0.0, (min_axle_vtrq - 0.80) / (2.20 - 0.80)))
+        beta_trq = 0.20 - trq_t * (0.20 - 0.035)
+        beta_slip = 0.20 - 0.165 * slip_indicator
+        beta = min(beta_trq, beta_slip)
+
+        is_crash_impact = (abs(v_wheel_ref) < 0.20 and abs(self.a_forward) > 20.0)
+
+        if abs(v_wheel_ref) < 0.02 and abs(self.a_forward) < 0.20 and max_axle_vtrq < 0.50:
             self.v_est = 0.0
         elif is_crash_impact:
             self.v_est = 0.0
         else:
-            # Under clean traction, trust wheel encoders heavily (adaptive_alpha ~ 0.08)
-            # Under high slip / wheelspin, automatically shift weight to inertial prediction (adaptive_alpha ~ 0.85)
-            adaptive_alpha = 0.08 + 0.77 * slip_indicator
-
-            # Bound prediction within physical traction envelope
-            envelope_margin = 0.80 if slip_indicator < 0.30 else 1.50
-            v_pred_clamped = min(self.v_wheels + envelope_margin, max(self.v_wheels - envelope_margin, v_pred))
-
-            self.v_est = adaptive_alpha * v_pred_clamped + (1.0 - adaptive_alpha) * self.v_wheels
+            v_pred = self.v_est + self.a_forward * step_dt
+            envelope_margin = 1.50
+            v_pred_clamped = min(
+                v_wheel_ref + envelope_margin,
+                max(v_wheel_ref - envelope_margin, v_pred),
+            )
+            self.v_est = (1.0 - beta) * v_pred_clamped + beta * v_wheel_ref
 
         # Distance integration
         self.total_distance_m += self.v_est * step_dt

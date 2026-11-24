@@ -455,8 +455,8 @@ class CppCurvilinearSLMPC:
             d0 = math.hypot(targets[0][0] - act_x, targets[0][1] - act_y)
             d1 = math.hypot(targets[1][0] - act_x, targets[1][1] - act_y)
 
-            is_clear_0 = bool(targets[0][3]) if len(targets[0]) >= 4 else (math.hypot(targets[0][0], targets[0][1]) >= 1.60)
-            is_clear_1 = bool(targets[1][3]) if len(targets[1]) >= 4 else (math.hypot(targets[1][0], targets[1][1]) >= 1.60)
+            is_clear_0 = bool(targets[0][3]) if len(targets[0]) >= 4 else (math.hypot(targets[0][0], targets[0][1]) >= 2.20)
+            is_clear_1 = bool(targets[1][3]) if len(targets[1]) >= 4 else (math.hypot(targets[1][0], targets[1][1]) >= 2.20)
 
             # If target 1 is closer to our currently followed line, target 1 is Incumbent
             # UNLESS target 1 is blocked by an obstacle while target 0 is completely clear (1.8m opening).
@@ -476,7 +476,7 @@ class CppCurvilinearSLMPC:
                     alt_target = targets[1]
 
         tx_prim, ty_prim, ap_prim = prim_target[:3]
-        is_clear_prim = bool(prim_target[3]) if len(prim_target) >= 4 else (math.hypot(tx_prim, ty_prim) >= 1.60)
+        is_clear_prim = bool(prim_target[3]) if len(prim_target) >= 4 else (math.hypot(tx_prim, ty_prim) >= 2.20)
         theta_prim = math.atan2(tx_prim - x0, max(0.20, ty_prim - y0))
 
         t_opt_0 = time.perf_counter()
@@ -563,7 +563,7 @@ class CppCurvilinearSLMPC:
         # - Hard skip challenger if remaining budget < 3.2 ms to guarantee strict 60 Hz compliance.
         if alt_target is not None and hasattr(self, "_handle_alt") and self._handle_alt:
             tx_alt, ty_alt, ap_alt = alt_target[:3]
-            is_clear_alt = bool(alt_target[3]) if len(alt_target) >= 4 else (math.hypot(tx_alt, ty_alt) >= 1.60)
+            is_clear_alt = bool(alt_target[3]) if len(alt_target) >= 4 else (math.hypot(tx_alt, ty_alt) >= 2.20)
             min_sep = getattr(self, "alt_min_separation_m", 0.06)
             has_sep = (math.hypot(tx_alt - tx_prim, ty_alt - ty_prim) >= min_sep or abs(tx_alt - tx_prim) >= (min_sep * 0.7))
 

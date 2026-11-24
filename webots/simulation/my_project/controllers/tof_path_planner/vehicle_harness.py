@@ -46,13 +46,7 @@ for p in [CURR_DIR, CONTROLLERS_DIR, MY_PROJECT_DIR, REPO_ROOT]:
         sys.path.insert(0, p)
 
 from brain import AutonomousBrain
-from electronic_diff_4wd import (
-    ElectronicDifferential4WD,
-    SLIP_RATIO_ACCEL_MAX,
-    SLIP_RATIO_MIN_CORNER,
-    MIN_SLIP_LEAD_MPS,
-    ABS_MIN_SPEED_MPS,
-)
+from electronic_diff_4wd import ElectronicDifferential4WD
 from traction_drift_controller import TractionDriftController
 from cpp_smart_hybrid_costmap import CppSmartHybridCostmap
 from imu_encoder_fusion import IMUEncoderFusion
@@ -338,17 +332,19 @@ class FolkraceVehicle:
             hold_time_s=RAMP_HOLD_TIME_S,
         )
 
-        # Default Tuning Parameters
-        self.base_mu = 0.817
-        self.mu_val = self.base_mu
-        self.r_infl = R_INFLATION_M
-        self.target_lookahead_m = 2.40
-        self.aggr_dist_far = 2.40
-        self.aggr_dist_close = 1.00
-        self.aggr_min_scale = 0.30
-        self.steer_deadband = 0.002
-        self.v_cruise_min = V_MIN_CRUISE
-        self.v_cruise_max = V_MAX_CRUISE
+        # Default Tuning Parameters (inherited directly from AutonomousBrain / best_planner_genome.json)
+        self.base_mu = float(self.brain.base_mu)
+        self.mu_val = float(self.brain.mu_val)
+        self.r_infl = float(self.brain.r_infl)
+        self.target_lookahead_m = float(self.brain.target_lookahead_m)
+        self.aggr_dist_far = float(self.brain.aggr_dist_far)
+        self.aggr_dist_close = float(self.brain.aggr_dist_close)
+        self.aggr_min_scale = float(self.brain.aggr_min_scale)
+        self.steer_deadband = float(self.brain.steer_deadband)
+        self.v_cruise_min = float(self.brain.v_cruise_min)
+        self.v_cruise_max = float(self.brain.v_cruise_max)
+        self._last_front_vtrq_avg = 0.0
+        self._last_rear_vtrq_avg = 0.0
 
         # Dynamic State Tracking
         self.step_counter = 0
@@ -492,6 +488,8 @@ class FolkraceVehicle:
         self.x_est = float(start_pos[0]) if start_pos else 0.0
         self.y_est = float(start_pos[1]) if start_pos else 0.0
         self.yaw_est = 0.0
+        self._last_front_vtrq_avg = 0.0
+        self._last_rear_vtrq_avg = 0.0
 
         # Reset latency queues & pose history
         initial_tofs = {name: TOF_MAX_RANGE_M for name in TOF_SENSOR_NAMES}
@@ -715,7 +713,12 @@ class FolkraceVehicle:
 
         # 120 Hz IMU + 4-Wheel Encoder Sensor Fusion & Odometry Dead Reckoning
         active_steer = float(getattr(self.ediff, "current_steer_rad", self.active_steer))
-        v_fused, yaw_rate, yaw_fused = self.fusion.update(dt=dt, steer_rad=active_steer)
+        v_fused, yaw_rate, yaw_fused = self.fusion.update(
+            dt=dt,
+            steer_rad=active_steer,
+            front_vtrq_avg=self._last_front_vtrq_avg,
+            rear_vtrq_avg=self._last_rear_vtrq_avg,
+        )
         self.v_est = float(v_fused) if not (math.isnan(v_fused) or math.isinf(v_fused)) else 0.0
         self.cached_yaw_rate = float(yaw_rate) if not (math.isnan(yaw_rate) or math.isinf(yaw_rate)) else 0.0
         self.yaw_est = float(yaw_fused) if not (math.isnan(yaw_fused) or math.isinf(yaw_fused)) else 0.0
@@ -837,102 +840,23 @@ class FolkraceVehicle:
         # Rear Drive Alpha from Drift Traction Controller
         combined_alpha = drift_res["rear_alpha"]
 
-        # 5. Dynamic Friction Rate Limiter with Instant Crash Resynchronization
-        if override_speed is not None:
-            self.rate_limited_speed = float(override_speed)
+        # 5-6. ESP32-Matched Option A1 Speed Envelope, Ramp Ceiling & 4WD Electronic Differential
+        bypass_speed_envelope = override_speed is not None
+        if bypass_speed_envelope:
+            cmd_target_v = float(override_speed)
         else:
-            target_v = self.ediff.apply_traction_speed_cap(
-                self.cached_target_speed,
-                current_v=self.rate_limited_speed,
-                mu=self.mu_val,
-                target_steer_rad=effective_steer_cmd,
-                v_curr=self.v_est,
-            )
-            v_curr = self.v_est
+            cmd_target_v = float(self.cached_target_speed)
+            # Hardware Ramp Speed Governor (mirrors ESP32 main.cpp pitch >= 8 deg + brain hysteresis)
+            if ramp_res["is_on_ramp"] or abs(self.fusion.pitch_deg) >= RAMP_ENTER_PITCH_DEG:
+                ramp_cap = float(ramp_res["speed_limit"])
+                if cmd_target_v > 0.0:
+                    cmd_target_v = min(cmd_target_v, ramp_cap)
+                elif cmd_target_v < 0.0:
+                    cmd_target_v = max(cmd_target_v, -ramp_cap)
 
-            # Ramp Speed Governor: enforce speed limit (e.g. 2.0 m/s) when traversing ramps/inclines
-            if ramp_res["is_on_ramp"]:
-                ramp_cap = ramp_res["speed_limit"]
-                if target_v > 0.0:
-                    target_v = min(target_v, ramp_cap)
-                elif target_v < 0.0:
-                    target_v = max(target_v, -ramp_cap)
-
-            # Combined-slip friction circle from true lateral utilization (measured & predicted)
-            accel_long_frac, brake_long_frac = self.ediff.compute_friction_circle_budgets(
-                v_curr=v_curr,
-                rate_limited_v=self.rate_limited_speed,
-                gyro_z_rad_s=live_gyro_z,
-                steer_rad=self.ediff.current_steer_rad,
-                mu=self.mu_val,
-            )
-
-            # Dynamic Acceleration Limits based on mu and combined-slip lateral reserve
-            dt_lag = TOTAL_LATENCY_STEPS * dt
-            a_limit_base = min(ACCEL_FWD_MAX, ACCEL_FWD_RATIO * self.mu_val * GRAVITY_G)
-            d_limit_base = min(BRAKE_DECEL_MAX, BRAKE_DECEL_RATIO * self.mu_val * GRAVITY_G)
-            a_limit = a_limit_base * accel_long_frac
-            d_limit = d_limit_base * brake_long_frac
-
-            accel_scale, decel_scale = self.ediff.get_slip_accel_decel_scales()
-            effective_a_limit = a_limit * accel_scale
-            effective_d_limit = d_limit * decel_scale
-
-            # Dynamic Slip Envelope referencing physical latency & peak tire slip
-            slip_ratio_base = min(SLIP_RATIO_ACCEL_MAX, max(0.08, 0.10 * (a_limit_base / GRAVITY_G)))
-            slip_ratio_accel = max(SLIP_RATIO_MIN_CORNER, slip_ratio_base * accel_long_frac)
-            slip_ratio_brake = max(SLIP_RATIO_MIN_CORNER, slip_ratio_base * brake_long_frac)
-            max_slip_lead = max(MIN_SLIP_LEAD_MPS, (effective_a_limit * dt_lag) + (slip_ratio_accel * abs(v_curr)))
-            max_brake_slip_lag = (effective_d_limit * dt_lag) + (slip_ratio_brake * abs(v_curr))
-            nominal_slip_lead = (a_limit_base * dt_lag) + (slip_ratio_base * abs(v_curr))
-
-            # Harmonized Instant Wall Hit / Collision Resync:
-            # Preserves motor acceleration lead within tractive slip envelope, snapping immediately to v_curr
-            # only if vehicle collides and decelerates abruptly below its dynamic slip envelope.
-            collision_threshold = nominal_slip_lead + 0.15
-            if self.rate_limited_speed >= 0.0:
-                if v_curr < self.rate_limited_speed - collision_threshold:
-                    self.rate_limited_speed = v_curr
-            else:
-                if v_curr > self.rate_limited_speed + collision_threshold:
-                    self.rate_limited_speed = v_curr
-
-            # When requesting deceleration or reverse, command must not stay higher than actual speed
-            if target_v <= v_curr:
-                if self.rate_limited_speed > v_curr:
-                    self.rate_limited_speed = v_curr
-            # When requesting acceleration forward, command must not stay lower than actual speed
-            elif target_v >= v_curr:
-                if self.rate_limited_speed < v_curr:
-                    self.rate_limited_speed = v_curr
-
-            speed_err = target_v - self.rate_limited_speed
-            is_accel = (self.rate_limited_speed >= 0.0 and speed_err > 0.0) or (self.rate_limited_speed <= 0.0 and speed_err < 0.0)
-
-            if is_accel:
-                max_dv = effective_a_limit * dt
-            else:
-                max_dv = effective_d_limit * dt
-
-            if abs(speed_err) <= max_dv:
-                self.rate_limited_speed = target_v
-            else:
-                self.rate_limited_speed += math.copysign(max_dv, speed_err)
-
-            # Dynamic Traction Slip Envelope Clamping (Accel TCS + Brake ABS Floor)
-            if self.rate_limited_speed > 0.0:
-                self.rate_limited_speed = min(self.rate_limited_speed, max(0.0, v_curr) + max_slip_lead)
-                if v_curr > ABS_MIN_SPEED_MPS:
-                    self.rate_limited_speed = max(self.rate_limited_speed, v_curr - max_brake_slip_lag)
-            elif self.rate_limited_speed < 0.0:
-                self.rate_limited_speed = max(self.rate_limited_speed, min(0.0, v_curr) - max_slip_lead)
-                if v_curr < -ABS_MIN_SPEED_MPS:
-                    self.rate_limited_speed = min(self.rate_limited_speed, v_curr + max_brake_slip_lag)
-
-        # 6. Electronic Differential & Ground-Roll Clamped Actuation
         is_drift_active = (drift_res.get("mode", "GRIP") != "GRIP") or bool(drift_res.get("is_stabilizing", False))
         diff_res = self.ediff.update(
-            target_v=self.rate_limited_speed,
+            target_v=cmd_target_v,
             target_steer_rad=effective_steer_cmd,
             gyro_z_rad_s=live_gyro_z,
             dt=dt,
@@ -942,7 +866,11 @@ class FolkraceVehicle:
             is_drifting=is_drift_active,
             mu=self.mu_val,
             v_curr=self.v_est,
+            bypass_speed_envelope=bypass_speed_envelope,
         )
+        self.rate_limited_speed = float(diff_res["rate_limited_v"])
+        self._last_front_vtrq_avg = 0.5 * (float(diff_res["vtrq_ff_FL"]) + float(diff_res["vtrq_ff_FR"]))
+        self._last_rear_vtrq_avg = 0.5 * (float(diff_res["vtrq_ff_RL"]) + float(diff_res["vtrq_ff_RR"]))
 
         # 7. Apply Actuator Commands
         if self.servos.get("left"):

@@ -975,7 +975,7 @@ def run_ga_worker(robot: any, vehicle: FolkraceVehicle) -> None:
 
         total_dist = float(track_tracker.total_progress_m)
         mean_speed = float(np.mean(true_speeds)) if true_speeds else 0.0
-        mean_speed = max(0.0, min(5.50, mean_speed))
+        mean_speed = max(0.0, min(V_MAX_CRUISE, mean_speed))
 
         if math.isnan(total_dist) or total_dist <= 0.10:
             total_dist = 0.0

@@ -308,7 +308,7 @@ class ToFGapScout:
 
                 # Aperture estimation around this beam
                 aperture_m = max(GAP_MIN_WIDTH_M, min(1.20, total_dist * 0.35))
-                is_clear = (not hit_obs) and (raw_z >= 1.79 or total_dist >= (max_lookahead_m - 0.05))
+                is_clear = (not hit_obs) and (raw_z >= (max_range - 0.01) or total_dist >= (max_lookahead_m - 0.05))
                 candidates.append({
                     "tx": tx, "ty": ty, "dist": total_dist,
                     "aperture": aperture_m, "steer_equiv": steer_equiv,
