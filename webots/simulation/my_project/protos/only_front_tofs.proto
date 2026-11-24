@@ -11,6 +11,11 @@ PROTO only_front_tofs [
   field SFString   customData      ""
   field SFBool     supervisor      TRUE
   field SFBool     synchronization TRUE
+  field SFFloat    bodyMass        0.6
+  field SFFloat    wheelMass       0.1
+  field SFFloat    motorMaxTorque  0.3
+  field SFFloat    motorMaxVel     139.64
+  field SFColor    badgeColor      0.0 0.9 1.0
 ]
 {
   Robot {
@@ -30,8 +35,8 @@ PROTO only_front_tofs [
         device [
           RotationalMotor {
             name "motor RL"
-            maxVelocity 139.64
-            maxTorque 0.3
+            maxVelocity IS motorMaxVel
+            maxTorque IS motorMaxTorque
           }
           PositionSensor {
             name "encoder RL"
@@ -62,7 +67,7 @@ PROTO only_front_tofs [
           }
           physics Physics {
             density -1
-            mass 0.1
+            mass IS wheelMass
           }
         }
       }
@@ -73,8 +78,8 @@ PROTO only_front_tofs [
         device [
           RotationalMotor {
             name "motor RR"
-            maxVelocity 139.64
-            maxTorque 0.3
+            maxVelocity IS motorMaxVel
+            maxTorque IS motorMaxTorque
           }
           PositionSensor {
             name "encoder RR"
@@ -105,7 +110,7 @@ PROTO only_front_tofs [
           }
           physics Physics {
             density -1
-            mass 0.1
+            mass IS wheelMass
           }
         }
       }
@@ -137,8 +142,8 @@ PROTO only_front_tofs [
         device2 [
           RotationalMotor {
             name "motor FR"
-            maxVelocity 139.64
-            maxTorque 0.3
+            maxVelocity IS motorMaxVel
+            maxTorque IS motorMaxTorque
           }
           PositionSensor {
             name "encoder FR"
@@ -169,7 +174,7 @@ PROTO only_front_tofs [
           }
           physics Physics {
             density -1
-            mass 0.1
+            mass IS wheelMass
           }
         }
       }
@@ -201,8 +206,8 @@ PROTO only_front_tofs [
         device2 [
           RotationalMotor {
             name "motor FL"
-            maxVelocity 139.64
-            maxTorque 0.3
+            maxVelocity IS motorMaxVel
+            maxTorque IS motorMaxTorque
           }
           PositionSensor {
             name "encoder FL"
@@ -234,7 +239,7 @@ PROTO only_front_tofs [
           }
           physics Physics {
             density -1
-            mass 0.1
+            mass IS wheelMass
           }
         }
       }
@@ -268,6 +273,23 @@ PROTO only_front_tofs [
           }
         ]
         rotationStep 0
+      }
+      # Upper body shell (strictly behind y=+0.075 to avoid self-occlusion of front Lidars at y=+0.090,
+      # spanning z_local=[0.010, 0.095] across the z_local=0.0275 ToF plane so other robots' Lidars see it)
+      Pose {
+        translation 0 -0.0075 0.0525
+        children [
+          Shape {
+            appearance PBRAppearance {
+              baseColor IS badgeColor
+              roughness 0.4
+              metalness 0.1
+            }
+            geometry Box {
+              size 0.136 0.165 0.085
+            }
+          }
+        ]
       }
       # Front Left ToF 3 (FOV midpoint 1.1deg, outer edge 4.5deg outwards)
       Lidar {
@@ -477,34 +499,34 @@ PROTO only_front_tofs [
     boundingObject Group {
       children [
         Pose {
-          translation 0 0.101 0.015
+          translation 0 0.101 0.018
           children [
             Box {
-              size 0.15 0.004 0.025
+              size 0.15 0.004 0.034
             }
           ]
         }
         Pose {
-          translation 0 -0.0995 0.015
+          translation 0 -0.0995 0.018
           children [
             Box {
-              size 0.15 0.001 0.025
+              size 0.15 0.001 0.034
             }
           ]
         }
         Pose {
-          translation -0.072 0 0.015
+          translation -0.072 0 0.018
           children [
             Box {
-              size 0.006 0.198 0.025
+              size 0.006 0.198 0.034
             }
           ]
         }
         Pose {
-          translation 0.072 0 0.015
+          translation 0.072 0 0.018
           children [
             Box {
-              size 0.006 0.198 0.025
+              size 0.006 0.198 0.034
             }
           ]
         }
@@ -521,7 +543,7 @@ PROTO only_front_tofs [
     }
     physics Physics {
       density -1
-      mass 0.6
+      mass IS bodyMass
       centerOfMass [
         0 0 -0.005
       ]

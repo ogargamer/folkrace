@@ -914,6 +914,7 @@ def run_ga_worker(robot: any, vehicle: FolkraceVehicle) -> None:
         crash_reason = "none"
         stalled = False
         stall_duration_s = 0.0
+        opponent_contacts = 0
         true_speeds = []
 
         total_steps = int(math.ceil(duration_s / DT))
@@ -944,14 +945,22 @@ def run_ga_worker(robot: any, vehicle: FolkraceVehicle) -> None:
                     crash_reason = "wall_collision"
                     break
 
-            # 2. Check Dynamic Obstacle Collisions
+            # 2. Dynamic Opponent Contacts / Legacy Cylinder Collisions
             for ox, oy in obs_positions:
                 d_obs = math.hypot(gx - ox, gy - oy)
-                if d_obs < 0.12:
+                if d_obs < 0.18:
+                    opponent_contacts += 1
+                if not obs_manager.is_physical_robots and d_obs < 0.12:
                     crashed = True
                     crash_reason = "obstacle_collision"
                     break
             if crashed:
+                break
+
+            # 2b. Check Flip / Rollover
+            if abs(vehicle.fusion.roll_deg) > 70.0 or abs(vehicle.fusion.pitch_deg) > 70.0:
+                crashed = True
+                crash_reason = "flipped"
                 break
 
             # 3. Check Off-Track
@@ -972,6 +981,7 @@ def run_ga_worker(robot: any, vehicle: FolkraceVehicle) -> None:
         for m in vehicle.motors.values():
             if m:
                 m.setVelocity(0.0)
+        obs_manager.set_paused(True)
 
         total_dist = float(track_tracker.total_progress_m)
         mean_speed = float(np.mean(true_speeds)) if true_speeds else 0.0
@@ -992,6 +1002,7 @@ def run_ga_worker(robot: any, vehicle: FolkraceVehicle) -> None:
             "crashed": bool(crashed),
             "crash_reason": crash_reason,
             "stalled": bool(stalled),
+            "opponent_contacts": int(opponent_contacts),
             "obstacle_speed_mps": float(obstacle_speed_mps),
         }
         trial_metrics["compute_multiplier"] = round(compute_efficiency_multiplier(gene_dict), 4)
@@ -1104,11 +1115,134 @@ def run_ga_worker(robot: any, vehicle: FolkraceVehicle) -> None:
 
 
 # ==============================================================================
+# MODE 4: PHYSICAL OPPONENT ROBOT DRIVER (FROZEN RIVAL PROFILES)
+# ==============================================================================
+OPPONENT_PROFILES: Dict[str, Dict[str, Any]] = {
+    "opponent_fast_light": {
+        "planner_decimation": 2,  # 60 Hz
+        "genes": {
+            "v_cruise_max": 2.65,
+            "v_cruise_min": 1.05,
+            "mu_friction": 0.78,
+            "center_bias": 0.15,
+        },
+    },
+    "opponent_reactive_light": {
+        "planner_decimation": 4,  # 30 Hz
+        "genes": {
+            "v_cruise_max": 2.15,
+            "v_cruise_min": 0.95,
+            "mu_friction": 0.72,
+            "r_steer_rate": 8.0,
+            "center_bias": 0.05,
+        },
+    },
+    "opponent_heavy_tank": {
+        "planner_decimation": 4,  # 30 Hz
+        "genes": {
+            "v_cruise_max": 1.25,
+            "v_cruise_min": 0.65,
+            "mu_friction": 0.80,
+            "v_corner_factor": 0.72,
+            "center_bias": 0.40,
+        },
+    },
+}
+
+
+def run_opponent_driver(robot: any, role: str) -> None:
+    """Runs a frozen, lightweight autonomous controller for a physical opponent robot."""
+    profile = OPPONENT_PROFILES.get(role, OPPONENT_PROFILES["opponent_reactive_light"])
+    base_genes: Dict[str, Any] = {}
+    best_path = os.path.join(GA_OPTIMIZER_DIR, "best_planner_genome.json")
+    if os.path.exists(best_path):
+        try:
+            with open(best_path, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            base_genes = dict(cfg.get("genes") or cfg.get("best_genome") or {})
+        except Exception:
+            base_genes = {}
+
+    frozen_genes = {**base_genes, **profile["genes"]}
+    base_v_max = float(frozen_genes.get("v_cruise_max", 2.0))
+    decim = int(profile.get("planner_decimation", 2))
+
+    vehicle = FolkraceVehicle(
+        robot,
+        is_supervisor=False,
+        genes=frozen_genes,
+        planner_decimation=decim,
+    )
+    print(
+        f"[Opponent:{role}] Active (decim={decim}, v_max={base_v_max:.2f} m/s, "
+        f"mu={frozen_genes.get('mu_friction', 0.8):.2f})",
+        flush=True,
+    )
+
+    last_custom = ""
+    last_trial = -1
+    paused = False
+
+    while robot.step(STEP_MS_INT) != -1:
+        raw_custom = ""
+        if hasattr(robot, "getCustomData"):
+            try:
+                raw_custom = robot.getCustomData() or ""
+            except Exception:
+                raw_custom = ""
+
+        if raw_custom and raw_custom != last_custom:
+            last_custom = raw_custom
+            try:
+                msg = json.loads(raw_custom)
+                paused = bool(msg.get("paused", False))
+                trial_id = int(msg.get("trial", -1))
+                is_rev = bool(msg.get("reverse", False))
+                speed_scale = max(0.2, min(1.5, float(msg.get("speed_scale", 1.0))))
+                if trial_id != last_trial:
+                    last_trial = trial_id
+                    vehicle.reset()
+                    for m in vehicle.motors.values():
+                        if m:
+                            m.setPosition(float("inf"))
+                            m.setVelocity(0.0)
+                    for s in vehicle.servos.values():
+                        if s:
+                            s.setPosition(0.0)
+                    scaled_v = max(0.60, min(V_MAX_CRUISE, base_v_max * speed_scale))
+                    vehicle.v_cruise_max = scaled_v
+                    vehicle.brain.v_cruise_max = scaled_v
+                    vehicle.planner.v_cruise_max = scaled_v
+                    vehicle.watchdog.set_mode("DISABLED" if is_rev else "OPTION_1_BREADCRUMB")
+            except Exception:
+                pass
+
+        if paused:
+            for m in vehicle.motors.values():
+                if m:
+                    m.setVelocity(0.0)
+            continue
+
+        vehicle.step(dt=DT, full_telemetry=False)
+
+
+# ==============================================================================
 # ENTRY POINT
 # ==============================================================================
 def main():
     if not WEBOTS_AVAILABLE:
         print("[ToF Controller] Error: Webots Python API not found.", flush=True)
+        return
+
+    # Check controllerArgs BEFORE env vars: Webots passes worker env vars to all 4 robots!
+    opp_role = None
+    for arg in sys.argv[1:]:
+        if arg in OPPONENT_PROFILES or arg.startswith("opponent_"):
+            opp_role = arg
+            break
+    if opp_role is not None:
+        robot = Robot()
+        run_opponent_driver(robot, opp_role)
         return
 
     # Use Supervisor if available, falling back to Robot

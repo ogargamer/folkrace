@@ -7,6 +7,8 @@
 ================================================================================
 """
 
+import json
+import math
 import os
 from typing import Dict, List, Optional, Tuple
 import numpy as np
@@ -71,7 +73,7 @@ class ReverseObstacleEngine:
 
 
 class MovingObstacleManager:
-    """Manages Webots solid nodes representing dynamic moving obstacles."""
+    """Manages Webots opponent robots (physical) or legacy solid cylinders."""
 
     def __init__(
         self,
@@ -95,18 +97,56 @@ class MovingObstacleManager:
             obstacle_names = ["MOVING_OBSTACLE", "MOVING_OBSTACLE_2", "MOVING_OBSTACLE_3"]
         self.obstacle_names = obstacle_names
         self.obs_nodes = []
+        self.opponent_robots: List[Dict[str, any]] = []
+        self.is_physical_robots: bool = False
+        self._reset_counter: int = 0
         self.current_s: List[float] = []
         self.last_sim_time_s = 0.0
 
         if hasattr(robot, "getFromDef"):
             for name in self.obstacle_names:
                 node = robot.getFromDef(name)
-                if node:
-                    field = node.getField("translation")
-                    if field:
-                        self.obs_nodes.append(field)
+                if not node:
+                    continue
+                trans_field = node.getField("translation")
+                ctrl_field = node.getField("controller")
+                if ctrl_field is not None and trans_field is not None:
+                    self.is_physical_robots = True
+                    rot_field = node.getField("rotation")
+                    custom_field = node.getField("customData")
+                    spawn_pos = list(trans_field.getSFVec3f())
+                    spawn_rot = list(rot_field.getSFRotation()) if rot_field else [0.0, 0.0, 1.0, 0.0]
 
-        self._init_positions()
+                    wheel_nodes = []
+                    try:
+                        children = node.getField("children")
+                        if children:
+                            for i in range(children.getCount()):
+                                child = children.getMFNode(i)
+                                if child and child.getTypeName() in ("HingeJoint", "Hinge2Joint"):
+                                    ep = child.getField("endPoint")
+                                    if ep:
+                                        ep_node = ep.getSFNode()
+                                        if ep_node:
+                                            wheel_nodes.append(ep_node)
+                    except Exception:
+                        pass
+
+                    self.opponent_robots.append({
+                        "def_name": name,
+                        "node": node,
+                        "trans": trans_field,
+                        "rot": rot_field,
+                        "custom": custom_field,
+                        "spawn_pos": spawn_pos,
+                        "spawn_rot": spawn_rot,
+                        "wheel_nodes": wheel_nodes,
+                    })
+                elif trans_field is not None:
+                    self.obs_nodes.append(trans_field)
+
+        if not self.is_physical_robots:
+            self._init_positions()
 
     @property
     def speed_mps(self) -> float:
@@ -119,6 +159,7 @@ class MovingObstacleManager:
             self.direction = -1
             self._speed_mps = abs(v)
         else:
+            self.direction = 1
             self._speed_mps = v
 
     def _init_positions(self) -> None:
@@ -142,7 +183,65 @@ class MovingObstacleManager:
         self.direction = -self.direction
         return self.direction
 
+    def set_paused(self, paused: bool) -> None:
+        """Signals physical opponent robots to pause or resume controller execution."""
+        if not self.is_physical_robots:
+            return
+        for idx, opp in enumerate(self.opponent_robots):
+            custom_field = opp.get("custom")
+            if custom_field is None:
+                continue
+            is_rev = (self.direction < 0) and (idx in (1, 2))
+            payload = {
+                "trial": self._reset_counter,
+                "paused": bool(paused),
+                "reverse": bool(is_rev),
+                "speed_scale": max(0.2, min(1.5, float(self._speed_mps))),
+            }
+            try:
+                custom_field.setSFString(json.dumps(payload))
+            except Exception:
+                pass
+
     def reset(self) -> None:
+        if self.is_physical_robots:
+            self._reset_counter += 1
+            speed_scale = max(0.2, min(1.5, float(self._speed_mps)))
+            for idx, opp in enumerate(self.opponent_robots):
+                is_rev = (self.direction < 0) and (idx in (1, 2))
+                try:
+                    opp["trans"].setSFVec3f(list(opp["spawn_pos"]))
+                    if opp["rot"] is not None:
+                        rot = list(opp["spawn_rot"])
+                        if is_rev:
+                            yaw = float(rot[3]) * (1.0 if rot[2] >= 0.0 else -1.0)
+                            yaw_rev = math.atan2(math.sin(yaw + math.pi), math.cos(yaw + math.pi))
+                            rot = [0.0, 0.0, 1.0, yaw_rev]
+                        opp["rot"].setSFRotation(rot)
+                    opp["node"].setVelocity([0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+                    opp["node"].resetPhysics()
+                    for wn in opp["wheel_nodes"]:
+                        try:
+                            wn.setVelocity([0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+                            wn.resetPhysics()
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+                if opp["custom"] is not None:
+                    payload = {
+                        "trial": self._reset_counter,
+                        "paused": False,
+                        "reverse": bool(is_rev),
+                        "speed_scale": speed_scale,
+                    }
+                    try:
+                        opp["custom"].setSFString(json.dumps(payload))
+                    except Exception:
+                        pass
+            return
+
         self._init_positions()
         if len(self.obs_nodes) > 0 and self.engine.total_length > 0:
             for k, field in enumerate(self.obs_nodes):
@@ -150,6 +249,16 @@ class MovingObstacleManager:
                 field.setSFVec3f([float(ox), float(oy), self.elevation_z])
 
     def update(self, sim_time_s: float) -> List[Tuple[float, float]]:
+        if self.is_physical_robots:
+            positions: List[Tuple[float, float]] = []
+            for opp in self.opponent_robots:
+                try:
+                    pos = opp["trans"].getSFVec3f()
+                    positions.append((float(pos[0]), float(pos[1])))
+                except Exception:
+                    pass
+            return positions
+
         positions = []
         n_obs = len(self.obs_nodes)
         if n_obs > 0 and self.engine.total_length > 0:

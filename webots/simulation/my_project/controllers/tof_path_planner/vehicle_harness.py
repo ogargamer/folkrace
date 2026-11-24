@@ -187,9 +187,16 @@ class FolkraceVehicle:
     pipeline (120 Hz physics / 60 Hz SL-MPC) for the Folkrace vehicle.
     """
 
-    def __init__(self, robot: Any, is_supervisor: bool = False, genes: Optional[Dict[str, Any]] = None):
+    def __init__(
+        self,
+        robot: Any,
+        is_supervisor: bool = False,
+        genes: Optional[Dict[str, Any]] = None,
+        planner_decimation: int = PLANNER_DECIMATION,
+    ):
         self.robot = robot
         self.is_supervisor = is_supervisor
+        self.planner_decimation = max(1, int(planner_decimation))
         self.robot_node = robot.getSelf() if (is_supervisor and hasattr(robot, "getSelf")) else None
         self._trans_field = self.robot_node.getField("translation") if (self.is_supervisor and self.robot_node) else None
         self._rot_field = self.robot_node.getField("rotation") if (self.is_supervisor and self.robot_node) else None
@@ -204,10 +211,15 @@ class FolkraceVehicle:
             "RL": robot.getDevice("motor RL"),
             "RR": robot.getDevice("motor RR"),
         }
-        for m in self.motors.values():
+        self.motor_max_vel: Dict[str, float] = {}
+        for k, m in self.motors.items():
             if m:
                 m.setPosition(float("inf"))
                 m.setVelocity(0.0)
+                try:
+                    self.motor_max_vel[k] = float(m.getMaxVelocity())
+                except Exception:
+                    self.motor_max_vel[k] = 139.64
 
         self.servos = {
             "left": robot.getDevice("servo left"),
@@ -381,7 +393,7 @@ class FolkraceVehicle:
 
         # Hardware Latency Buffers (1-step 60 Hz ToF delay = 16.67 ms + 1-step 120 Hz actuator lag = 8.33 ms)
         initial_tofs = {name: TOF_MAX_RANGE_M for name in TOF_SENSOR_NAMES}
-        tof_queue_steps = max(1, int(round(TOF_LATENCY_STEPS / max(1, PLANNER_DECIMATION))))
+        tof_queue_steps = max(1, int(round(TOF_LATENCY_STEPS / max(1, self.planner_decimation))))
         self.tof_queue = LatencyQueue(steps=tof_queue_steps, default_val=initial_tofs)
         start_x = float(self.x_est)
         start_y = float(self.y_est)
@@ -452,10 +464,15 @@ class FolkraceVehicle:
                 except Exception:
                     pass
 
-        for m in self.motors.values():
+        self.motor_max_vel: Dict[str, float] = {}
+        for k, m in self.motors.items():
             if m:
                 m.setPosition(float("inf"))
                 m.setVelocity(0.0)
+                try:
+                    self.motor_max_vel[k] = float(m.getMaxVelocity())
+                except Exception:
+                    self.motor_max_vel[k] = 139.64
         for s in self.servos.values():
             if s:
                 s.setPosition(0.0)
@@ -735,8 +752,8 @@ class FolkraceVehicle:
         planner_ran = False
         tof_readings = self.last_tofs
 
-        # Closed-loop Control Tick (60 Hz Pi/ToF with Decimation = 2 on 120 Hz ESP/physics)
-        if self.step_counter % PLANNER_DECIMATION == 0:
+        # Closed-loop Control Tick (60 Hz Pi/ToF with configurable decimation on 120 Hz ESP/physics)
+        if self.step_counter % self.planner_decimation == 0:
             planner_ran = True
             raw_tofs = self.read_tof_sensors()
             tof_readings = self.tof_queue.update(raw_tofs)
@@ -748,7 +765,7 @@ class FolkraceVehicle:
         )
         self.cached_f_tof = f_tof
 
-        if self.step_counter % PLANNER_DECIMATION == 0:
+        if self.step_counter % self.planner_decimation == 0:
             gx_curr, gy_curr, gyaw_curr = self.get_ground_truth_pose()
             current_physical_steer = float(getattr(self.ediff, "current_steer_rad", self.active_steer))
             target_speed, target_steer, brain_telem = self.brain.step(
@@ -756,7 +773,7 @@ class FolkraceVehicle:
                 v_est=self.v_est,
                 steer_actual_rad=current_physical_steer,
                 gyro_z_rad_s=self.cached_yaw_rate,
-                dt=dt * PLANNER_DECIMATION,
+                dt=dt * self.planner_decimation,
                 sim_time_s=sim_time,
                 ground_truth_pose=None,  # Zero ground truth: test watchdog on dead-reckoned odometry matching Pi 4
                 full_telemetry=full_telemetry,
@@ -878,14 +895,12 @@ class FolkraceVehicle:
         if self.servos.get("right"):
             self.servos["right"].setPosition(diff_res["steer_right"])
 
-        if self.motors.get("FL"):
-            self.motors["FL"].setVelocity(diff_res["omega_FL"])
-        if self.motors.get("FR"):
-            self.motors["FR"].setVelocity(diff_res["omega_FR"])
-        if self.motors.get("RL"):
-            self.motors["RL"].setVelocity(diff_res["omega_RL"])
-        if self.motors.get("RR"):
-            self.motors["RR"].setVelocity(diff_res["omega_RR"])
+        for k, omega_key in (("FL", "omega_FL"), ("FR", "omega_FR"), ("RL", "omega_RL"), ("RR", "omega_RR")):
+            m = self.motors.get(k)
+            if m:
+                lim = self.motor_max_vel.get(k, 139.64)
+                w_cmd = max(-lim, min(lim, float(diff_res[omega_key])))
+                m.setVelocity(w_cmd)
 
 
         # 8. Assemble Telemetry Payload (Full for GUI / Lean for headless GA)
