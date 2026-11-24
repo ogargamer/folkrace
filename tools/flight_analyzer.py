@@ -6,7 +6,7 @@
   ASCII top-down ToF/MPC radar rendering, A/B run comparison, and ML/AI export.
 
   Backward-compatible with both v1 (32-col frames) and v2 (40-col + events/labels)
-  SQLite flight databases produced by pi4/debug_recorder.py.
+  SQLite flight databases produced by 2_pi4/debug_recorder.py.
 ================================================================================
 """
 
@@ -26,7 +26,7 @@ import numpy as np
 
 TOOLS_DIR = Path(__file__).resolve().parent
 ROOT_DIR = TOOLS_DIR.parent
-PI4_DIR = ROOT_DIR / "pi4"
+PI4_DIR = ROOT_DIR / "2_pi4"
 DOWNLOADS_DIR = Path.home() / "Downloads"
 RECORDINGS_DIR = ROOT_DIR / "data" / "recordings"
 AI_EXPORTS_DIR = ROOT_DIR / "data" / "ai_exports"

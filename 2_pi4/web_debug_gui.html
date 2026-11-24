@@ -1,0 +1,4578 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Folkrace Pi 4 — Real-Time Tactical Debugger & Flight Studio</title>
+  <style>
+    :root {
+      --bg-dark: #0b0e14;
+      --card-bg: #131720;
+      --border-color: #262c36;
+      --text-primary: #e6edf3;
+      --text-secondary: #8b949e;
+      --accent-cyan: #00e5ff;
+      --accent-gold: #ffd600;
+      --accent-green: #00e676;
+      --accent-red: #ff3d00;
+      --accent-purple: #e040fb;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background-color: var(--bg-dark);
+      color: var(--text-primary);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Consolas, monospace;
+      font-size: 13px;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    header {
+      background-color: var(--card-bg);
+      border-bottom: 1px solid var(--border-color);
+      padding: 8px 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      height: 48px;
+    }
+
+    .header-title {
+      font-size: 15px;
+      font-weight: 700;
+      color: var(--accent-cyan);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .header-badges {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+    }
+
+    .badge {
+      padding: 3px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 700;
+      background: #1c212c;
+      border: 1px solid var(--border-color);
+    }
+
+    .badge-core {
+      color: #58a6ff;
+      border-color: #1f6feb;
+    }
+
+    .badge-live {
+      color: #00e676;
+      border-color: #00c853;
+    }
+
+    .badge-replay {
+      color: #ffd600;
+      border-color: #ffab00;
+    }
+
+    .badge-slip {
+      color: #ff1744;
+      border-color: #d50000;
+    }
+
+    .main-content {
+      display: flex;
+      flex: 1;
+      overflow: hidden;
+      padding: 10px;
+      gap: 10px;
+    }
+
+    .canvas-panel {
+      flex: 6;
+      background-color: var(--card-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      position: relative;
+    }
+
+    .canvas-header {
+      padding: 6px 12px;
+      border-bottom: 1px solid var(--border-color);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 11px;
+      color: var(--text-secondary);
+    }
+
+    #radarCanvas {
+      flex: 1;
+      width: 100%;
+      height: 100%;
+      cursor: crosshair;
+    }
+
+    .side-panel {
+      flex: 5;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      overflow-y: auto;
+    }
+
+    .card {
+      background-color: var(--card-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      padding: 10px 12px;
+    }
+
+    .card-title {
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--accent-cyan);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 8px;
+      display: flex;
+      justify-content: space-between;
+    }
+
+    .gauge-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+
+    .gauge-box {
+      background: #0d1117;
+      border: 1px solid var(--border-color);
+      border-radius: 4px;
+      padding: 6px 8px;
+    }
+
+    .gauge-label {
+      font-size: 10px;
+      color: var(--text-secondary);
+    }
+
+    .gauge-val {
+      font-size: 16px;
+      font-weight: 700;
+      color: var(--text-primary);
+      margin-top: 2px;
+    }
+
+    .val-cmd {
+      color: var(--accent-cyan);
+    }
+
+    .val-act {
+      color: var(--accent-green);
+    }
+
+    .val-warn {
+      color: var(--accent-red);
+    }
+
+    .rpm-matrix {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px;
+      margin-top: 6px;
+    }
+
+    .rpm-cell {
+      background: #0d1117;
+      border: 1px solid var(--border-color);
+      border-radius: 4px;
+      padding: 4px 6px;
+      font-size: 11px;
+    }
+
+    /* Scrubber & Timeline Bar */
+    .timeline-bar {
+      background-color: var(--card-bg);
+      border-top: 1px solid var(--border-color);
+      padding: 8px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .timeline-slider-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    #frameSlider {
+      flex: 1;
+      height: 8px;
+      border-radius: 4px;
+      outline: none;
+      accent-color: var(--accent-cyan);
+      cursor: pointer;
+    }
+
+    .timeline-controls {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .btn-group {
+      display: flex;
+      gap: 4px;
+      align-items: center;
+    }
+
+    button,
+    select {
+      background-color: #1c212c;
+      border: 1px solid var(--border-color);
+      color: var(--text-primary);
+      padding: 5px 10px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 11px;
+      font-weight: 600;
+    }
+
+    button:hover {
+      background-color: #2a3242;
+    }
+
+    button:active {
+      background-color: #384358;
+    }
+
+    button.active {
+      background-color: #1f6feb;
+      border-color: #58a6ff;
+    }
+
+    .btn-play {
+      background-color: #238636;
+      border-color: #2ea043;
+      padding: 5px 14px;
+    }
+
+    .btn-play:hover {
+      background-color: #2ea043;
+    }
+
+    .btn-anomaly {
+      background-color: #8b0000;
+      border-color: #ff3d00;
+      color: #fff;
+    }
+
+    .btn-anomaly:hover {
+      background-color: #b71c1c;
+    }
+
+    .legend-row {
+      position: absolute;
+      bottom: 8px;
+      left: 8px;
+      background: rgba(11, 14, 20, 0.85);
+      padding: 4px 8px;
+      border-radius: 4px;
+      border: 1px solid var(--border-color);
+      display: flex;
+      gap: 10px;
+      font-size: 10px;
+      pointer-events: none;
+    }
+
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .legend-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+    }
+
+    /* Navigation Tabs */
+    .nav-tabs {
+      display: flex;
+      gap: 4px;
+      background: #0d1117;
+      padding: 3px;
+      border-radius: 6px;
+      border: 1px solid var(--border-color);
+    }
+
+    .nav-tab {
+      background: transparent;
+      border: 1px solid transparent;
+      color: var(--text-secondary);
+      padding: 5px 12px;
+      font-size: 12px;
+      font-weight: 600;
+      font-family: inherit;
+      border-radius: 4px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.15s ease;
+    }
+
+    .nav-tab:hover {
+      color: var(--text-primary);
+      background: #1c212c;
+    }
+
+    .nav-tab.active {
+      color: var(--accent-cyan);
+      background: #192434;
+      border-color: #1f6feb88;
+      box-shadow: 0 0 8px rgba(0, 229, 255, 0.15);
+    }
+
+    /* Interactive Live / Fake Data Toggle Button */
+    .btn-toggle-fake {
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      font-weight: 700;
+      padding: 4px 10px;
+      border-radius: 4px;
+      border: 1px solid;
+      transition: all 0.2s ease;
+      user-select: none;
+      font-family: inherit;
+      outline: none;
+    }
+
+    /* Tab 1 Start / Stop Control Button */
+    .btn-planner-toggle {
+      width: 100%;
+      padding: 10px 14px;
+      border-radius: 6px;
+      border: 1px solid;
+      font-size: 13px;
+      font-weight: 800;
+      letter-spacing: 0.5px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      transition: all 0.15s ease;
+    }
+
+    .btn-planner-toggle.state-stopped {
+      background: #0d2b1d;
+      border-color: #00e676;
+      color: #00e676;
+    }
+
+    .btn-planner-toggle.state-stopped:hover {
+      background: #143f2b;
+      box-shadow: 0 0 12px rgba(0, 230, 118, 0.25);
+    }
+
+    .btn-planner-toggle.state-running {
+      background: #361217;
+      border-color: #ff5252;
+      color: #ff5252;
+    }
+
+    .btn-planner-toggle.state-running:hover {
+      background: #4d1920;
+      box-shadow: 0 0 12px rgba(255, 82, 82, 0.3);
+    }
+
+    .btn-toggle-fake.state-live {
+      color: var(--accent-green);
+      border-color: #00c853;
+      background: #003d1c44;
+      box-shadow: 0 0 8px rgba(0, 230, 118, 0.25);
+    }
+
+    .btn-toggle-fake.state-live:hover {
+      background: #00552766;
+      box-shadow: 0 0 12px rgba(0, 230, 118, 0.45);
+    }
+
+    .btn-toggle-fake.state-fake {
+      color: #f7d6ff;
+      border-color: var(--accent-purple);
+      background: #351c4a66;
+      box-shadow: 0 0 8px rgba(224, 64, 251, 0.3);
+    }
+
+    .btn-toggle-fake.state-fake:hover {
+      background: #4f287088;
+      box-shadow: 0 0 12px rgba(224, 64, 251, 0.55);
+    }
+
+    .tab-page {
+      display: flex;
+      flex: 1;
+      overflow: hidden;
+      min-height: 0;
+    }
+
+    /* Page 2: Powertrain & STM32 Pipeline */
+    #pageMotors {
+      flex-direction: column;
+      padding: 10px;
+      gap: 10px;
+      overflow-y: auto;
+    }
+
+    /* Pipeline Topology Ribbon */
+    .pipeline-ribbon {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: var(--card-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      padding: 8px 14px;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+
+    .pipe-node {
+      flex: 1;
+      background: #0e121a;
+      border: 1px solid var(--border-color);
+      border-radius: 5px;
+      padding: 6px 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      position: relative;
+    }
+
+    .pipe-node-title {
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--text-primary);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .pipe-node-sub {
+      font-size: 10px;
+      color: var(--text-secondary);
+      font-family: Consolas, monospace;
+    }
+
+    .pipe-arrow {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      color: var(--accent-cyan);
+      font-size: 14px;
+      padding: 0 4px;
+      user-select: none;
+    }
+
+    .pipe-arrow-sub {
+      font-size: 8px;
+      color: var(--text-secondary);
+      text-transform: uppercase;
+      font-family: Consolas, monospace;
+      white-space: nowrap;
+    }
+
+    .badge-online {
+      color: var(--accent-green);
+      border: 1px solid #00c853;
+      background: #003d1c33;
+      padding: 2px 6px;
+      border-radius: 3px;
+      font-size: 10px;
+      font-weight: 700;
+    }
+
+    .badge-offline {
+      color: var(--accent-red);
+      border: 1px solid #d50000;
+      background: #8b000033;
+      padding: 2px 6px;
+      border-radius: 3px;
+      font-size: 10px;
+      font-weight: 700;
+    }
+
+    .badge-bench {
+      color: var(--accent-purple);
+      border: 1px solid var(--accent-purple);
+      background: #351c4a33;
+      padding: 2px 6px;
+      border-radius: 3px;
+      font-size: 10px;
+      font-weight: 700;
+    }
+
+    /* Master Action Bar */
+    .motor-action-bar {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      background: var(--card-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      padding: 8px 12px;
+      align-items: center;
+      flex-shrink: 0;
+    }
+
+    .btn-motor-action {
+      padding: 6px 14px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 700;
+      font-family: inherit;
+      cursor: pointer;
+      border: 1px solid;
+      transition: all 0.15s ease;
+    }
+
+    .btn-motor-action:disabled,
+    .btn-preset:disabled,
+    button:disabled {
+      opacity: 0.55 !important;
+      cursor: not-allowed !important;
+      pointer-events: none !important;
+      filter: grayscale(0.5);
+    }
+
+    .btn-arm {
+      background: #003d1c;
+      border-color: var(--accent-green);
+      color: #e6ffed;
+    }
+
+    .btn-arm:hover {
+      background: #00602d;
+      box-shadow: 0 0 10px rgba(0, 230, 118, 0.3);
+    }
+
+    .btn-estop {
+      background: #8b0000;
+      border-color: #ff1744;
+      color: #fff;
+      animation: estop-pulse 2s infinite;
+    }
+
+    .btn-estop:hover {
+      background: #b71c1c;
+      box-shadow: 0 0 12px rgba(255, 23, 68, 0.5);
+    }
+
+    @keyframes estop-pulse {
+
+      0%,
+      100% {
+        box-shadow: 0 0 0 0 rgba(255, 23, 68, 0.4);
+      }
+
+      50% {
+        box-shadow: 0 0 10px 3px rgba(255, 23, 68, 0.6);
+      }
+    }
+
+    .btn-disarm {
+      background: #21262d;
+      border-color: var(--border-color);
+      color: var(--text-secondary);
+    }
+
+    .btn-disarm:hover {
+      background: #30363d;
+      color: var(--text-primary);
+    }
+
+    .btn-query {
+      background: #0d2838;
+      border-color: var(--accent-cyan);
+      color: #cff;
+    }
+
+    .btn-query:hover {
+      background: #13425f;
+    }
+
+    .btn-save {
+      background: #1c2b42;
+      border-color: #58a6ff;
+      color: #cce5ff;
+    }
+
+    .btn-save:hover {
+      background: #263e63;
+    }
+
+    .btn-bench {
+      background: #351c4a;
+      border-color: var(--accent-purple);
+      color: #f7d6ff;
+    }
+
+    .btn-bench:hover {
+      background: #4f2870;
+    }
+
+    .btn-dfu {
+      background: #422d0d;
+      border-color: var(--accent-gold);
+      color: #fff1cc;
+    }
+
+    .btn-dfu:hover {
+      background: #614213;
+    }
+
+    .btn-reset {
+      background: #1f2328;
+      border-color: #38404a;
+      color: #c9d1d9;
+    }
+
+    .btn-reset:hover {
+      background: #2d333b;
+    }
+
+    /* Motor Main Body Split */
+    .motor-body {
+      display: flex;
+      flex: 1;
+      gap: 10px;
+      min-height: 0;
+    }
+
+    .motor-col-left {
+      flex: 6;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .motor-col-right {
+      flex: 5;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    /* 4-Wheel Motor Grid */
+    .motor-wheel-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+
+    .motor-card {
+      background: var(--card-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      padding: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      position: relative;
+    }
+
+    .motor-card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 1px solid var(--border-color);
+      padding-bottom: 4px;
+      font-size: 11px;
+      font-weight: 700;
+    }
+
+    .motor-rpm-hero {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      padding: 4px 0;
+    }
+
+    .motor-rpm-large {
+      font-size: 22px;
+      font-weight: 700;
+      font-family: Consolas, monospace;
+    }
+
+    .motor-delta-badge {
+      font-size: 11px;
+      padding: 2px 6px;
+      border-radius: 3px;
+      font-family: Consolas, monospace;
+      font-weight: 700;
+    }
+
+    .motor-metrics-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 4px;
+      font-size: 10px;
+      background: #0e121a;
+      padding: 6px;
+      border-radius: 4px;
+    }
+
+    .motor-calib-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 10px;
+      margin-top: 2px;
+    }
+
+    .calib-prog-bar-bg {
+      flex: 1;
+      height: 6px;
+      background: #21262d;
+      border-radius: 3px;
+      overflow: hidden;
+    }
+
+    .calib-prog-bar-fill {
+      height: 100%;
+      width: 0%;
+      background: var(--accent-green);
+      transition: width 0.2s ease;
+    }
+
+    /* Waveform Strip Chart Panel */
+    .motor-chart-panel {
+      background: var(--card-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      padding: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      min-height: 220px;
+    }
+
+    .chart-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--text-primary);
+    }
+
+    .chart-legend {
+      display: flex;
+      gap: 12px;
+      font-size: 10px;
+      align-items: center;
+    }
+
+    #motorWaveCanvas {
+      width: 100%;
+      height: 160px;
+      background: #090c10;
+      border: 1px solid #1c212c;
+      border-radius: 4px;
+    }
+
+    /* Right Column Cards */
+    .bench-slider-group {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      margin-top: 4px;
+    }
+
+    .slider-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 11px;
+    }
+
+    .bench-slider {
+      width: 100%;
+      height: 6px;
+      border-radius: 3px;
+      background: #21262d;
+      outline: none;
+      cursor: pointer;
+    }
+
+    .preset-row {
+      display: flex;
+      gap: 6px;
+      margin-top: 4px;
+    }
+
+    .btn-preset {
+      flex: 1;
+      padding: 3px 6px;
+      font-size: 10px;
+      border: 1px solid var(--border-color);
+      background: #1c212c;
+      color: var(--text-primary);
+      border-radius: 3px;
+      cursor: pointer;
+    }
+
+    .btn-preset:hover {
+      background: #263040;
+      border-color: var(--accent-cyan);
+    }
+
+    /* PID Tuner Grid */
+    .pid-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-top: 4px;
+    }
+
+    .pid-input-box {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+
+    .pid-input {
+      background: #090c10;
+      border: 1px solid var(--border-color);
+      color: var(--text-primary);
+      padding: 5px 8px;
+      border-radius: 4px;
+      font-family: Consolas, monospace;
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .pid-input:focus {
+      outline: none;
+      border-color: var(--accent-cyan);
+    }
+
+    /* MCU Response Console */
+    #mcuConsole {
+      background: #090c10;
+      border: 1px solid #1c212c;
+      border-radius: 4px;
+      padding: 8px;
+      font-family: Consolas, monospace;
+      font-size: 11px;
+      color: #58a6ff;
+      height: 120px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-break: break-all;
+      line-height: 1.4;
+    }
+
+    .cmd-input-row {
+      display: flex;
+      gap: 6px;
+      margin-top: 6px;
+    }
+
+    #rawCmdInput {
+      flex: 1;
+      background: #090c10;
+      border: 1px solid var(--border-color);
+      color: #e6edf3;
+      padding: 5px 8px;
+      border-radius: 4px;
+      font-family: Consolas, monospace;
+      font-size: 12px;
+    }
+
+    #rawCmdInput:focus {
+      outline: none;
+      border-color: var(--accent-cyan);
+    }
+  </style>
+</head>
+
+<body>
+
+  <header>
+    <div style="display:flex; align-items:center; gap:16px;">
+      <div class="header-title">
+        <span>🏎️ FOLKRACE PI 4</span>
+      </div>
+      <div class="nav-tabs">
+        <button id="tabNavBtn" class="nav-tab active" onclick="switchPage('nav')">
+          <span>🗺️ 1. Navigation &amp; SL-MPC</span>
+        </button>
+        <button id="tabMotorsBtn" class="nav-tab" onclick="switchPage('motors')">
+          <span>⚡ 2. Powertrain &amp; STM32 Pipeline</span>
+        </button>
+      </div>
+    </div>
+    <div class="header-badges">
+      <span class="badge badge-core">Core 1: Planner (Dedicated)</span>
+      <span class="badge badge-core">Core 2: Debug Server &amp; WAL Logger</span>
+      <span id="bufferBadge" class="badge" style="color:var(--accent-cyan);border-color:var(--accent-cyan)">Buffer: 0.0
+        / 30m</span>
+      <button id="btnToggleFakeData" class="badge btn-toggle-fake state-live" onclick="toggleFakeData()"
+        title="Click to toggle between Live Hardware Sensors and Synthetic Benchmark Data">
+        <span id="fakeToggleIcon">🟢</span>
+        <span id="fakeToggleText">LIVE SENSORS</span>
+      </button>
+      <span id="cpuTempBadge" class="badge">Temp: --°C</span>
+      <span id="freqBadge" class="badge">-- Hz</span>
+      <div id="perfHudBadge" class="badge" title="Laptop GUI &amp; Network Performance: FPS | RTT | Render | Payload"
+        style="color:#00e5ff; border-color:#00897b; background:#0d1821; font-family:Consolas, monospace; display:flex; gap:6px; align-items:center;">
+        <span style="color:#ffd600;">⚡ PROFILER:</span>
+        <span id="perfFps" style="color:#00e676; font-weight:bold;">-- FPS</span>
+        <span style="color:#484f58;">|</span>
+        <span id="perfRtt">--ms RTT</span>
+        <span style="color:#484f58;">|</span>
+        <span id="perfRender">--ms Render</span>
+        <span style="color:#484f58;">|</span>
+        <span id="perfSize" style="color:#ffd600;">-- KB</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- PAGE 1: Navigation, ToF Costmap & Curvilinear SL-MPC Trajectory Viewport -->
+  <div id="pageNav" class="tab-page active">
+    <div class="main-content">
+      <!-- 2D Canvas matching Webots GUI -->
+      <div class="canvas-panel">
+        <div class="canvas-header">
+          <span>ToF Occupancy Costmap &amp; Curvilinear SL-MPC Trajectory Viewport</span>
+          <span id="coordReadout">Cursor: X=0.00m, Y=0.00m</span>
+        </div>
+        <canvas id="radarCanvas"></canvas>
+      </div>
+
+      <!-- Telemetry HUD & Diagnostics -->
+      <div class="side-panel">
+        <!-- 0. Master Start / Stop Control -->
+        <div class="card" style="padding:8px 10px;">
+          <button id="btnPlannerStartStop" class="btn-planner-toggle state-stopped" onclick="togglePlannerRun()">
+            <span id="plannerToggleIcon">▶</span>
+            <span id="plannerToggleText">START AUTONOMOUS DRIVE</span>
+          </button>
+          <div id="plannerToggleSub"
+            style="margin-top:5px;font-size:10px;color:var(--text-secondary);text-align:center;">
+            STOPPED · Line calc off · Motor drivers disabled · Servo centered
+          </div>
+        </div>
+
+        <!-- 1. Motion & Actuator HUD -->
+        <div class="card">
+          <div class="card-title">
+            <span>Kinematic Actuation (Cmd vs Actual)</span>
+            <span id="lblMode" style="color:var(--accent-green)">MODE: DRIVE</span>
+          </div>
+          <div class="gauge-grid">
+            <div class="gauge-box">
+              <div class="gauge-label">FORWARD SPEED</div>
+              <div class="gauge-val">
+                <span class="val-cmd" id="vCmd">0.00</span> / <span class="val-act" id="vReal">0.00</span> <small
+                  style="font-size:11px;color:var(--text-secondary)">m/s</small>
+              </div>
+            </div>
+            <div class="gauge-box">
+              <div class="gauge-label">SERVO STEERING ANGLE</div>
+              <div class="gauge-val">
+                <span class="val-cmd" id="steerCmd">0.0°</span> / <span class="val-act" id="steerAct">0.0°</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- 4-Wheel RPM Matrix -->
+          <div style="margin-top:8px;font-size:10px;color:var(--text-secondary);font-weight:700;">4-WHEEL ELECTRONIC
+            DIFF RPMS</div>
+          <div class="rpm-matrix">
+            <div class="rpm-cell">FL: <span class="val-cmd" id="rpmFLCmd">0</span> / <span class="val-act"
+                id="rpmFLAct">0</span></div>
+            <div class="rpm-cell">FR: <span class="val-cmd" id="rpmFRCmd">0</span> / <span class="val-act"
+                id="rpmFRAct">0</span></div>
+            <div class="rpm-cell">RL: <span class="val-cmd" id="rpmRLCmd">0</span> / <span class="val-act"
+                id="rpmRLAct">0</span></div>
+            <div class="rpm-cell">RR: <span class="val-cmd" id="rpmRRCmd">0</span> / <span class="val-act"
+                id="rpmRRAct">0</span></div>
+          </div>
+        </div>
+
+        <!-- 2. IMU & Traction Dynamics -->
+        <div class="card">
+          <div class="card-title">IMU Attitude &amp; Traction Stability</div>
+          <div class="gauge-grid">
+            <div class="gauge-box">
+              <div class="gauge-label">YAW / GYRO Z</div>
+              <div class="gauge-val"><span id="imuYaw">0.0°</span> <small
+                  style="font-size:11px;color:var(--text-secondary)" id="imuGyroZ">0.00 rad/s</small></div>
+            </div>
+            <div class="gauge-box">
+              <div class="gauge-label">SLIP STATE / RATIO</div>
+              <div class="gauge-val"><span id="slipStateBadge" style="color:var(--accent-green)">NORMAL</span> <small
+                  style="font-size:11px;color:var(--text-secondary)" id="slipRatio">0.00</small></div>
+            </div>
+            <div class="gauge-box">
+              <div class="gauge-label">PITCH / ROLL</div>
+              <div class="gauge-val"><span id="imuPitch">0.0°</span> / <span id="imuRoll">0.0°</span></div>
+            </div>
+            <div class="gauge-box">
+              <div class="gauge-label">ACCEL (FWD / LAT)</div>
+              <div class="gauge-val"><span id="accelFwd">0.0</span> / <span id="accelLat">0.0</span> <small
+                  style="font-size:11px;color:var(--text-secondary)">m/s²</small></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 3. SL-MPC Optimization Profiler -->
+        <div class="card">
+          <div class="card-title">Core 1 SL-MPC Profiler (Real-Time Latency)</div>
+          <div class="gauge-grid">
+            <div class="gauge-box">
+              <div class="gauge-label">TOTAL PLANNER STEP</div>
+              <div class="gauge-val"><span id="planMs" style="color:var(--accent-cyan)">0.00</span> <small
+                  style="font-size:11px;color:var(--text-secondary)">ms</small></div>
+            </div>
+            <div class="gauge-box">
+              <div class="gauge-label">OSQP ITERATIONS</div>
+              <div class="gauge-val"><span id="osqpIters">0</span></div>
+            </div>
+            <div class="gauge-box">
+              <div class="gauge-label">COSTMAP UPDATE</div>
+              <div class="gauge-val"><span id="mapMs">0.00</span> <small
+                  style="font-size:11px;color:var(--text-secondary)">ms</small></div>
+            </div>
+            <div class="gauge-box">
+              <div class="gauge-label">GAP SCOUT LATENCY</div>
+              <div class="gauge-val"><span id="scoutMs">0.00</span> <small
+                  style="font-size:11px;color:var(--text-secondary)">ms</small></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 5. Display Layer Options (Matching Webots GUI) -->
+        <div class="card">
+          <div class="card-title">Layer Display Options</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;font-size:11px;color:#c9d1d9;">
+            <label><input type="checkbox" id="chkBest" checked> Best Trajectory (Gold)</label>
+            <label><input type="checkbox" id="chkCand" checked> Candidate / Alt Line</label>
+            <label><input type="checkbox" id="chkCorridor" checked> MPC Corridor (Teal)</label>
+            <label><input type="checkbox" id="chkGuide" checked> Spline Guide (Cyan Dash)</label>
+            <label><input type="checkbox" id="chkShield" checked> Emergency Shield</label>
+            <label><input type="checkbox" id="chkBackup" checked> Backup Escape Curves</label>
+            <label><input type="checkbox" id="chkGap" checked> Scouted Gap (Green)</label>
+            <label><input type="checkbox" id="chkHazard" checked> Hazard Mask (C-Space)</label>
+            <label><input type="checkbox" id="chkCostmap" checked> Costmap</label>
+            <label><input type="checkbox" id="chkRays" checked> ToF Cones (16ch)</label>
+            <label><input type="checkbox" id="chkChassis" checked> Chassis Footprint</label>
+            <label><input type="checkbox" id="chkGrid" checked> Grid &amp; Circles</label>
+            <label><input type="checkbox" id="chkTrail" checked> Historic Trail (Cyan)</label>
+            <label><input type="checkbox" id="chkSightlines" checked> Wrong-Way Rays (Cyan/Red)</label>
+          </div>
+        </div>
+
+        <!-- 4. Session Flight Log & Disk Quota -->
+        <div class="card">
+          <div class="card-title">SD Card Flight Black Box</div>
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+            <span id="sessionName">Session: active</span>
+            <div style="display:flex;gap:4px;">
+              <button id="btnOpenLocalDb" title="Open a downloaded .db file for 60 Hz offline replay">📂 Open
+                .db</button>
+              <button id="btnDownloadLog" title="Download SQLite database to laptop">💾 Download Log</button>
+              <input type="file" id="fileOpenLocalDb" accept=".db,.sqlite" style="display:none">
+            </div>
+          </div>
+          <div style="font-size:11px;color:var(--text-secondary);display:flex;flex-direction:column;gap:3px;">
+            <div>Driving Buffer: <span id="drivingTime" style="color:var(--accent-cyan);font-weight:700">0.0 min</span>
+              / 30 min (Rolling Auto-Delete)</div>
+            <div>Stored Frames: <span id="recFrames" style="color:var(--text-primary);font-weight:700">0</span> (<span
+                id="recSize">0.0 MB</span>) | Pruned: <span id="prunedFrames">0</span></div>
+            <div>Free SD Storage: <span id="diskFree" style="color:var(--accent-green);font-weight:700">-- GB</span>
+            </div>
+            <div id="prevSessionsRow" style="display:none;margin-top:4px;gap:4px;align-items:center;">
+              <span style="color:var(--text-secondary);">Log:</span>
+              <select id="prevSessionSelect"
+                style="flex:1;min-width:0;background:var(--bg-secondary,#111827);color:var(--text-primary);border:1px solid var(--border-color,#334155);border-radius:4px;padding:2px 4px;font-size:11px;"></select>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- PAGE 2: Dedicated Powertrain & End-to-End STM32 Motor Pipeline -->
+  <div id="pageMotors" class="tab-page" style="display:none;">
+    <!-- Pipeline Topology Ribbon -->
+    <div class="pipeline-ribbon">
+      <div class="pipe-node" id="nodePi4">
+        <div class="pipe-node-title">
+          <span>🖥️ PI 4 HOST</span>
+          <span class="badge-online" id="badgePi4">ONLINE</span>
+        </div>
+        <div class="pipe-node-sub" id="pipePi4Status">Bridge: 127.0.0.1:9877 (60 Hz)</div>
+      </div>
+      <div class="pipe-arrow">➔<div class="pipe-arrow-sub">USB CDC 921.6k</div>
+      </div>
+      <div class="pipe-node" id="nodeEsp32">
+        <div class="pipe-node-title">
+          <span>⚡ ESP32-S3 MASTER</span>
+          <span class="badge-online" id="badgeEsp32">LIVE 400Hz</span>
+        </div>
+        <div class="pipe-node-sub" id="pipeEsp32Mode">RTOS Core 1 (2500 µs loop)</div>
+      </div>
+      <div class="pipe-arrow">➔<div class="pipe-arrow-sub">UART1 921.6k</div>
+      </div>
+      <div class="pipe-node" id="nodeStmFront">
+        <div class="pipe-node-title">
+          <span>🏎️ STM32 FRONT (FL / FR)</span>
+          <span class="badge-online" id="badgeStmFront">ONLINE</span>
+        </div>
+        <div class="pipe-node-sub" id="pipeFrontRpm">FL: 0 | FR: 0 RPM</div>
+      </div>
+      <div class="pipe-arrow">➔<div class="pipe-arrow-sub">UART2 921.6k</div>
+      </div>
+      <div class="pipe-node" id="nodeStmRear">
+        <div class="pipe-node-title">
+          <span>🏎️ STM32 REAR (RL / RR)</span>
+          <span class="badge-online" id="badgeStmRear">ONLINE</span>
+        </div>
+        <div class="pipe-node-sub" id="pipeRearRpm">RL: 0 | RR: 0 RPM</div>
+      </div>
+    </div>
+
+    <!-- Master Powertrain Action Bar -->
+    <div class="motor-action-bar">
+      <button class="btn-motor-action btn-arm" onclick="enableMotors(true)">⚡ ARM MOTORS</button>
+      <button class="btn-motor-action btn-estop" onclick="emergencyStop()">🛑 EMERGENCY STOP</button>
+      <button class="btn-motor-action btn-disarm" onclick="enableMotors(false)">🚫 DISABLE</button>
+      <button class="btn-motor-action btn-query" onclick="queryStatus()">📋 QUERY STATUS</button>
+      <button class="btn-motor-action btn-save" onclick="saveFlash()">💾 SAVE FLASH</button>
+      <button class="btn-motor-action btn-bench" id="btnBenchToggle" onclick="toggleFakeData()">🧪 FAKE DATA:
+        OFF</button>
+      <button class="btn-motor-action btn-dfu" onclick="enterDfu()">🔧 DFU REBOOT</button>
+      <button class="btn-motor-action btn-reset" onclick="resetControllers()">🔄 RESET</button>
+      <button class="btn-motor-action btn-reconnect" style="background:#1e3a5f;color:#38bdf8;border:1px solid #0284c7;"
+        onclick="reconnectMcu()">🔌 RECONNECT ESP32</button>
+      <span id="motorActionStatus"
+        style="font-size:11px;color:var(--accent-cyan);font-family:Consolas, monospace;margin-left:auto;">Pipeline
+        ready</span>
+    </div>
+
+    <!-- Main Body Split -->
+    <div class="motor-body">
+      <!-- Left Column: 4-Wheel Motor Grid & Live Oscilloscope -->
+      <div class="motor-col-left">
+        <!-- 4-Wheel Independent Motor Pods (2x2 Chassis Matrix) -->
+        <div class="motor-wheel-grid">
+          <!-- Front-Left (FL) -->
+          <div class="motor-card" id="cardFL">
+            <div class="motor-card-header">
+              <span style="color:var(--accent-cyan);">🏎️ FRONT-LEFT (FL)</span>
+              <span style="color:var(--text-secondary);font-size:10px;">Axle 0 (Front) | M1</span>
+            </div>
+            <div class="motor-rpm-hero">
+              <div class="motor-rpm-large"><span id="mFL_rpmAct" style="color:var(--accent-cyan);">0</span> <small
+                  style="font-size:12px;color:var(--text-secondary);">/ <span id="mFL_rpmCmd">0</span> RPM</small></div>
+              <div class="motor-delta-badge" id="mFL_rpmDelta">Δ 0</div>
+            </div>
+            <div class="motor-metrics-row">
+              <div>Wheel Speed: <span id="mFL_speed" style="font-weight:700;color:#fff;">0.00</span> m/s</div>
+              <div>Driver: <span id="mFL_status" style="color:var(--accent-green);font-weight:700;">ENABLED</span></div>
+              <div>MT6816 Angle: <span id="mFL_enc" style="color:var(--accent-green);font-weight:700;">OK
+                  (14-bit)</span></div>
+              <div>Stall Warn: <span id="mFL_stall" style="color:var(--text-secondary);">NONE</span></div>
+            </div>
+            <div class="motor-calib-row">
+              <button class="btn-preset" style="max-width:85px;" onclick="calibrateMotor(0, 1)">Calib M1</button>
+              <input id="calibVolt_0_1" type="number" step="0.5" value="4.0"
+                style="width:42px;background:#090c10;border:1px solid #30363d;color:#fff;padding:2px;font-size:10px;border-radius:3px;">
+              <span style="font-size:9px;color:var(--text-secondary);">V</span>
+              <div class="calib-prog-bar-bg">
+                <div id="mFL_calibProg" class="calib-prog-bar-fill"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Front-Right (FR) -->
+          <div class="motor-card" id="cardFR">
+            <div class="motor-card-header">
+              <span style="color:var(--accent-gold);">🏎️ FRONT-RIGHT (FR)</span>
+              <span style="color:var(--text-secondary);font-size:10px;">Axle 0 (Front) | M2</span>
+            </div>
+            <div class="motor-rpm-hero">
+              <div class="motor-rpm-large"><span id="mFR_rpmAct" style="color:var(--accent-gold);">0</span> <small
+                  style="font-size:12px;color:var(--text-secondary);">/ <span id="mFR_rpmCmd">0</span> RPM</small></div>
+              <div class="motor-delta-badge" id="mFR_rpmDelta">Δ 0</div>
+            </div>
+            <div class="motor-metrics-row">
+              <div>Wheel Speed: <span id="mFR_speed" style="font-weight:700;color:#fff;">0.00</span> m/s</div>
+              <div>Driver: <span id="mFR_status" style="color:var(--accent-green);font-weight:700;">ENABLED</span></div>
+              <div>MT6816 Angle: <span id="mFR_enc" style="color:var(--accent-green);font-weight:700;">OK
+                  (14-bit)</span></div>
+              <div>Stall Warn: <span id="mFR_stall" style="color:var(--text-secondary);">NONE</span></div>
+            </div>
+            <div class="motor-calib-row">
+              <button class="btn-preset" style="max-width:85px;" onclick="calibrateMotor(0, 2)">Calib M2</button>
+              <input id="calibVolt_0_2" type="number" step="0.5" value="4.0"
+                style="width:42px;background:#090c10;border:1px solid #30363d;color:#fff;padding:2px;font-size:10px;border-radius:3px;">
+              <span style="font-size:9px;color:var(--text-secondary);">V</span>
+              <div class="calib-prog-bar-bg">
+                <div id="mFR_calibProg" class="calib-prog-bar-fill"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Rear-Left (RL) -->
+          <div class="motor-card" id="cardRL">
+            <div class="motor-card-header">
+              <span style="color:var(--accent-purple);">🏎️ REAR-LEFT (RL)</span>
+              <span style="color:var(--text-secondary);font-size:10px;">Axle 1 (Rear) | M1</span>
+            </div>
+            <div class="motor-rpm-hero">
+              <div class="motor-rpm-large"><span id="mRL_rpmAct" style="color:var(--accent-purple);">0</span> <small
+                  style="font-size:12px;color:var(--text-secondary);">/ <span id="mRL_rpmCmd">0</span> RPM</small></div>
+              <div class="motor-delta-badge" id="mRL_rpmDelta">Δ 0</div>
+            </div>
+            <div class="motor-metrics-row">
+              <div>Wheel Speed: <span id="mRL_speed" style="font-weight:700;color:#fff;">0.00</span> m/s</div>
+              <div>Driver: <span id="mRL_status" style="color:var(--accent-green);font-weight:700;">ENABLED</span></div>
+              <div>MT6816 Angle: <span id="mRL_enc" style="color:var(--accent-green);font-weight:700;">OK
+                  (14-bit)</span></div>
+              <div>Stall Warn: <span id="mRL_stall" style="color:var(--text-secondary);">NONE</span></div>
+            </div>
+            <div class="motor-calib-row">
+              <button class="btn-preset" style="max-width:85px;" onclick="calibrateMotor(1, 1)">Calib M1</button>
+              <input id="calibVolt_1_1" type="number" step="0.5" value="4.0"
+                style="width:42px;background:#090c10;border:1px solid #30363d;color:#fff;padding:2px;font-size:10px;border-radius:3px;">
+              <span style="font-size:9px;color:var(--text-secondary);">V</span>
+              <div class="calib-prog-bar-bg">
+                <div id="mRL_calibProg" class="calib-prog-bar-fill"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Rear-Right (RR) -->
+          <div class="motor-card" id="cardRR">
+            <div class="motor-card-header">
+              <span style="color:var(--accent-green);">🏎️ REAR-RIGHT (RR)</span>
+              <span style="color:var(--text-secondary);font-size:10px;">Axle 1 (Rear) | M2</span>
+            </div>
+            <div class="motor-rpm-hero">
+              <div class="motor-rpm-large"><span id="mRR_rpmAct" style="color:var(--accent-green);">0</span> <small
+                  style="font-size:12px;color:var(--text-secondary);">/ <span id="mRR_rpmCmd">0</span> RPM</small></div>
+              <div class="motor-delta-badge" id="mRR_rpmDelta">Δ 0</div>
+            </div>
+            <div class="motor-metrics-row">
+              <div>Wheel Speed: <span id="mRR_speed" style="font-weight:700;color:#fff;">0.00</span> m/s</div>
+              <div>Driver: <span id="mRR_status" style="color:var(--accent-green);font-weight:700;">ENABLED</span></div>
+              <div>MT6816 Angle: <span id="mRR_enc" style="color:var(--accent-green);font-weight:700;">OK
+                  (14-bit)</span></div>
+              <div>Stall Warn: <span id="mRR_stall" style="color:var(--text-secondary);">NONE</span></div>
+            </div>
+            <div class="motor-calib-row">
+              <button class="btn-preset" style="max-width:85px;" onclick="calibrateMotor(1, 2)">Calib M2</button>
+              <input id="calibVolt_1_2" type="number" step="0.5" value="4.0"
+                style="width:42px;background:#090c10;border:1px solid #30363d;color:#fff;padding:2px;font-size:10px;border-radius:3px;">
+              <span style="font-size:9px;color:var(--text-secondary);">V</span>
+              <div class="calib-prog-bar-bg">
+                <div id="mRR_calibProg" class="calib-prog-bar-fill"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Live 4-Wheel Rolling Oscilloscope Strip Chart -->
+        <div class="motor-chart-panel">
+          <div class="chart-header">
+            <span>Real-Time 4-Wheel RPM Waveform Strip Chart (400 Hz Feedback)</span>
+            <div class="chart-legend">
+              <span style="color:var(--accent-cyan);">■ FL</span>
+              <span style="color:var(--accent-gold);">■ FR</span>
+              <span style="color:var(--accent-purple);">■ RL</span>
+              <span style="color:var(--accent-green);">■ RR</span>
+              <span style="color:#ffffff;">┄ Target</span>
+              <div style="display:flex;gap:4px;margin-left:8px;">
+                <button class="btn-preset" onclick="setChartWindow(120)">2s</button>
+                <button class="btn-preset" onclick="setChartWindow(300)">5s</button>
+                <button class="btn-preset" onclick="setChartWindow(600)">10s</button>
+                <button class="btn-preset" id="btnPauseWave" onclick="toggleWavePause()">⏸</button>
+              </div>
+            </div>
+          </div>
+          <canvas id="motorWaveCanvas"></canvas>
+        </div>
+      </div>
+
+      <!-- Right Column: Interactive Diff Bench, PID Gain Tuner & Raw Console -->
+      <div class="motor-col-right">
+        <!-- 1. Interactive Electronic Differential & Throttle Bench -->
+        <div class="card">
+          <div class="card-title">
+            <span>4WD Electronic Differential &amp; Throttle Bench</span>
+            <span style="color:var(--accent-cyan);font-size:11px;" id="diffSplitReadout">Split: 50% / 50%</span>
+          </div>
+          <div class="bench-slider-group">
+            <!-- Manual Speed Slider -->
+            <div class="slider-row">
+              <span>Target Speed (v_cmd):</span>
+              <span id="throttleVal" style="font-weight:700;color:var(--accent-cyan);">0.00 m/s</span>
+            </div>
+            <input type="range" id="throttleSlider" class="bench-slider" min="-3.0" max="5.0" step="0.1" value="0.0"
+              oninput="onThrottleInput(this.value)">
+            <div class="preset-row">
+              <button class="btn-preset" onclick="setSpeed(0.0)">STOP (0.0)</button>
+              <button class="btn-preset" onclick="setSpeed(1.0)">1.0 m/s</button>
+              <button class="btn-preset" onclick="setSpeed(2.5)">2.5 m/s</button>
+              <button class="btn-preset" onclick="setSpeed(4.0)">4.0 m/s</button>
+            </div>
+
+            <!-- Steering Angle Slider -->
+            <div class="slider-row" style="margin-top:6px;">
+              <span>Ackermann Steering Angle:</span>
+              <span id="steerSliderVal" style="font-weight:700;color:var(--accent-gold);">0.0°</span>
+            </div>
+            <input type="range" id="steerSlider" class="bench-slider" min="-32.2" max="32.2" step="0.5" value="0.0"
+              oninput="onSteerInput(this.value)">
+            <div class="preset-row">
+              <button class="btn-preset" onclick="setSteer(32.2)">◀ Hard Left (+32.2°)</button>
+              <button class="btn-preset" onclick="setSteer(0.0)">Center (0°)</button>
+              <button class="btn-preset" onclick="setSteer(-32.2)">Hard Right (-32.2°) ▶</button>
+            </div>
+
+            <!-- Live Servo Neutral Trim (±60 µs) -->
+            <div class="slider-row" style="margin-top:8px;">
+              <span>Servo Neutral Trim (±60 µs):</span>
+              <span id="trimSliderVal" style="font-weight:700;color:var(--accent-cyan);">0 µs (1510 µs)</span>
+            </div>
+            <input type="range" id="trimSlider" class="bench-slider" min="-60" max="60" step="1" value="0"
+              oninput="onTrimInput(this.value)">
+            <div class="preset-row">
+              <button class="btn-preset" onclick="nudgeTrim(-1)">◀ -1 µs</button>
+              <button class="btn-preset" onclick="setTrim(0)">Reset (0 µs)</button>
+              <button class="btn-preset" onclick="nudgeTrim(1)">+1 µs ▶</button>
+              <button class="btn-preset" onclick="saveTrimCenter()"
+                style="border-color:var(--accent-cyan);color:var(--accent-cyan);"
+                title="Permanently set current trim as the new 0 µs center and recenter slider">Set Center</button>
+              <button id="btnAutoServoCenter" class="btn-preset" onclick="toggleAutoServoCenter()"
+                style="border-color:var(--accent-gold);color:var(--accent-gold);"
+                title="Automatically drive fwd/bwd, brake to standstill, measure gyro curvature, and trim servo until straight">Auto
+                Center</button>
+            </div>
+            <div
+              style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:6px;font-size:10px;color:var(--text-secondary);">
+              <label style="display:flex;flex-direction:column;gap:2px;">Dist (m)
+                <input type="number" id="autoCenterDistInput" class="pid-input" style="padding:3px 6px;font-size:11px;"
+                  min="0.5" max="2.0" step="0.1" value="1.0">
+              </label>
+              <label style="display:flex;flex-direction:column;gap:2px;">Speed (m/s)
+                <input type="number" id="autoCenterSpeedInput" class="pid-input" style="padding:3px 6px;font-size:11px;"
+                  min="0.35" max="1.00" step="0.05" value="0.60">
+              </label>
+              <label style="display:flex;flex-direction:column;gap:2px;">Tol (°/m)
+                <input type="number" id="autoCenterTolInput" class="pid-input" style="padding:3px 6px;font-size:11px;"
+                  min="0.3" max="3.0" step="0.1" value="0.8">
+              </label>
+              <label style="display:flex;flex-direction:column;gap:2px;">Tries
+                <input type="number" id="autoCenterTriesInput" class="pid-input" style="padding:3px 6px;font-size:11px;"
+                  min="2" max="12" step="1" value="6">
+              </label>
+            </div>
+            <div id="autoCenterStatusBox"
+              style="display:none;background:#0e121a;border:1px solid var(--border-color);padding:6px 8px;border-radius:4px;margin-top:6px;font-size:11px;line-height:1.4;">
+              <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+                <span id="autoCenterPhase" style="font-weight:700;color:var(--accent-gold);">IDLE</span>
+                <span id="autoCenterMetrics"
+                  style="color:var(--accent-cyan);font-family:Consolas,monospace;font-size:10px;">Iter 0/6 · 0.00/1.00
+                  m</span>
+              </div>
+              <div style="width:100%;height:4px;background:#21262d;border-radius:2px;overflow:hidden;margin:4px 0;">
+                <div id="autoCenterProgBar"
+                  style="height:100%;width:0%;background:var(--accent-cyan);transition:width 0.15s ease;"></div>
+              </div>
+              <div id="autoCenterMsg" style="color:var(--text-secondary);">Ready</div>
+              <div id="autoCenterHistoryWrap"
+                style="display:none;margin-top:6px;max-height:110px;overflow-y:auto;border-top:1px solid #1c212c;padding-top:4px;">
+                <table
+                  style="width:100%;border-collapse:collapse;font-family:Consolas,monospace;font-size:10px;text-align:right;">
+                  <thead>
+                    <tr style="color:var(--text-secondary);border-bottom:1px solid #1c212c;">
+                      <th style="text-align:left;padding:2px 3px;">#</th>
+                      <th style="padding:2px 3px;">Ctr</th>
+                      <th style="padding:2px 3px;">Fwd</th>
+                      <th style="padding:2px 3px;">Bwd</th>
+                      <th style="padding:2px 3px;">Net</th>
+                      <th style="padding:2px 3px;">Step</th>
+                      <th style="text-align:left;padding:2px 3px;">Mode</th>
+                    </tr>
+                  </thead>
+                  <tbody id="autoCenterHistoryBody"></tbody>
+                </table>
+              </div>
+            </div>
+
+            <!-- Differential Split Metrics -->
+            <div
+              style="background:#0e121a;padding:8px;border-radius:4px;margin-top:8px;font-size:11px;display:flex;justify-content:space-between;">
+              <div>Left Axle Avg: <span id="diffLeftAvg" style="color:var(--accent-cyan);font-weight:700;">0</span> RPM
+              </div>
+              <div>Right Axle Avg: <span id="diffRightAvg" style="color:var(--accent-gold);font-weight:700;">0</span>
+                RPM</div>
+              <div>Delta (R - L): <span id="diffDelta" style="color:var(--accent-green);font-weight:700;">0 RPM</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 2. STM32 FOC Velocity PID Gain Tuner -->
+        <div class="card">
+          <div class="card-title">
+            <span>STM32 FOC Velocity PID Controller</span>
+            <span style="color:var(--text-secondary);font-size:10px;">Broadcasts to Front &amp; Rear UARTs</span>
+          </div>
+          <div class="pid-grid">
+            <div class="pid-input-box">
+              <label style="font-size:10px;color:var(--text-secondary);">PROPORTIONAL GAIN (Kp):</label>
+              <input type="number" id="pidKpInput" class="pid-input" step="0.01" value="0.100">
+            </div>
+            <div class="pid-input-box">
+              <label style="font-size:10px;color:var(--text-secondary);">INTEGRAL GAIN (Ki):</label>
+              <input type="number" id="pidKiInput" class="pid-input" step="0.1" value="1.500">
+            </div>
+          </div>
+          <div class="preset-row" style="margin-top:8px;">
+            <button class="btn-preset" onclick="setPidPreset(0.05, 0.8)">Soft (0.05 / 0.8)</button>
+            <button class="btn-preset" onclick="setPidPreset(0.10, 1.5)">Default (0.10 / 1.5)</button>
+            <button class="btn-preset" onclick="setPidPreset(0.20, 3.0)">Track (0.20 / 3.0)</button>
+          </div>
+          <div style="display:flex;gap:6px;margin-top:8px;">
+            <button class="btn-motor-action btn-save" style="flex:1;" onclick="sendPidGains()">⚡ DISPATCH PID TO
+              STM32s</button>
+            <button class="btn-preset" style="flex:0.6;" onclick="saveFlash()">💾 Persist Flash</button>
+          </div>
+        </div>
+
+        <!-- 3. ESP32 & STM32 Live Pipeline Terminal Console -->
+        <div class="card" style="flex:1;display:flex;flex-direction:column;min-height:160px;">
+          <div class="card-title">
+            <span>ESP32 Master &amp; STM32 Live Pipeline Console</span>
+            <span style="font-size:10px;color:var(--text-secondary);">UART Stream Responses</span>
+          </div>
+          <div id="mcuConsole" data-last-log="">[Console Ready] Folkrace Pi 4 Pipeline Active.</div>
+          <div class="cmd-input-row">
+            <input type="text" id="rawCmdInput" placeholder="Command (e.g. STATUS, V 2.5, A 90, PID 0.12 1.8)"
+              onkeydown="if(event.key==='Enter')sendRawCommand()">
+            <button class="btn-preset" style="padding:5px 12px;" onclick="sendRawCommand()">Send</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Bottom Frame-by-Frame Scrubbing Controls -->
+  <div class="timeline-bar">
+    <div class="timeline-slider-row">
+      <span id="lblTime" style="font-weight:700;color:var(--accent-cyan);min-width:90px;">00:00.00</span>
+      <input type="range" id="frameSlider" min="1" max="1" value="1">
+      <span id="lblFrame" style="font-weight:700;min-width:110px;text-align:right;">Frame 0 / 0</span>
+    </div>
+
+    <div class="timeline-controls">
+      <div class="btn-group">
+        <button id="btnToggleLive" class="active">🔴 LIVE</button>
+        <button id="btnFirst">|◀ First</button>
+        <button id="btnPrev10">◀◀ -10</button>
+        <button id="btnPrev1">◀ -1</button>
+        <button id="btnPlay" class="btn-play">▶ Play</button>
+        <button id="btnNext1">+1 ▶</button>
+        <button id="btnNext10">+10 ▶▶</button>
+        <button id="btnLast">Last ▶|</button>
+      </div>
+
+      <div class="btn-group">
+        <label style="font-size:11px;color:var(--text-secondary)">Speed:</label>
+        <select id="selSpeed">
+          <option value="0.1">0.1x (Slow-Mo)</option>
+          <option value="0.25">0.25x</option>
+          <option value="0.5">0.5x</option>
+          <option value="1.0" selected>1.0x Real-Time</option>
+          <option value="2.0">2.0x Fast</option>
+        </select>
+
+        <button id="btnJumpAnomaly" class="btn-anomaly" title="Jump to next slip, emergency stop, or sudden spike">
+          ⚡ Jump to Unexpected Moment
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // =============================================================================
+    // FOLKRACE PI 4 MISSION CONTROL CLIENT LOGIC
+    // =============================================================================
+
+    const canvas = document.getElementById("radarCanvas");
+    const ctx = canvas.getContext("2d");
+
+    let isLive = true;
+    let isPlaying = false;
+    let playInterval = null;
+    let currentFrameId = 0;
+    let minFrameId = 1;
+    let totalFrames = 0;
+    let loadSeq = 0;
+    let currentPkt = null;
+    let anomaliesList = [];
+
+    // Metric bounds matching Webots GUI Viewport (PlannerCostmapCanvas)
+    const X_MIN = -1.6;
+    const X_MAX = 1.6;
+    const Y_MIN = -0.85;
+    const Y_MAX = 2.50;
+
+    // 16-Channel Physical ToF Sensor Mounting Poses (only_front_tofs.proto / planner_gui.py)
+    const FRONT_TOF_SENSOR_RIG = [
+      // Front-Left Array (cross-pointing Right)
+      { name: "tof_front_left_4.1deg", sx: -0.058, sy: 0.092, heading: 1.5512, label: "FL 1.1°" },
+      { name: "tof_front_left_15.4deg", sx: -0.058, sy: 0.092, heading: 1.3548, label: "FL 12.4°" },
+      { name: "tof_front_left_26.6deg", sx: -0.058, sy: 0.092, heading: 1.1585, label: "FL 23.6°" },
+      { name: "tof_front_left_37.9deg", sx: -0.058, sy: 0.092, heading: 0.9621, label: "FL 34.9°" },
+      { name: "tof_front_left_49.1deg", sx: -0.057, sy: 0.090, heading: 0.7658, label: "FL 46.1°" },
+      { name: "tof_front_left_60.4deg", sx: -0.057, sy: 0.090, heading: 0.5694, label: "FL 57.4°" },
+      { name: "tof_front_left_71.6deg", sx: -0.057, sy: 0.090, heading: 0.3731, label: "FL 68.6°" },
+      { name: "tof_front_left_82.9deg", sx: -0.057, sy: 0.090, heading: 0.1767, label: "FL 79.9°" },
+      // Front-Right Array (cross-pointing Left)
+      { name: "tof_front_right_4.1deg", sx: 0.058, sy: 0.092, heading: 1.5904, label: "FR 1.1°" },
+      { name: "tof_front_right_15.4deg", sx: 0.058, sy: 0.092, heading: 1.7868, label: "FR 12.4°" },
+      { name: "tof_front_right_26.6deg", sx: 0.058, sy: 0.092, heading: 1.9831, label: "FR 23.6°" },
+      { name: "tof_front_right_37.9deg", sx: 0.058, sy: 0.092, heading: 2.1795, label: "FR 34.9°" },
+      { name: "tof_front_right_49.1deg", sx: 0.057, sy: 0.090, heading: 2.3758, label: "FR 46.1°" },
+      { name: "tof_front_right_60.4deg", sx: 0.057, sy: 0.090, heading: 2.5722, label: "FR 57.4°" },
+      { name: "tof_front_right_71.6deg", sx: 0.057, sy: 0.090, heading: 2.7685, label: "FR 68.6°" },
+      { name: "tof_front_right_82.9deg", sx: 0.057, sy: 0.090, heading: 2.9649, label: "FR 79.9°" }
+    ];
+
+    // Offscreen canvas for pixel-exact costmap probability & C-space rendering
+    const costmapOffscreen = document.createElement("canvas");
+    const costmapCtx = costmapOffscreen.getContext("2d");
+
+    // Precompute Kinematic Reverse Backup Escape Arcs matching planner_gui.py
+    const WHEELBASE_M = 0.1325;
+    const MAX_STEER_RAD = 0.562285;
+    const R_MIN_TURN = WHEELBASE_M / Math.max(1e-3, Math.tan(MAX_STEER_RAD));
+    const ORIGIN_Y = 0.0;
+    const BUMPER_Y = 0.095;
+    const ARC_LOOKAHEAD_M = 0.13;
+    const N_ARC_PTS = Math.max(3, Math.floor(ARC_LOOKAHEAD_M / 0.015));
+    const ARC_PTS_LEFT = [];
+    const ARC_PTS_RIGHT = [];
+    const ARC_PTS_CENTER = [];
+    for (let i = 0; i < N_ARC_PTS; i++) {
+      const s = (i / (N_ARC_PTS - 1)) * ARC_LOOKAHEAD_M;
+      ARC_PTS_LEFT.push([
+        -R_MIN_TURN * (1.0 - Math.cos(s / R_MIN_TURN)),
+        ORIGIN_Y + R_MIN_TURN * Math.sin(s / R_MIN_TURN)
+      ]);
+      ARC_PTS_RIGHT.push([
+        R_MIN_TURN * (1.0 - Math.cos(s / R_MIN_TURN)),
+        ORIGIN_Y + R_MIN_TURN * Math.sin(s / R_MIN_TURN)
+      ]);
+      ARC_PTS_CENTER.push([0.0, ORIGIN_Y + s]);
+    }
+
+    // Layer toggle checkboxes
+    const layerIds = ["chkBest", "chkCand", "chkCorridor", "chkGuide", "chkShield", "chkBackup", "chkGap", "chkHazard", "chkCostmap", "chkRays", "chkChassis", "chkGrid", "chkTrail", "chkSightlines"];
+    for (const id of layerIds) {
+      const el = document.getElementById(id);
+      if (el) {
+        el.addEventListener("change", () => {
+          if (currentPkt) renderRadar(currentPkt);
+        });
+      }
+    }
+
+    function isLayerOn(id) {
+      const el = document.getElementById(id);
+      return el ? el.checked : true;
+    }
+
+    function resizeCanvas() {
+      const rect = canvas.parentElement.getBoundingClientRect();
+      canvas.width = rect.width;
+      canvas.height = rect.height - 35; // account for header
+      if (currentPkt) renderRadar(currentPkt);
+    }
+    window.addEventListener("resize", resizeCanvas);
+    setTimeout(resizeCanvas, 50);
+
+    // Coordinate conversion: Real-world meters -> Canvas Pixels
+    function toPixel(x, y) {
+      const w = Math.max(10.0, canvas.width);
+      const h = Math.max(10.0, canvas.height);
+      const u = (x - X_MIN) / (X_MAX - X_MIN);
+      const v = (y - Y_MIN) / (Y_MAX - Y_MIN);
+      return [u * w, (1.0 - v) * h];
+    }
+
+    function toMetric(px, py) {
+      const w = Math.max(10.0, canvas.width);
+      const h = Math.max(10.0, canvas.height);
+      const mx = X_MIN + (px / w) * (X_MAX - X_MIN);
+      const my = Y_MIN + ((h - py) / h) * (Y_MAX - Y_MIN);
+      return [mx, my];
+    }
+
+    function drawRoundedRect(ctx, x, y, w, h, r) {
+      const radius = Math.min(r, Math.abs(w) / 2, Math.abs(h) / 2);
+      ctx.beginPath();
+      ctx.moveTo(x + radius, y);
+      ctx.lineTo(x + w - radius, y);
+      ctx.quadraticCurveTo(x + w, y, x + w, y + radius);
+      ctx.lineTo(x + w, y + h - radius);
+      ctx.quadraticCurveTo(x + w, y + h, x + w - radius, y + h);
+      ctx.lineTo(x + radius, y + h);
+      ctx.quadraticCurveTo(x, y + h, x, y + h - radius);
+      ctx.lineTo(x, y + radius);
+      ctx.quadraticCurveTo(x, y, x + radius, y);
+      ctx.closePath();
+    }
+
+    canvas.addEventListener("mousemove", (e) => {
+      const rect = canvas.getBoundingClientRect();
+      const [mx, my] = toMetric(e.clientX - rect.left, e.clientY - rect.top);
+      document.getElementById("coordReadout").innerText = `Cursor: X=${mx.toFixed(2)}m, Y=${my.toFixed(2)}m`;
+    });
+
+    // Precomputed 32-bit Little-Endian RGBA Color Lookup Table (512 entries: 0..255 normal, 256..511 inflated)
+    const COLOR_LUT = new Uint32Array(512);
+    for (let p = 0; p < 256; p++) {
+      if (p >= 166) {
+        COLOR_LUT[p] = 0xFF0000FF; // Solid red (confirmed obstacle prob > 0.65)
+      } else if (p < 97) {
+        COLOR_LUT[p] = 0x9622160E; // Dark navy free space (prob < 0.38)
+      } else {
+        COLOR_LUT[p] = 0x821ED7F5; // Translucent yellow unknown space (0.38 <= prob <= 0.65)
+      }
+      // With hazard inflation
+      if (p >= 166) {
+        COLOR_LUT[p + 256] = 0xFF0000FF; // Obstacle hit takes precedence
+      } else {
+        COLOR_LUT[p + 256] = 0xAF402AFF; // Coral red inflated safety margin
+      }
+    }
+
+    // Persistent cached ImageData & 32-bit pixel view (zero garbage collection allocations)
+    let cachedCostmapImgData = null;
+    let cachedCostmapU32 = null;
+
+    // ==============================================================================
+    // LOCAL 1:1 C++ SMART HYBRID COSTMAP RECONSTRUCTION (ZERO PI OVERHEAD)
+    // Runs locally on the laptop with bit-for-bit equivalence to Webots simulation
+    // ==============================================================================
+    const CM_X_MIN = -1.25;
+    const CM_X_MAX = 1.25;
+    const CM_Y_MIN = 0.00;
+    const CM_Y_MAX = 2.60;
+    const CM_RES = 0.015;
+    const CM_R_INFLATION = 0.075;
+    const CM_WIDTH = Math.round((CM_X_MAX - CM_X_MIN) / CM_RES) + 1; // 168
+    const CM_HEIGHT = Math.round((CM_Y_MAX - CM_Y_MIN) / CM_RES) + 1; // 174
+    const CM_TOTAL_CELLS = CM_WIDTH * CM_HEIGHT; // 29232
+    const CM_INFLATION_CELLS = Math.round(CM_R_INFLATION / CM_RES); // 5
+
+    function wrapAngle(a) {
+      const TWO_PI = 2.0 * Math.PI;
+      let res = (a + Math.PI) % TWO_PI;
+      if (res < 0) res += TWO_PI;
+      return res - Math.PI;
+    }
+
+    // Flat preallocated buffers for zero garbage collection allocations
+    const cmLogOdds = new Float32Array(CM_TOTAL_CELLS);
+    const cmRawHazard = new Uint8Array(CM_TOTAL_CELLS);
+    const cmHazardMask = new Uint8Array(CM_TOTAL_CELLS);
+
+    // Precompute Dilation Spans
+    const CM_SPAN_DX = new Int32Array(2 * CM_INFLATION_CELLS + 1);
+    for (let dy = -CM_INFLATION_CELLS; dy <= CM_INFLATION_CELLS; dy++) {
+      CM_SPAN_DX[dy + CM_INFLATION_CELLS] = Math.floor(Math.sqrt(Math.max(0, CM_INFLATION_CELLS * CM_INFLATION_CELLS - dy * dy)));
+    }
+
+    // Precompute Sigmoid LUT (2048 entries across [-10.0, +10.0])
+    const CM_SIGMOID_LUT = new Float32Array(2048);
+    for (let i = 0; i < 2048; i++) {
+      const lo = -10.0 + (i * 20.0) / 2047.0;
+      CM_SIGMOID_LUT[i] = 1.0 / (1.0 + Math.exp(-lo));
+    }
+
+    // Precompute 16-Channel Sensor Cones (sorted by radial distance)
+    const L_OCC_CENTER = 5.5;
+    const L_OCC_EDGE = 2.9;
+    const CM_SENSOR_CONES = [];
+
+    for (let sIdx = 0; sIdx < 16; sIdx++) {
+      const s = FRONT_TOF_SENSOR_RIG[sIdx];
+      const halfFov = 0.19634954 * 0.5;
+      const sigmaTheta = halfFov / 2.10;
+      const twoSigmaThetaSq = 2.0 * sigmaTheta * sigmaTheta;
+      const cone = [];
+
+      for (let r = 0; r < CM_HEIGHT; r++) {
+        const cellY = CM_Y_MIN + r * CM_RES + CM_RES * 0.5;
+        const dy = cellY - s.sy;
+        const rowOff = r * CM_WIDTH;
+
+        for (let c = 0; c < CM_WIDTH; c++) {
+          const cellX = CM_X_MIN + c * CM_RES + CM_RES * 0.5;
+          const dx = cellX - s.sx;
+          const dist = Math.hypot(dx, dy);
+          if (dist < 0.001 || dist > 2.40) continue;
+
+          const phi = Math.atan2(dy, dx);
+          const dth = Math.abs(wrapAngle(phi - s.heading));
+          if (dth > halfFov) continue;
+
+          const angFactor = Math.exp(-(dth * dth) / twoSigmaThetaSq);
+          const hitVal = L_OCC_EDGE + (L_OCC_CENTER - L_OCC_EDGE) * angFactor;
+          cone.push({ idx: rowOff + c, r: dist, hit: hitVal });
+        }
+      }
+      cone.sort((a, b) => a.r - b.r);
+      CM_SENSOR_CONES.push(cone);
+    }
+
+    function extract16Ranges(pkt) {
+      if (pkt.tof_ranges && pkt.tof_ranges.length >= 16) {
+        return pkt.tof_ranges;
+      }
+      const ranges = new Float32Array(16);
+      for (let i = 0; i < 16; i++) {
+        const sName = FRONT_TOF_SENSOR_RIG[i].name;
+        let r = 0.0;
+        if (pkt.tof && pkt.tof[sName] !== undefined) {
+          r = parseFloat(pkt.tof[sName]);
+        } else if (pkt.tof_ranges && pkt.tof_ranges[i] !== undefined) {
+          r = parseFloat(pkt.tof_ranges[i]);
+        }
+        ranges[i] = (isNaN(r) || r <= 0.001) ? 0.0 : r;
+      }
+      return ranges;
+    }
+
+    function computeLocalSmartHybridCostmap(ranges) {
+      // Step 1: Flat buffer reset (<0.01ms)
+      cmLogOdds.fill(0.0);
+      cmHazardMask.fill(0);
+
+      // If all ranges are zero (no sensors connected / 0 data), do not carve false free space
+      let hasValid = false;
+      for (let i = 0; i < ranges.length; i++) {
+        if (ranges[i] > 0.001) { hasValid = true; break; }
+      }
+      if (!hasValid) return;
+
+      const L_FREE = -2.5;
+
+      // Origin launch clearance (under bumper)
+      for (let r = 0; r < CM_HEIGHT; r++) {
+        const cellY = CM_Y_MIN + r * CM_RES + CM_RES * 0.5;
+        if (cellY > 0.095) break;
+        const rowOff = r * CM_WIDTH;
+        for (let c = 0; c < CM_WIDTH; c++) {
+          const cellX = CM_X_MIN + c * CM_RES + CM_RES * 0.5;
+          if (Math.abs(cellX) <= 0.080 && cellY >= 0.0) {
+            cmLogOdds[rowOff + c] = L_FREE;
+          }
+        }
+      }
+
+      // Step 2A: Accumulate Obstacle Hit Evidence
+      for (let sIdx = 0; sIdx < 16; sIdx++) {
+        const rawZ = ranges[sIdx] !== undefined ? ranges[sIdx] : 2.40;
+        const z = Math.min(2.40, Math.max(0.001, rawZ));
+        const isHit = z < 2.38;
+        if (!isHit) continue;
+
+        const sigmaR = Math.max(0.030 * z, CM_RES);
+        const rHitMin = z - 0.12 * sigmaR;
+        const rHitMax = z + Math.max(0.075, 1.25 * sigmaR);
+
+        const cells = CM_SENSOR_CONES[sIdx];
+        const n = cells.length;
+        for (let i = 0; i < n; i++) {
+          const r = cells[i].r;
+          if (r < rHitMin) continue;
+          if (r <= rHitMax) {
+            cmLogOdds[cells[i].idx] += cells[i].hit;
+          } else {
+            break;
+          }
+        }
+      }
+
+      // Step 2B: Strict Free-Space & Negative Cone Space-Carving
+      for (let sIdx = 0; sIdx < 16; sIdx++) {
+        const rawZ = ranges[sIdx] !== undefined ? ranges[sIdx] : 2.40;
+        const z = Math.min(2.40, Math.max(0.001, rawZ));
+        const isHit = z < 2.38;
+
+        let rCarveMax;
+        if (!isHit) {
+          rCarveMax = 2.40;
+        } else {
+          const sigmaR = Math.max(0.030 * z, CM_RES);
+          rCarveMax = z - Math.max(0.025, 1.0 * sigmaR);
+        }
+
+        if (rCarveMax > 0.001) {
+          const cells = CM_SENSOR_CONES[sIdx];
+          const n = cells.length;
+          for (let i = 0; i < n; i++) {
+            if (cells[i].r < rCarveMax) {
+              const idx = cells[i].idx;
+              if (cmLogOdds[idx] > L_FREE) cmLogOdds[idx] = L_FREE;
+            } else {
+              break;
+            }
+          }
+        }
+      }
+
+      // Re-apply origin clearance
+      for (let r = 0; r < CM_HEIGHT; r++) {
+        const cellY = CM_Y_MIN + r * CM_RES + CM_RES * 0.5;
+        if (cellY > 0.095) break;
+        const rowOff = r * CM_WIDTH;
+        for (let c = 0; c < CM_WIDTH; c++) {
+          const cellX = CM_X_MIN + c * CM_RES + CM_RES * 0.5;
+          if (Math.abs(cellX) <= 0.080 && cellY >= 0.0) {
+            cmLogOdds[rowOff + c] = L_FREE;
+          }
+        }
+      }
+
+      // Step 3: Probabilities and Confirmed Obstacle Threshold
+      for (let i = 0; i < CM_TOTAL_CELLS; i++) {
+        cmRawHazard[i] = (cmLogOdds[i] >= 0.62) ? 1 : 0;
+      }
+
+      // Step 4: C-Space Morphological Dilation on Obstacle Boundaries
+      cmHazardMask.fill(0);
+      for (let r = 0; r < CM_HEIGHT; r++) {
+        const rowOff = r * CM_WIDTH;
+        for (let c = 0; c < CM_WIDTH; c++) {
+          if (cmRawHazard[rowOff + c] === 1) {
+            // Interior obstacle skip
+            if (r > 0 && r < CM_HEIGHT - 1 && c > 0 && c < CM_WIDTH - 1 &&
+              cmRawHazard[(r - 1) * CM_WIDTH + c] === 1 &&
+              cmRawHazard[(r + 1) * CM_WIDTH + c] === 1 &&
+              cmRawHazard[rowOff + (c - 1)] === 1 &&
+              cmRawHazard[rowOff + (c + 1)] === 1) {
+              cmHazardMask[rowOff + c] = 1;
+              continue;
+            }
+
+            // Perimeter dilation
+            for (let dy = -CM_INFLATION_CELLS; dy <= CM_INFLATION_CELLS; dy++) {
+              const nr = r + dy;
+              if (nr < 0 || nr >= CM_HEIGHT) continue;
+              const dx = CM_SPAN_DX[dy + CM_INFLATION_CELLS];
+              const ncStart = Math.max(0, c - dx);
+              const ncEnd = Math.min(CM_WIDTH - 1, c + dx);
+              const nRowOff = nr * CM_WIDTH;
+              for (let nc = ncStart; nc <= ncEnd; nc++) {
+                cmHazardMask[nRowOff + nc] = 1;
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // Render 2D Map Exactly Matching Webots Simulation PlannerCostmapCanvas
+    function renderRadar(pkt) {
+      // Background fill: QColor(10, 13, 18)
+      ctx.fillStyle = "rgb(10, 13, 18)";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      const b = (pkt.grid_bounds && pkt.grid_bounds.length === 4) ? pkt.grid_bounds : [-1.25, 1.25, 0.00, 2.60];
+      const mapXMin = b[0], mapXMax = b[1], mapYMin = b[2], mapYMax = b[3];
+
+      // 1. Costmap Probability Image & C-Space Hazard Overlay (Constructed locally on laptop from binary)
+      if (isLayerOn("chkCostmap")) {
+        const showHazard = isLayerOn("chkHazard");
+        let rendered = false;
+
+        // Fast Path A: Direct binary Uint8Array from Pi 4 binary stream
+        if (pkt.prob_bytes && pkt.grid_shape && pkt.grid_shape.length === 2) {
+          const H = pkt.grid_shape[0];
+          const W = pkt.grid_shape[1];
+          if (H > 0 && W > 0 && pkt.prob_bytes.length >= H * W) {
+            if (costmapOffscreen.width !== W || costmapOffscreen.height !== H) {
+              costmapOffscreen.width = W;
+              costmapOffscreen.height = H;
+              cachedCostmapImgData = null;
+              cachedCostmapU32 = null;
+            }
+            if (!cachedCostmapImgData) {
+              cachedCostmapImgData = costmapCtx.createImageData(W, H);
+              cachedCostmapU32 = new Uint32Array(cachedCostmapImgData.data.buffer);
+            }
+            const u32 = cachedCostmapU32;
+            const prob = pkt.prob_bytes;
+            const haz = showHazard ? pkt.hazard_bytes : null;
+
+            for (let r = 0; r < H; r++) {
+              const destRow = H - 1 - r;
+              const srcOff = r * W;
+              const destOff = destRow * W;
+              for (let c = 0; c < W; c++) {
+                const idx = srcOff + c;
+                const p = prob[idx];
+                const hBit = (haz && haz[idx] > 0) ? 256 : 0;
+                u32[destOff + c] = COLOR_LUT[p | hBit];
+              }
+            }
+            costmapCtx.putImageData(cachedCostmapImgData, 0, 0);
+            rendered = true;
+          }
+        } else if (pkt.grid_unpacked && pkt.grid_unpacked.length > 0) {
+          // Legacy Path B: 2D unpacked nested arrays (fallback)
+          const g = pkt.grid_unpacked;
+          const hMask = pkt.hazard_unpacked || null;
+          const H = g.length;
+          const W = g[0].length;
+          if (costmapOffscreen.width !== W || costmapOffscreen.height !== H) {
+            costmapOffscreen.width = W;
+            costmapOffscreen.height = H;
+            cachedCostmapImgData = null;
+            cachedCostmapU32 = null;
+          }
+          if (!cachedCostmapImgData) {
+            cachedCostmapImgData = costmapCtx.createImageData(W, H);
+            cachedCostmapU32 = new Uint32Array(cachedCostmapImgData.data.buffer);
+          }
+          const u32 = cachedCostmapU32;
+          for (let r = 0; r < H; r++) {
+            const destRow = H - 1 - r;
+            const gRow = g[r];
+            const hRow = (hMask && hMask[r]) ? hMask[r] : null;
+            const destOff = destRow * W;
+            for (let c = 0; c < W; c++) {
+              const p = Math.floor(gRow[c] * 255.0);
+              const hBit = (showHazard && hRow && hRow[c] > 0) ? 256 : 0;
+              u32[destOff + c] = COLOR_LUT[p | hBit];
+            }
+          }
+          costmapCtx.putImageData(cachedCostmapImgData, 0, 0);
+          rendered = true;
+        } else if (!rendered && (pkt.tof_ranges || pkt.tof)) {
+          // Fast Path C: Local 1:1 C++ Smart Hybrid Costmap Reconstruction on Laptop (Zero Pi Overhead!)
+          // Reconstructs identical 15mm continuous Bayesian probability map, space-carved cones,
+          // and circular morphological C-space hazard dilation locally in <0.3ms in JavaScript.
+          const ranges = extract16Ranges(pkt);
+          computeLocalSmartHybridCostmap(ranges);
+
+          if (costmapOffscreen.width !== CM_WIDTH || costmapOffscreen.height !== CM_HEIGHT) {
+            costmapOffscreen.width = CM_WIDTH;
+            costmapOffscreen.height = CM_HEIGHT;
+            cachedCostmapImgData = null;
+            cachedCostmapU32 = null;
+          }
+          if (!cachedCostmapImgData) {
+            cachedCostmapImgData = costmapCtx.createImageData(CM_WIDTH, CM_HEIGHT);
+            cachedCostmapU32 = new Uint32Array(cachedCostmapImgData.data.buffer);
+          }
+
+          const u32 = cachedCostmapU32;
+          const LUT_SCALE = 2047.0 / 20.0;
+          for (let r = 0; r < CM_HEIGHT; r++) {
+            const destRow = CM_HEIGHT - 1 - r;
+            const srcOff = r * CM_WIDTH;
+            const destOff = destRow * CM_WIDTH;
+            for (let c = 0; c < CM_WIDTH; c++) {
+              const idx = srcOff + c;
+              const lo = Math.max(-10.0, Math.min(10.0, cmLogOdds[idx]));
+              const lutIdx = Math.max(0, Math.min(2047, Math.floor((lo + 10.0) * LUT_SCALE)));
+              const p = Math.floor(CM_SIGMOID_LUT[lutIdx] * 255.0);
+              const hBit = (showHazard && cmHazardMask[idx] > 0) ? 256 : 0;
+              u32[destOff + c] = COLOR_LUT[p | hBit];
+            }
+          }
+          costmapCtx.putImageData(cachedCostmapImgData, 0, 0);
+          rendered = true;
+        }
+
+        if (rendered) {
+          const [tlX, tlY] = toPixel(mapXMin, mapYMax);
+          const [brX, brY] = toPixel(mapXMax, mapYMin);
+          const rectW = brX - tlX;
+          const rectH = brY - tlY;
+
+          ctx.save();
+          ctx.imageSmoothingEnabled = false;
+          ctx.drawImage(costmapOffscreen, tlX, tlY, rectW, rectH);
+          ctx.restore();
+
+          // Dotted border around costmap bounds: QColor(80, 120, 160, 90)
+          ctx.save();
+          ctx.strokeStyle = "rgba(80, 120, 160, 0.35)";
+          ctx.lineWidth = 1;
+          ctx.setLineDash([2, 3]);
+          ctx.strokeRect(tlX, tlY, rectW, rectH);
+          ctx.restore();
+        }
+      }
+
+      // 2. Grid lines & range circles
+      if (isLayerOn("chkGrid")) {
+        ctx.save();
+        ctx.font = "8pt Consolas, monospace";
+        const yLines = [-0.5, 0.0, 0.5, 1.0, 1.5, 1.8];
+        for (const ym of yLines) {
+          const [p1x, p1y] = toPixel(X_MIN, ym);
+          const [p2x, p2y] = toPixel(X_MAX, ym);
+          ctx.strokeStyle = "rgba(50, 70, 90, 0.43)";
+          ctx.lineWidth = 1;
+          ctx.setLineDash([5, 4]);
+          ctx.beginPath();
+          ctx.moveTo(p1x, p1y);
+          ctx.lineTo(p2x, p2y);
+          ctx.stroke();
+
+          ctx.fillStyle = "rgba(100, 150, 200, 0.71)";
+          const lblText = Math.abs(ym - 1.8) < 1e-3 ? "1.8m (ToF Limit)" : `${ym.toFixed(1)}m`;
+          ctx.fillText(lblText, p1x + 8, p1y - 4);
+        }
+
+        const xLines = [-1.0, -0.5, 0.0, 0.5, 1.0];
+        ctx.strokeStyle = "rgba(50, 70, 90, 0.43)";
+        ctx.lineWidth = 1;
+        ctx.setLineDash([5, 4]);
+        for (const xm of xLines) {
+          const [p1x, p1y] = toPixel(xm, Y_MIN);
+          const [p2x, p2y] = toPixel(xm, Y_MAX);
+          ctx.beginPath();
+          ctx.moveTo(p1x, p1y);
+          ctx.lineTo(p2x, p2y);
+          ctx.stroke();
+        }
+
+        const rings = [0.5, 1.0, 1.5, 1.8];
+        ctx.strokeStyle = "rgba(60, 90, 120, 0.20)";
+        ctx.lineWidth = 1;
+        ctx.setLineDash([2, 3]);
+        for (const r of rings) {
+          const [tlX, tlY] = toPixel(-r, r);
+          const [brX, brY] = toPixel(r, -r);
+          const cx = (tlX + brX) * 0.5;
+          const cy = (tlY + brY) * 0.5;
+          const rx = Math.abs(brX - tlX) * 0.5;
+          const ry = Math.abs(brY - tlY) * 0.5;
+          ctx.beginPath();
+          ctx.ellipse(cx, cy, rx, ry, 0, 0, 2 * Math.PI);
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
+
+      // 3. ToF Sensor Rays & Conical Beams (16 Channels)
+      if (isLayerOn("chkRays") && (pkt.tof || (pkt.tof_ranges && pkt.tof_ranges.length === 16))) {
+        const halfFov = 0.19634954 / 2.0; // 5.625 deg half FOV
+        const nArc = 6;
+
+        for (let i = 0; i < FRONT_TOF_SENSOR_RIG.length; i++) {
+          const s = FRONT_TOF_SENSOR_RIG[i];
+          let rng = null;
+          if (pkt.tof && pkt.tof[s.name] !== undefined) {
+            rng = parseFloat(pkt.tof[s.name]);
+          } else if (pkt.tof_ranges && pkt.tof_ranges.length > i) {
+            rng = parseFloat(pkt.tof_ranges[i]);
+          }
+          if (rng === null || isNaN(rng) || rng <= 0.001) continue;
+
+          const dispR = Math.min(Math.max(rng, 0.02), 2.40);
+          const isHit = rng < 2.38;
+          const [ox, oy] = toPixel(s.sx, s.sy);
+
+          const arcPts = [];
+          for (let k = 0; k < nArc; k++) {
+            const a = (s.heading - halfFov) + (k / (nArc - 1)) * (2.0 * halfFov);
+            const ax = s.sx + dispR * Math.cos(a);
+            const ay = s.sy + dispR * Math.sin(a);
+            arcPts.push(toPixel(ax, ay));
+          }
+
+          const cx = s.sx + dispR * Math.cos(s.heading);
+          const cy = s.sy + dispR * Math.sin(s.heading);
+          const [pcx, pcy] = toPixel(cx, cy);
+
+          let cFill, cLine, cEdge;
+          if (isHit) {
+            if (dispR < 0.25) {
+              cFill = "rgba(255, 40, 40, 0.20)";
+              cLine = "rgba(255, 60, 60, 0.86)";
+              cEdge = "rgba(255, 60, 60, 0.35)";
+            } else if (dispR < 0.55) {
+              cFill = "rgba(255, 180, 0, 0.16)";
+              cLine = "rgba(255, 190, 0, 0.78)";
+              cEdge = "rgba(255, 190, 0, 0.35)";
+            } else {
+              cFill = "rgba(0, 230, 180, 0.12)";
+              cLine = "rgba(0, 230, 180, 0.67)";
+              cEdge = "rgba(0, 230, 180, 0.35)";
+            }
+          } else {
+            cFill = "rgba(70, 110, 160, 0.05)";
+            cLine = "rgba(80, 130, 180, 0.24)";
+            cEdge = "rgba(80, 130, 180, 0.16)";
+          }
+
+          // Conical sector polygon
+          ctx.save();
+          ctx.fillStyle = cFill;
+          ctx.beginPath();
+          ctx.moveTo(ox, oy);
+          for (const pt of arcPts) ctx.lineTo(pt[0], pt[1]);
+          ctx.closePath();
+          ctx.fill();
+
+          // Boundary rays
+          ctx.strokeStyle = cEdge;
+          ctx.lineWidth = 1.0;
+          ctx.setLineDash(isHit ? [] : [2, 3]);
+          ctx.beginPath();
+          ctx.moveTo(ox, oy);
+          ctx.lineTo(arcPts[0][0], arcPts[0][1]);
+          ctx.moveTo(ox, oy);
+          ctx.lineTo(arcPts[arcPts.length - 1][0], arcPts[arcPts.length - 1][1]);
+          ctx.stroke();
+
+          // Contact arc on obstacle surface
+          if (isHit) {
+            ctx.strokeStyle = cLine;
+            ctx.lineWidth = 2.5;
+            ctx.lineCap = "round";
+            ctx.setLineDash([]);
+            ctx.beginPath();
+            ctx.moveTo(arcPts[0][0], arcPts[0][1]);
+            for (let k = 1; k < arcPts.length; k++) {
+              ctx.lineTo(arcPts[k][0], arcPts[k][1]);
+            }
+            ctx.stroke();
+          }
+
+          // Center optical axis ray
+          ctx.strokeStyle = cLine;
+          ctx.lineWidth = isHit ? 1.2 : 0.8;
+          ctx.setLineDash(isHit ? [5, 4] : [2, 3]);
+          ctx.beginPath();
+          ctx.moveTo(ox, oy);
+          ctx.lineTo(pcx, pcy);
+          ctx.stroke();
+
+          // Sensor origin mount dot
+          ctx.setLineDash([]);
+          ctx.fillStyle = "rgba(0, 220, 255, 0.78)";
+          ctx.beginPath();
+          ctx.arc(ox, oy, 2.5, 0, 2 * Math.PI);
+          ctx.fill();
+
+          // Obstacle hit marker and range tag
+          if (isHit) {
+            ctx.fillStyle = cLine;
+            ctx.beginPath();
+            ctx.arc(pcx, pcy, 3.5, 0, 2 * Math.PI);
+            ctx.fill();
+            if (dispR < 1.30) {
+              ctx.font = "7pt Consolas, monospace";
+              ctx.fillStyle = "rgba(255, 255, 255, 0.86)";
+              ctx.fillText(`${Math.round(dispR * 100)}cm`, pcx + 4, pcy - 3);
+            }
+          }
+
+          // Fallback zone overlay: show both raw targets (slightly transparent) + status codes
+          if (
+            pkt.tof_target0_mm && pkt.tof_target1_mm &&
+            pkt.tof_target0_status && pkt.tof_target1_status &&
+            pkt.tof_target0_mm.length > i && pkt.tof_target1_mm.length > i &&
+            pkt.tof_target0_status.length > i && pkt.tof_target1_status.length > i
+          ) {
+            const d0 = pkt.tof_target0_mm[i];
+            const d1 = pkt.tof_target1_mm[i];
+            const st0 = pkt.tof_target0_status[i];
+            const st1 = pkt.tof_target1_status[i];
+            const isValidSt = (st) => (st === 5 || st === 6 || st === 9);
+            const valid0 = isValidSt(st0) && d0 > 0;
+            const valid1 = isValidSt(st1) && d1 > 0;
+
+            if (!valid0 && !valid1) {
+              const fbTargets = [
+                { idx: 0, dMm: d0, st: st0, stroke: "rgba(255, 170, 90, 0.45)", text: "rgba(255, 195, 130, 0.62)", yOff: -5 },
+                { idx: 1, dMm: d1, st: st1, stroke: "rgba(130, 190, 255, 0.42)", text: "rgba(165, 210, 255, 0.58)", yOff: 9 },
+              ];
+              ctx.font = "6.5pt Consolas, monospace";
+              for (const ft of fbTargets) {
+                if (ft.dMm > 0) {
+                  const dispT = Math.min(Math.max(ft.dMm / 1000.0, 0.02), 2.40);
+                  const [tx, ty] = toPixel(s.sx + dispT * Math.cos(s.heading), s.sy + dispT * Math.sin(s.heading));
+                  ctx.strokeStyle = ft.stroke;
+                  ctx.lineWidth = 1.5;
+                  ctx.setLineDash([3, 3]);
+                  ctx.beginPath();
+                  for (let k = 0; k < nArc; k++) {
+                    const a = (s.heading - halfFov) + (k / (nArc - 1)) * (2.0 * halfFov);
+                    const [ax, ay] = toPixel(s.sx + dispT * Math.cos(a), s.sy + dispT * Math.sin(a));
+                    if (k === 0) ctx.moveTo(ax, ay);
+                    else ctx.lineTo(ax, ay);
+                  }
+                  ctx.stroke();
+
+                  ctx.setLineDash([]);
+                  ctx.fillStyle = ft.stroke;
+                  ctx.beginPath();
+                  ctx.arc(tx, ty, 2.8, 0, 2 * Math.PI);
+                  ctx.fill();
+
+                  ctx.fillStyle = ft.text;
+                  ctx.fillText(`T${ft.idx}:${Math.round(ft.dMm / 10)}cm(s${ft.st})`, tx + 4, ty + ft.yOff);
+                } else {
+                  const labelR = 0.35 + ft.idx * 0.16;
+                  const [lx, ly] = toPixel(s.sx + labelR * Math.cos(s.heading), s.sy + labelR * Math.sin(s.heading));
+                  ctx.fillStyle = ft.text;
+                  ctx.fillText(`T${ft.idx}:--(s${ft.st})`, lx + 4, ly + ft.yOff);
+                }
+              }
+            }
+          }
+          ctx.restore();
+        }
+      }
+
+      // 4. Curvilinear SL-MPC Dynamic Safety Corridor (Teal Ribbon & Boundaries)
+      if (isLayerOn("chkCorridor") && pkt.corridor_left && pkt.corridor_right && pkt.corridor_left.length > 1 && pkt.corridor_right.length > 1) {
+        ctx.save();
+        ctx.fillStyle = "rgba(0, 229, 255, 0.10)";
+        ctx.beginPath();
+        const [s0x, s0y] = toPixel(pkt.corridor_left[0][0], pkt.corridor_left[0][1]);
+        ctx.moveTo(s0x, s0y);
+        for (let i = 1; i < pkt.corridor_left.length; i++) {
+          const [px, py] = toPixel(pkt.corridor_left[i][0], pkt.corridor_left[i][1]);
+          ctx.lineTo(px, py);
+        }
+        for (let i = pkt.corridor_right.length - 1; i >= 0; i--) {
+          const [px, py] = toPixel(pkt.corridor_right[i][0], pkt.corridor_right[i][1]);
+          ctx.lineTo(px, py);
+        }
+        ctx.closePath();
+        ctx.fill();
+
+        // Left & right corridor dashed boundaries
+        ctx.strokeStyle = "rgba(0, 229, 255, 0.59)";
+        ctx.lineWidth = 1.3;
+        ctx.setLineDash([5, 4]);
+        ctx.beginPath();
+        for (let i = 0; i < pkt.corridor_left.length - 1; i++) {
+          const [p1x, p1y] = toPixel(pkt.corridor_left[i][0], pkt.corridor_left[i][1]);
+          const [p2x, p2y] = toPixel(pkt.corridor_left[i + 1][0], pkt.corridor_left[i + 1][1]);
+          ctx.moveTo(p1x, p1y);
+          ctx.lineTo(p2x, p2y);
+        }
+        for (let i = 0; i < pkt.corridor_right.length - 1; i++) {
+          const [p1x, p1y] = toPixel(pkt.corridor_right[i][0], pkt.corridor_right[i][1]);
+          const [p2x, p2y] = toPixel(pkt.corridor_right[i + 1][0], pkt.corridor_right[i + 1][1]);
+          ctx.moveTo(p1x, p1y);
+          ctx.lineTo(p2x, p2y);
+        }
+        ctx.stroke();
+        ctx.restore();
+      }
+
+      // 5. Curvilinear SL-MPC Reference Guide Spline (Cyan Dashed)
+      if (isLayerOn("chkGuide") && pkt.guide_line && pkt.guide_line.length > 1) {
+        ctx.save();
+        ctx.strokeStyle = "rgba(80, 200, 255, 0.63)";
+        ctx.lineWidth = 1.4;
+        ctx.setLineDash([5, 4]);
+        ctx.beginPath();
+        const [g0x, g0y] = toPixel(pkt.guide_line[0][0], pkt.guide_line[0][1]);
+        ctx.moveTo(g0x, g0y);
+        for (let i = 1; i < pkt.guide_line.length; i++) {
+          const [gx, gy] = toPixel(pkt.guide_line[i][0], pkt.guide_line[i][1]);
+          ctx.lineTo(gx, gy);
+        }
+        ctx.stroke();
+        ctx.restore();
+      }
+
+      // 6. Candidate Trajectory Lines (Cyan Fan & Purple Challenger Line)
+      if (isLayerOn("chkCand") && pkt.candidate_lines && Array.isArray(pkt.candidate_lines)) {
+        ctx.save();
+        for (let idx = 0; idx < pkt.candidate_lines.length; idx++) {
+          const line = pkt.candidate_lines[idx];
+          if (!line || line.length < 2) continue;
+          if (idx === 0) {
+            ctx.strokeStyle = "rgba(0, 200, 255, 0.35)";
+            ctx.lineWidth = 1.2;
+            ctx.setLineDash([]);
+          } else {
+            ctx.strokeStyle = "rgba(180, 100, 255, 0.63)";
+            ctx.lineWidth = 1.6;
+            ctx.setLineDash([5, 4]);
+          }
+          ctx.beginPath();
+          const [sx, sy] = toPixel(line[0][0], line[0][1]);
+          ctx.moveTo(sx, sy);
+          for (let i = 1; i < line.length; i++) {
+            const [lx, ly] = toPixel(line[i][0], line[i][1]);
+            ctx.lineTo(lx, ly);
+          }
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
+
+      // 7. Best / Winning Planned Driving Line (Bright Gold Solid Line with Step Dots)
+      if (isLayerOn("chkBest") && pkt.best_line && pkt.best_line.length > 1) {
+        ctx.save();
+        ctx.strokeStyle = "rgba(255, 215, 0, 0.94)";
+        ctx.lineWidth = 3.0;
+        ctx.setLineDash([]);
+        ctx.beginPath();
+        const [b0x, b0y] = toPixel(pkt.best_line[0][0], pkt.best_line[0][1]);
+        ctx.moveTo(b0x, b0y);
+        for (let i = 1; i < pkt.best_line.length; i++) {
+          const [bx, by] = toPixel(pkt.best_line[i][0], pkt.best_line[i][1]);
+          ctx.lineTo(bx, by);
+        }
+        ctx.stroke();
+
+        // Tiny yellow step dots along every step of the planned driving line
+        ctx.fillStyle = "rgba(255, 245, 100, 1.0)";
+        ctx.strokeStyle = "rgba(30, 25, 0, 0.86)";
+        ctx.lineWidth = 0.8;
+        for (let i = 0; i < pkt.best_line.length; i++) {
+          const [nx, ny] = toPixel(pkt.best_line[i][0], pkt.best_line[i][1]);
+          ctx.beginPath();
+          ctx.arc(nx, ny, 2.5, 0, 2 * Math.PI);
+          ctx.fill();
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
+
+      // 8. Emergency Shield Micro-Rollouts & Predictive Course Probe
+      if (isLayerOn("chkShield") && pkt.shield) {
+        const sh = pkt.shield;
+        const sActive = Boolean(sh.active);
+        const chosenId = sh.chosen_id !== undefined ? sh.chosen_id : -1;
+        const allBlockedReverse = sActive && chosenId === 4;
+
+        const branches = [
+          { pts: sh.straight_zero || [], safe: Boolean(sh.straight_zero_safe), chosen: false, stepNum: -1 },
+          { pts: sh.straight_mpc || sh.straight || [], safe: Boolean(sh.straight_mpc_safe !== undefined ? sh.straight_mpc_safe : sh.straight_safe), chosen: false, stepNum: 0 },
+          { pts: sh.k1_left || [], safe: Boolean(sh.k1_left_safe), chosen: sActive && chosenId === 2, stepNum: 1 },
+          { pts: sh.k1_right || [], safe: Boolean(sh.k1_right_safe), chosen: sActive && chosenId === 3, stepNum: 1 },
+          { pts: sh.k2_left || [], safe: Boolean(sh.k2_left_safe), chosen: sActive && chosenId === 0, stepNum: 2 },
+          { pts: sh.k2_right || [], safe: Boolean(sh.k2_right_safe), chosen: sActive && chosenId === 1, stepNum: 2 }
+        ];
+
+        ctx.save();
+        for (const bItem of branches) {
+          const branch = bItem.pts;
+          if (!branch || branch.length < 2) continue;
+
+          if (bItem.stepNum === -1) {
+            ctx.strokeStyle = bItem.safe ? "rgba(190, 220, 255, 0.75)" : "rgba(255, 100, 50, 0.82)";
+            ctx.lineWidth = bItem.safe ? 2.0 : 2.6;
+            ctx.setLineDash([2, 3]);
+          } else if (bItem.stepNum === 0) {
+            ctx.strokeStyle = bItem.safe ? "rgba(240, 245, 255, 0.86)" : "rgba(255, 60, 20, 0.94)";
+            ctx.lineWidth = bItem.safe ? 2.4 : 3.2;
+            ctx.setLineDash([5, 4]);
+          } else if (allBlockedReverse && bItem.stepNum === 1) {
+            ctx.strokeStyle = "rgba(255, 30, 80, 0.94)";
+            ctx.lineWidth = 2.8;
+            ctx.setLineDash([]);
+          } else if (bItem.chosen) {
+            ctx.strokeStyle = "rgba(0, 255, 128, 1.0)";
+            ctx.lineWidth = 3.2;
+            ctx.setLineDash([]);
+          } else if (bItem.safe) {
+            ctx.strokeStyle = bItem.stepNum === 1 ? "rgba(0, 230, 160, 0.82)" : "rgba(0, 255, 200, 0.86)";
+            ctx.lineWidth = 2.0;
+            ctx.setLineDash([]);
+          } else {
+            ctx.strokeStyle = "rgba(255, 70, 70, 0.75)";
+            ctx.lineWidth = 1.6;
+            ctx.setLineDash([5, 4]);
+          }
+
+          ctx.beginPath();
+          const [p0x, p0y] = toPixel(branch[0][0], branch[0][1]);
+          ctx.moveTo(p0x, p0y);
+          for (let i = 1; i < branch.length; i++) {
+            const [px, py] = toPixel(branch[i][0], branch[i][1]);
+            ctx.lineTo(px, py);
+          }
+          ctx.stroke();
+
+          ctx.setLineDash([]);
+          if (bItem.stepNum > 0) {
+            ctx.fillStyle = (allBlockedReverse && bItem.stepNum === 1) ? "rgba(255, 30, 80, 0.94)" : "rgba(255, 215, 0, 0.86)";
+            ctx.beginPath();
+            ctx.arc(p0x, p0y, 2.5, 0, 2 * Math.PI);
+            ctx.fill();
+          }
+
+          const [ptx, pty] = toPixel(branch[branch.length - 1][0], branch[branch.length - 1][1]);
+          if (bItem.stepNum === -1) {
+            ctx.fillStyle = bItem.safe ? "rgb(140, 230, 255)" : "rgb(255, 90, 50)";
+          } else if (allBlockedReverse && bItem.stepNum === 1) {
+            ctx.fillStyle = "rgb(255, 30, 80)";
+          } else {
+            ctx.fillStyle = bItem.safe ? "rgb(0, 255, 128)" : "rgb(255, 50, 50)";
+          }
+          const tipR = bItem.chosen ? 4.0 : 2.6;
+          ctx.beginPath();
+          ctx.arc(ptx, pty, tipR, 0, 2 * Math.PI);
+          ctx.fill();
+        }
+
+        if (allBlockedReverse) {
+          const [ox, oy] = toPixel(0.0, 0.0);
+          ctx.strokeStyle = "rgba(255, 30, 80, 0.90)";
+          ctx.lineWidth = 2.5;
+          ctx.setLineDash([]);
+          ctx.beginPath();
+          ctx.arc(ox, oy, 9.0, 0, 2 * Math.PI);
+          ctx.stroke();
+          ctx.font = "bold 7pt Consolas, monospace";
+          ctx.fillStyle = "rgba(255, 30, 80, 0.94)";
+          ctx.fillText("◄ REV", ox + 11, oy + 4);
+        }
+        ctx.restore();
+      }
+
+      // 9. Reverse Backup Logic Checking Curves (Left Arc, Center Sightline, Right Arc)
+      if (isLayerOn("chkBackup")) {
+        const hMask = pkt.hazard_unpacked || null;
+        const hasH = (hMask && hMask.length > 0 && hMask[0].length > 0) || (cmHazardMask && cmHazardMask.length === CM_TOTAL_CELLS);
+        const hRows = (hMask && hMask.length > 0) ? hMask.length : CM_HEIGHT;
+        const hCols = (hMask && hMask.length > 0 && hMask[0].length > 0) ? hMask[0].length : CM_WIDTH;
+        const dx = Math.max(1e-4, mapXMax - mapXMin);
+        const dy = Math.max(1e-4, mapYMax - mapYMin);
+
+        const recState = String(pkt.escape_state || pkt.recovery_state || pkt.mode || "DRIVE").toUpperCase();
+        const isRecovering = recState.includes("RECOVERY") || recState.includes("PIVOT") || recState.includes("DECEL");
+
+        const curves = [ARC_PTS_LEFT, ARC_PTS_CENTER, ARC_PTS_RIGHT];
+        ctx.save();
+        for (const pts of curves) {
+          let hitIdx = -1;
+          if (hasH) {
+            for (let i = 0; i < pts.length; i++) {
+              const px = pts[i][0], py = pts[i][1];
+              if (py < BUMPER_Y) continue;
+              const col = Math.floor(((px - mapXMin) / dx) * hCols);
+              const row = Math.floor(((py - mapYMin) / dy) * hRows);
+              if (row >= 0 && row < hRows && col >= 0 && col < hCols) {
+                const isBlocked = (hMask && hMask.length > 0) ? (hMask[row][col] > 0) : (cmHazardMask[row * CM_WIDTH + col] > 0);
+                if (isBlocked) {
+                  hitIdx = i;
+                  break;
+                }
+              }
+            }
+          }
+
+          const clearEnd = hitIdx !== -1 ? hitIdx : pts.length;
+          if (isRecovering) {
+            ctx.strokeStyle = "rgba(255, 64, 230, 0.94)";
+            ctx.lineWidth = 1.8;
+            ctx.setLineDash([]);
+          } else {
+            ctx.strokeStyle = "rgba(225, 60, 255, 0.78)";
+            ctx.lineWidth = 1.3;
+            ctx.setLineDash([5, 4]);
+          }
+
+          if (clearEnd > 1) {
+            ctx.beginPath();
+            const [s0x, s0y] = toPixel(pts[0][0], pts[0][1]);
+            ctx.moveTo(s0x, s0y);
+            for (let i = 1; i < clearEnd; i++) {
+              const [px, py] = toPixel(pts[i][0], pts[i][1]);
+              ctx.lineTo(px, py);
+            }
+            ctx.stroke();
+          }
+
+          if (hitIdx !== -1 && hitIdx < pts.length) {
+            ctx.strokeStyle = "rgba(255, 75, 75, 0.55)";
+            ctx.lineWidth = 1.1;
+            ctx.setLineDash([2, 3]);
+            ctx.beginPath();
+            const startIdx = Math.max(0, hitIdx - 1);
+            const [hsx, hsy] = toPixel(pts[startIdx][0], pts[startIdx][1]);
+            ctx.moveTo(hsx, hsy);
+            for (let i = startIdx + 1; i < pts.length; i++) {
+              const [px, py] = toPixel(pts[i][0], pts[i][1]);
+              ctx.lineTo(px, py);
+            }
+            ctx.stroke();
+
+            const [hx, hy] = toPixel(pts[hitIdx][0], pts[hitIdx][1]);
+            ctx.setLineDash([]);
+            ctx.fillStyle = "rgba(255, 50, 50, 0.82)";
+            ctx.strokeStyle = "rgba(255, 80, 80, 0.90)";
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            ctx.arc(hx, hy, 3.0, 0, 2 * Math.PI);
+            ctx.fill();
+            ctx.stroke();
+          }
+
+          const tipIdx = Math.min(clearEnd, pts.length - 1);
+          const [tx, ty] = toPixel(pts[tipIdx][0], pts[tipIdx][1]);
+          ctx.setLineDash([]);
+          ctx.fillStyle = "rgba(255, 120, 255, 0.90)";
+          ctx.beginPath();
+          ctx.arc(tx, ty, 2.5, 0, 2 * Math.PI);
+          ctx.fill();
+        }
+
+        // Center sightline emergency backup threshold ticks (9cm red, 15cm amber)
+        const threshTicks = [
+          { d: 0.09, col: "rgba(255, 60, 60, 0.86)" },
+          { d: 0.15, col: "rgba(255, 190, 0, 0.78)" }
+        ];
+        ctx.setLineDash([]);
+        ctx.lineWidth = 1.2;
+        for (const t of threshTicks) {
+          const yt = BUMPER_Y + t.d;
+          const [tlx, tly] = toPixel(-0.025, yt);
+          const [trx, try_] = toPixel(0.025, yt);
+          ctx.strokeStyle = t.col;
+          ctx.beginPath();
+          ctx.moveTo(tlx, tly);
+          ctx.lineTo(trx, try_);
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
+
+      // 10. Scouted Open Gap Target Marker & Multi-Target Candidates
+      if (isLayerOn("chkGap")) {
+        ctx.save();
+        if (pkt.targets && Array.isArray(pkt.targets)) {
+          ctx.strokeStyle = "rgba(0, 220, 255, 0.71)";
+          ctx.fillStyle = "rgba(0, 220, 255, 0.16)";
+          ctx.lineWidth = 1.5;
+          ctx.setLineDash([4, 3]);
+          for (const cand of pkt.targets) {
+            if (!cand || cand.length < 2) continue;
+            const [pcx, pcy] = toPixel(cand[0], cand[1]);
+            ctx.beginPath();
+            ctx.arc(pcx, pcy, 6.0, 0, 2 * Math.PI);
+            ctx.fill();
+            ctx.stroke();
+          }
+        }
+
+        if (pkt.gap && pkt.gap.length >= 2) {
+          const xg = pkt.gap[0];
+          const yg = pkt.gap[1];
+          const width = pkt.gap.length >= 3 ? pkt.gap[2] : 0.0;
+          const [pgx, pgy] = toPixel(xg, yg);
+
+          ctx.setLineDash([]);
+          ctx.strokeStyle = "rgba(0, 255, 128, 0.94)";
+          ctx.fillStyle = "rgba(0, 255, 128, 0.35)";
+          ctx.lineWidth = 2.0;
+          ctx.beginPath();
+          ctx.arc(pgx, pgy, 8.0, 0, 2 * Math.PI);
+          ctx.fill();
+          ctx.stroke();
+
+          if (width > 0) {
+            const [plx, ply] = toPixel(xg - width * 0.5, yg);
+            const [prx, pry] = toPixel(xg + width * 0.5, yg);
+            ctx.beginPath();
+            ctx.moveTo(plx, ply);
+            ctx.lineTo(prx, pry);
+            ctx.stroke();
+          }
+        }
+        ctx.restore();
+      }
+
+      // 11. Breadcrumb Historical Trail & Wrong-Way Sightlines (if present)
+      if (isLayerOn("chkTrail") && pkt.trail && Array.isArray(pkt.trail) && pkt.trail.length > 0) {
+        const pose = (pkt.pose && pkt.pose.length >= 3) ? pkt.pose : [0.0, 0.0, 0.0];
+        const gx = pose[0], gy = pose[1], gyaw = pose[2];
+        const cosYaw = Math.cos(gyaw), sinYaw = Math.sin(gyaw);
+        const localPts = [];
+        for (const pt of pkt.trail) {
+          if (Array.isArray(pt) && pt.length >= 2) {
+            const dx = pt[0] - gx;
+            const dy = pt[1] - gy;
+            localPts.push([cosYaw * dx + sinYaw * dy, -sinYaw * dx + cosYaw * dy]);
+          }
+        }
+        localPts.push([0.0, -0.070]);
+        if (localPts.length > 1) {
+          ctx.save();
+          const nPts = localPts.length;
+          for (let i = 0; i < nPts - 1; i++) {
+            const [p1x, p1y] = toPixel(localPts[i][0], localPts[i][1]);
+            const [p2x, p2y] = toPixel(localPts[i + 1][0], localPts[i + 1][1]);
+            const frac = (i + 1) / nPts;
+            const alpha = (70 + 170 * frac) / 255.0;
+            ctx.strokeStyle = `rgba(0, 220, 255, ${alpha.toFixed(2)})`;
+            ctx.lineWidth = 2.2;
+            ctx.lineCap = "round";
+            ctx.beginPath();
+            ctx.moveTo(p1x, p1y);
+            ctx.lineTo(p2x, p2y);
+            ctx.stroke();
+
+            if (i % 2 === 0) {
+              ctx.fillStyle = `rgba(0, 229, 255, ${(alpha * 0.8).toFixed(2)})`;
+              ctx.beginPath();
+              ctx.arc(p1x, p1y, 2.2, 0, Math.PI * 2);
+              ctx.fill();
+            }
+          }
+          ctx.restore();
+        }
+      }
+
+      // 11b. Wrong-Way Line-of-Sight Raycasts
+      if (isLayerOn("chkSightlines") && pkt.sightlines && Array.isArray(pkt.sightlines) && pkt.sightlines.length > 0) {
+        const [ox, oy] = toPixel(0.0, 0.095); // Front bumper origin
+        ctx.save();
+        ctx.font = "bold 7pt Consolas, monospace";
+        for (const ray of pkt.sightlines) {
+          const rx = Number(ray.xv || 0.0);
+          const ry = Number(ray.yv || 0.0);
+          const isClear = ray.clear !== undefined ? Boolean(ray.clear) : true;
+          const isOpp = Boolean(ray.opposing);
+          const [tx, ty] = toPixel(rx, ry);
+
+          if (isClear && isOpp) {
+            ctx.strokeStyle = "rgba(0, 255, 180, 0.90)";
+            ctx.lineWidth = 2.4;
+            ctx.setLineDash([]);
+            ctx.beginPath();
+            ctx.moveTo(ox, oy);
+            ctx.lineTo(tx, ty);
+            ctx.stroke();
+
+            ctx.fillStyle = "rgba(0, 255, 180, 0.94)";
+            ctx.beginPath();
+            ctx.arc(tx, ty, 4.0, 0, Math.PI * 2);
+            ctx.fill();
+
+            const hDiff = Number(ray.heading_diff_deg || 0.0);
+            ctx.fillStyle = "rgba(0, 255, 180, 0.98)";
+            ctx.fillText(`LOS ${Math.round(hDiff)}°`, tx + 5, ty - 3);
+          } else if (!isClear) {
+            ctx.strokeStyle = "rgba(255, 60, 60, 0.51)";
+            ctx.lineWidth = 1.2;
+            ctx.setLineDash([4, 4]);
+            ctx.beginPath();
+            ctx.moveTo(ox, oy);
+            ctx.lineTo(tx, ty);
+            ctx.stroke();
+
+            ctx.fillStyle = "rgba(255, 60, 60, 0.63)";
+            ctx.fillRect(tx - 2.5, ty - 2.5, 5, 5);
+          }
+        }
+        ctx.restore();
+      }
+
+      // 11c. Corrective 180 Target Vector (Gold Arrow)
+      const recStateWw = String(pkt.escape_state || pkt.recovery_state || "").toUpperCase();
+      const isWrongWayActive = Boolean(pkt.is_wrong_way) || recStateWw.includes("180");
+      if (isWrongWayActive) {
+        const pose = (pkt.pose && pkt.pose.length >= 3) ? pkt.pose : [0.0, 0.0, 0.0];
+        const gyaw = Number(pose[2] || 0.0);
+        const tgtWorld = Number(pkt.target_yaw || 0.0);
+        const relYaw = Math.atan2(Math.sin(tgtWorld - gyaw), Math.cos(tgtWorld - gyaw));
+        const arrowLenM = 0.85;
+        const axv = arrowLenM * Math.sin(relYaw);
+        const ayv = arrowLenM * Math.cos(relYaw);
+        const [px0, py0] = toPixel(0.0, 0.0);
+        const [px1, py1] = toPixel(axv, ayv);
+
+        ctx.save();
+        ctx.strokeStyle = "rgba(255, 215, 0, 0.94)";
+        ctx.lineWidth = 3.5;
+        ctx.lineCap = "round";
+        ctx.beginPath();
+        ctx.moveTo(px0, py0);
+        ctx.lineTo(px1, py1);
+        ctx.stroke();
+
+        const angle = Math.atan2(py1 - py0, px1 - px0);
+        const headLen = 10;
+        ctx.fillStyle = "rgba(255, 215, 0, 0.96)";
+        ctx.beginPath();
+        ctx.moveTo(px1, py1);
+        ctx.lineTo(px1 - headLen * Math.cos(angle - Math.PI / 6), py1 - headLen * Math.sin(angle - Math.PI / 6));
+        ctx.lineTo(px1 - headLen * Math.cos(angle + Math.PI / 6), py1 - headLen * Math.sin(angle + Math.PI / 6));
+        ctx.closePath();
+        ctx.fill();
+        ctx.restore();
+      }
+
+      // 12. Physical Chassis Footprint & Origin (150x200mm Robot Geometry matching planner_gui.py)
+      if (isLayerOn("chkChassis")) {
+        const steerRad = ((pkt.steer_deg !== undefined ? pkt.steer_deg : (pkt.steer_cmd_deg || 0)) * Math.PI) / 180.0;
+        drawChassis(steerRad);
+      }
+
+      // 12b. Wrong-Way Alert Banner
+      if (isWrongWayActive) {
+        ctx.save();
+        ctx.fillStyle = "rgba(40, 10, 16, 0.86)";
+        ctx.strokeStyle = "rgba(255, 60, 60, 0.86)";
+        ctx.lineWidth = 1.5;
+        drawRoundedRect(ctx, 14, 12, 360, 26, 5);
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.font = "bold 10pt 'Segoe UI', sans-serif";
+        ctx.fillStyle = "rgb(255, 80, 80)";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText("🚨 WRONG-WAY TRIPPED — EXECUTING 180°", 14 + 180, 12 + 13);
+        ctx.restore();
+      }
+
+      // 13. Costmap Category & Breadcrumb Legend (Free / Unknown / Obstacle / C-Space / Trail / LOS Ray)
+      drawWebotsLegend();
+    }
+
+    function drawChassis(steerRad) {
+      const carW = 0.150;
+      const carL = 0.200;
+
+      const [tlX, tlY] = toPixel(-carW / 2.0, carL / 2.0);
+      const [brX, brY] = toPixel(carW / 2.0, -carL / 2.0);
+
+      ctx.save();
+      // Chassis outer boundary: pen QColor(0, 229, 255, 220) 1.8px, brush QColor(18, 30, 45, 200)
+      ctx.strokeStyle = "rgba(0, 229, 255, 0.86)";
+      ctx.fillStyle = "rgba(18, 30, 45, 0.78)";
+      ctx.lineWidth = 1.8;
+      drawRoundedRect(ctx, tlX, tlY, brX - tlX, brY - tlY, 4);
+      ctx.fill();
+      ctx.stroke();
+
+      // Steered front wheels and fixed rear wheels
+      const wheelPos = [
+        [-0.0411, 0.0625, steerRad], // FL (steered)
+        [0.0411, 0.0625, steerRad], // FR (steered)
+        [-0.0500, -0.0700, 0.0],      // RL (fixed)
+        [0.0500, -0.0700, 0.0]       // RR (fixed)
+      ];
+      for (const [wx, wy, wSteer] of wheelPos) {
+        drawWheel(wx, wy, wSteer);
+      }
+
+      // Front bumper highlight line (y = +0.100 m)
+      const [flX, flY] = toPixel(-carW / 2.0, 0.100);
+      const [frX, frY] = toPixel(carW / 2.0, 0.100);
+      ctx.strokeStyle = "rgba(0, 255, 180, 0.98)";
+      ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      ctx.moveTo(flX, flY);
+      ctx.lineTo(frX, frY);
+      ctx.stroke();
+
+      // Front bumper center origin dot (x = 0.0, y = +0.095)
+      const [bmpX, bmpY] = toPixel(0.0, 0.095);
+      ctx.fillStyle = "rgb(0, 255, 180)";
+      ctx.beginPath();
+      ctx.arc(bmpX, bmpY, 2.5, 0, 2 * Math.PI);
+      ctx.fill();
+
+      // Origin center marker (0.0, 0.0)
+      const [p0x, p0y] = toPixel(0.0, 0.0);
+      ctx.fillStyle = "rgb(255, 50, 50)";
+      ctx.beginPath();
+      ctx.arc(p0x, p0y, 3.5, 0, 2 * Math.PI);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    function drawWheel(x, y, steerAngle) {
+      const [px, py] = toPixel(x, y);
+      ctx.save();
+      ctx.translate(px, py);
+      ctx.rotate(-steerAngle);
+      ctx.fillStyle = "rgba(40, 40, 40, 0.94)";
+      ctx.strokeStyle = "rgba(255, 215, 64, 0.94)";
+      ctx.lineWidth = 1.5;
+      drawRoundedRect(ctx, -4, -8, 8, 16, 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    function drawWebotsLegend() {
+      const legendItems = [
+        { name: "Free", bg: "rgba(14, 22, 34, 0.90)", fg: "rgb(0, 229, 255)" },
+        { name: "Unknown", bg: "rgba(245, 215, 30, 0.82)", fg: "rgb(20, 20, 20)" },
+        { name: "Obstacle", bg: "rgba(255, 0, 0, 0.98)", fg: "rgb(255, 255, 255)" },
+        { name: "C-Space", bg: "rgba(255, 42, 64, 0.82)", fg: "rgb(255, 255, 255)" },
+        { name: "Trail", bg: "rgba(0, 220, 255, 0.78)", fg: "rgb(10, 20, 30)" },
+        { name: "LOS Ray", bg: "rgba(0, 255, 180, 0.86)", fg: "rgb(10, 20, 20)" }
+      ];
+      let lx = 14;
+      const ly = canvas.height - 26;
+      ctx.save();
+      ctx.font = "bold 8pt Consolas, monospace";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      for (const item of legendItems) {
+        ctx.fillStyle = item.bg;
+        ctx.strokeStyle = "rgba(50, 70, 95, 0.71)";
+        ctx.lineWidth = 1;
+        drawRoundedRect(ctx, lx, ly, 60, 18, 3);
+        ctx.fill();
+        ctx.stroke();
+        ctx.fillStyle = item.fg;
+        ctx.fillText(item.name, lx + 30, ly + 9);
+        lx += 66;
+      }
+      ctx.restore();
+    }
+
+    // Update DOM Telemetry Cards
+    function updateHUD(pkt) {
+      document.getElementById("vCmd").innerText = (pkt.v_cmd || 0).toFixed(2);
+      document.getElementById("vReal").innerText = (pkt.v_real || pkt.v_est || 0).toFixed(2);
+
+      document.getElementById("steerCmd").innerText = `${(pkt.steer_cmd_deg || pkt.steer_deg || 0).toFixed(1)}°`;
+      document.getElementById("steerAct").innerText = `${(pkt.steer_actual_deg || pkt.steer_deg || 0).toFixed(1)}°`;
+
+      const rpms_cmd = pkt.rpms_cmd || [0, 0, 0, 0];
+      const rpms_act = pkt.rpms_act || [0, 0, 0, 0];
+      document.getElementById("rpmFLCmd").innerText = Math.round(rpms_cmd[0] || 0);
+      document.getElementById("rpmFRCmd").innerText = Math.round(rpms_cmd[1] || 0);
+      document.getElementById("rpmRLCmd").innerText = Math.round(rpms_cmd[2] || 0);
+      document.getElementById("rpmRRCmd").innerText = Math.round(rpms_cmd[3] || 0);
+
+      document.getElementById("rpmFLAct").innerText = Math.round(rpms_act[0] || 0);
+      document.getElementById("rpmFRAct").innerText = Math.round(rpms_act[1] || 0);
+      document.getElementById("rpmRLAct").innerText = Math.round(rpms_act[2] || 0);
+      document.getElementById("rpmRRAct").innerText = Math.round(rpms_act[3] || 0);
+
+      document.getElementById("imuYaw").innerText = `${(pkt.yaw_deg || pkt.yaw_fused || 0).toFixed(1)}°`;
+      document.getElementById("imuGyroZ").innerText = `${(pkt.gyro_z || 0).toFixed(2)} rad/s`;
+      document.getElementById("imuPitch").innerText = `${(pkt.pitch_deg || 0).toFixed(1)}°`;
+      document.getElementById("imuRoll").innerText = `${(pkt.roll_deg || 0).toFixed(1)}°`;
+
+      document.getElementById("accelFwd").innerText = (pkt.accel_fwd || 0).toFixed(1);
+      document.getElementById("accelLat").innerText = (pkt.accel_lat || 0).toFixed(1);
+
+      const slipState = pkt.slip_state || "NORMAL";
+      const badge = document.getElementById("slipStateBadge");
+      badge.innerText = slipState;
+      if (slipState.includes("SPIN") || slipState.includes("OVERSTEER")) {
+        badge.style.color = "var(--accent-red)";
+      } else {
+        badge.style.color = "var(--accent-green)";
+      }
+      document.getElementById("slipRatio").innerText = (pkt.slip_ratio || 0).toFixed(2);
+
+      document.getElementById("planMs").innerText = (pkt.plan_ms || 0).toFixed(2);
+      document.getElementById("osqpIters").innerText = pkt.iters_prim || pkt.osqp_iters || 0;
+      document.getElementById("mapMs").innerText = (pkt.map_ms || 0).toFixed(2);
+      document.getElementById("scoutMs").innerText = (pkt.scout_ms || 0).toFixed(2);
+
+      const recStateHud = String(pkt.escape_state || pkt.recovery_state || "").toUpperCase();
+      const isWrongWayHud = Boolean(pkt.is_wrong_way) || recStateHud.includes("180");
+      const lblModeEl = document.getElementById("lblMode");
+      if (isWrongWayHud) {
+        lblModeEl.innerText = `🚨 WRONG-WAY (${recStateHud || "180°"})`;
+        lblModeEl.style.color = "var(--accent-red)";
+      } else {
+        lblModeEl.innerText = `MODE: ${pkt.mode || "DRIVE"}`;
+        lblModeEl.style.color = "var(--accent-green)";
+      }
+
+      // Time / Frame labels
+      const simT = pkt.sim_time || 0;
+      const mins = Math.floor(simT / 60);
+      const secs = (simT % 60).toFixed(2).padStart(5, "0");
+      document.getElementById("lblTime").innerText = `${mins}:${secs}`;
+
+      // Update Page 2 Dedicated Powertrain & STM32 Pipeline
+      updateMotorPage(pkt);
+    }
+
+    // =============================================================================
+    // PAGE 2: POWERTRAIN & STM32 PIPELINE LOGIC & WAVEFORM OSCILLOSCOPE
+    // =============================================================================
+
+    let currentPage = 'nav';
+    const motorCanvas = document.getElementById("motorWaveCanvas");
+    const ctxMotor = motorCanvas ? motorCanvas.getContext("2d") : null;
+
+    const motorWaveformBuffer = {
+      maxPoints: 300,
+      isPaused: false,
+      cmd: [],
+      fl: [],
+      fr: [],
+      rl: [],
+      rr: []
+    };
+
+    function switchPage(page) {
+      currentPage = page;
+      const navBtn = document.getElementById("tabNavBtn");
+      const motorsBtn = document.getElementById("tabMotorsBtn");
+      const pageNav = document.getElementById("pageNav");
+      const pageMotors = document.getElementById("pageMotors");
+
+      if (page === 'nav') {
+        if (navBtn) navBtn.classList.add("active");
+        if (motorsBtn) motorsBtn.classList.remove("active");
+        if (pageNav) pageNav.style.display = "flex";
+        if (pageMotors) pageMotors.style.display = "none";
+        resizeCanvas();
+      } else {
+        if (motorsBtn) motorsBtn.classList.add("active");
+        if (navBtn) navBtn.classList.remove("active");
+        if (pageNav) pageNav.style.display = "none";
+        if (pageMotors) pageMotors.style.display = "flex";
+        resizeMotorCanvas();
+        renderMotorChart();
+      }
+    }
+
+    function resizeMotorCanvas() {
+      if (!motorCanvas || !motorCanvas.parentElement) return;
+      const rect = motorCanvas.parentElement.getBoundingClientRect();
+      motorCanvas.width = Math.max(200, rect.width - 24);
+      motorCanvas.height = Math.max(160, rect.height - 45);
+    }
+
+    window.addEventListener("resize", () => {
+      if (currentPage === 'motors') resizeMotorCanvas();
+    });
+
+    function setChartWindow(pts) {
+      motorWaveformBuffer.maxPoints = pts;
+      while (motorWaveformBuffer.fl.length > pts) {
+        motorWaveformBuffer.cmd.shift();
+        motorWaveformBuffer.fl.shift();
+        motorWaveformBuffer.fr.shift();
+        motorWaveformBuffer.rl.shift();
+        motorWaveformBuffer.rr.shift();
+      }
+      if (currentPage === 'motors') renderMotorChart();
+    }
+
+    function toggleWavePause() {
+      motorWaveformBuffer.isPaused = !motorWaveformBuffer.isPaused;
+      const btn = document.getElementById("btnPauseWave");
+      if (btn) btn.innerText = motorWaveformBuffer.isPaused ? "▶" : "⏸";
+    }
+
+    function renderMotorChart() {
+      if (!ctxMotor || !motorCanvas) return;
+      const w = motorCanvas.width;
+      const h = motorCanvas.height;
+
+      // Background
+      ctxMotor.fillStyle = "#090c10";
+      ctxMotor.fillRect(0, 0, w, h);
+
+      // Determine dynamic scale (RPM range)
+      let maxRpm = 1000;
+      for (let i = 0; i < motorWaveformBuffer.fl.length; i++) {
+        const val = Math.max(
+          Math.abs(motorWaveformBuffer.fl[i] || 0),
+          Math.abs(motorWaveformBuffer.fr[i] || 0),
+          Math.abs(motorWaveformBuffer.rl[i] || 0),
+          Math.abs(motorWaveformBuffer.rr[i] || 0),
+          Math.abs(motorWaveformBuffer.cmd[i] || 0)
+        );
+        if (val > maxRpm) maxRpm = val;
+      }
+      maxRpm = Math.ceil((maxRpm * 1.25) / 250) * 250;
+
+      // Grid lines
+      ctxMotor.save();
+      ctxMotor.lineWidth = 1;
+      const midY = h / 2.0;
+
+      // 0 RPM Center Axis
+      ctxMotor.strokeStyle = "#2d333b";
+      ctxMotor.setLineDash([4, 4]);
+      ctxMotor.beginPath();
+      ctxMotor.moveTo(0, midY);
+      ctxMotor.lineTo(w, midY);
+      ctxMotor.stroke();
+
+      // +/- Quarters
+      ctxMotor.strokeStyle = "#161b22";
+      ctxMotor.setLineDash([2, 4]);
+      const qY1 = midY - (midY * 0.5);
+      const qY2 = midY + (midY * 0.5);
+      ctxMotor.beginPath();
+      ctxMotor.moveTo(0, qY1);
+      ctxMotor.lineTo(w, qY1);
+      ctxMotor.moveTo(0, qY2);
+      ctxMotor.lineTo(w, qY2);
+      ctxMotor.stroke();
+      ctxMotor.restore();
+
+      // Scale labels
+      ctxMotor.font = "9px Consolas, monospace";
+      ctxMotor.fillStyle = "#8b949e";
+      ctxMotor.fillText(`+${maxRpm}`, 6, 12);
+      ctxMotor.fillText(`+${Math.round(maxRpm / 2)}`, 6, qY1 + 3);
+      ctxMotor.fillText(`0 RPM`, 6, midY - 3);
+      ctxMotor.fillText(`-${Math.round(maxRpm / 2)}`, 6, qY2 + 3);
+      ctxMotor.fillText(`-${maxRpm}`, 6, h - 4);
+
+      const n = motorWaveformBuffer.fl.length;
+      if (n < 2) return;
+
+      const dx = (w - 70) / (motorWaveformBuffer.maxPoints - 1);
+      const startX = 65 + (motorWaveformBuffer.maxPoints - n) * dx;
+
+      function toY(val) {
+        const norm = (val || 0) / maxRpm;
+        return midY - norm * (midY - 12);
+      }
+
+      function drawTrace(arr, strokeStyle, isDashed = false) {
+        ctxMotor.save();
+        ctxMotor.strokeStyle = strokeStyle;
+        ctxMotor.lineWidth = isDashed ? 1.5 : 2.0;
+        if (isDashed) ctxMotor.setLineDash([4, 3]);
+        ctxMotor.beginPath();
+        for (let i = 0; i < n; i++) {
+          const x = startX + i * dx;
+          const y = toY(arr[i]);
+          if (i === 0) ctxMotor.moveTo(x, y);
+          else ctxMotor.lineTo(x, y);
+        }
+        ctxMotor.stroke();
+        ctxMotor.restore();
+      }
+
+      // Draw Traces: Target (Dashed White), FL, FR, RL, RR
+      drawTrace(motorWaveformBuffer.cmd, "rgba(255, 255, 255, 0.7)", true);
+      drawTrace(motorWaveformBuffer.fl, "#00e5ff");
+      drawTrace(motorWaveformBuffer.fr, "#ffd600");
+      drawTrace(motorWaveformBuffer.rl, "#e040fb");
+      drawTrace(motorWaveformBuffer.rr, "#00e676");
+
+      // Right Edge Current Value Tags
+      const lastIdx = n - 1;
+      const tagVals = [
+        { label: "FL", val: motorWaveformBuffer.fl[lastIdx], col: "#00e5ff" },
+        { label: "FR", val: motorWaveformBuffer.fr[lastIdx], col: "#ffd600" },
+        { label: "RL", val: motorWaveformBuffer.rl[lastIdx], col: "#e040fb" },
+        { label: "RR", val: motorWaveformBuffer.rr[lastIdx], col: "#00e676" },
+      ];
+      ctxMotor.font = "bold 9px Consolas, monospace";
+      let curTagY = 16;
+      for (const t of tagVals) {
+        ctxMotor.fillStyle = t.col;
+        ctxMotor.fillText(`${t.label}: ${Math.round(t.val || 0)}`, w - 60, curTagY);
+        curTagY += 12;
+      }
+    }
+
+    // REST Dispatcher to debug_server -> UDP 9877 -> MCU UART Bridge -> ESP32 -> STM32
+    let mcuCommandInFlight = false;
+    let lastButtonActionTime = 0;
+    const BUTTON_DEBOUNCE_MS = 250;
+    let throttleSendTimer = null;
+    let steerSendTimer = null;
+    let activeManualSpeed = 0.0;
+    let manualKeepaliveTimer = null;
+
+    function sendKeepaliveSilent() {
+      fetch("/api/mcu/command", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "keepalive" }),
+        keepalive: true
+      }).catch(() => { });
+    }
+
+    function syncManualKeepalive() {
+      const needKeepalive = (Math.abs(activeManualSpeed) > 0.001) || fakeDataActive;
+      if (needKeepalive && !manualKeepaliveTimer) {
+        manualKeepaliveTimer = setInterval(sendKeepaliveSilent, 150);
+      } else if (!needKeepalive && manualKeepaliveTimer) {
+        clearInterval(manualKeepaliveTimer);
+        manualKeepaliveTimer = null;
+      }
+    }
+
+    function stopManualKeepaliveAndZero() {
+      activeManualSpeed = 0.0;
+      syncManualKeepalive();
+    }
+
+    function sendBeaconStopOnUnload() {
+      if (Math.abs(activeManualSpeed) > 0.001 || fakeDataActive) {
+        stopManualKeepaliveAndZero();
+        const payload = JSON.stringify({ action: "motors", enable: false });
+        if (navigator.sendBeacon) {
+          navigator.sendBeacon("/api/mcu/command", new Blob([payload], { type: "application/json" }));
+        } else {
+          fetch("/api/mcu/command", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: payload,
+            keepalive: true
+          }).catch(() => { });
+        }
+      }
+    }
+    window.addEventListener("pagehide", sendBeaconStopOnUnload);
+    window.addEventListener("beforeunload", sendBeaconStopOnUnload);
+
+    async function sendMcuCommand(payload) {
+      const statusEl = document.getElementById("motorActionStatus");
+      if (statusEl) statusEl.innerText = `Dispatching ${payload.action || 'cmd'}...`;
+
+      try {
+        const res = await fetch("/api/mcu/command", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        appendMcuConsole(`[SENT -> STM32] ${JSON.stringify(payload)} => status: ${data.status}`);
+        if (statusEl) statusEl.innerText = `Dispatched: ${data.action} (${data.cmd || 'OK'})`;
+        return data;
+      } catch (err) {
+        appendMcuConsole(`[ERROR] Network fault: ${err.message}`);
+        if (statusEl) statusEl.innerText = `Error: ${err.message}`;
+        return null;
+      }
+    }
+
+    // Executes a button action safely with UI locking and time-based debounce protection
+    async function executeButtonCommand(btnEl, payload) {
+      const now = performance.now();
+      if (mcuCommandInFlight || (now - lastButtonActionTime < BUTTON_DEBOUNCE_MS)) {
+        return;
+      }
+      mcuCommandInFlight = true;
+      lastButtonActionTime = now;
+
+      let btn = btnEl;
+      if (!btn && window.event && window.event.target) {
+        btn = window.event.target.closest("button");
+      }
+
+      // Temporarily disable all command buttons in UI to prevent burst multi-click queuing
+      const buttonsToLock = document.querySelectorAll(".btn-motor-action, .btn-preset");
+      buttonsToLock.forEach(b => { b.disabled = true; });
+
+      try {
+        return await sendMcuCommand(payload);
+      } finally {
+        setTimeout(() => {
+          buttonsToLock.forEach(b => { b.disabled = false; });
+          mcuCommandInFlight = false;
+        }, BUTTON_DEBOUNCE_MS);
+      }
+    }
+
+    function appendMcuConsole(text) {
+      const c = document.getElementById("mcuConsole");
+      if (!c) return;
+      const timestamp = new Date().toLocaleTimeString();
+      c.innerText += `\n[${timestamp}] ${text}`;
+      c.scrollTop = c.scrollHeight;
+    }
+
+    function enableMotors(enable) {
+      if (!enable) {
+        document.getElementById("throttleSlider").value = 0.0;
+        document.getElementById("throttleVal").innerText = "0.00 m/s";
+        stopManualKeepaliveAndZero();
+      }
+      executeButtonCommand(null, { action: "motors", enable: enable });
+    }
+
+    function emergencyStop() {
+      document.getElementById("throttleSlider").value = 0.0;
+      document.getElementById("throttleVal").innerText = "0.00 m/s";
+      stopManualKeepaliveAndZero();
+      executeButtonCommand(null, { action: "estop" });
+    }
+
+    function queryStatus() {
+      executeButtonCommand(null, { action: "status" });
+    }
+
+    function saveFlash() {
+      executeButtonCommand(null, { action: "save" });
+    }
+
+    function enterDfu() {
+      if (confirm("Reboot both Front and Rear STM32 controllers into System ROM DFU Bootloader for USB firmware flashing?")) {
+        executeButtonCommand(null, { action: "dfu" });
+      }
+    }
+
+    let plannerRunning = false;
+    let lastPlannerToggleMs = 0;
+
+    function syncPlannerRunButton(isRunning) {
+      const btn = document.getElementById("btnPlannerStartStop");
+      const icon = document.getElementById("plannerToggleIcon");
+      const text = document.getElementById("plannerToggleText");
+      const sub = document.getElementById("plannerToggleSub");
+      if (!btn || !icon || !text || !sub) return;
+      if (isRunning) {
+        btn.className = "btn-planner-toggle state-running";
+        icon.innerText = "⏹";
+        text.innerText = "STOP AUTONOMOUS DRIVE";
+        sub.innerText = "RUNNING · Line calc active · Motor drivers armed";
+        sub.style.color = "#ff8a80";
+      } else {
+        btn.className = "btn-planner-toggle state-stopped";
+        icon.innerText = "▶";
+        text.innerText = "START AUTONOMOUS DRIVE";
+        sub.innerText = "STOPPED · Line calc off · Motor drivers disabled · Servo centered";
+        sub.style.color = "var(--text-secondary)";
+      }
+    }
+
+    async function togglePlannerRun() {
+      const nextState = !plannerRunning;
+      if (nextState) {
+        document.getElementById("throttleSlider").value = 0.0;
+        document.getElementById("throttleVal").innerText = "0.00 m/s";
+        stopManualKeepaliveAndZero();
+      }
+      plannerRunning = nextState;
+      lastPlannerToggleMs = performance.now();
+      syncPlannerRunButton(plannerRunning);
+      const data = await sendMcuCommand({ action: "planner", enable: nextState });
+      if (data && typeof data.planner_running === "boolean") {
+        plannerRunning = data.planner_running;
+        syncPlannerRunButton(plannerRunning);
+      }
+    }
+
+    let fakeDataActive = false;
+
+    function syncFakeDataButtons(isBench) {
+      const fakeBtn = document.getElementById("btnToggleFakeData");
+      const fakeIcon = document.getElementById("fakeToggleIcon");
+      const fakeText = document.getElementById("fakeToggleText");
+      if (fakeBtn && fakeIcon && fakeText) {
+        if (isBench) {
+          fakeBtn.className = "badge btn-toggle-fake state-fake";
+          fakeIcon.innerText = "🧪";
+          fakeText.innerText = "FAKE DATA (BENCH)";
+          fakeBtn.title = "Currently running Synthetic Benchmark (Fake Data). Click to switch to Live Hardware Sensors.";
+        } else {
+          fakeBtn.className = "badge btn-toggle-fake state-live";
+          fakeIcon.innerText = "🟢";
+          fakeText.innerText = "LIVE SENSORS";
+          fakeBtn.title = "Currently using Live Hardware Sensors & Dual STM32 Encoders. Click to switch to Synthetic Benchmark.";
+        }
+      }
+
+      const benchBtn = document.getElementById("btnBenchToggle");
+      if (benchBtn) {
+        if (isBench) {
+          benchBtn.innerText = "🧪 FAKE DATA: ON";
+          benchBtn.style.background = "#4f2870";
+          benchBtn.style.borderColor = "var(--accent-purple)";
+        } else {
+          benchBtn.innerText = "🟢 FAKE DATA: OFF";
+          benchBtn.style.background = "#003d1c";
+          benchBtn.style.borderColor = "var(--accent-green)";
+        }
+      }
+    }
+
+    async function toggleFakeData() {
+      const btn = document.getElementById("btnToggleFakeData");
+      const benchBtn = document.getElementById("btnBenchToggle");
+      const now = performance.now();
+      if (mcuCommandInFlight || (now - lastButtonActionTime < BUTTON_DEBOUNCE_MS)) {
+        return;
+      }
+      mcuCommandInFlight = true;
+      lastButtonActionTime = now;
+
+      if (btn) { btn.disabled = true; btn.style.opacity = "0.5"; }
+      if (benchBtn) { benchBtn.disabled = true; benchBtn.style.opacity = "0.5"; }
+
+      fakeDataActive = !fakeDataActive;
+      if (!fakeDataActive) {
+        document.getElementById("throttleSlider").value = 0.0;
+        document.getElementById("throttleVal").innerText = "0.00 m/s";
+        stopManualKeepaliveAndZero();
+      } else {
+        syncManualKeepalive();
+      }
+      syncFakeDataButtons(fakeDataActive);
+      appendMcuConsole(`>>> Toggling Synthetic Fake Data / Live Sensors mode: ${fakeDataActive ? "FAKE DATA (BENCH)" : "LIVE SENSORS"}...`);
+
+      try {
+        const res = await sendMcuCommand({ action: "bench", enabled: fakeDataActive });
+        if (res && typeof res.fake_data === "boolean") {
+          fakeDataActive = res.fake_data;
+          syncFakeDataButtons(fakeDataActive);
+          syncManualKeepalive();
+        }
+      } catch (e) {
+        appendMcuConsole(`[WARN] Fake data toggle error: ${e.message}`);
+      } finally {
+        setTimeout(() => {
+          if (btn) { btn.disabled = false; btn.style.opacity = "1.0"; }
+          if (benchBtn) { benchBtn.disabled = false; benchBtn.style.opacity = "1.0"; }
+          mcuCommandInFlight = false;
+        }, BUTTON_DEBOUNCE_MS);
+      }
+
+      // If switched back to LIVE and controller isn't connected, immediately wipe any leftover fake data to 0
+      if (!fakeDataActive) {
+        const hasHardware = currentPkt && currentPkt.flags && (currentPkt.flags.stm32_front || currentPkt.flags.stm32_rear || currentPkt.flags.imu);
+        if (!hasHardware) {
+          currentPkt = { ...defaultPkt };
+          updateHUD(currentPkt);
+          scheduleRender(currentPkt);
+        }
+      }
+    }
+
+    function toggleBench() {
+      toggleFakeData();
+    }
+
+    function resetControllers() {
+      document.getElementById("throttleSlider").value = 0.0;
+      document.getElementById("throttleVal").innerText = "0.00 m/s";
+      document.getElementById("steerSlider").value = 0.0;
+      document.getElementById("steerSliderVal").innerText = "0.0°";
+      stopManualKeepaliveAndZero();
+      executeButtonCommand(null, { action: "reset" });
+    }
+
+    function reconnectMcu() {
+      appendMcuConsole("[ACTION] Re-detecting and reconnecting ESP32 serial ports...");
+      executeButtonCommand(null, { action: "reconnect" });
+    }
+
+    function setSpeed(v) {
+      document.getElementById("throttleSlider").value = v;
+      document.getElementById("throttleVal").innerText = `${Number(v).toFixed(2)} m/s`;
+      activeManualSpeed = Number(v) || 0.0;
+      syncManualKeepalive();
+      executeButtonCommand(null, { action: "speed", v: v });
+    }
+
+    function onThrottleInput(v) {
+      document.getElementById("throttleVal").innerText = `${Number(v).toFixed(2)} m/s`;
+      const speedVal = parseFloat(v) || 0.0;
+      if (Math.abs(speedVal) <= 0.001) {
+        stopManualKeepaliveAndZero();
+      } else {
+        activeManualSpeed = speedVal;
+        syncManualKeepalive();
+      }
+      if (throttleSendTimer) clearTimeout(throttleSendTimer);
+      throttleSendTimer = setTimeout(() => {
+        sendMcuCommand({ action: "speed", v: speedVal });
+      }, 100);
+    }
+
+    function setSteer(deg) {
+      document.getElementById("steerSlider").value = deg;
+      document.getElementById("steerSliderVal").innerText = `${Number(deg).toFixed(1)}°`;
+      executeButtonCommand(null, { action: "steer", deg: deg });
+    }
+
+    function onSteerInput(deg) {
+      document.getElementById("steerSliderVal").innerText = `${Number(deg).toFixed(1)}°`;
+      if (steerSendTimer) clearTimeout(steerSendTimer);
+      steerSendTimer = setTimeout(() => {
+        sendMcuCommand({ action: "steer", deg: parseFloat(deg) });
+      }, 100);
+    }
+
+    let trimSendTimer = null;
+    let servoCenterUs = 1510;
+
+    function formatUs(val) {
+      const n = Number(val);
+      if (!Number.isFinite(n)) return "1510";
+      const r = Math.round(n * 10) / 10;
+      return Number.isInteger(r) ? `${r}` : r.toFixed(1);
+    }
+
+    function updateTrimDisplay(us) {
+      const val = Math.max(-60, Math.min(60, Math.round(Number(us))));
+      const sign = val > 0 ? "+" : "";
+      document.getElementById("trimSlider").value = val;
+      document.getElementById("trimSliderVal").innerText = `${sign}${val} µs (${formatUs(Number(servoCenterUs) + val)} µs)`;
+      return val;
+    }
+
+    function setTrim(us) {
+      const val = updateTrimDisplay(us);
+      executeButtonCommand(null, { action: "trim", trim_us: val });
+    }
+
+    function nudgeTrim(delta) {
+      const cur = Number(document.getElementById("trimSlider").value) || 0;
+      setTrim(cur + delta);
+    }
+
+    function onTrimInput(us) {
+      const val = updateTrimDisplay(us);
+      if (trimSendTimer) clearTimeout(trimSendTimer);
+      trimSendTimer = setTimeout(() => {
+        sendMcuCommand({ action: "trim", trim_us: val });
+      }, 100);
+    }
+
+    async function saveTrimCenter() {
+      const sliderVal = Number(document.getElementById("trimSlider").value) || 0;
+      try {
+        const res = await fetch("/api/mcu/command", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "save_trim_center", trim_us: sliderVal })
+        });
+        const data = await res.json();
+        if (typeof data.servo_center_us === "number") {
+          servoCenterUs = data.servo_center_us;
+        } else {
+          servoCenterUs = Math.max(500, Math.min(2500, servoCenterUs + sliderVal));
+        }
+        updateTrimDisplay(0);
+        appendMcuConsole(`>>> Servo center permanently updated to ${formatUs(servoCenterUs)} µs (slider reset to 0 µs)`);
+      } catch (err) {
+        appendMcuConsole(`[ERROR] Failed saving servo center: ${err.message}`);
+      }
+    }
+
+    let autoCenterPollTimer = null;
+    let autoCenterWasRunning = false;
+
+    function setAutoCenterInputsDisabled(disabled) {
+      for (const id of ["autoCenterDistInput", "autoCenterSpeedInput", "autoCenterTolInput", "autoCenterTriesInput"]) {
+        const el = document.getElementById(id);
+        if (el) el.disabled = Boolean(disabled);
+      }
+    }
+
+    function renderAutoCenterHistory(history) {
+      const wrap = document.getElementById("autoCenterHistoryWrap");
+      const tbody = document.getElementById("autoCenterHistoryBody");
+      if (!wrap || !tbody) return;
+      if (!Array.isArray(history) || history.length === 0) {
+        wrap.style.display = "none";
+        tbody.textContent = "";
+        return;
+      }
+      wrap.style.display = "block";
+      tbody.textContent = "";
+      for (const row of history) {
+        const tr = document.createElement("tr");
+        tr.style.borderBottom = "1px solid #161b22";
+        const fmtDeg = (v) => typeof v === "number" ? `${v >= 0 ? "+" : ""}${v.toFixed(1)}` : "--";
+        const stepVal = typeof row.step_us === "number" ? `${row.step_us >= 0 ? "+" : ""}${row.step_us.toFixed(1)}` : "--";
+        const cells = [
+          [String(row.iter ?? ""), "left", "var(--text-secondary)"],
+          [formatUs(row.center_us), "right", "var(--accent-cyan)"],
+          [fmtDeg(row.fwd_drift_deg_per_m), "right", "var(--text-primary)"],
+          [fmtDeg(row.bwd_drift_deg_per_m), "right", "var(--text-primary)"],
+          [fmtDeg(row.drift_deg_per_m), "right", Math.abs(Number(row.drift_deg_per_m)) <= 0.8 ? "var(--accent-green)" : "var(--accent-gold)"],
+          [stepVal, "right", "var(--text-primary)"],
+          [String(row.method || ""), "left", "var(--text-secondary)"],
+        ];
+        for (const [txt, align, col] of cells) {
+          const td = document.createElement("td");
+          td.textContent = txt;
+          td.style.padding = "2px 3px";
+          td.style.textAlign = align;
+          td.style.color = col;
+          tr.appendChild(td);
+        }
+        tbody.appendChild(tr);
+      }
+    }
+
+    function updateAutoServoCenterUI(st) {
+      if (!st) return;
+      const btn = document.getElementById("btnAutoServoCenter");
+      const box = document.getElementById("autoCenterStatusBox");
+      const phaseEl = document.getElementById("autoCenterPhase");
+      const metricsEl = document.getElementById("autoCenterMetrics");
+      const progBar = document.getElementById("autoCenterProgBar");
+      const msgEl = document.getElementById("autoCenterMsg");
+
+      const running = Boolean(st.running);
+      setAutoCenterInputsDisabled(running);
+      if (btn) {
+        if (running) {
+          btn.innerText = "Stop Auto Center";
+          btn.style.borderColor = "var(--accent-red, #ff5252)";
+          btn.style.color = "var(--accent-red, #ff5252)";
+        } else {
+          btn.innerText = "Auto Center";
+          btn.style.borderColor = "var(--accent-gold)";
+          btn.style.color = "var(--accent-gold)";
+        }
+      }
+
+      if (box && (running || (st.phase && st.phase !== "IDLE"))) {
+        box.style.display = "block";
+        phaseEl.innerText = st.phase || "IDLE";
+        let barColor = "var(--accent-cyan)";
+        if (st.phase === "CONVERGED") {
+          phaseEl.style.color = "var(--accent-green)";
+          barColor = "var(--accent-green)";
+        } else if (st.phase === "DONE_BEST") {
+          phaseEl.style.color = "var(--accent-gold)";
+          barColor = "var(--accent-gold)";
+        } else if (st.phase === "ERROR" || st.phase === "ABORTED") {
+          phaseEl.style.color = "var(--accent-red, #ff5252)";
+          barColor = "var(--accent-red, #ff5252)";
+        } else {
+          phaseEl.style.color = "var(--accent-cyan)";
+        }
+        const distNum = typeof st.distance_m === "number" ? st.distance_m : 0.0;
+        const tgtNum = typeof st.target_distance_m === "number" && st.target_distance_m > 0 ? st.target_distance_m : 1.0;
+        const drift = typeof st.drift_deg_per_m === "number" ? `${st.drift_deg_per_m >= 0 ? "+" : ""}${st.drift_deg_per_m.toFixed(2)}°/m` : "0.00°/m";
+        const fwdBwd = (typeof st.fwd_drift_deg_per_m === "number" && typeof st.bwd_drift_deg_per_m === "number")
+          ? ` (F ${st.fwd_drift_deg_per_m >= 0 ? "+" : ""}${st.fwd_drift_deg_per_m.toFixed(1)} / B ${st.bwd_drift_deg_per_m >= 0 ? "+" : ""}${st.bwd_drift_deg_per_m.toFixed(1)})`
+          : "";
+        const ctrTxt = typeof st.servo_center_us === "number" ? ` · ${formatUs(st.servo_center_us)} µs` : "";
+        metricsEl.innerText = `Iter ${st.iteration || 0}/${st.max_iterations || 6} · ${distNum.toFixed(2)}/${tgtNum.toFixed(2)} m · ${drift}${fwdBwd}${ctrTxt}`;
+        if (progBar) {
+          const pct = (st.phase === "CONVERGED" || st.phase === "DONE_BEST") ? 100 : Math.max(0, Math.min(100, (distNum / tgtNum) * 100));
+          progBar.style.width = `${pct.toFixed(1)}%`;
+          progBar.style.background = barColor;
+        }
+        msgEl.innerText = st.message || "";
+        renderAutoCenterHistory(st.history || []);
+      }
+
+      if (typeof st.servo_center_us === "number" && st.servo_center_us !== servoCenterUs) {
+        servoCenterUs = st.servo_center_us;
+        updateTrimDisplay(0);
+      }
+
+      if (autoCenterWasRunning && !running) {
+        if (autoCenterPollTimer) {
+          clearInterval(autoCenterPollTimer);
+          autoCenterPollTimer = null;
+        }
+        appendMcuConsole(`>>> [AutoCenter] ${st.phase}: ${st.message || ""}`);
+      }
+      autoCenterWasRunning = running;
+    }
+
+    async function pollAutoServoCenter() {
+      try {
+        const res = await fetch("/api/auto_servo_center");
+        if (res.ok) {
+          const st = await res.json();
+          updateAutoServoCenterUI(st);
+        }
+      } catch (err) { }
+    }
+
+    async function toggleAutoServoCenter() {
+      const enable = !autoCenterWasRunning;
+      const payload = { action: "auto_servo_center", enable: enable };
+      if (enable) {
+        const distVal = parseFloat(document.getElementById("autoCenterDistInput")?.value);
+        const spdVal = parseFloat(document.getElementById("autoCenterSpeedInput")?.value);
+        const tolVal = parseFloat(document.getElementById("autoCenterTolInput")?.value);
+        const triesVal = parseInt(document.getElementById("autoCenterTriesInput")?.value, 10);
+        const trimVal = Number(document.getElementById("trimSlider")?.value) || 0;
+        if (Number.isFinite(distVal)) payload.drive_distance_m = distVal;
+        if (Number.isFinite(spdVal)) payload.cruise_speed = spdVal;
+        if (Number.isFinite(tolVal)) payload.tolerance_deg_per_m = tolVal;
+        if (Number.isFinite(triesVal)) payload.max_iterations = triesVal;
+        if (trimVal !== 0) payload.trim_offset_us = trimVal;
+      }
+      try {
+        const res = await fetch("/api/mcu/command", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        if (data.error && !res.ok) {
+          appendMcuConsole(`[ERROR] Auto Center: ${data.error}`);
+          return;
+        }
+        if (data.auto_servo_center) {
+          updateAutoServoCenterUI(data.auto_servo_center);
+        }
+        if (enable && data.auto_servo_center?.running && !autoCenterPollTimer) {
+          autoCenterWasRunning = true;
+          autoCenterPollTimer = setInterval(pollAutoServoCenter, 180);
+          appendMcuConsole(`>>> [AutoCenter] Started (${payload.drive_distance_m ?? 1.0}m @ ${payload.cruise_speed ?? 0.60}m/s, tol ${payload.tolerance_deg_per_m ?? 0.8}°/m)...`);
+        }
+      } catch (err) {
+        appendMcuConsole(`[ERROR] Auto Center failed: ${err.message}`);
+      }
+    }
+
+    function setPidPreset(kp, ki) {
+      document.getElementById("pidKpInput").value = kp;
+      document.getElementById("pidKiInput").value = ki;
+    }
+
+    function sendPidGains() {
+      const kp = parseFloat(document.getElementById("pidKpInput").value) || 0.1;
+      const ki = parseFloat(document.getElementById("pidKiInput").value) || 1.5;
+      executeButtonCommand(null, { action: "pid", kp: kp, ki: ki });
+    }
+
+    function calibrateMotor(axle, motor) {
+      const voltInput = document.getElementById(`calibVolt_${axle}_${motor}`);
+      const voltage = voltInput ? parseFloat(voltInput.value) || 4.0 : 4.0;
+      appendMcuConsole(`>>> Starting calibration on Axle ${axle} (0=Front, 1=Rear), Motor ${motor} @ ${voltage.toFixed(1)}V...`);
+      executeButtonCommand(null, { action: "calib", axle: axle, motor: motor, voltage: voltage });
+    }
+
+    function sendRawCommand() {
+      const input = document.getElementById("rawCmdInput");
+      const cmd = input ? input.value.trim() : "";
+      if (cmd) {
+        executeButtonCommand(null, { action: "raw", cmd: cmd });
+        input.value = "";
+      }
+    }
+
+    function updateMotorPage(pkt) {
+      const rpms_cmd = pkt.rpms_cmd || [0, 0, 0, 0];
+      const rpms_act = pkt.rpms_act || [0, 0, 0, 0];
+      const flags = pkt.flags || {};
+      const wheel_r = 0.0275; // meters
+      const rpmToMps = (2.0 * Math.PI * wheel_r) / 60.0;
+
+      if (!motorWaveformBuffer.isPaused) {
+        motorWaveformBuffer.cmd.push(rpms_cmd[0] || 0);
+        motorWaveformBuffer.fl.push(rpms_act[0] || 0);
+        motorWaveformBuffer.fr.push(rpms_act[1] || 0);
+        motorWaveformBuffer.rl.push(rpms_act[2] || 0);
+        motorWaveformBuffer.rr.push(rpms_act[3] || 0);
+        if (motorWaveformBuffer.fl.length > motorWaveformBuffer.maxPoints) {
+          motorWaveformBuffer.cmd.shift();
+          motorWaveformBuffer.fl.shift();
+          motorWaveformBuffer.fr.shift();
+          motorWaveformBuffer.rl.shift();
+          motorWaveformBuffer.rr.shift();
+        }
+      }
+
+      // FL
+      const flCmd = Math.round(rpms_cmd[0] || 0);
+      const flAct = Math.round(rpms_act[0] || 0);
+      const flDelta = flAct - flCmd;
+      const elFLCmd = document.getElementById("mFL_rpmCmd");
+      const elFLAct = document.getElementById("mFL_rpmAct");
+      const elFLDelta = document.getElementById("mFL_rpmDelta");
+      const elFLSpeed = document.getElementById("mFL_speed");
+      if (elFLCmd) elFLCmd.innerText = flCmd;
+      if (elFLAct) elFLAct.innerText = flAct;
+      if (elFLDelta) {
+        elFLDelta.innerText = `Δ ${flDelta >= 0 ? '+' : ''}${flDelta}`;
+        elFLDelta.style.background = Math.abs(flDelta) > 150 ? '#8b000044' : '#1c212c';
+        elFLDelta.style.color = Math.abs(flDelta) > 150 ? 'var(--accent-red)' : 'var(--text-secondary)';
+      }
+      if (elFLSpeed) elFLSpeed.innerText = (flAct * rpmToMps).toFixed(2);
+
+      // FR
+      const frCmd = Math.round(rpms_cmd[1] || 0);
+      const frAct = Math.round(rpms_act[1] || 0);
+      const frDelta = frAct - frCmd;
+      const elFRCmd = document.getElementById("mFR_rpmCmd");
+      const elFRAct = document.getElementById("mFR_rpmAct");
+      const elFRDelta = document.getElementById("mFR_rpmDelta");
+      const elFRSpeed = document.getElementById("mFR_speed");
+      if (elFRCmd) elFRCmd.innerText = frCmd;
+      if (elFRAct) elFRAct.innerText = frAct;
+      if (elFRDelta) {
+        elFRDelta.innerText = `Δ ${frDelta >= 0 ? '+' : ''}${frDelta}`;
+        elFRDelta.style.background = Math.abs(frDelta) > 150 ? '#8b000044' : '#1c212c';
+        elFRDelta.style.color = Math.abs(frDelta) > 150 ? 'var(--accent-red)' : 'var(--text-secondary)';
+      }
+      if (elFRSpeed) elFRSpeed.innerText = (frAct * rpmToMps).toFixed(2);
+
+      // RL
+      const rlCmd = Math.round(rpms_cmd[2] || 0);
+      const rlAct = Math.round(rpms_act[2] || 0);
+      const rlDelta = rlAct - rlCmd;
+      const elRLCmd = document.getElementById("mRL_rpmCmd");
+      const elRLAct = document.getElementById("mRL_rpmAct");
+      const elRLDelta = document.getElementById("mRL_rpmDelta");
+      const elRLSpeed = document.getElementById("mRL_speed");
+      if (elRLCmd) elRLCmd.innerText = rlCmd;
+      if (elRLAct) elRLAct.innerText = rlAct;
+      if (elRLDelta) {
+        elRLDelta.innerText = `Δ ${rlDelta >= 0 ? '+' : ''}${rlDelta}`;
+        elRLDelta.style.background = Math.abs(rlDelta) > 150 ? '#8b000044' : '#1c212c';
+        elRLDelta.style.color = Math.abs(rlDelta) > 150 ? 'var(--accent-red)' : 'var(--text-secondary)';
+      }
+      if (elRLSpeed) elRLSpeed.innerText = (rlAct * rpmToMps).toFixed(2);
+
+      // RR
+      const rrCmd = Math.round(rpms_cmd[3] || 0);
+      const rrAct = Math.round(rpms_act[3] || 0);
+      const rrDelta = rrAct - rrCmd;
+      const elRRCmd = document.getElementById("mRR_rpmCmd");
+      const elRRAct = document.getElementById("mRR_rpmAct");
+      const elRRDelta = document.getElementById("mRR_rpmDelta");
+      const elRRSpeed = document.getElementById("mRR_speed");
+      if (elRRCmd) elRRCmd.innerText = rrCmd;
+      if (elRRAct) elRRAct.innerText = rrAct;
+      if (elRRDelta) {
+        elRRDelta.innerText = `Δ ${rrDelta >= 0 ? '+' : ''}${rrDelta}`;
+        elRRDelta.style.background = Math.abs(rrDelta) > 150 ? '#8b000044' : '#1c212c';
+        elRRDelta.style.color = Math.abs(rrDelta) > 150 ? 'var(--accent-red)' : 'var(--text-secondary)';
+      }
+      if (elRRSpeed) elRRSpeed.innerText = (rrAct * rpmToMps).toFixed(2);
+
+      // Pipeline Topology Health Nodes
+      const stmFrontOnline = Boolean(flags.stm32_front);
+      const stmRearOnline = Boolean(flags.stm32_rear);
+      const isBench = Boolean(flags.fake_data);
+
+      const bFront = document.getElementById("badgeStmFront");
+      if (bFront) {
+        bFront.innerText = stmFrontOnline ? "ONLINE" : "OFFLINE";
+        bFront.className = `pipe-node-badge ${stmFrontOnline ? 'badge-online' : 'badge-offline'}`;
+      }
+      const pFront = document.getElementById("pipeFrontRpm");
+      if (pFront) pFront.innerText = `FL: ${flAct} | FR: ${frAct} RPM`;
+
+      const bRear = document.getElementById("badgeStmRear");
+      if (bRear) {
+        bRear.innerText = stmRearOnline ? "ONLINE" : "OFFLINE";
+        bRear.className = `pipe-node-badge ${stmRearOnline ? 'badge-online' : 'badge-offline'}`;
+      }
+      const pRear = document.getElementById("pipeRearRpm");
+      if (pRear) pRear.innerText = `RL: ${rlAct} | RR: ${rrAct} RPM`;
+
+      const espOnline = Boolean(pkt.mcu_main_connected || flags.imu_online || flags.imu || flags.stm32_front || flags.stm32_rear || isBench);
+      const bEsp = document.getElementById("badgeEsp32");
+      if (bEsp) {
+        if (isBench) {
+          bEsp.innerText = "BENCH";
+          bEsp.className = "pipe-node-badge badge-bench";
+        } else if (espOnline) {
+          bEsp.innerText = "LIVE 400Hz";
+          bEsp.className = "pipe-node-badge badge-online";
+        } else {
+          bEsp.innerText = "OFFLINE";
+          bEsp.className = "pipe-node-badge badge-offline";
+        }
+      }
+      const pEsp = document.getElementById("pipeEsp32Mode");
+      if (pEsp) {
+        if (isBench) {
+          pEsp.innerText = "Synthetic Sweeps (Fake Mode)";
+        } else if (espOnline) {
+          const portTag = pkt.mcu_main_port ? ` (${pkt.mcu_main_port.replace('/dev/', '')})` : "";
+          pEsp.innerText = `Dual-Core RTOS 400 Hz${portTag}`;
+        } else {
+          pEsp.innerText = "Controller Disconnected (0 Data)";
+        }
+      }
+
+      // Global Header and Page 2 Button Sync (only from live stream, never overwrite during replay)
+      if (isLive) {
+        fakeDataActive = isBench;
+        syncFakeDataButtons(isBench);
+
+        if (performance.now() - lastPlannerToggleMs > 500) {
+          const srvRunning = Boolean(
+            pkt.planner_running !== undefined
+              ? pkt.planner_running
+              : (pkt.flags && pkt.flags.planner_running)
+          );
+          if (srvRunning !== plannerRunning) {
+            plannerRunning = srvRunning;
+            syncPlannerRunButton(plannerRunning);
+          }
+        }
+      }
+
+      // Differential Split
+      const leftAvg = (flAct + rlAct) * 0.5;
+      const rightAvg = (frAct + rrAct) * 0.5;
+      const totalAvg = Math.abs(leftAvg) + Math.abs(rightAvg);
+      const leftPct = totalAvg > 1 ? Math.round((Math.abs(leftAvg) / totalAvg) * 100) : 50;
+      const rightPct = 100 - leftPct;
+      const diffDelta = Math.round(rightAvg - leftAvg);
+
+      const elDiffSplit = document.getElementById("diffSplitReadout");
+      if (elDiffSplit) elDiffSplit.innerText = `Split: ${leftPct}% L / ${rightPct}% R`;
+      const elLeftAvg = document.getElementById("diffLeftAvg");
+      if (elLeftAvg) elLeftAvg.innerText = Math.round(leftAvg);
+      const elRightAvg = document.getElementById("diffRightAvg");
+      if (elRightAvg) elRightAvg.innerText = Math.round(rightAvg);
+      const elDiffDelta = document.getElementById("diffDelta");
+      if (elDiffDelta) elDiffDelta.innerText = `${diffDelta >= 0 ? '+' : ''}${diffDelta} RPM`;
+
+      // MCU Logs / Responses
+      if (pkt.mcu_log && Array.isArray(pkt.mcu_log) && pkt.mcu_log.length > 0) {
+        const consoleBox = document.getElementById("mcuConsole");
+        const latestStr = pkt.mcu_log.join("\n");
+        if (consoleBox && consoleBox.dataset.lastLog !== latestStr) {
+          consoleBox.dataset.lastLog = latestStr;
+          consoleBox.innerText = latestStr;
+          consoleBox.scrollTop = consoleBox.scrollHeight;
+        }
+      }
+
+      // Draw chart if page is active
+      if (currentPage === 'motors') {
+        renderMotorChart();
+      }
+    }
+
+    // High-Speed Local Binary Ingestion & Real-Time Performance Profiler
+    const perfMetrics = {
+      frameCount: 0,
+      lastFpsCalc: performance.now(),
+      currentFps: 60.0,
+      lastArrivalMs: 0.0,
+      arrivalIntervalMs: 50.0,
+      stutterCount: 0,
+      intervals: [],
+      lastRttMs: 0.0,
+      lastRenderMs: 0.0,
+      lastPayloadKb: 0.0,
+      isBinary: true,
+      isWebSocket: false
+    };
+    window.__FOLKRACE_LATENCY__ = perfMetrics;
+
+    async function decompressZlib(bytes) {
+      if (typeof DecompressionStream !== "undefined") {
+        try {
+          const ds = new DecompressionStream("deflate");
+          const writer = ds.writable.getWriter();
+          writer.write(bytes);
+          writer.close();
+          const res = new Response(ds.readable);
+          const buf = await res.arrayBuffer();
+          return new Uint8Array(buf);
+        } catch (e) {
+          try {
+            const dsRaw = new DecompressionStream("deflate-raw");
+            const writerRaw = dsRaw.writable.getWriter();
+            writerRaw.write(bytes);
+            writerRaw.close();
+            const resRaw = new Response(dsRaw.readable);
+            const bufRaw = await resRaw.arrayBuffer();
+            return new Uint8Array(bufRaw);
+          } catch (e2) { }
+        }
+      }
+      return null;
+    }
+
+    async function parseLiveBinary(ab) {
+      const view = new DataView(ab);
+      // Magic validation "FOLK" (0x464F4C4B)
+      if (view.getUint32(0, false) !== 0x464F4C4B) {
+        throw new Error("Invalid binary magic header");
+      }
+      const totalLen = view.getUint32(4, true);
+      const timeStep = view.getUint32(8, true);
+      const timestamp = view.getFloat64(12, true);
+      const simTime = view.getFloat32(20, true);
+      const vCmd = view.getFloat32(24, true);
+      const vReal = view.getFloat32(28, true);
+      const steerCmd = view.getFloat32(32, true);
+      const steerAct = view.getFloat32(36, true);
+      const yawDeg = view.getFloat32(40, true);
+      const pitchDeg = view.getFloat32(44, true);
+      const rollDeg = view.getFloat32(48, true);
+      const gyroZ = view.getFloat32(52, true);
+      const accelFwd = view.getFloat32(56, true);
+      const accelLat = view.getFloat32(60, true);
+      const slipRatio = view.getFloat32(64, true);
+      const fTof = view.getFloat32(68, true);
+      const planMs = view.getFloat32(72, true);
+      const mapMs = view.getFloat32(76, true);
+      const scoutMs = view.getFloat32(80, true);
+
+      const rpmsCmd = [
+        view.getFloat32(84, true),
+        view.getFloat32(88, true),
+        view.getFloat32(92, true),
+        view.getFloat32(96, true)
+      ];
+      const rpmsAct = [
+        view.getFloat32(100, true),
+        view.getFloat32(104, true),
+        view.getFloat32(108, true),
+        view.getFloat32(112, true)
+      ];
+      const tofRanges = [];
+      for (let i = 0; i < 16; i++) {
+        tofRanges.push(view.getFloat32(116 + i * 4, true));
+      }
+      const gap = [
+        view.getFloat32(180, true),
+        view.getFloat32(184, true),
+        view.getFloat32(188, true)
+      ];
+      const rows = view.getUint16(192, true);
+      const cols = view.getUint16(194, true);
+      const bounds = [
+        view.getFloat32(196, true),
+        view.getFloat32(200, true),
+        view.getFloat32(204, true),
+        view.getFloat32(208, true)
+      ];
+      const probCompLen = view.getUint32(212, true);
+      const probRawLen = view.getUint32(216, true);
+      const hazCompLen = view.getUint32(220, true);
+      const hazRawLen = view.getUint32(224, true);
+      const metaLen = view.getUint32(228, true);
+
+      const headerEnd = 232;
+      let probBytes = null;
+      let hazBytes = null;
+      if (probCompLen > 0 && rows > 0 && cols > 0) {
+        const slice = new Uint8Array(ab, headerEnd, probCompLen);
+        if (probCompLen < probRawLen) {
+          probBytes = await decompressZlib(slice);
+        } else {
+          probBytes = slice;
+        }
+      }
+      if (hazCompLen > 0 && rows > 0 && cols > 0) {
+        const slice = new Uint8Array(ab, headerEnd + probCompLen, hazCompLen);
+        if (hazCompLen < hazRawLen) {
+          hazBytes = await decompressZlib(slice);
+        } else {
+          hazBytes = slice;
+        }
+      }
+      let meta = {};
+      if (metaLen > 0) {
+        try {
+          const metaStr = new TextDecoder().decode(new Uint8Array(ab, headerEnd + probCompLen + hazCompLen, metaLen));
+          meta = JSON.parse(metaStr);
+        } catch (e) { }
+      }
+
+      return {
+        time_step: timeStep,
+        timestamp: timestamp,
+        sim_time: simTime,
+        v_cmd: vCmd,
+        v_real: vReal,
+        steer_cmd_deg: steerCmd,
+        steer_actual_deg: steerAct,
+        yaw_deg: yawDeg,
+        pitch_deg: pitchDeg,
+        roll_deg: rollDeg,
+        gyro_z: gyroZ,
+        accel_fwd: accelFwd,
+        accel_lat: accelLat,
+        slip_ratio: slipRatio,
+        f_tof: fTof,
+        plan_ms: planMs,
+        map_ms: mapMs,
+        scout_ms: scoutMs,
+        rpms_cmd: rpmsCmd,
+        rpms_act: rpmsAct,
+        tof_ranges: tofRanges,
+        gap: gap,
+        grid_shape: [rows, cols],
+        grid_bounds: bounds,
+        prob_bytes: probBytes,
+        hazard_bytes: hazBytes,
+        ...meta
+      };
+    }
+
+    let isFetching = false;
+    let useBinaryEndpoint = true;
+    let wsLive = null;
+    let wsConnected = false;
+    let pendingPkt = null;
+    let rafHandle = null;
+    let lastHudUpdate = 0;
+
+    function scheduleRender(pkt) {
+      pendingPkt = pkt;
+      if (!rafHandle) {
+        rafHandle = requestAnimationFrame(renderLoop);
+      }
+    }
+
+    function renderLoop() {
+      rafHandle = null;
+      if (!pendingPkt) return;
+      const pkt = pendingPkt;
+      pendingPkt = null;
+
+      const t0 = performance.now();
+      renderRadar(pkt);
+      perfMetrics.lastRenderMs = performance.now() - t0;
+    }
+
+    function syncLiveFrameCounter(totFrames, minFrame) {
+      const n = parseInt(totFrames || 0, 10);
+      if (minFrame !== undefined && minFrame !== null) {
+        const m = parseInt(minFrame, 10);
+        if (m >= 1) {
+          minFrameId = m;
+          document.getElementById("frameSlider").min = minFrameId;
+        }
+      }
+      if (n <= 0) return;
+      totalFrames = n;
+      const slider = document.getElementById("frameSlider");
+      slider.max = totalFrames;
+      if (isLive) {
+        currentFrameId = totalFrames;
+        slider.value = totalFrames;
+        document.getElementById("lblFrame").innerText = `Frame ${totalFrames} / ${totalFrames}`;
+      } else {
+        document.getElementById("lblFrame").innerText = `Frame ${currentFrameId} / ${totalFrames}`;
+      }
+    }
+
+    function initLiveWebSocket() {
+      if (wsLive) {
+        try { wsLive.close(); } catch (e) { }
+        wsLive = null;
+      }
+      const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+      const wsUrl = `${protocol}//${location.host}/ws_live`;
+
+      try {
+        wsLive = new WebSocket(wsUrl);
+        wsLive.binaryType = "arraybuffer";
+
+        wsLive.onopen = () => {
+          wsConnected = true;
+          perfMetrics.isWebSocket = true;
+          perfMetrics.isBinary = true;
+        };
+
+        wsLive.onmessage = async (evt) => {
+          if (!isLive) return;
+          const t0 = performance.now();
+          const ab = evt.data;
+          if (!(ab instanceof ArrayBuffer)) return;
+
+          if (perfMetrics.lastArrivalMs > 0) {
+            const interval = t0 - perfMetrics.lastArrivalMs;
+            perfMetrics.arrivalIntervalMs = interval;
+            perfMetrics.intervals.push(interval);
+            if (perfMetrics.intervals.length > 100) perfMetrics.intervals.shift();
+            if (interval > 66.7) perfMetrics.stutterCount++;
+          }
+          perfMetrics.lastArrivalMs = t0;
+
+          const pkt = await parseLiveBinary(ab);
+          currentPkt = pkt;
+
+          // Throttle heavy DOM updates to ~15 Hz (every 66ms) to keep Firefox completely fluid
+          if (t0 - lastHudUpdate >= 66.0) {
+            lastHudUpdate = t0;
+            updateHUD(pkt);
+          }
+
+          // Schedule canvas render on display refresh (RAF)
+          scheduleRender(pkt);
+
+          perfMetrics.lastPayloadKb = ab.byteLength / 1024.0;
+          perfMetrics.frameCount++;
+
+          syncLiveFrameCounter(pkt._total_frames || pkt.total_frames);
+
+          if (t0 - perfMetrics.lastFpsCalc >= 500.0) {
+            perfMetrics.currentFps = (perfMetrics.frameCount * 1000.0) / (t0 - perfMetrics.lastFpsCalc);
+            perfMetrics.frameCount = 0;
+            perfMetrics.lastFpsCalc = t0;
+            updatePerfHUD();
+          }
+        };
+
+        wsLive.onclose = () => {
+          wsConnected = false;
+          perfMetrics.isWebSocket = false;
+          if (isLive) {
+            setTimeout(initLiveWebSocket, 2000);
+            setTimeout(fetchLive, 50);
+          }
+        };
+
+        wsLive.onerror = () => {
+          wsConnected = false;
+          perfMetrics.isWebSocket = false;
+          if (isLive) {
+            setTimeout(fetchLive, 50);
+          }
+        };
+      } catch (err) {
+        wsConnected = false;
+        perfMetrics.isWebSocket = false;
+      }
+    }
+
+    async function fetchLive() {
+      if (!isLive || isFetching) return;
+      if (wsConnected) return; // If WebSocket is actively streaming, don't poll
+      isFetching = true;
+      const t0 = performance.now();
+      let payloadBytes = 0;
+
+      try {
+        if (useBinaryEndpoint) {
+          const res = await fetch("/api/live_bin");
+          if (res.ok) {
+            const ab = await res.arrayBuffer();
+            payloadBytes = ab.byteLength;
+            const pkt = await parseLiveBinary(ab);
+            currentPkt = pkt;
+            updateHUD(pkt);
+
+            scheduleRender(pkt);
+            perfMetrics.isBinary = true;
+
+            syncLiveFrameCounter(pkt._total_frames || pkt.total_frames);
+          } else {
+            useBinaryEndpoint = false;
+          }
+        } else {
+          const res = await fetch("/api/live");
+          if (res.ok) {
+            const pkt = await res.json();
+            currentPkt = pkt;
+            updateHUD(pkt);
+
+            scheduleRender(pkt);
+            perfMetrics.isBinary = false;
+
+            syncLiveFrameCounter(pkt._total_frames || pkt.total_frames);
+          }
+        }
+      } catch (err) {
+        useBinaryEndpoint = false;
+      } finally {
+        const tEnd = performance.now();
+        perfMetrics.lastRttMs = tEnd - t0;
+        perfMetrics.lastPayloadKb = payloadBytes / 1024.0;
+        perfMetrics.frameCount++;
+
+        if (tEnd - perfMetrics.lastFpsCalc >= 500.0) {
+          perfMetrics.currentFps = (perfMetrics.frameCount * 1000.0) / (tEnd - perfMetrics.lastFpsCalc);
+          perfMetrics.frameCount = 0;
+          perfMetrics.lastFpsCalc = tEnd;
+          updatePerfHUD();
+        }
+
+        isFetching = false;
+        if (isLive && !wsConnected) {
+          const elapsed = performance.now() - t0;
+          const delay = Math.max(66, Math.round(100 - elapsed)); // Throttle fallback to ~10 Hz to prevent network congestion
+          setTimeout(fetchLive, delay);
+        }
+      }
+    }
+    // Initial render with default zero telemetry state (strictly 0 fake data if controller is not connected)
+    const defaultPkt = {
+      time_step: 0,
+      sim_time: 0.0,
+      mode: "STANDBY",
+      recovery_state: "STANDBY",
+      status: "OFFLINE",
+      v_cmd: 0.0,
+      v_real: 0.0,
+      v_est: 0.0,
+      steer_cmd_deg: 0.0,
+      steer_deg: 0.0,
+      steer_actual_deg: 0.0,
+      rpms_cmd: [0, 0, 0, 0],
+      rpms_act: [0, 0, 0, 0],
+      yaw_deg: 0.0,
+      pitch_deg: 0.0,
+      roll_deg: 0.0,
+      gyro_z: 0.0,
+      accel_fwd: 0.0,
+      accel_lat: 0.0,
+      slip_state: "OFFLINE",
+      slip_ratio: 0.0,
+      flags: { fake_data: false, stm32_front: false, stm32_rear: false, imu: false },
+      tof_ranges: new Array(16).fill(0.0),
+      tof_ranges_raw: new Array(16).fill(0.0),
+      f_tof: 0.0,
+      gap: [0.0, 0.0, 0.0],
+      targets: [],
+      best_line: [],
+      grid_bounds: [CM_X_MIN, CM_X_MAX, CM_Y_MIN, CM_Y_MAX],
+    };
+    currentPkt = defaultPkt;
+    renderRadar(defaultPkt);
+    updateHUD(defaultPkt);
+    syncFakeDataButtons(false);
+    syncPlannerRunButton(false);
+
+    const isLocalReplay = new URLSearchParams(window.location.search).get("replay") === "1";
+    if (isLocalReplay) {
+      setReplayMode();
+    } else {
+      initLiveWebSocket();
+      setTimeout(fetchLive, 50);
+    }
+
+    function updatePerfHUD() {
+      const elFps = document.getElementById("perfFps");
+      const elRtt = document.getElementById("perfRtt");
+      const elRender = document.getElementById("perfRender");
+      const elSize = document.getElementById("perfSize");
+      if (!elFps) return;
+
+      elFps.innerText = `${perfMetrics.currentFps.toFixed(1)} Hz`;
+      elFps.style.color = perfMetrics.currentFps >= 18 ? "#00e676" : (perfMetrics.currentFps >= 10 ? "#ffd600" : "#ff3d00");
+
+      if (perfMetrics.isWebSocket) {
+        elRtt.innerText = `${perfMetrics.arrivalIntervalMs.toFixed(1)}ms dt`;
+      } else {
+        elRtt.innerText = `${perfMetrics.lastRttMs.toFixed(1)}ms RTT`;
+      }
+
+      elRender.innerText = `${perfMetrics.lastRenderMs.toFixed(1)}ms Render`;
+      const typeTag = perfMetrics.isWebSocket ? "WS-Bin" : (perfMetrics.isBinary ? "Bin" : "JSON");
+      elSize.innerText = `${perfMetrics.lastPayloadKb.toFixed(1)} KB (${typeTag})`;
+    }
+
+    // Server Status / System Info
+    async function fetchStatus() {
+      try {
+        const res = await fetch("/api/status");
+        if (res.ok) {
+          const data = await res.json();
+          document.getElementById("cpuTempBadge").innerText = `Temp: ${data.temp_c || "--"}°C`;
+          document.getElementById("bufferBadge").innerText = `Buffer: ${data.driving_minutes || 0} / ${data.max_buffer_minutes || 30}m`;
+          document.getElementById("drivingTime").innerText = `${data.driving_minutes || 0} min`;
+          document.getElementById("prunedFrames").innerText = data.pruned_frames || 0;
+          document.getElementById("recFrames").innerText = data.total_recorded || 0;
+          document.getElementById("recSize").innerText = `${data.file_size_mb || 0} MB`;
+          document.getElementById("diskFree").innerText = `${data.disk_free_gb || "--"} GB`;
+          document.getElementById("sessionName").innerText = `Session: ${data.session_id || "active"}`;
+          document.getElementById("freqBadge").innerText = `${Math.round(data.loop_hz || 60)} Hz`;
+          if (typeof data.servo_center_us === "number" && data.servo_center_us !== servoCenterUs) {
+            servoCenterUs = data.servo_center_us;
+            const curSlider = Number(document.getElementById("trimSlider").value) || 0;
+            updateTrimDisplay(curSlider);
+          }
+          if (data.auto_servo_center) {
+            updateAutoServoCenterUI(data.auto_servo_center);
+            if (data.auto_servo_center.running && !autoCenterPollTimer) {
+              autoCenterPollTimer = setInterval(pollAutoServoCenter, 180);
+            }
+          }
+          syncLiveFrameCounter(data.total_recorded, data.min_frame_id);
+        }
+      } catch (err) { }
+    }
+    setInterval(fetchStatus, 2000);
+    fetchStatus().then(() => {
+      if (isLocalReplay && totalFrames > 0) {
+        loadFrame(minFrameId);
+      }
+    });
+
+    // Time-Travel / Frame-by-Frame Scrubbing
+    const frameSlider = document.getElementById("frameSlider");
+    frameSlider.addEventListener("input", (e) => {
+      if (totalFrames <= 0) return;
+      stopPlayback();
+      setReplayMode();
+      loadFrame(parseInt(e.target.value));
+    });
+
+    function setReplayMode() {
+      isLive = false;
+      const btnLive = document.getElementById("btnToggleLive");
+      if (btnLive) btnLive.classList.remove("active");
+      const mb = document.getElementById("modeBadge");
+      if (mb) {
+        mb.innerText = "REPLAY / SCRUB";
+        mb.className = "badge badge-replay";
+      }
+    }
+
+    function stopPlayback() {
+      isPlaying = false;
+      if (playInterval) {
+        clearTimeout(playInterval);
+        playInterval = null;
+      }
+      document.getElementById("btnPlay").innerText = "▶ Play";
+    }
+
+    async function stepPlayback() {
+      if (!isPlaying || isLive) return;
+      if (currentFrameId >= totalFrames) {
+        stopPlayback();
+        return;
+      }
+      const tStart = performance.now();
+      await loadFrame(currentFrameId + 1);
+      if (!isPlaying || isLive) return;
+      const speed = parseFloat(document.getElementById("selSpeed").value) || 1.0;
+      const targetMs = 16.667 / speed;
+      const elapsed = performance.now() - tStart;
+      const delay = Math.max(1, Math.round(targetMs - elapsed));
+      playInterval = setTimeout(stepPlayback, delay);
+    }
+
+    document.getElementById("btnToggleLive").addEventListener("click", () => {
+      isLive = true;
+      stopPlayback();
+      const btnLive = document.getElementById("btnToggleLive");
+      if (btnLive) btnLive.classList.add("active");
+      const mb = document.getElementById("modeBadge");
+      if (mb) {
+        mb.innerText = "LIVE STREAM";
+        mb.className = "badge badge-live";
+      }
+      if (!wsConnected) {
+        initLiveWebSocket();
+        setTimeout(fetchLive, 50);
+      }
+    });
+
+    async function loadFrame(frameId) {
+      if (totalFrames <= 0) return;
+      const targetId = Math.max(minFrameId, Math.min(totalFrames, frameId));
+      const reqSeq = ++loadSeq;
+      currentFrameId = targetId;
+      frameSlider.value = currentFrameId;
+      document.getElementById("lblFrame").innerText = `Frame ${currentFrameId} / ${totalFrames}`;
+
+      try {
+        const resBin = await fetch(`/api/frame_bin/${targetId}`);
+        if (resBin.ok) {
+          const ab = await resBin.arrayBuffer();
+          const pkt = await parseLiveBinary(ab);
+          if (reqSeq !== loadSeq || isLive) return;
+          currentPkt = pkt;
+          updateHUD(pkt);
+          renderRadar(pkt);
+          return;
+        }
+      } catch (err) {
+        console.warn("Replay binary frame load failed, falling back to JSON:", err);
+      }
+
+      try {
+        const res = await fetch(`/api/frame/${targetId}`);
+        if (res.ok) {
+          const pkt = await res.json();
+          if (reqSeq !== loadSeq || isLive) return;
+          currentPkt = pkt;
+          updateHUD(pkt);
+          renderRadar(pkt);
+        } else {
+          console.warn(`Replay frame ${targetId} HTTP ${res.status}`);
+        }
+      } catch (err) {
+        console.warn("Replay JSON frame load failed:", err);
+      }
+    }
+
+    function stepToFrame(targetId) {
+      if (totalFrames <= 0) return;
+      stopPlayback();
+      setReplayMode();
+      loadFrame(targetId);
+    }
+
+    document.getElementById("btnFirst").addEventListener("click", () => stepToFrame(minFrameId));
+    document.getElementById("btnLast").addEventListener("click", () => stepToFrame(totalFrames));
+    document.getElementById("btnPrev1").addEventListener("click", () => stepToFrame(currentFrameId - 1));
+    document.getElementById("btnNext1").addEventListener("click", () => stepToFrame(currentFrameId + 1));
+    document.getElementById("btnPrev10").addEventListener("click", () => stepToFrame(currentFrameId - 10));
+    document.getElementById("btnNext10").addEventListener("click", () => stepToFrame(currentFrameId + 10));
+
+    document.getElementById("btnPlay").addEventListener("click", () => {
+      if (totalFrames <= 0) return;
+      setReplayMode();
+      if (isPlaying) {
+        stopPlayback();
+      } else {
+        if (currentFrameId >= totalFrames || currentFrameId < minFrameId) {
+          currentFrameId = minFrameId - 1;
+        }
+        isPlaying = true;
+        document.getElementById("btnPlay").innerText = "⏸ Pause";
+        stepPlayback();
+      }
+    });
+
+    // Anomaly / Unexpected Moments Jump
+    async function loadAnomalies() {
+      try {
+        const res = await fetch("/api/anomalies");
+        if (res.ok) {
+          anomaliesList = await res.json();
+        }
+      } catch (err) { }
+    }
+    loadAnomalies();
+
+    document.getElementById("btnJumpAnomaly").addEventListener("click", async () => {
+      if (anomaliesList.length === 0) {
+        await loadAnomalies();
+      }
+      if (anomaliesList.length === 0) {
+        alert("No anomalies / unexpected moments detected in this session yet!");
+        return;
+      }
+      // Find next anomaly after current frame
+      let nextAnom = anomaliesList.find(a => a.frame_id > currentFrameId);
+      if (!nextAnom) nextAnom = anomaliesList[0]; // loop back to first
+      stopPlayback();
+      setReplayMode();
+      loadFrame(nextAnom.frame_id);
+    });
+
+    // Download selected log database (current or past session)
+    document.getElementById("btnDownloadLog").addEventListener("click", () => {
+      const sel = document.getElementById("prevSessionSelect");
+      if (sel && sel.value && sel.value !== "__CURRENT__") {
+        window.location.href = `/api/download?file=${encodeURIComponent(sel.value)}`;
+      } else {
+        window.location.href = "/api/download";
+      }
+    });
+
+    // Populate current + past/crashed sessions from Pi SD card (hidden in local replay mode)
+    async function refreshPiSessions() {
+      if (isLocalReplay) return;
+      try {
+        const res = await fetch("/api/sessions");
+        if (!res.ok) return;
+        const sessions = await res.json();
+        const visible = (sessions || []).filter(s => s.is_current || s.frames > 0);
+        const row = document.getElementById("prevSessionsRow");
+        const sel = document.getElementById("prevSessionSelect");
+        if (!visible.length) {
+          row.style.display = "none";
+          return;
+        }
+        const prevChoice = sel.value;
+        sel.innerHTML = "";
+        for (const s of visible) {
+          const opt = document.createElement("option");
+          opt.value = s.is_current ? "__CURRENT__" : s.filename;
+          const mb = (s.size_bytes / (1024 * 1024)).toFixed(1);
+          opt.textContent = s.is_current
+            ? `Current: ${s.filename} (${s.frames}f, ${mb} MB)`
+            : `${s.filename} (${s.frames}f, ${mb} MB)`;
+          sel.appendChild(opt);
+        }
+        if (prevChoice && [...sel.options].some(o => o.value === prevChoice)) {
+          sel.value = prevChoice;
+        }
+        row.style.display = "flex";
+      } catch (_) { }
+    }
+    refreshPiSessions();
+
+    // Open / upload a local .db file (active in local --replay server mode)
+    const fileOpenLocalDb = document.getElementById("fileOpenLocalDb");
+    document.getElementById("btnOpenLocalDb").addEventListener("click", () => {
+      if (!isLocalReplay) {
+        alert("To replay a downloaded .db offline at 60 Hz, first click 'Download Log' and then run:\n\npython 1_launchers/4_pi4_debug_studio.py --replay");
+        return;
+      }
+      fileOpenLocalDb.value = "";
+      fileOpenLocalDb.click();
+    });
+
+    fileOpenLocalDb.addEventListener("change", async (e) => {
+      const file = e.target.files && e.target.files[0];
+      if (!file) return;
+      try {
+        const res = await fetch("/api/upload_db", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/octet-stream",
+            "X-Filename": file.name
+          },
+          body: await file.arrayBuffer()
+        });
+        if (!res.ok) {
+          alert(`Failed to load database: HTTP ${res.status}`);
+          return;
+        }
+        stopPlayback();
+        setReplayMode();
+        anomaliesList = [];
+        await fetchStatus();
+        await loadAnomalies();
+        if (totalFrames > 0) {
+          await loadFrame(minFrameId);
+        }
+      } catch (err) {
+        alert(`Failed to upload database: ${err}`);
+      }
+    });
+  </script>
+</body>
+
+</html>

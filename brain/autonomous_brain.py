@@ -224,6 +224,13 @@ class AutonomousBrain:
             alt_aperture_bias=float(genes.get("alt_aperture_bias", 1.80)),
             w_gap_clear=float(genes.get("w_gap_clear", 5.00)),
             center_bias=float(genes.get("center_bias", MPC_CENTER_BIAS)),
+            track_width_cap_m=float(genes.get("track_width_cap_m", 0.0)),
+            corner_outer_bias=float(genes.get("corner_outer_bias", 0.0)),
+            inner_corner_margin_m=float(genes.get("inner_corner_margin_m", 0.0)),
+            blind_turn_kappa=float(genes.get("blind_turn_kappa", 0.0)),
+            brake_decel_scale=float(genes.get("brake_decel_scale", 1.0)),
+            narrow_corridor_v_gain=float(genes.get("narrow_corridor_v_gain", 0.0)),
+            use_corridor_flow=int(genes.get("use_corridor_flow", 0)),
         )
         self.planner.costmap = self.costmap
 
@@ -382,6 +389,7 @@ class AutonomousBrain:
             x0=dx_3,
             y0=dy_3,
             psi0=delta_yaw_3,
+            pitch_rad=pitch_rad,
         )
         t_plan_ms = (time.perf_counter() - t_plan_0) * 1000.0
         self.last_plan_res = plan_res

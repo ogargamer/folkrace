@@ -92,24 +92,23 @@ flowchart TD
 
 | Subsystem | Hardware Platform | Primary Responsibilities | Key Communication |
 | :--- | :--- | :--- | :--- |
-| **Brain** | [Raspberry Pi 4](file:///c:/Users/nurmi/Documents/Folkrace/pi4/README.md) | High-level path planning via Curvilinear SL-MPC on Core 0/1; live telemetry and debugging server on Core 2/3. No LiDAR. | UART from ESP32 ToF (16 zones), UART with ESP32 Main |
-| **Chassis Dynamics** | [ESP32 Main](file:///c:/Users/nurmi/Documents/Folkrace/ESP32/README.md) | 400 Hz control loop: BNO08x 9-DOF IMU reading, steering servo control, 4WD electronic differential, slip/spinout watchdog. | High-speed UART to Pi 4; dual UART links to 2x STM32 |
-| **Perception Hub** | [ESP32 ToF Hub](file:///c:/Users/nurmi/Documents/Folkrace/ESP32/README.md) | Manages 4x VL53L8CX multizone ToFs on one shared SPI bus with dedicated MISO lines; filters data into 16 distance zones. | UART output to Pi 4 (921,600 baud) |
-| **Front Axle Motors** | [STM32 Front](file:///c:/Users/nurmi/Documents/Folkrace/STM32/README.md) | Controls 2x direct-drive GM3506 BLDC motors (FL, FR) with 2x MT6816 SPI magnetic encoders via hardware SimpleFOC at 20 kHz. | UART link with ESP32 Main; SPI1/SPI2 for encoders |
-| **Rear Axle Motors** | [STM32 Rear](file:///c:/Users/nurmi/Documents/Folkrace/STM32/README.md) | Controls 2x direct-drive GM3506 BLDC motors (RL, RR) with 2x MT6816 SPI magnetic encoders via hardware SimpleFOC at 20 kHz. | UART link with ESP32 Main; SPI1/SPI2 for encoders |
+| **Brain** | [Raspberry Pi 4](file:///c:/Users/nurmi/Documents/Folkrace/2_pi4/README.md) | High-level path planning via Curvilinear SL-MPC on Core 0/1; live telemetry and debugging server on Core 2/3. No LiDAR. | UART from ESP32 ToF (16 zones), UART with ESP32 Main |
+| **Chassis Dynamics** | [ESP32 Main](file:///c:/Users/nurmi/Documents/Folkrace/3_esp32/README.md) | 400 Hz control loop: BNO08x 9-DOF IMU reading, steering servo control, 4WD electronic differential, slip/spinout watchdog. | High-speed UART to Pi 4; dual UART links to 2x STM32 |
+| **Perception Hub** | [ESP32 ToF Hub](file:///c:/Users/nurmi/Documents/Folkrace/3_esp32/README.md) | Manages 4x VL53L8CX multizone ToFs on one shared SPI bus with dedicated MISO lines; filters data into 16 distance zones. | UART output to Pi 4 (921,600 baud) |
+| **Front Axle Motors** | [STM32 Front](file:///c:/Users/nurmi/Documents/Folkrace/4_stm32/README.md) | Controls 2x direct-drive GM3506 BLDC motors (FL, FR) with 2x MT6816 SPI magnetic encoders via hardware SimpleFOC at 20 kHz. | UART link with ESP32 Main; SPI1/SPI2 for encoders |
+| **Rear Axle Motors** | [STM32 Rear](file:///c:/Users/nurmi/Documents/Folkrace/4_stm32/README.md) | Controls 2x direct-drive GM3506 BLDC motors (RL, RR) with 2x MT6816 SPI magnetic encoders via hardware SimpleFOC at 20 kHz. | UART link with ESP32 Main; SPI1/SPI2 for encoders |
 
 ---
 
 ## 3. Directory Structure
 
-* **[pi4/](file:///c:/Users/nurmi/Documents/Folkrace/pi4/README.md)**: Raspberry Pi 4 companion stack, SL-MPC planner configuration, debug server notes, and pin mapping.
-* **[ESP32/](file:///c:/Users/nurmi/Documents/Folkrace/ESP32/README.md)**:
+* **[1_launchers/](file:///c:/Users/nurmi/Documents/Folkrace/1_launchers/README.md)**: Consolidated one-click launcher scripts for simulation, genetic algorithm optimization, and hardware test benches.
+* **[2_pi4/](file:///c:/Users/nurmi/Documents/Folkrace/2_pi4/README.md)**: Raspberry Pi 4 companion stack, SL-MPC planner configuration, debug server notes, and pin mapping.
+* **[3_esp32/](file:///c:/Users/nurmi/Documents/Folkrace/3_esp32/README.md)**:
   * **`ESP32_Main/`**: Real-time vehicle dynamics, electronic differential, BNO08x IMU driver, steering servo actuation, and STM32 UART link.
   * **`ESP32_ToF/`**: Quad VL53L8CX multi-zone Time-of-Flight driver suite, dedicated MISO bus architecture, and 16-zone distance matrix stream.
-* **[STM32/](file:///c:/Users/nurmi/Documents/Folkrace/STM32/README.md)**: Dual-motor Field Oriented Control (SimpleFOC), MT6816 SPI magnetic encoder drivers, 128-point LUT calibration, and hardware timer configurations.
-* **[launchers/](file:///c:/Users/nurmi/Documents/Folkrace/launchers/README.md)**: Consolidated one-click launcher scripts for simulation, genetic algorithm optimization, and hardware test benches.
-* **[webots/](file:///c:/Users/nurmi/Documents/Folkrace/webots/README.md)**: Webots physics simulation, Curvilinear SL-MPC C++ solvers (`curvilinear_sl_mpc.dll`), genetic algorithm tuning benches, and virtual race tracks.
-* **[docs/](file:///c:/Users/nurmi/Documents/Folkrace/docs/)**: Engineering specifications, wiring diagrams, and calibration procedures.
+* **[4_stm32/](file:///c:/Users/nurmi/Documents/Folkrace/4_stm32/README.md)**: Dual-motor Field Oriented Control (SimpleFOC), MT6816 SPI magnetic encoder drivers, 128-point LUT calibration, and hardware timer configurations.
+* **[5_webots/](file:///c:/Users/nurmi/Documents/Folkrace/5_webots/README.md)**: Webots physics simulation, Curvilinear SL-MPC C++ solvers (`curvilinear_sl_mpc.dll`), genetic algorithm tuning benches, and virtual race tracks.
 
 ---
 
@@ -164,18 +163,18 @@ pio run -e esp32_tof -t upload
 
 ## 6. Verification & Test Launchers
 
-All diagnostic GUIs and simulation suites are centralized in [`launchers/`](file:///c:/Users/nurmi/Documents/Folkrace/launchers/README.md):
+All diagnostic GUIs and simulation suites are centralized in [`1_launchers/`](file:///c:/Users/nurmi/Documents/Folkrace/1_launchers/README.md):
 
 ```bash
 # Launch physical quad VL53L8CX ToF multi-target visualizer
-python launchers/6_esp32_tof_gui.py
+python 1_launchers/6_esp32_tof_gui.py
 
 # Launch physical high-rate steering servo calibration bench
-python launchers/8_esp32_servo_gui.py
+python 1_launchers/8_esp32_servo_gui.py
 
 # Launch physical STM32 motor closed-loop FOC & encoder GUI
-python launchers/9_stm32_encoder_motor_gui.py
+python 1_launchers/9_stm32_encoder_motor_gui.py
 
 # Launch Webots 3D simulation with Curvilinear SL-MPC & dynamic obstacles
-python launchers/1_champion_preview.py
+python 1_launchers/1_champion_preview.py
 ```

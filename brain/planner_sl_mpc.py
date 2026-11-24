@@ -64,8 +64,8 @@ _ext = ".dll" if sys.platform == "win32" else ".so"
 candidates = [
     os.path.join(CURR_DIR, f"curvilinear_sl_mpc{_ext}"),
     os.path.join(os.getcwd(), f"curvilinear_sl_mpc{_ext}"),
-    os.path.abspath(os.path.join(CURR_DIR, "..", "pi4", f"curvilinear_sl_mpc{_ext}")),
-    os.path.abspath(os.path.join(CURR_DIR, "..", "..", "..", "..", "..", "pi4", f"curvilinear_sl_mpc{_ext}")),
+    os.path.abspath(os.path.join(CURR_DIR, "..", "2_pi4", f"curvilinear_sl_mpc{_ext}")),
+    os.path.abspath(os.path.join(CURR_DIR, "..", "..", "..", "..", "..", "2_pi4", f"curvilinear_sl_mpc{_ext}")),
 ]
 for _cand in candidates:
     if os.path.exists(_cand):
@@ -115,6 +115,27 @@ if CPP_AVAILABLE and _lib is not None:
     if hasattr(_lib, "sl_mpc_set_center_bias"):
         _lib.sl_mpc_set_center_bias.argtypes = [ctypes.c_void_p, ctypes.c_double]
         _lib.sl_mpc_set_center_bias.restype = None
+
+    if hasattr(_lib, "sl_mpc_set_racing_params"):
+        _lib.sl_mpc_set_racing_params.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_double,
+            ctypes.c_double,
+            ctypes.c_double,
+            ctypes.c_double,
+            ctypes.c_double,
+            ctypes.c_double,
+            ctypes.c_int,
+        ]
+        _lib.sl_mpc_set_racing_params.restype = None
+
+    if hasattr(_lib, "sl_mpc_set_context"):
+        _lib.sl_mpc_set_context.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_double,
+            ctypes.c_int,
+        ]
+        _lib.sl_mpc_set_context.restype = None
 
     if hasattr(_lib, "sl_mpc_reset"):
         _lib.sl_mpc_reset.argtypes = [ctypes.c_void_p]
@@ -216,6 +237,13 @@ class CppCurvilinearSLMPC:
         alt_aperture_bias: float = MPC_ALT_APERTURE_BIAS,
         w_gap_clear: float = MPC_W_GAP_CLEAR,
         center_bias: float = MPC_CENTER_BIAS,
+        track_width_cap_m: float = 0.0,
+        corner_outer_bias: float = 0.0,
+        inner_corner_margin_m: float = 0.0,
+        blind_turn_kappa: float = 0.0,
+        brake_decel_scale: float = 1.0,
+        narrow_corridor_v_gain: float = 0.0,
+        use_corridor_flow: int = 0,
         **kwargs,
     ):
         self._costmap = costmap_engine
@@ -236,6 +264,13 @@ class CppCurvilinearSLMPC:
         self.alt_aperture_bias = float(alt_aperture_bias)
         self.w_gap_clear = float(kwargs.get("alt_lookahead_depth_weight", w_gap_clear))
         self.center_bias = max(0.0, min(1.0, float(center_bias)))
+        self.track_width_cap_m = max(0.0, float(track_width_cap_m))
+        self.corner_outer_bias = max(0.0, min(1.0, float(corner_outer_bias)))
+        self.inner_corner_margin_m = max(0.0, min(0.25, float(inner_corner_margin_m)))
+        self.blind_turn_kappa = max(0.0, min(3.0, float(blind_turn_kappa)))
+        self.brake_decel_scale = max(0.4, min(1.5, float(brake_decel_scale)))
+        self.narrow_corridor_v_gain = max(0.0, min(1.0, float(narrow_corridor_v_gain)))
+        self.use_corridor_flow = int(bool(use_corridor_flow))
         self.dt_actuator = DT_PLANNER
         self.nx = 7
         self.nu = 2
@@ -332,6 +367,15 @@ class CppCurvilinearSLMPC:
                 _lib.sl_mpc_set_max_iter(self._handle_alt, 6)
 
         self.set_center_bias(self.center_bias)
+        self.set_racing_params(
+            track_width_cap_m=self.track_width_cap_m,
+            corner_outer_bias=self.corner_outer_bias,
+            inner_corner_margin_m=self.inner_corner_margin_m,
+            blind_turn_kappa=self.blind_turn_kappa,
+            brake_decel_scale=self.brake_decel_scale,
+            narrow_corridor_v_gain=self.narrow_corridor_v_gain,
+            use_corridor_flow=self.use_corridor_flow,
+        )
 
     def reset_active_target(self) -> None:
         """Resets the currently tracked active corridor/target line and OSQP solver warm-start."""
@@ -364,6 +408,38 @@ class CppCurvilinearSLMPC:
                 _lib.sl_mpc_set_center_bias(self._handle, ctypes.c_double(self.center_bias))
             if hasattr(self, "_handle_alt") and self._handle_alt:
                 _lib.sl_mpc_set_center_bias(self._handle_alt, ctypes.c_double(self.center_bias))
+
+    def set_racing_params(
+        self,
+        track_width_cap_m: float = 0.0,
+        corner_outer_bias: float = 0.0,
+        inner_corner_margin_m: float = 0.0,
+        blind_turn_kappa: float = 0.0,
+        brake_decel_scale: float = 1.0,
+        narrow_corridor_v_gain: float = 0.0,
+        use_corridor_flow: int = 0,
+    ) -> None:
+        """Updates racing-line and corridor-flow parameters on both primary and challenger solvers."""
+        self.track_width_cap_m = max(0.0, float(track_width_cap_m))
+        self.corner_outer_bias = max(0.0, min(1.0, float(corner_outer_bias)))
+        self.inner_corner_margin_m = max(0.0, min(0.25, float(inner_corner_margin_m)))
+        self.blind_turn_kappa = max(0.0, min(3.0, float(blind_turn_kappa)))
+        self.brake_decel_scale = max(0.4, min(1.5, float(brake_decel_scale)))
+        self.narrow_corridor_v_gain = max(0.0, min(1.0, float(narrow_corridor_v_gain)))
+        self.use_corridor_flow = int(bool(use_corridor_flow))
+        if _lib is not None and hasattr(_lib, "sl_mpc_set_racing_params"):
+            for h in (getattr(self, "_handle", None), getattr(self, "_handle_alt", None)):
+                if h:
+                    _lib.sl_mpc_set_racing_params(
+                        h,
+                        ctypes.c_double(self.track_width_cap_m),
+                        ctypes.c_double(self.corner_outer_bias),
+                        ctypes.c_double(self.inner_corner_margin_m),
+                        ctypes.c_double(self.blind_turn_kappa),
+                        ctypes.c_double(self.brake_decel_scale),
+                        ctypes.c_double(self.narrow_corridor_v_gain),
+                        ctypes.c_int(self.use_corridor_flow),
+                    )
 
     @property
     def alt_lookahead_depth_weight(self) -> float:
@@ -428,6 +504,7 @@ class CppCurvilinearSLMPC:
         psi0: float = 0.0,
         t_frame_start: Optional[float] = None,
         frame_budget_ms: float = 15.5,
+        pitch_rad: float = 0.0,
     ) -> Dict[str, any]:
         """
         Solves the Curvilinear SL-MPC QP using high-speed native C++ core.
@@ -478,6 +555,20 @@ class CppCurvilinearSLMPC:
         tx_prim, ty_prim, ap_prim = prim_target[:3]
         is_clear_prim = bool(prim_target[3]) if len(prim_target) >= 4 else (math.hypot(tx_prim, ty_prim) >= 2.20)
         theta_prim = math.atan2(tx_prim - x0, max(0.20, ty_prim - y0))
+
+        has_opposite_gap = 0
+        if alt_target is not None:
+            dx_p = tx_prim - x0
+            dx_a = alt_target[0] - x0
+            is_clear_a = bool(alt_target[3]) if len(alt_target) >= 4 else (math.hypot(alt_target[0], alt_target[1]) >= 1.40)
+            if (dx_p * dx_a < -0.005) and (is_clear_a or math.hypot(alt_target[0] - x0, alt_target[1] - y0) >= 1.10):
+                has_opposite_gap = 1
+
+        if _lib is not None and hasattr(_lib, "sl_mpc_set_context"):
+            if self._handle:
+                _lib.sl_mpc_set_context(self._handle, ctypes.c_double(float(pitch_rad)), ctypes.c_int(has_opposite_gap))
+            if hasattr(self, "_handle_alt") and self._handle_alt:
+                _lib.sl_mpc_set_context(self._handle_alt, ctypes.c_double(float(pitch_rad)), ctypes.c_int(has_opposite_gap))
 
         t_opt_0 = time.perf_counter()
         t_opt_cpu_0 = time.process_time()

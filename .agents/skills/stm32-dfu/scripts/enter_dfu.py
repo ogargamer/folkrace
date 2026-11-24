@@ -60,7 +60,7 @@ def main():
         if os.path.exists("platformio.ini"):
             cmd = ["pio", "run", "-e", args.env, "-t", "upload"]
         else:
-            cmd = ["pio", "run", "-d", "STM32", "-e", args.env, "-t", "upload"]
+            cmd = ["pio", "run", "-d", "4_stm32", "-e", args.env, "-t", "upload"]
         print(f"\n[RUN] Running: {' '.join(cmd)}")
         ret = subprocess.run(cmd)
         sys.exit(ret.returncode)

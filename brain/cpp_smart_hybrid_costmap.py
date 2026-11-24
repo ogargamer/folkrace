@@ -22,8 +22,8 @@ _ext = ".dll" if sys.platform == "win32" else ".so"
 candidates = [
     os.path.join(CURR_DIR, f"smart_hybrid_costmap_front{_ext}"),
     os.path.join(os.getcwd(), f"smart_hybrid_costmap_front{_ext}"),
-    os.path.abspath(os.path.join(CURR_DIR, "..", "pi4", f"smart_hybrid_costmap_front{_ext}")),
-    os.path.abspath(os.path.join(CURR_DIR, "..", "..", "..", "..", "..", "pi4", f"smart_hybrid_costmap_front{_ext}")),
+    os.path.abspath(os.path.join(CURR_DIR, "..", "2_pi4", f"smart_hybrid_costmap_front{_ext}")),
+    os.path.abspath(os.path.join(CURR_DIR, "..", "..", "..", "..", "..", "2_pi4", f"smart_hybrid_costmap_front{_ext}")),
 ]
 for _cand in candidates:
     if os.path.exists(_cand):

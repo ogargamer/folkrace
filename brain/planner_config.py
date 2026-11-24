@@ -19,13 +19,13 @@ import json
 import math
 from typing import Any, Dict, List, Optional, Tuple
 
-# Ensure repository root is on sys.path for core module access
+# Ensure repository root is on sys.path for brain.vehicle_params access
 _CURR_DIR = os.path.dirname(os.path.abspath(__file__))
-_REPO_ROOT = os.path.abspath(os.path.join(_CURR_DIR, "..", "..", "..", "..", ".."))
+_REPO_ROOT = os.path.abspath(os.path.join(_CURR_DIR, ".."))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from core.vehicle_params import (
+from brain.vehicle_params import (
     REAR_AXLE_OFFSET_M,
     FRONT_AXLE_OFFSET_M,
     WHEELBASE,
@@ -77,7 +77,7 @@ PLANNER_TYPE: str = "SL_MPC"
 
 # ==============================================================================
 # 1. PHYSICAL VEHICLE, SENSORS & TIMING
-# (Unified and synchronized from config/vehicle_config.json via core.vehicle_params)
+# (Unified and synchronized from brain/vehicle_config.json via brain.vehicle_params)
 # ==============================================================================
 
 # Simulation Physics & Actuator Step Timing
@@ -303,7 +303,7 @@ def _find_best_genome_path() -> Optional[str]:
     probe = _CURR_DIR
     for _ in range(6):
         candidates.append(
-            os.path.join(probe, "webots", "optimization", "ga_planner_optimizer", "best_planner_genome.json")
+            os.path.join(probe, "5_webots", "optimization", "ga_planner_optimizer", "best_planner_genome.json")
         )
         parent = os.path.dirname(probe)
         if parent == probe:

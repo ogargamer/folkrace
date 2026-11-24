@@ -39,7 +39,7 @@ if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 TOOLS_DIR = ROOT_DIR / "tools"
-PI4_DIR = ROOT_DIR / "pi4"
+PI4_DIR = ROOT_DIR / "2_pi4"
 for p in (str(ROOT_DIR), str(TOOLS_DIR), str(PI4_DIR)):
     if p not in sys.path:
         sys.path.insert(0, p)
@@ -63,7 +63,7 @@ def _print_json(obj: Any):
 
 
 def _load_debug_studio_module():
-    launchers_dir = ROOT_DIR / "launchers"
+    launchers_dir = ROOT_DIR / "1_launchers"
     matches = sorted(launchers_dir.glob("*pi4_debug_studio.py"))
     if not matches:
         raise FileNotFoundError(f"Could not locate *pi4_debug_studio.py in {launchers_dir}")

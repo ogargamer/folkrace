@@ -4,7 +4,7 @@
 GUI PERFORMANCE PROFILER & BENCHMARK SUITE
 ===============================================================================
 A high-precision performance analysis tool for PyQt GUI applications in the
-Folkrace project (profiling esp32/ESP32_ToF/tof_4x_gui.py and launchers/4_pi4_debug_studio.py).
+Folkrace project (profiling 3_esp32/ESP32_ToF/tof_4x_gui.py and 1_launchers/4_pi4_debug_studio.py).
 
 Features:
   1. Synthetic Packet Generation: Simulates ESP32 4x VL53L8CX binary telemetry
@@ -47,7 +47,7 @@ import numpy as np
 
 # Adjust Python path to import GUI modules
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-ESP32_TOF_DIR = os.path.join(ROOT_DIR, "esp32", "ESP32_ToF")
+ESP32_TOF_DIR = os.path.join(ROOT_DIR, "3_esp32", "ESP32_ToF")
 if ESP32_TOF_DIR not in sys.path:
     sys.path.insert(0, ESP32_TOF_DIR)
 
@@ -357,7 +357,7 @@ def profile_pi4_studio(host: str = None, duration_sec: float = 2.0):
 
     print("\n" + "=" * 78)
     print(" FOLKRACE GUI PERFORMANCE PROFILER: PI 4 DEBUG STUDIO & STREAMER")
-    print(" Target: launchers/4_pi4_debug_studio.py (Pi 4 Dual-Core Telemetry)")
+    print(" Target: 1_launchers/4_pi4_debug_studio.py (Pi 4 Dual-Core Telemetry)")
     print("=" * 78)
 
     # 1. Resolve Pi 4 Host
@@ -584,7 +584,7 @@ def main():
 
     print("\n" + "=" * 78)
     print(" FOLKRACE GUI PERFORMANCE PROFILER & BENCHMARK SUITE")
-    print(" Target: esp32/ESP32_ToF/tof_4x_gui.py")
+    print(" Target: 3_esp32/ESP32_ToF/tof_4x_gui.py")
     print("=" * 78)
 
     gui = tof_4x_gui.FourToFStreamGUI()
