@@ -11,9 +11,12 @@
 
   Usage:
     python 1_launchers/2_fast_champion_drive.py
+    python 1_launchers/2_fast_champion_drive.py --track 2
+    python 1_launchers/2_fast_champion_drive.py --reverse
 ================================================================================
 """
 
+import argparse
 import os
 import sys
 import time
@@ -29,7 +32,7 @@ BEST_GENOME_PATH = os.path.join(GA_OPTIMIZER_DIR, "best_planner_genome.json")
 WEBOTS_BIN = r"C:\Program Files\Webots\msys64\mingw64\bin\webots.exe"
 
 
-def activate_champion_config() -> bool:
+def activate_champion_config(track: int = 1) -> bool:
     if not os.path.isfile(BEST_GENOME_PATH):
         print(f"[Error] Champion genome file does not exist: {BEST_GENOME_PATH}")
         return False
@@ -51,13 +54,14 @@ def activate_champion_config() -> bool:
         dist = metrics.get("distance_m", "N/A")
         speed = metrics.get("mean_speed_mps", "N/A")
         laps = metrics.get("laps_completed", "N/A")
+        track_label = "Track 2 (Reverse Opponents)" if track == 2 else "Track 1 (Forward Opponents)"
 
         print("=" * 80)
         print("  FAST CHAMPION PURE 3D DRIVE - MAX REAL-TIME PERFORMANCE")
         print("=" * 80)
         print(f"[Ready] Activated Champion: {title}")
         print(f"        Fitness: {fitness} | Dist: {dist}m | Speed: {speed}m/s | Laps: {laps}")
-        print(f"        World:   {os.path.basename(WORLD_PATH)}")
+        print(f"        World:   {os.path.basename(WORLD_PATH)} | {track_label}")
         print("=" * 80)
         return True
     except Exception as e:
@@ -81,8 +85,28 @@ def _kill_proc(proc):
             pass
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="Fast Champion Pure 3D Drive Launcher")
+    parser.add_argument(
+        "--track",
+        type=int,
+        choices=(1, 2),
+        default=1,
+        help="Track mode: 1 = Forward opponents (default), 2 = Reverse opponents",
+    )
+    parser.add_argument(
+        "--reverse",
+        action="store_true",
+        help="Shortcut for --track 2 (reverse opponents)",
+    )
+    return parser.parse_args()
+
+
 def main():
-    if not activate_champion_config():
+    args = parse_args()
+    track = 2 if args.reverse else args.track
+
+    if not activate_champion_config(track=track):
         sys.exit(1)
 
     webots_cmd = WEBOTS_BIN if os.path.isfile(WEBOTS_BIN) else "webots"
@@ -90,6 +114,7 @@ def main():
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
     env["WEBOTS_CONTROLLER_MODE"] = "fast_drive"
+    env["FOLKRACE_OBS_DIRECTION"] = "-1" if track == 2 else "1"
 
     cmd = [
         webots_cmd,
