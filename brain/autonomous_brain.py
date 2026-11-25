@@ -265,15 +265,15 @@ class AutonomousBrain:
         self.planner.costmap = self.costmap
 
         rec_steer = min(MAX_STEERING_RAD, float(genes.get("recovery_steer_angle_rad", RECOVERY_STEER_ANGLE_RAD)))
-        rec_speed = float(
-            math.sqrt(max(0.01, self.mu_val * 9.81 * (WHEELBASE / max(0.01, math.tan(abs(rec_steer))))))
-        )
+        r_min_turn = WHEELBASE / max(0.01, math.tan(abs(rec_steer)))
+        rec_speed = float(math.sqrt(max(0.01, self.mu_val * 9.81 * r_min_turn)))
         if "recovery_reverse_speed" in genes:
             rec_speed = float(genes["recovery_reverse_speed"])
+        rec_fwd_speed = float(math.sqrt(max(0.01, 0.90 * self.mu_val * 9.81 * r_min_turn)))
 
         self.recovery_manager = StuckRecoveryManager(
             reverse_speed_m_s=rec_speed,
-            corrective_forward_speed_m_s=RECOVERY_CORRECTIVE_180_SPEED_MPS,
+            corrective_forward_speed_m_s=rec_fwd_speed,
             steer_angle_rad=rec_steer,
             clearance_exit_m=float(genes.get("recovery_clearance_exit_m", RECOVERY_CLEARANCE_EXIT_M)),
             any_tof_exit_m=float(genes.get("recovery_any_tof_exit_m", RECOVERY_ANY_TOF_EXIT_M)),
@@ -291,6 +291,10 @@ class AutonomousBrain:
             self.planner.set_dynamic_mu(new_mu)
         if hasattr(self.recovery_manager, "mu_friction"):
             self.recovery_manager.mu_friction = float(new_mu)
+            r_min_turn = WHEELBASE / max(0.01, math.tan(max(0.01, abs(self.recovery_manager.steer_angle))))
+            self.recovery_manager.corrective_forward_speed = float(
+                math.sqrt(max(0.01, 0.90 * self.mu_val * 9.81 * r_min_turn))
+            )
 
     def reset(self, start_pose: Tuple[float, float, float] = (0.0, 0.0, 0.0)) -> None:
         """Resets all internal filters, costmap, pose tracker, and recovery state machines."""

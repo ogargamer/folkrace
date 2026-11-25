@@ -921,9 +921,9 @@ class StuckRecoveryManager:
                     self.corrective_steer_dir, rev_l_pin, rev_r_pin, hazard_mask, costmap_obj
                 )
 
-            # Smoothly taper forward U-turn speed as front clearance shrinks below 0.50m
-            if tof.d_straight < 0.50:
-                taper_v = max(0.35, 1.5 * (tof.d_straight - 0.12))
+            # Only taper forward U-turn speed in the final braking zone (< 0.30m)
+            if tof.d_straight < 0.30:
+                taper_v = max(0.65, 3.5 * (tof.d_straight - 0.12))
                 fwd_cmd_v = min(self.corrective_forward_speed, taper_v)
             else:
                 fwd_cmd_v = self.corrective_forward_speed
