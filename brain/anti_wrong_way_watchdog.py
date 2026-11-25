@@ -133,6 +133,7 @@ class WrongWayStatus:
     sightline_rays: List[Dict[str, Any]] = field(default_factory=list)
     early_exit_gap: Optional[Tuple[float, float]] = None
     early_exit_found: bool = False
+    pending_wrong_way: bool = False
 
 
 # ==============================================================================
@@ -823,6 +824,7 @@ class AntiWrongWayWatchdog:
             self.consecutive_ww_steps = min(self.CONFIRM_STEPS_THRESHOLD, self.consecutive_ww_steps + 1)
             self.ww_confirm_s = min(self.confirm_time_s, self.ww_confirm_s + dt_step)
             if self.consecutive_ww_steps < self.CONFIRM_STEPS_THRESHOLD and self.ww_confirm_s < self.confirm_time_s:
+                status.pending_wrong_way = True
                 status.is_wrong_way = False
                 status.corrective_action = "NONE"
         else:

@@ -19,7 +19,7 @@ from typing import Optional
 import uuid
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-WEBOTS_DIR = os.path.join(REPO_ROOT, "webots")
+WEBOTS_DIR = os.path.join(REPO_ROOT, "5_webots")
 MY_PROJECT_DIR = os.path.join(WEBOTS_DIR, "simulation", "my_project")
 PLANNERS_DIR = os.path.join(MY_PROJECT_DIR, "controllers", "tof_path_planner")
 GA_DIR = os.path.join(WEBOTS_DIR, "optimization", "ga_planner_optimizer")

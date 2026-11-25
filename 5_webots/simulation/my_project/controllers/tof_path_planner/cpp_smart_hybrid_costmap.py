@@ -285,7 +285,7 @@ class CppSmartHybridCostmap:
         return 2.40
 
     def process_tof_frame(
-        self, readings: Dict[str, float], noise_pct: float = 0.0, need_prob_map: bool = True
+        self, readings: Dict[str, float], noise_pct: float = 0.0, need_prob_map: bool = True, need_unknown_mask: bool = True
     ) -> Tuple[np.ndarray, np.ndarray, float]:
         """Drop-in 50/60 Hz Webots controller execution method returning (prob_map, hazard_mask, exec_ms)."""
         import time
@@ -306,14 +306,16 @@ class CppSmartHybridCostmap:
             self._prob_ptr if need_prob_map else None,
             self._haz_ptr,
         )
-        if need_prob_map:
+        if need_prob_map or need_unknown_mask:
             if hasattr(_lib, "costmap_get_unknown_mask"):
                 _lib.costmap_get_unknown_mask(
                     self._handle,
                     self._unk_ptr,
                 )
-            else:
+            elif need_prob_map:
                 self.unknown_mask = ((self.prob_map >= 0.38) & (self.prob_map <= 0.65) & (self.hazard_mask == 0)).astype(np.uint8)
+            else:
+                self.unknown_mask.fill(0)
 
         if hasattr(_lib, "costmap_get_perf"):
             _lib.costmap_get_perf(self._handle, self._perf_buf)

@@ -815,7 +815,7 @@ class StuckRecoveryManager:
             else:
                 self.corrective_used_reverse = True
                 self.corrective_reverse_timer += dt
-                if tof.d_straight > self._rev_best_d_straight + 0.02:
+                if tof.d_straight > self._rev_best_d_straight + 0.035:
                     self._rev_best_d_straight = tof.d_straight
                     self._rev_stall_timer = 0.0
                 else:
@@ -831,9 +831,9 @@ class StuckRecoveryManager:
                 reverse_timeout = (self.corrective_reverse_timer >= RECOVERY_REVERSE_STROKE_MAX_S)
                 rev_clear_target = max(self.clearance_exit_m, self.corrective_rev_clear_m)
                 rev_stalled_with_room = (
-                    self.corrective_reverse_timer >= 0.45
-                    and self._rev_stall_timer >= 0.25
-                    and tof.d_straight >= 0.20
+                    self.corrective_reverse_timer >= 0.30
+                    and self._rev_stall_timer >= 0.18
+                    and tof.d_straight >= 0.22
                 )
                 if (has_min_reverse_time and (tof.d_straight >= rev_clear_target or rev_stalled_with_room)) or reverse_timeout:
                     self.corrective_substate = "FORWARD"
@@ -863,10 +863,9 @@ class StuckRecoveryManager:
                     return self._cmd(self.corrective_forward_speed, self.corrective_steer_dir * self.steer_angle)
                 t_yaw = self.target_corrective_yaw
                 p_sign = self.corrective_steer_dir
-                rev_l_pin = (tof.min_l <= 0.04) if tof.d_straight >= 0.14 else is_l_pinned
-                rev_r_pin = (tof.min_r <= 0.04) if tof.d_straight >= 0.14 else is_r_pinned
+                # Do not override reverse U-turn direction with corner-ToF pinning (prevents corner limit cycles)
                 return self._step_reverse_stroke(
-                    tof, current_yaw, t_yaw, current_v, p_sign, rev_l_pin, rev_r_pin, hazard_mask, costmap_obj
+                    tof, current_yaw, t_yaw, current_v, p_sign, False, False, hazard_mask, costmap_obj
                 )
 
             return self._step_reverse_stroke(
@@ -877,7 +876,7 @@ class StuckRecoveryManager:
         if self.state == StuckRecoveryState.CORRECTIVE_180:
             # If a safe long-path early exit is found, front is open, and chassis has turned enough, terminate U-turn
             if self.target_corrective_yaw is not None:
-                can_early_exit = abs(wrap_to_pi(self.target_corrective_yaw - current_yaw)) <= math.radians(55.0)
+                can_early_exit = abs(wrap_to_pi(self.target_corrective_yaw - current_yaw)) <= math.radians(35.0)
             else:
                 can_early_exit = abs(self.corrective_net_turn) >= self.corrective_early_exit_turn_rad
             if (early_exit_available or kwargs.get("early_exit_available", False)) and can_early_exit and tof.d_straight >= 0.80 and self.corrective_substate == "FORWARD":
@@ -914,11 +913,9 @@ class StuckRecoveryManager:
                 self.engage_corrective_reverse(force=False)
 
             if self.corrective_substate == "REVERSE":
-                rev_l_pin = (tof.min_l <= 0.04) if tof.d_straight >= 0.14 else is_l_pinned
-                rev_r_pin = (tof.min_r <= 0.04) if tof.d_straight >= 0.14 else is_r_pinned
                 return self._step_reverse_stroke(
                     tof, current_yaw, self.target_corrective_yaw, current_v,
-                    self.corrective_steer_dir, rev_l_pin, rev_r_pin, hazard_mask, costmap_obj
+                    self.corrective_steer_dir, False, False, hazard_mask, costmap_obj
                 )
 
             # Only taper forward U-turn speed in the final braking zone (< 0.30m)

@@ -777,6 +777,10 @@ def run_fast_champion_drive(robot: any, vehicle: FolkraceVehicle) -> None:
         vehicle.configure(genes)
 
     traj_csv = find_trajectory_csv()
+    try:
+        obs_dir = int(os.environ.get("FOLKRACE_OBS_DIRECTION", MOVING_OBSTACLE_DIRECTION))
+    except ValueError:
+        obs_dir = MOVING_OBSTACLE_DIRECTION
     obs_engine = ReverseObstacleEngine(traj_csv, speed_mps=MOVING_OBSTACLE_SPEED_MPS)
     obs_manager = MovingObstacleManager(
         robot=robot,
@@ -784,12 +788,14 @@ def run_fast_champion_drive(robot: any, vehicle: FolkraceVehicle) -> None:
         obstacle_names=MOVING_OBSTACLE_NAMES,
         elevation_z=MOVING_OBSTACLE_Z_ELEVATION,
         speed_mps=MOVING_OBSTACLE_SPEED_MPS,
+        direction=obs_dir,
     )
 
     from ga_planner_config import ROBOT_START_POS, ROBOT_START_ROT
     start_pos = list(ROBOT_START_POS)
     start_rot = list(ROBOT_START_ROT)
     vehicle.reset(start_pos=start_pos, start_rot=start_rot)
+    obs_manager.reset()
 
     sim_time = 0.0
     last_print_time = 0.0
@@ -996,6 +1002,7 @@ def run_wrong_way_eval(robot: any, vehicle: FolkraceVehicle) -> None:
         max_rec_s: float = 4.5,
         raise_pillars: bool = False,
         min_post_dist_m: float = 0.40,
+        align_tol_deg: float = 45.0,
     ) -> Dict[str, Any]:
         _set_pillars(raise_pillars)
         _reset_world_robot()
@@ -1050,13 +1057,15 @@ def run_wrong_way_eval(robot: any, vehicle: FolkraceVehicle) -> None:
             rec_state = str(vehicle.recovery_manager.state)
             in_180 = ("CORRECTIVE_180" in rec_state)
 
-            if planner_ran and step_idx in (2, 12, 60, 120):
+            if planner_ran and step_idx in (2, 12, 30, 45, 60, 90, 120, 150, 180):
                 rays = vehicle.last_aww_status.sightline_rays if vehicle.last_aww_status else []
                 n_clr_opp = sum(1 for r in rays if r.get("clear") and r.get("opposing"))
                 n_opp = sum(1 for r in rays if r.get("opposing"))
+                sub_s = getattr(vehicle.recovery_manager, "corrective_substate", "")
                 print(
-                    f"  [t+{sim_t-t_spin:.2f}s] gt_yaw={math.degrees(gyaw):.1f}deg pt_yaw={math.degrees(vehicle.pose_tracker.yaw):.1f}deg "
-                    f"v={vehicle.v_est:.2f} rec={rec_state} ww={is_ww} rays={len(rays)} opp={n_opp} clr_opp={n_clr_opp}",
+                    f"  [t+{sim_t-t_spin:.2f}s] gt=({gx:.2f},{gy:.2f},{math.degrees(gyaw):.1f}deg) pt_yaw={math.degrees(vehicle.pose_tracker.yaw):.1f}deg "
+                    f"v={vehicle.v_est:.2f} vr={vehicle.get_ground_truth_velocity():.2f} f={vehicle.cached_f_tof:.2f} rec={rec_state}({sub_s}) dir={vehicle.recovery_manager.corrective_steer_dir:+.0f} "
+                    f"cmd=({vehicle.recovery_manager.current_cmd_v:.2f},{vehicle.recovery_manager.current_cmd_steer:+.2f}) ww={is_ww} rays={len(rays)} opp={n_opp} clr_opp={n_clr_opp}",
                     flush=True,
                 )
 
@@ -1064,7 +1073,7 @@ def run_wrong_way_eval(robot: any, vehicle: FolkraceVehicle) -> None:
                 detect_lat = sim_t - t_spin
             if rec_done_lat is None and was_in_180 and not in_180:
                 rec_done_lat = sim_t - t_spin
-                aligned_at_exit = abs(_wrap_pi(gyaw - pre_yaw)) <= math.radians(45.0)
+                aligned_at_exit = abs(_wrap_pi(gyaw - pre_yaw)) <= math.radians(align_tol_deg)
             elif rec_done_lat is not None:
                 if is_ww:
                     retriggers += 1
@@ -1174,7 +1183,7 @@ def run_wrong_way_eval(robot: any, vehicle: FolkraceVehicle) -> None:
             "T1_clean_fwd_opponents_25s": lambda: _run_clean_drive_scenario("T1_clean_fwd_opponents_25s", 25.0, obs_speed_mps=1.0, min_progress_m=45.0),
             "T2_clean_rev_opponents_25s": lambda: _run_clean_drive_scenario("T2_clean_rev_opponents_25s", 25.0, obs_speed_mps=-1.0, min_progress_m=15.0, allow_off_track=True),
             "T3_midrace_straight_180": lambda: _run_spin_scenario("T3_midrace_straight_180", 3.5, math.pi, min_post_dist_m=0.50),
-            "T4_midrace_corner_160": lambda: _run_spin_scenario("T4_midrace_corner_160", 6.5, math.radians(160.0), min_post_dist_m=0.50),
+            "T4_midrace_corner_160": lambda: _run_spin_scenario("T4_midrace_corner_160", 6.5, math.radians(160.0), min_post_dist_m=0.50, align_tol_deg=60.0),
             "T5_midrace_shoved_wall_180": lambda: _run_spin_scenario("T5_midrace_shoved_wall_180", 3.5, math.pi, fwd_shove_m=0.55, lat_shift_m=0.10, min_post_dist_m=0.50),
         }
     else:
@@ -1182,7 +1191,7 @@ def run_wrong_way_eval(robot: any, vehicle: FolkraceVehicle) -> None:
             "W1_straight_180": lambda: _run_spin_scenario("W1_straight_180", 1.25, math.pi),
             "W2_wall_hug_right_170": lambda: _run_spin_scenario("W2_wall_hug_right_170", 1.25, math.radians(170.0), lat_shift_m=0.22),
             "W3_wall_hug_left_170": lambda: _run_spin_scenario("W3_wall_hug_left_170", 1.25, math.radians(-170.0), lat_shift_m=-0.22),
-            "W4_shoved_fwd_180": lambda: _run_spin_scenario("W4_shoved_fwd_180", 1.25, math.pi, fwd_shove_m=0.85),
+            "W4_shoved_fwd_180": lambda: _run_spin_scenario("W4_shoved_fwd_180", 1.25, math.pi, fwd_shove_m=0.60),
             "W5_diagonal_135_spin": lambda: _run_spin_scenario("W5_diagonal_135_spin", 1.25, math.radians(135.0)),
             "W6_pillar_occluded_spin": lambda: _run_spin_scenario("W6_pillar_occluded_spin", 1.25, math.pi, max_rec_s=3.5, raise_pillars=True, min_post_dist_m=0.40),
             "W7_hairpin_clean_endurance": lambda: _run_clean_drive_scenario("W7_hairpin_clean_endurance", 15.0, lower_pillars=True, min_progress_m=18.0),

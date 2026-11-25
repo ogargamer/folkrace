@@ -18,7 +18,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PLANNER_DIR = os.path.join(REPO_ROOT, "webots", "simulation", "my_project", "controllers", "tof_path_planner")
+PLANNER_DIR = os.path.join(REPO_ROOT, "5_webots", "simulation", "my_project", "controllers", "tof_path_planner")
 for p in (REPO_ROOT, PLANNER_DIR):
     if p not in sys.path:
         sys.path.insert(0, p)

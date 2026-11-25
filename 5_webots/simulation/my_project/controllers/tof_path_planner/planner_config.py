@@ -228,7 +228,7 @@ RECOVERY_TOTAL_TIMEOUT_S: float = 1.2       # seconds maximum total recovery dur
 RECOVERY_EXIT_MIN_TIME_S: float = 0.0        # seconds minimum recovery stroke time before clearance check
 RECOVERY_180_TIMEOUT_S: float = 2.5          # seconds timeout for forward-only corrective 180 turn
 RECOVERY_180_TIMEOUT_WITH_REV_S: float = 3.5 # seconds timeout for corrective 180 when reverse support engaged
-RECOVERY_180_REV_CLEAR_M: float = 0.4208     # meters forward clearance required to exit CORRECTIVE_180[REVERSE]
+RECOVERY_180_REV_CLEAR_M: float = 0.38       # meters forward clearance required to exit CORRECTIVE_180[REVERSE]
 RECOVERY_180_REV_MIN_S: float = 0.1361       # seconds minimum reverse duration in CORRECTIVE_180[REVERSE]
 RECOVERY_180_ALIGN_DEG: float = 30.7898      # degrees target alignment tolerance for CORRECTIVE_180 exit
 RECOVERY_180_EARLY_EXIT_TURN_DEG: float = 95.0  # degrees minimum net turn before allowing early exit
@@ -249,7 +249,7 @@ AWW_BREADCRUMB_SPACING_M: float = 0.05         # meters minimum spatial spacing 
 AWW_BREADCRUMB_MAX_TIMEOUT_S: float = 6.0      # seconds maximum timeout before breadcrumb history expires
 AWW_CONFIRM_TIME_S: float = 0.0543             # seconds continuous confirmation (~3-4 frames @ 60 Hz)
 AWW_POST_RECOVERY_COOLDOWN_S: float = 0.3703   # seconds cooldown after CORRECTIVE_180 before re-arming
-AWW_MIN_CONFIRMED_BREADCRUMBS: int = 4         # minimum confirmed opposing LOS breadcrumbs required
+AWW_MIN_CONFIRMED_BREADCRUMBS: int = 3         # minimum confirmed opposing LOS breadcrumbs required
 AWW_MAX_DETECT_DIST_M: float = 2.223           # meters forward LOS search envelope (within 2.4m ToF / 2.6m costmap)
 AWW_MAX_LAT_XV_M: float = 0.538                # meters lateral in-corridor bound |lat_bc| for wrong-way LOS matching
 

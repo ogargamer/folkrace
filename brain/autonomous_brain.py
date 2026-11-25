@@ -386,7 +386,10 @@ class AutonomousBrain:
 
         # 3. C++ Smart Hybrid Costmap Processing
         t_map_0 = time.perf_counter()
-        prob_map, hazard_mask, map_ms = self.costmap.process_tof_frame(clean_tofs, need_prob_map=full_telemetry)
+        need_unknown = (getattr(self.watchdog, "mode", "DISABLED") != "DISABLED")
+        prob_map, hazard_mask, map_ms = self.costmap.process_tof_frame(
+            clean_tofs, need_prob_map=full_telemetry, need_unknown_mask=need_unknown
+        )
         t_map_ms = (time.perf_counter() - t_map_0) * 1000.0
 
         # 4. 3-Step Composite SE(2) Forward Lookahead Anchor Projection
@@ -453,7 +456,7 @@ class AutonomousBrain:
                     gap_aligned = True
                     if tgt_corr_yaw is not None and math.hypot(gx_c, gy_c) > 1e-3:
                         gap_world_yaw = wrap_to_pi(nav_pose[2] - math.atan2(gx_c, gy_c))
-                        gap_aligned = abs(wrap_to_pi(tgt_corr_yaw - gap_world_yaw)) <= math.radians(55.0)
+                        gap_aligned = abs(wrap_to_pi(tgt_corr_yaw - gap_world_yaw)) <= math.radians(35.0)
                     if gap_aligned:
                         candidate_gaps.append((gx_c, gy_c))
 
@@ -475,6 +478,9 @@ class AutonomousBrain:
                 dt=dt,
             )
             self.last_aww_status = aww_status
+
+            if aww_status.pending_wrong_way and not aww_status.is_wrong_way and self.recovery_manager.state == StuckRecoveryState.NORMAL_DRIVE:
+                raw_target_speed = min(raw_target_speed, 0.0)
 
             if aww_status.is_wrong_way and self.recovery_manager.state == StuckRecoveryState.NORMAL_DRIVE:
                 tgt_yaw = aww_status.target_recovery_yaw if aww_status.target_recovery_yaw is not None else wrap_to_pi(nav_pose[2] + math.pi)
@@ -636,7 +642,10 @@ class AutonomousBrain:
         if is_recovering:
             # During recovery, snap down immediately if physical speed is much lower (e.g. post-spin/impact)
             target_v = target_speed
-            if target_v >= 0.0 and v_est < (self.rate_limited_speed - 0.25):
+            if target_v < 0.0 and self.rate_limited_speed > 0.0:
+                # Never keep commanding positive forward propulsion once reverse braking is requested
+                self.rate_limited_speed = 0.0
+            elif target_v >= 0.0 and v_est < (self.rate_limited_speed - 0.25):
                 self.rate_limited_speed = max(0.0, v_est)
             d_limit = min(BRAKE_DECEL_MAX, BRAKE_DECEL_RATIO * self.mu_val * GRAVITY_G)
             speed_err = target_v - self.rate_limited_speed
