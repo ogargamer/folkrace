@@ -19,6 +19,7 @@ try:
     from .planner_config import (
         MPC_HORIZON_N,
         MPC_DT,
+        MPC_MAX_ITER,
         MPC_Q_PROGRESS,
         MPC_Q_CTE,
         MPC_Q_HEADING,
@@ -47,6 +48,7 @@ except ImportError:
     from planner_config import (
         MPC_HORIZON_N,
         MPC_DT,
+        MPC_MAX_ITER,
         MPC_Q_PROGRESS,
         MPC_Q_CTE,
         MPC_Q_HEADING,
@@ -150,6 +152,18 @@ if CPP_AVAILABLE and _lib is not None:
             ctypes.c_int,
         ]
         _lib.sl_mpc_set_context.restype = None
+
+    if hasattr(_lib, "sl_mpc_set_advanced_params"):
+        _lib.sl_mpc_set_advanced_params.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_double,
+        ]
+        _lib.sl_mpc_set_advanced_params.restype = None
+
+    if hasattr(_lib, "sl_mpc_get_shield_active"):
+        _lib.sl_mpc_get_shield_active.argtypes = [ctypes.c_void_p]
+        _lib.sl_mpc_get_shield_active.restype = ctypes.c_int
 
     if hasattr(_lib, "sl_mpc_reset"):
         _lib.sl_mpc_reset.argtypes = [ctypes.c_void_p]
@@ -258,6 +272,9 @@ class CppCurvilinearSLMPC:
         brake_decel_scale: float = MPC_BRAKE_DECEL_SCALE,
         narrow_corridor_v_gain: float = MPC_NARROW_CORRIDOR_V_GAIN,
         use_corridor_flow: int = MPC_USE_CORRIDOR_FLOW,
+        fix_yaw_sign: int = 1,
+        mpc_v_nom_min: float = 1.20,
+        mpc_max_iter: int = MPC_MAX_ITER,
         **kwargs,
     ):
         self._costmap = costmap_engine
@@ -285,6 +302,9 @@ class CppCurvilinearSLMPC:
         self.brake_decel_scale = max(0.4, min(1.5, float(brake_decel_scale)))
         self.narrow_corridor_v_gain = max(0.0, min(1.0, float(narrow_corridor_v_gain)))
         self.use_corridor_flow = int(bool(use_corridor_flow))
+        self.fix_yaw_sign = int(bool(fix_yaw_sign))
+        self.mpc_v_nom_min = max(0.80, min(3.50, float(mpc_v_nom_min)))
+        self.mpc_max_iter = max(6, min(35, int(mpc_max_iter)))
         self.dt_actuator = DT_PLANNER
         self.nx = 7
         self.nu = 2
@@ -390,6 +410,12 @@ class CppCurvilinearSLMPC:
             narrow_corridor_v_gain=self.narrow_corridor_v_gain,
             use_corridor_flow=self.use_corridor_flow,
         )
+        if hasattr(_lib, "sl_mpc_set_advanced_params"):
+            for h in (self._handle, self._handle_alt):
+                if h:
+                    _lib.sl_mpc_set_advanced_params(
+                        h, ctypes.c_int(self.fix_yaw_sign), ctypes.c_double(self.mpc_v_nom_min)
+                    )
 
     def reset_active_target(self) -> None:
         """Resets the currently tracked active corridor/target line and OSQP solver warm-start."""
@@ -598,13 +624,13 @@ class CppCurvilinearSLMPC:
                 target_deadline_ms = min(float(frame_budget_ms), 13.2)
                 budget_for_prim_ms = target_deadline_ms - elapsed_prior_ms - 0.5  # Reserve 0.5ms for shield
                 if budget_for_prim_ms >= 8.0:
-                    max_iter_prim = 14
+                    max_iter_prim = self.mpc_max_iter
                 elif budget_for_prim_ms >= 4.5:
-                    max_iter_prim = 10
+                    max_iter_prim = min(10, self.mpc_max_iter)
                 else:
                     max_iter_prim = 6
             else:
-                max_iter_prim = 14
+                max_iter_prim = self.mpc_max_iter
             _lib.sl_mpc_set_max_iter(self._handle, max_iter_prim)
 
         t_prim_0 = time.perf_counter()

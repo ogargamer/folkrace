@@ -165,6 +165,9 @@ GAP_DIST_EXP_K: float = 0.717          # Exponential growth scaling factor for d
 # 4.4 Dual-Path Candidate Selection & Smart Challenger Arbitration
 ALT_MIN_SEPARATION_M: float = 0.052    # meters minimum lateral separation between primary and challenger targets
 ALT_APERTURE_BIAS: float = 1.553       # Multiplier on aperture width reward for challenger target
+COSTMAP_PERSISTENCE_FRAMES: int = 0    # Body-frame obstacle persistence frames (0 = zero ghost smear)
+GAP_USE_TRUE_APERTURE: int = 1         # 1 = real 180-ray angular gap width, 0 = legacy 0.30*dist
+WEIGHT_GAP_CENTER: float = 0.832       # Corridor edge-clearance centering weight in gap scout
 
 
 # ==============================================================================
@@ -174,6 +177,7 @@ ALT_APERTURE_BIAS: float = 1.553       # Multiplier on aperture width reward for
 # 5.1 Prediction Horizon & Timestep
 MPC_HORIZON_N: int = 30                # Prediction horizon steps (fixed at 30 in native QP sparsity table)
 MPC_DT: float = 1.0 / 60.0             # seconds per horizon step (exact 60.0 Hz planning loop: ~0.016667 s)
+MPC_MAX_ITER: int = 25                 # Primary OSQP iteration cap (converged, ~0.47 ms mean latency)
 
 # 5.2 Cost Function Weights (Quadratic & Linear OSQP Penalties, GA Champion)
 MPC_Q_PROGRESS: float = 23.108         # Weight encouraging forward arc-length progress
@@ -361,6 +365,10 @@ def _apply_best_genome_overrides() -> None:
         "gap_dist_exp_k": ("GAP_DIST_EXP_K", float),
         "alt_min_separation_m": ("ALT_MIN_SEPARATION_M", float),
         "alt_aperture_bias": ("ALT_APERTURE_BIAS", float),
+        "costmap_persistence": ("COSTMAP_PERSISTENCE_FRAMES", int),
+        "use_true_aperture": ("GAP_USE_TRUE_APERTURE", int),
+        "w_gap_center": ("WEIGHT_GAP_CENTER", float),
+        "mpc_max_iter": ("MPC_MAX_ITER", int),
         "horizon_N": ("MPC_HORIZON_N", int),
         "dt": ("MPC_DT", float),
         "q_progress": ("MPC_Q_PROGRESS", float),

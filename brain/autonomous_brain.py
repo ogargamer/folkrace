@@ -62,6 +62,10 @@ try:
         GRAVITY_G,
         MPC_MU_FRICTION,
         MPC_CENTER_BIAS,
+        MPC_MAX_ITER,
+        COSTMAP_PERSISTENCE_FRAMES,
+        GAP_USE_TRUE_APERTURE,
+        WEIGHT_GAP_CENTER,
         TOF_MAX_RANGE_M,
         WHEELBASE,
     )
@@ -89,6 +93,10 @@ except ImportError:
         GRAVITY_G,
         MPC_MU_FRICTION,
         MPC_CENTER_BIAS,
+        MPC_MAX_ITER,
+        COSTMAP_PERSISTENCE_FRAMES,
+        GAP_USE_TRUE_APERTURE,
+        WEIGHT_GAP_CENTER,
         TOF_MAX_RANGE_M,
         WHEELBASE,
     )
@@ -189,6 +197,13 @@ class AutonomousBrain:
             resolution=GRID_RES,
             r_inflation_m=self.r_infl,
         )
+        if hasattr(self.costmap, "set_advanced_params"):
+            self.costmap.set_advanced_params(
+                persistence_frames=int(genes.get("costmap_persistence", COSTMAP_PERSISTENCE_FRAMES)),
+                fix_yaw_sign=int(genes.get("fix_yaw_sign", 1)),
+                use_true_aperture=int(genes.get("use_true_aperture", GAP_USE_TRUE_APERTURE)),
+                w_gap_center=float(genes.get("w_gap_center", WEIGHT_GAP_CENTER)),
+            )
 
         self.gap_scout = ToFGapScout(
             w_gap_distance=float(genes.get("w_gap_distance", 3.50)),
@@ -231,6 +246,9 @@ class AutonomousBrain:
             brake_decel_scale=float(genes.get("brake_decel_scale", 1.0)),
             narrow_corridor_v_gain=float(genes.get("narrow_corridor_v_gain", 0.0)),
             use_corridor_flow=int(genes.get("use_corridor_flow", 0)),
+            fix_yaw_sign=int(genes.get("fix_yaw_sign", 1)),
+            mpc_v_nom_min=float(genes.get("mpc_v_nom_min", 1.20)),
+            mpc_max_iter=int(genes.get("mpc_max_iter", MPC_MAX_ITER)),
         )
         self.planner.costmap = self.costmap
 

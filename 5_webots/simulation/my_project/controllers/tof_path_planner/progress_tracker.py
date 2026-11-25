@@ -156,8 +156,8 @@ class WebotsTrackProgressTracker:
             seg_len = seg_bwd
             min_d_perp = d_bwd
 
-        # Off track check (track width is 1.0m, walls at +/- 0.50m)
-        if min_d_perp > 0.65:
+        # Off track check (track width is 1.0m; racing line hugs inner apex so outer wall is up to 0.86m away)
+        if min_d_perp > 0.95:
             self.off_track = True
             return self.max_track_progress
 

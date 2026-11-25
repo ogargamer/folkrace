@@ -204,7 +204,7 @@ class ToFGapScout:
         self.last_aperture = aperture
         self.last_targets = targets
 
-        raw_rel = math.atan2(xg_prim - anchor_x, max(0.20, yg_prim - anchor_y)) - anchor_yaw
+        raw_rel = math.atan2(xg_prim - anchor_x, max(0.20, yg_prim - anchor_y)) + anchor_yaw
         theta_g = math.atan2(math.sin(raw_rel), math.cos(raw_rel))
         return xg_prim, yg_prim, aperture, theta_g
 
@@ -302,7 +302,7 @@ class ToFGapScout:
                 total_dist = math.hypot(d_ax, d_ay)
 
                 # Heading in steering coordinates relative to anchor (positive = left)
-                raw_rel = math.atan2(d_ax, d_ay) - anchor_yaw
+                raw_rel = math.atan2(d_ax, d_ay) + anchor_yaw
                 rel_angle = math.atan2(math.sin(raw_rel), math.cos(raw_rel))
                 steer_equiv = -rel_angle
 
@@ -359,7 +359,7 @@ class ToFGapScout:
                 total_dist = math.hypot(d_ax, d_ay)
 
                 # True relative angle from anchor to target (tx, ty)
-                raw_rel = math.atan2(d_ax, d_ay) - anchor_yaw
+                raw_rel = math.atan2(d_ax, d_ay) + anchor_yaw
                 rel_angle = math.atan2(math.sin(raw_rel), math.cos(raw_rel))
                 steer_equiv = -rel_angle
                 aperture_m = max(GAP_MIN_WIDTH_M, min(1.20, total_dist * 0.30))

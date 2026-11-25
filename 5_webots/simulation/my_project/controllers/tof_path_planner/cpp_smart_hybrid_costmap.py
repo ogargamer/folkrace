@@ -72,6 +72,16 @@ _lib.costmap_get_width.restype = ctypes.c_int
 _lib.costmap_get_height.argtypes = [ctypes.c_void_p]
 _lib.costmap_get_height.restype = ctypes.c_int
 
+if hasattr(_lib, "costmap_set_advanced_params"):
+    _lib.costmap_set_advanced_params.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_float,
+    ]
+    _lib.costmap_set_advanced_params.restype = None
+
 if hasattr(_lib, "costmap_get_unknown_mask"):
     _lib.costmap_get_unknown_mask.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint8)]
     _lib.costmap_get_unknown_mask.restype = None
@@ -221,6 +231,23 @@ class CppSmartHybridCostmap:
         self.prob_map.fill(0.0)
         self.hazard_mask.fill(0)
         self.unknown_mask.fill(1)
+
+    def set_advanced_params(
+        self,
+        persistence_frames: int = 0,
+        fix_yaw_sign: int = 1,
+        use_true_aperture: int = 1,
+        w_gap_center: float = 0.832,
+    ) -> None:
+        """Configures persistence, yaw-sign convention, true gap width, and corridor centering."""
+        if hasattr(self, "_handle") and self._handle and hasattr(_lib, "costmap_set_advanced_params"):
+            _lib.costmap_set_advanced_params(
+                self._handle,
+                int(persistence_frames),
+                int(bool(fix_yaw_sign)),
+                int(bool(use_true_aperture)),
+                float(w_gap_center),
+            )
 
     def update(self, readings: any, current_steer_rad: float = 0.0) -> Tuple[np.ndarray, np.ndarray, float]:
         """Convenience method accepting either list/array of 16 ranges or dict."""

@@ -86,6 +86,8 @@ public:
   bool use_corridor_flow;
   double pitch_rad;
   bool has_opposite_gap;
+  bool fix_yaw_sign;
+  double v_nom_min;
 
   int nx;
   int nu;
@@ -174,6 +176,7 @@ public:
         inner_corner_margin_m(0.0), blind_turn_kappa(0.0),
         brake_decel_scale(1.0), narrow_corridor_v_gain(0.0),
         use_corridor_flow(false), pitch_rad(0.0), has_opposite_gap(false),
+        fix_yaw_sign(true), v_nom_min(1.20),
         nx(7),
         nu(2), max_iterations(35), best_line_count(0), guide_line_count(0),
         corridor_count(0), shield_active(false), shield_chosen_id(-1),
@@ -863,7 +866,7 @@ public:
 
     // 1. Establish Curvilinear Reference Spline towards gap centroid
     double L_guide = std::hypot(xg - x0, std::max(0.35, yg - y0));
-    double v_nom = std::max(v_bar, 1.20);
+    double v_nom = std::max(v_bar, v_nom_min);
     double dt_val = this->dt;
 
     // Tangent vector at start:
@@ -934,8 +937,8 @@ public:
 
     // Front-bumper clearance margin based on gap angle
     double angle_to_gap = std::atan2(xg - x0, std::max(0.35, yg - y0));
-    double yaw_clearance_margin =
-        LF_CONST * std::abs(std::sin(angle_to_gap - psi0));
+    double rel_gap_err = fix_yaw_sign ? (angle_to_gap + psi0) : (angle_to_gap - psi0);
+    double yaw_clearance_margin = LF_CONST * std::abs(std::sin(rel_gap_err));
 
     for (int k = 0; k <= N; ++k) {
       double sk = std::min(L_guide, k * v_nom * dt_val);
@@ -1167,7 +1170,7 @@ public:
 
     // Initial state: heading error towards gap target drives the QP to steer
     // into the turn
-    double e_psi_0 = angle_to_gap - psi0;
+    double e_psi_0 = rel_gap_err;
     while (e_psi_0 > PI_CONST)
       e_psi_0 -= 2.0 * PI_CONST;
     while (e_psi_0 < -PI_CONST)
@@ -1628,6 +1631,22 @@ SL_MPC_API int sl_mpc_get_shield_branches(
   if (out_chosen_id)
     *out_chosen_id = planner->shield_chosen_id;
 
+  return planner->shield_active ? 1 : 0;
+}
+
+SL_MPC_API void sl_mpc_set_advanced_params(void *handle, int fix_yaw_sign,
+                                           double v_nom_min) {
+  if (!handle)
+    return;
+  auto *planner = static_cast<CurvilinearSLMPCNative *>(handle);
+  planner->fix_yaw_sign = (fix_yaw_sign != 0);
+  planner->v_nom_min = std::max(0.80, std::min(3.50, v_nom_min));
+}
+
+SL_MPC_API int sl_mpc_get_shield_active(void *handle) {
+  if (!handle)
+    return 0;
+  auto *planner = static_cast<CurvilinearSLMPCNative *>(handle);
   return planner->shield_active ? 1 : 0;
 }
 

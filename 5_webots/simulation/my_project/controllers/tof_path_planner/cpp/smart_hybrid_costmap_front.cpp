@@ -76,6 +76,10 @@ public:
     int width, height, total_cells;
     float r_inflation_m;
     int inflation_cells;
+    int persistence_frames = 0;
+    int fix_yaw_sign = 1;
+    int use_true_aperture = 1;
+    float w_gap_center = 0.832f;
 
     // Flat preallocated buffers (zero runtime heap allocations)
     std::vector<float> log_odds;
@@ -308,7 +312,7 @@ public:
             uint8_t raw = (lo >= 0.62f) ? 1 : 0;
 
             if (raw == 1) {
-                persistence_count[i] = 3; // Hold confirmed hit for up to 3 frames (50 ms)
+                persistence_count[i] = static_cast<uint8_t>(std::max(0, std::min(10, persistence_frames))); // Configurable persistence frames
             } else if (lo <= -2.0f) {
                 // Actively confirmed free by direct sensor cone: cancel persistence immediately
                 persistence_count[i] = 0;
@@ -485,7 +489,8 @@ public:
                 float d_anchor_x = tx - anchor_x;
                 float d_anchor_y = std::max(0.05f, ty - anchor_y);
                 float total_dist = std::hypot(d_anchor_x, d_anchor_y);
-                float rel_angle = wrap_angle(std::atan2(d_anchor_x, d_anchor_y) - anchor_yaw);
+                float yaw_adj = fix_yaw_sign ? anchor_yaw : -anchor_yaw;
+                float rel_angle = wrap_angle(std::atan2(d_anchor_x, d_anchor_y) + yaw_adj);
                 float steer_equiv = -rel_angle;
                 float aperture_m = std::max(GAP_MIN_WIDTH_M, std::min(1.20f, total_dist * 0.35f));
                 bool is_clear = (!hit_obs) && (ranges_16[i] >= (max_range - 0.01f) || total_dist >= (max_r - 0.05f));
@@ -550,7 +555,8 @@ public:
                 float d_anchor_x = tx - anchor_x;
                 float d_anchor_y = std::max(0.05f, ty - anchor_y);
                 float total_dist = std::hypot(d_anchor_x, d_anchor_y);
-                float rel_angle = wrap_angle(std::atan2(d_anchor_x, d_anchor_y) - anchor_yaw);
+                float yaw_adj = fix_yaw_sign ? anchor_yaw : -anchor_yaw;
+                float rel_angle = wrap_angle(std::atan2(d_anchor_x, d_anchor_y) + yaw_adj);
                 float steer_equiv = -rel_angle;
                 float aperture_m = std::max(GAP_MIN_WIDTH_M, std::min(1.20f, total_dist * 0.30f));
                 bool is_clear = (!hit_obs);
@@ -567,6 +573,42 @@ public:
         }
 
         // 3. Score Candidate Targets
+        float cand_edge_margin[MAX_CAND] = {0.0f};
+        if (use_true_aperture != 0 || w_gap_center > 0.0f) {
+            float ray_dist_deg[181];
+            for (int b = 0; b <= 180; ++b) ray_dist_deg[b] = 0.0f;
+            for (int i = 0; i < n_cand; ++i) {
+                int bin = std::max(0, std::min(180, static_cast<int>(std::round(candidates[i].rel_angle / DEG2RAD)) + 90));
+                if (candidates[i].dist > ray_dist_deg[bin]) {
+                    ray_dist_deg[bin] = candidates[i].dist;
+                }
+            }
+            for (int b = 6; b <= 174; ++b) {
+                if (ray_dist_deg[b] <= 0.0f && ray_dist_deg[b - 1] > 0.0f && ray_dist_deg[b + 1] > 0.0f) {
+                    ray_dist_deg[b] = 0.5f * (ray_dist_deg[b - 1] + ray_dist_deg[b + 1]);
+                }
+            }
+            for (int i = 0; i < n_cand; ++i) {
+                int bin = std::max(0, std::min(180, static_cast<int>(std::round(candidates[i].rel_angle / DEG2RAD)) + 90));
+                float d_ref = std::max(0.20f, candidates[i].dist * 0.85f);
+                int dl = 1;
+                while (dl <= 30 && (bin - dl) >= 5 && ray_dist_deg[bin - dl] >= d_ref) {
+                    dl++;
+                }
+                int dr = 1;
+                while (dr <= 30 && (bin + dr) <= 175 && ray_dist_deg[bin + dr] >= d_ref) {
+                    dr++;
+                }
+                float theta_l = static_cast<float>(dl - 1) * DEG2RAD;
+                float theta_r = static_cast<float>(dr - 1) * DEG2RAD;
+                float true_w = std::min(1.20f, candidates[i].dist * (theta_l + theta_r));
+                cand_edge_margin[i] = std::min(0.50f, candidates[i].dist * std::min(theta_l, theta_r));
+                if (use_true_aperture != 0) {
+                    candidates[i].aperture = true_w;
+                }
+            }
+        }
+
         float max_clear_dist = 0.10f;
         for (int i = 0; i < n_cand; ++i) {
             if (candidates[i].dist > max_clear_dist) max_clear_dist = candidates[i].dist;
@@ -666,11 +708,13 @@ public:
             }
 
             float clear_bonus = c.is_clear ? 3.0f : 0.0f;
+            float center_bonus = (w_gap_center > 0.0f) ? (w_gap_center * (cand_edge_margin[i] / 0.50f)) : 0.0f;
             float sc = w_gap_distance * dist_factor
                      + w_gap_width * width_norm
                      + neighbor_bonus
                      + side_bonus
                      + clear_bonus
+                     + center_bonus
                      - center_penalty
                      - w_steer * steer_diff
                      - w_straight * straight_diff;
@@ -733,10 +777,12 @@ public:
                             center_penalty = straight_block_penalty * std::exp(scout_straight_exp_k * angle_ratio);
                         }
 
+                        float center_bonus_alt = (w_gap_center > 0.0f) ? (w_gap_center * (cand_edge_margin[scored[k].cand_idx] / 0.50f)) : 0.0f;
                         float score_alt = w_gap_distance * dist_factor
                                         + (w_gap_width * alt_aperture_bias) * width_norm
                                         + side_bonus_alt
                                         + clear_bonus_alt
+                                        + center_bonus_alt
                                         - center_penalty
                                         - w_steer * steer_diff
                                         - w_straight * straight_diff;
@@ -944,6 +990,21 @@ COSTMAP_API int costmap_get_width(void* handle) {
 COSTMAP_API int costmap_get_height(void* handle) {
     if (!handle) return 0;
     return static_cast<SmartHybridCostmapFront*>(handle)->height;
+}
+
+COSTMAP_API void costmap_set_advanced_params(
+    void* handle,
+    int persistence_frames,
+    int fix_yaw_sign,
+    int use_true_aperture,
+    float w_gap_center
+) {
+    if (!handle) return;
+    auto* cm = static_cast<SmartHybridCostmapFront*>(handle);
+    cm->persistence_frames = std::max(0, std::min(10, persistence_frames));
+    cm->fix_yaw_sign = (fix_yaw_sign != 0) ? 1 : 0;
+    cm->use_true_aperture = (use_true_aperture != 0) ? 1 : 0;
+    cm->w_gap_center = std::max(0.0f, std::min(20.0f, w_gap_center));
 }
 
 }

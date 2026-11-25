@@ -63,7 +63,7 @@ ACTIVE_PLANNER: str = "OPTION_2_SL_MPC"
 # Headless Webots Simulation Settings
 WEBOTS_BINARY: str = r"C:\Program Files\Webots\msys64\mingw64\bin\webots.exe"
 BASE_WORKER_PORT: int = 10200
-TIMEOUT_PER_TRIAL_WALL_S: float = 200.0
+TIMEOUT_PER_TRIAL_WALL_S: float = 420.0
 
 # Moving Obstacle Parameters (Track 1 = 1.00 m/s forward, Track 2 = 1.00 m/s reverse/opposite)
 ENABLE_MOVING_OBSTACLES: bool = True
@@ -161,6 +161,7 @@ OPTION_2_SL_MPC_GENE_SPECS: List[Tuple[str, float, float, type, float, str]] = [
     ("blind_turn_kappa",         0.00,   1.40,  float,  0.00,   "Blind 90-deg corner curvature floor (1/m)"),
     ("brake_decel_scale",        0.60,   1.25,  float,  1.00,   "Backward braking deceleration multiplier"),
     ("narrow_corridor_v_gain",   0.00,   1.00,  float,  0.00,   "Speed moderation in genuinely narrow (<0.48m) corridors"),
+    ("w_gap_center",             0.00,   3.00,  float,  0.832,  "True-aperture corridor edge-clearance centering weight"),
 ]
 
 
