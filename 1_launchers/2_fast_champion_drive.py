@@ -112,6 +112,21 @@ def main():
     webots_cmd = WEBOTS_BIN if os.path.isfile(WEBOTS_BIN) else "webots"
 
     env = os.environ.copy()
+    webots_home = r"C:\Program Files\Webots"
+    webots_bin_dir = os.path.dirname(webots_cmd) if os.path.isabs(webots_cmd) else os.path.dirname(WEBOTS_BIN)
+    py_dir = os.path.dirname(sys.executable)
+    py_scripts = os.path.join(py_dir, "Scripts")
+    planners_dir = os.path.join(MY_PROJECT_DIR, "controllers", "tof_path_planner")
+
+    env["WEBOTS_HOME"] = webots_home
+    env["PATH"] = webots_bin_dir + os.pathsep + py_dir + os.pathsep + py_scripts + os.pathsep + env.get("PATH", "")
+    env["PYTHONPATH"] = os.pathsep.join([
+        planners_dir,
+        os.path.join(GA_OPTIMIZER_DIR, "data"),
+        GA_OPTIMIZER_DIR,
+        MY_PROJECT_DIR,
+        ROOT_DIR,
+    ])
     env["PYTHONUNBUFFERED"] = "1"
     env["WEBOTS_CONTROLLER_MODE"] = "fast_drive"
     env["FOLKRACE_OBS_DIRECTION"] = "-1" if track == 2 else "1"

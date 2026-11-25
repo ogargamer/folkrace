@@ -148,6 +148,14 @@ def read_tof_multi_ray(dev: Any, noise_pct: float = 0.02) -> float:
 
 read_tof_device = read_tof_multi_ray
 
+# 45-degree 4-zone VL53L8CX bank mapping (Webots getRangeImage orders rays left-to-right: +FOV/2 -> -FOV/2)
+TOF_BANK_LAYOUT: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
+    ("tof_front_left_inner",  ("tof_front_left_4.1deg",  "tof_front_left_15.4deg", "tof_front_left_26.6deg", "tof_front_left_37.9deg")),
+    ("tof_front_left_outer",  ("tof_front_left_49.1deg", "tof_front_left_60.4deg", "tof_front_left_71.6deg", "tof_front_left_82.9deg")),
+    ("tof_front_right_inner", ("tof_front_right_37.9deg", "tof_front_right_26.6deg", "tof_front_right_15.4deg", "tof_front_right_4.1deg")),
+    ("tof_front_right_outer", ("tof_front_right_82.9deg", "tof_front_right_71.6deg", "tof_front_right_60.4deg", "tof_front_right_49.1deg")),
+)
+
 
 def wrap_to_pi(angle: float) -> float:
     """Wraps angle in radians to [-pi, pi]."""
@@ -195,10 +203,17 @@ class FolkraceVehicle:
         is_supervisor: bool = False,
         genes: Optional[Dict[str, Any]] = None,
         planner_decimation: int = PLANNER_DECIMATION,
+        planner_phase: int = 0,
+        defer_tof_enable: bool = False,
+        disable_alt_solver: bool = False,
     ):
         self.robot = robot
         self.is_supervisor = is_supervisor
         self.planner_decimation = max(1, int(planner_decimation))
+        self.planner_phase = int(planner_phase) % self.planner_decimation
+        self._global_step_counter = self.planner_phase
+        self._tof_step_ms_int = max(1, int(round(TIME_STEP_MS)) * self.planner_decimation)
+        self._tofs_enabled = False
         self.robot_node = robot.getSelf() if (is_supervisor and hasattr(robot, "getSelf")) else None
         self._trans_field = self.robot_node.getField("translation") if (self.is_supervisor and self.robot_node) else None
         self._rot_field = self.robot_node.getField("rotation") if (self.is_supervisor and self.robot_node) else None
@@ -251,20 +266,30 @@ class FolkraceVehicle:
         # 2. Discover Sensors
         self.tofs = {}
         self.tof_devices = []
+        self.tof_banks: List[Tuple[Any, Tuple[str, ...]]] = []
         step_ms_int = int(round(TIME_STEP_MS))
-        tof_step_ms_int = max(1, step_ms_int * self.planner_decimation)
-        for name in TOF_SENSOR_NAMES:
-            dev = robot.getDevice(name)
-            if dev is None:
-                short_name = name.replace("tof_front_", "tof_")
-                dev = robot.getDevice(short_name)
-            if dev is not None:
-                dev.enable(tof_step_ms_int)
-                self.tofs[name] = dev
+
+        bank_devs = [(bank_name, robot.getDevice(bank_name), zone_names) for bank_name, zone_names in TOF_BANK_LAYOUT]
+        if any(dev is not None for _, dev, _ in bank_devs):
+            for bank_name, dev, zone_names in bank_devs:
+                self.tof_banks.append((dev, zone_names))
+                self.tofs[bank_name] = dev
                 self.tof_devices.append(dev)
-            else:
-                self.tofs[name] = None
-                self.tof_devices.append(None)
+        else:
+            for name in TOF_SENSOR_NAMES:
+                dev = robot.getDevice(name)
+                if dev is None:
+                    short_name = name.replace("tof_front_", "tof_")
+                    dev = robot.getDevice(short_name)
+                if dev is not None:
+                    self.tofs[name] = dev
+                    self.tof_devices.append(dev)
+                else:
+                    self.tofs[name] = None
+                    self.tof_devices.append(None)
+
+        if not defer_tof_enable:
+            self.enable_tof_sensors()
 
         self.imu_dev = (
             robot.getDevice("bno08x_imu")
@@ -306,7 +331,7 @@ class FolkraceVehicle:
         self.fusion.attach_devices(self.encoders, imu_dev=self.imu_dev, gyro_dev=self.gyro, accel_dev=self.accel)
 
         # 3. Core Perception & Autonomous Trajectory Planner (Shared Brain)
-        self.brain = AutonomousBrain(genes=genes)
+        self.brain = AutonomousBrain(genes=genes, disable_alt_solver=disable_alt_solver)
 
         # Expose sub-modules for backwards compatibility & telemetry
         self.costmap = self.brain.costmap
@@ -528,20 +553,49 @@ class FolkraceVehicle:
         self.proj_v = 0.0
         self.proj_steer = 0.0
 
+    def enable_tof_sensors(self) -> None:
+        """Enables ToF Lidar/DistanceSensor devices at the configured decimated period."""
+        for dev in self.tof_devices:
+            if dev is not None:
+                dev.enable(self._tof_step_ms_int)
+        self._tofs_enabled = True
+
     def read_tof_sensors(self) -> Dict[str, float]:
-        """Reads all 16 ToF range sensors and returns a dict mapping sensor name -> range in meters."""
+        """Reads all 16 ToF range zones (from 4-bank Lidars or 16 legacy devices) and returns a dict."""
         cached_tofs: Dict[str, float] = {}
         noise_pct = getattr(self, "tof_noise_pct", float(os.environ.get("TOF_NOISE_PCT", 0.0)))
-        for name in TOF_SENSOR_NAMES:
-            dev = self.tofs.get(name)
-            if dev is not None:
-                val = read_tof_device(dev)
-                if noise_pct > 0.0 and val < (TOF_MAX_RANGE_M - 0.01):
-                    noise = float(np.random.uniform(-noise_pct, noise_pct)) * val
-                    val = float(np.clip(val + noise, 0.02, TOF_MAX_RANGE_M))
-                cached_tofs[name] = val
-            else:
-                cached_tofs[name] = TOF_MAX_RANGE_M
+        if self.tof_banks:
+            for dev, zone_names in self.tof_banks:
+                n_zones = len(zone_names)
+                r_img = dev.getRangeImage() if (dev is not None and hasattr(dev, "getRangeImage")) else None
+                if r_img and len(r_img) >= n_zones:
+                    rays_per_zone = len(r_img) // n_zones
+                    for z_idx, name in enumerate(zone_names):
+                        start = z_idx * rays_per_zone
+                        end = (z_idx + 1) * rays_per_zone if z_idx < n_zones - 1 else len(r_img)
+                        best = TOF_MAX_RANGE_M
+                        for v in r_img[start:end]:
+                            if 0.0 < v < best:
+                                best = v
+                        val = max(TOF_MIN_RANGE_M, min(TOF_MAX_RANGE_M, float(best)))
+                        if noise_pct > 0.0 and val < (TOF_MAX_RANGE_M - 0.01):
+                            noise = float(np.random.uniform(-noise_pct, noise_pct)) * val
+                            val = float(np.clip(val + noise, 0.02, TOF_MAX_RANGE_M))
+                        cached_tofs[name] = val
+                else:
+                    for name in zone_names:
+                        cached_tofs[name] = TOF_MAX_RANGE_M
+        else:
+            for name in TOF_SENSOR_NAMES:
+                dev = self.tofs.get(name)
+                if dev is not None:
+                    val = read_tof_device(dev)
+                    if noise_pct > 0.0 and val < (TOF_MAX_RANGE_M - 0.01):
+                        noise = float(np.random.uniform(-noise_pct, noise_pct)) * val
+                        val = float(np.clip(val + noise, 0.02, TOF_MAX_RANGE_M))
+                    cached_tofs[name] = val
+                else:
+                    cached_tofs[name] = TOF_MAX_RANGE_M
         self.raw_tofs = cached_tofs
         return cached_tofs
 
@@ -655,6 +709,7 @@ class FolkraceVehicle:
         full_telemetry: bool = True,
         override_speed: Optional[float] = None,
         override_steer: Optional[float] = None,
+        build_telemetry: bool = True,
     ) -> Tuple[Dict[str, Any], bool]:
         """
         Executes one 120 Hz dynamics step with 60 Hz planner decimation.
@@ -664,6 +719,7 @@ class FolkraceVehicle:
         t_step_cpu_start = time.process_time()
         _gc_stats["step_gc_ms"] = 0.0
         self.step_counter += 1
+        self._global_step_counter += 1
         self._step_gt_pose = None
         self._step_gt_vel = None
         self._step_rear_flow = None
@@ -681,6 +737,8 @@ class FolkraceVehicle:
             tof_readings = self.tof_queue.update(raw_tofs)
             self.last_tofs = tof_readings
             self.pose_history.append((self.x_est, self.y_est, self.yaw_est))
+            if not build_telemetry:
+                return {}, False
             gx, gy, gyaw = self.get_ground_truth_pose()
             rear_flow = self.get_ground_truth_rear_axle_flow()
             telemetry = {
@@ -757,9 +815,10 @@ class FolkraceVehicle:
 
         planner_ran = False
         tof_readings = self.last_tofs
+        is_planner_tick = ((self._global_step_counter - self.planner_phase - 2) % self.planner_decimation == 0)
 
         # Closed-loop Control Tick (60 Hz Pi/ToF with configurable decimation on 120 Hz ESP/physics)
-        if self.step_counter % self.planner_decimation == 0:
+        if is_planner_tick:
             planner_ran = True
             raw_tofs = self.read_tof_sensors()
             tof_readings = self.tof_queue.update(raw_tofs)
@@ -771,7 +830,7 @@ class FolkraceVehicle:
         )
         self.cached_f_tof = f_tof
 
-        if self.step_counter % self.planner_decimation == 0:
+        if is_planner_tick:
             current_physical_steer = float(getattr(self.ediff, "current_steer_rad", self.active_steer))
             target_speed, target_steer, brain_telem = self.brain.step(
                 tof_readings=tof_readings,
@@ -787,15 +846,7 @@ class FolkraceVehicle:
                 imu_yaw_rad=(self.fusion.yaw if self.imu_dev is not None else None),
             )
 
-            is_recovering = (self.recovery_manager.state != StuckRecoveryState.NORMAL_DRIVE)
-            if is_recovering:
-                if not self.was_recovering:
-                    self.rate_limited_speed = min(self.rate_limited_speed, self.v_est)
-                self.was_recovering = True
-            else:
-                if self.was_recovering:
-                    self.was_recovering = False
-                    self.rate_limited_speed = self.v_est
+            self.was_recovering = (self.recovery_manager.state != StuckRecoveryState.NORMAL_DRIVE)
 
             if override_speed is not None:
                 target_speed = float(override_speed)
@@ -873,8 +924,7 @@ class FolkraceVehicle:
         combined_alpha = drift_res["rear_alpha"]
 
         # 5-6. ESP32-Matched Option A1 Speed Envelope, Ramp Ceiling & 4WD Electronic Differential
-        in_recovery_mode = (self.recovery_manager.state != StuckRecoveryState.NORMAL_DRIVE)
-        bypass_speed_envelope = (override_speed is not None) or in_recovery_mode
+        bypass_speed_envelope = (override_speed is not None)
         if override_speed is not None:
             cmd_target_v = float(override_speed)
         else:
@@ -898,7 +948,7 @@ class FolkraceVehicle:
             v_ground_RR=drift_res["v_ground_RR"],
             is_drifting=is_drift_active,
             mu=self.mu_val,
-            v_curr=(cmd_target_v if in_recovery_mode else self.v_est),
+            v_curr=self.v_est,
             bypass_speed_envelope=bypass_speed_envelope,
         )
         self.rate_limited_speed = float(diff_res["rate_limited_v"])
@@ -920,6 +970,8 @@ class FolkraceVehicle:
 
 
         # 8. Assemble Telemetry Payload (Full for GUI / Lean for headless GA)
+        if not build_telemetry:
+            return {}, planner_ran
         if full_telemetry:
             gx, gy, gyaw = self.get_ground_truth_pose()
             v_real = self.get_ground_truth_velocity()

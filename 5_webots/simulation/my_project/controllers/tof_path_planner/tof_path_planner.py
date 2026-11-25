@@ -812,17 +812,38 @@ def run_fast_champion_drive(robot: any, vehicle: FolkraceVehicle) -> None:
 
     sim_time = 0.0
     last_print_time = 0.0
+    last_wall_time = time.perf_counter()
+    wb_ms_accum = 0.0
+    ctrl_ms_accum = 0.0
+    window_steps = 0
 
     print("[Fast Drive] Simulation started. Real-time driving active.", flush=True)
 
-    while robot.step(STEP_MS_INT) != -1:
+    while True:
+        t_wb0 = time.perf_counter()
+        if robot.step(STEP_MS_INT) == -1:
+            break
+        t_wb1 = time.perf_counter()
+        wb_ms_accum += (t_wb1 - t_wb0) * 1000.0
         sim_time += DT
         if not obs_manager.is_physical_robots:
             obs_manager.update(sim_time)
         telemetry, planner_ran = vehicle.step(dt=DT, full_telemetry=False)
+        ctrl_ms_accum += (time.perf_counter() - t_wb1) * 1000.0
+        window_steps += 1
 
         # Throttle console telemetry to 1 Hz so stdout pipe never stalls physics
         if planner_ran and (sim_time - last_print_time >= 1.0):
+            now_wall = time.perf_counter()
+            wall_dt = max(1e-6, now_wall - last_wall_time)
+            sim_dt_win = window_steps * DT
+            rtf = sim_dt_win / wall_dt
+            avg_wb_ms = wb_ms_accum / max(1, window_steps)
+            avg_ctrl_ms = ctrl_ms_accum / max(1, window_steps)
+            last_wall_time = now_wall
+            wb_ms_accum = 0.0
+            ctrl_ms_accum = 0.0
+            window_steps = 0
             last_print_time = sim_time
             f_tof_val = telemetry.get("f_tof", 0.0)
             v_real_val = vehicle.get_ground_truth_velocity()
@@ -850,6 +871,7 @@ def run_fast_champion_drive(robot: any, vehicle: FolkraceVehicle) -> None:
             alt_str = f" alt:{opt_alt_ms:3.1f} it:{iters_prim}/{iters_alt}" if opt_alt_ms > 0.0 else f" it:{iters_prim}"
             obs_str = f" obs:{obs_ms:3.1f}" if obs_ms > 0.0 else ""
             perf_breakdown = (
+                f"RTF: {rtf:4.2f}x | wb:{avg_wb_ms:4.1f}ms ctrl:{avg_ctrl_ms:4.1f}ms | "
                 f"Plan: {plan_ms:4.1f}ms (map:{map_ms:3.1f}{map_detail} sc:{scout_ms:3.1f} "
                 f"prim:{opt_prim_ms:3.1f}{alt_str} "
                 f"sh:{opt_shield_ms:3.1f}{obs_str} tlm:{telem_ms:3.1f} "
@@ -1506,6 +1528,7 @@ def run_ga_worker(robot: any, vehicle: FolkraceVehicle) -> None:
 OPPONENT_PROFILES: Dict[str, Dict[str, Any]] = {
     "opponent_fast_light": {
         "planner_decimation": 2,  # 60 Hz
+        "planner_phase": 1,
         "genes": {
             "v_cruise_max": 2.65,
             "v_cruise_min": 1.05,
@@ -1515,6 +1538,7 @@ OPPONENT_PROFILES: Dict[str, Dict[str, Any]] = {
     },
     "opponent_reactive_light": {
         "planner_decimation": 4,  # 30 Hz
+        "planner_phase": 1,
         "genes": {
             "v_cruise_max": 2.15,
             "v_cruise_min": 0.95,
@@ -1525,6 +1549,7 @@ OPPONENT_PROFILES: Dict[str, Dict[str, Any]] = {
     },
     "opponent_heavy_tank": {
         "planner_decimation": 4,  # 30 Hz
+        "planner_phase": 3,
         "genes": {
             "v_cruise_max": 1.25,
             "v_cruise_min": 0.65,
@@ -1552,18 +1577,28 @@ def run_opponent_driver(robot: any, role: str) -> None:
     frozen_genes = {**base_genes, **profile["genes"]}
     base_v_max = float(frozen_genes.get("v_cruise_max", 2.0))
     decim = int(profile.get("planner_decimation", 2))
+    phase = int(profile.get("planner_phase", 0)) % max(1, decim)
 
     vehicle = FolkraceVehicle(
         robot,
         is_supervisor=False,
         genes=frozen_genes,
         planner_decimation=decim,
+        planner_phase=phase,
+        defer_tof_enable=(phase > 0),
+        disable_alt_solver=True,
     )
     print(
-        f"[Opponent:{role}] Active (decim={decim}, v_max={base_v_max:.2f} m/s, "
+        f"[Opponent:{role}] Active (decim={decim}, phase={phase}, v_max={base_v_max:.2f} m/s, "
         f"mu={frozen_genes.get('mu_friction', 0.8):.2f})",
         flush=True,
     )
+
+    if phase > 0:
+        for _ in range(phase):
+            if robot.step(STEP_MS_INT) == -1:
+                return
+        vehicle.enable_tof_sensors()
 
     last_custom = ""
     last_trial = -1
@@ -1583,7 +1618,6 @@ def run_opponent_driver(robot: any, role: str) -> None:
                 msg = json.loads(raw_custom)
                 paused = bool(msg.get("paused", False))
                 trial_id = int(msg.get("trial", -1))
-                is_rev = bool(msg.get("reverse", False))
                 speed_scale = max(0.2, min(1.5, float(msg.get("speed_scale", 1.0))))
                 if trial_id != last_trial:
                     last_trial = trial_id
@@ -1599,7 +1633,7 @@ def run_opponent_driver(robot: any, role: str) -> None:
                     vehicle.v_cruise_max = scaled_v
                     vehicle.brain.v_cruise_max = scaled_v
                     vehicle.planner.v_cruise_max = scaled_v
-                    vehicle.watchdog.set_mode("DISABLED" if is_rev else "OPTION_1_BREADCRUMB")
+                    vehicle.watchdog.set_mode("OPTION_1_BREADCRUMB")
             except Exception:
                 pass
 
@@ -1609,7 +1643,7 @@ def run_opponent_driver(robot: any, role: str) -> None:
                     m.setVelocity(0.0)
             continue
 
-        vehicle.step(dt=DT, full_telemetry=False)
+        vehicle.step(dt=DT, full_telemetry=False, build_telemetry=False)
 
 
 # ==============================================================================

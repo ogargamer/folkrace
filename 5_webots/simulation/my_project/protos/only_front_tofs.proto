@@ -291,193 +291,49 @@ PROTO only_front_tofs [
           }
         ]
       }
-      # Front Left ToF 3 (FOV midpoint 1.1deg, outer edge 4.5deg outwards)
+      # Front Left ToF Inner Bank (4x 11.25deg zones: 4.1deg, 15.4deg, 26.6deg, 37.9deg)
       Lidar {
         translation -0.058 0.092 0.0275
-        rotation 0 0 1 1.5512
-        name "tof_front_left_4.1deg"
-        horizontalResolution 5
-        fieldOfView 0.1963
+        rotation 0 0 1 1.25665
+        name "tof_front_left_inner"
+        horizontalResolution 20
+        fieldOfView 0.7854
         numberOfLayers 1
         near 0.001
         minRange 0.001
         maxRange 2.4
       }
-      # Front Left ToF 2 (FOV midpoint 12.4deg)
-      Lidar {
-        translation -0.058 0.092 0.0275
-        rotation 0 0 1 1.3548
-        name "tof_front_left_15.4deg"
-        horizontalResolution 5
-        fieldOfView 0.1963
-        numberOfLayers 1
-        near 0.001
-        minRange 0.001
-        maxRange 2.4
-      }
-      # Front Left ToF 1 (FOV midpoint 23.6deg)
-      Lidar {
-        translation -0.058 0.092 0.0275
-        rotation 0 0 1 1.1585
-        name "tof_front_left_26.6deg"
-        horizontalResolution 5
-        fieldOfView 0.1963
-        numberOfLayers 1
-        near 0.001
-        minRange 0.001
-        maxRange 2.4
-      }
-      # Front Left ToF 0 (FOV midpoint 34.9deg)
-      Lidar {
-        translation -0.058 0.092 0.0275
-        rotation 0 0 1 0.9621
-        name "tof_front_left_37.9deg"
-        horizontalResolution 5
-        fieldOfView 0.1963
-        numberOfLayers 1
-        near 0.001
-        minRange 0.001
-        maxRange 2.4
-      }
-      # Front Left ToF -1 (FOV midpoint 46.1deg)
+      # Front Left ToF Outer Bank (4x 11.25deg zones: 49.1deg, 60.4deg, 71.6deg, 82.9deg)
       Lidar {
         translation -0.057 0.09 0.0275
-        rotation 0 0 1 0.7658
-        name "tof_front_left_49.1deg"
-        horizontalResolution 5
-        fieldOfView 0.1963
+        rotation 0 0 1 0.47125
+        name "tof_front_left_outer"
+        horizontalResolution 20
+        fieldOfView 0.7854
         numberOfLayers 1
         near 0.001
         minRange 0.001
         maxRange 2.4
       }
-      # Front Left ToF -2 (FOV midpoint 57.4deg)
-      Lidar {
-        translation -0.057 0.09 0.0275
-        rotation 0 0 1 0.5694
-        name "tof_front_left_60.4deg"
-        horizontalResolution 5
-        fieldOfView 0.1963
-        numberOfLayers 1
-        near 0.001
-        minRange 0.001
-        maxRange 2.4
-      }
-      # Front Left ToF -3 (FOV midpoint 68.6deg)
-      Lidar {
-        translation -0.057 0.09 0.0275
-        rotation 0 0 1 0.3731
-        name "tof_front_left_71.6deg"
-        horizontalResolution 5
-        fieldOfView 0.1963
-        numberOfLayers 1
-        near 0.001
-        minRange 0.001
-        maxRange 2.4
-      }
-      # Front Left ToF -4 (FOV midpoint 79.9deg, outer edge 85.5deg)
-      Lidar {
-        translation -0.057 0.09 0.0275
-        rotation 0 0 1 0.1767
-        name "tof_front_left_82.9deg"
-        horizontalResolution 5
-        fieldOfView 0.1963
-        numberOfLayers 1
-        near 0.001
-        minRange 0.001
-        maxRange 2.4
-      }
-      # Front Right ToF 3 (FOV midpoint 1.1deg, outer edge 4.5deg outwards)
+      # Front Right ToF Inner Bank (4x 11.25deg zones: 37.9deg, 26.6deg, 15.4deg, 4.1deg)
       Lidar {
         translation 0.058 0.092 0.0275
-        rotation 0 0 1 1.5904
-        name "tof_front_right_4.1deg"
-        horizontalResolution 5
-        fieldOfView 0.1963
+        rotation 0 0 1 1.88495
+        name "tof_front_right_inner"
+        horizontalResolution 20
+        fieldOfView 0.7854
         numberOfLayers 1
         near 0.001
         minRange 0.001
         maxRange 2.4
       }
-      # Front Right ToF 2 (FOV midpoint 12.4deg)
-      Lidar {
-        translation 0.058 0.092 0.0275
-        rotation 0 0 1 1.7868
-        name "tof_front_right_15.4deg"
-        horizontalResolution 5
-        fieldOfView 0.1963
-        numberOfLayers 1
-        near 0.001
-        minRange 0.001
-        maxRange 2.4
-      }
-      # Front Right ToF 1 (FOV midpoint 23.6deg)
-      Lidar {
-        translation 0.058 0.092 0.0275
-        rotation 0 0 1 1.9831
-        name "tof_front_right_26.6deg"
-        horizontalResolution 5
-        fieldOfView 0.1963
-        numberOfLayers 1
-        near 0.001
-        minRange 0.001
-        maxRange 2.4
-      }
-      # Front Right ToF 0 (FOV midpoint 34.9deg)
-      Lidar {
-        translation 0.058 0.092 0.0275
-        rotation 0 0 1 2.1795
-        name "tof_front_right_37.9deg"
-        horizontalResolution 5
-        fieldOfView 0.1963
-        numberOfLayers 1
-        near 0.001
-        minRange 0.001
-        maxRange 2.4
-      }
-      # Front Right ToF -1 (FOV midpoint 46.1deg)
+      # Front Right ToF Outer Bank (4x 11.25deg zones: 82.9deg, 71.6deg, 60.4deg, 49.1deg)
       Lidar {
         translation 0.057 0.09 0.0275
-        rotation 0 0 1 2.3758
-        name "tof_front_right_49.1deg"
-        horizontalResolution 5
-        fieldOfView 0.1963
-        numberOfLayers 1
-        near 0.001
-        minRange 0.001
-        maxRange 2.4
-      }
-      # Front Right ToF -2 (FOV midpoint 57.4deg)
-      Lidar {
-        translation 0.057 0.09 0.0275
-        rotation 0 0 1 2.5722
-        name "tof_front_right_60.4deg"
-        horizontalResolution 5
-        fieldOfView 0.1963
-        numberOfLayers 1
-        near 0.001
-        minRange 0.001
-        maxRange 2.4
-      }
-      # Front Right ToF -3 (FOV midpoint 68.6deg)
-      Lidar {
-        translation 0.057 0.09 0.0275
-        rotation 0 0 1 2.7685
-        name "tof_front_right_71.6deg"
-        horizontalResolution 5
-        fieldOfView 0.1963
-        numberOfLayers 1
-        near 0.001
-        minRange 0.001
-        maxRange 2.4
-      }
-      # Front Right ToF -4 (FOV midpoint 79.9deg, outer edge 85.5deg)
-      Lidar {
-        translation 0.057 0.09 0.0275
-        rotation 0 0 1 2.9649
-        name "tof_front_right_82.9deg"
-        horizontalResolution 5
-        fieldOfView 0.1963
+        rotation 0 0 1 2.67035
+        name "tof_front_right_outer"
+        horizontalResolution 20
+        fieldOfView 0.7854
         numberOfLayers 1
         near 0.001
         minRange 0.001

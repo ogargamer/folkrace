@@ -121,7 +121,8 @@ class AutonomousBrain:
     Consumes clean physical sensor readings and produces motion targets.
     """
 
-    def __init__(self, genes: Optional[Dict[str, Any]] = None):
+    def __init__(self, genes: Optional[Dict[str, Any]] = None, disable_alt_solver: bool = False):
+        self.disable_alt_solver = bool(disable_alt_solver)
         # 1. Perception & Navigation Engines
         self.r_infl = R_INFLATION_M
         self.costmap = CppSmartHybridCostmap(
@@ -428,7 +429,7 @@ class AutonomousBrain:
             v_current=v_3,
             steer_current=steer_3,
             yaw_rate_current=gyro_z_rad_s,
-            extra_targets=getattr(self.gap_scout, "last_targets", None),
+            extra_targets=(None if self.disable_alt_solver else getattr(self.gap_scout, "last_targets", None)),
             x0=dx_3,
             y0=dy_3,
             psi0=delta_yaw_3,
@@ -641,14 +642,13 @@ class AutonomousBrain:
 
         # 10c. Unified Dynamic Speed Rate Limiter (Smooth takeoff, no 0 -> 400 RPM step shock)
         if is_recovering:
-            # During recovery, snap down immediately if physical speed is much lower (e.g. post-spin/impact)
+            # Directional physical resync: only pull toward v_est when the robot has already slowed past the command
             target_v = target_speed
-            if target_v < 0.0 and self.rate_limited_speed > 0.0:
-                # Never keep commanding positive forward propulsion once reverse braking is requested
-                self.rate_limited_speed = 0.0
-            elif target_v >= 0.0 and v_est < (self.rate_limited_speed - 0.25):
-                self.rate_limited_speed = max(0.0, v_est)
-            d_limit = min(BRAKE_DECEL_MAX, BRAKE_DECEL_RATIO * self.mu_val * GRAVITY_G)
+            if target_v < self.rate_limited_speed and v_est < self.rate_limited_speed:
+                self.rate_limited_speed = max(target_v, v_est)
+            elif target_v > self.rate_limited_speed and v_est > self.rate_limited_speed:
+                self.rate_limited_speed = min(target_v, v_est)
+            d_limit = 1.35 * min(BRAKE_DECEL_MAX, BRAKE_DECEL_RATIO * self.mu_val * GRAVITY_G)
             speed_err = target_v - self.rate_limited_speed
             max_dv = d_limit * dt
             if abs(speed_err) <= max_dv:
@@ -663,13 +663,15 @@ class AutonomousBrain:
             a_limit = 2.2 * min(ACCEL_FWD_MAX, ACCEL_FWD_RATIO * self.mu_val * GRAVITY_G)
             d_limit = 1.5 * min(BRAKE_DECEL_MAX, BRAKE_DECEL_RATIO * self.mu_val * GRAVITY_G)
 
-            # Instant crash/stop resync: wide threshold so ESP32 400 Hz ramp lead never triggers false resyncs
+            # Cap forward/reverse command lead above physical speed without pinning at +0.14 when v_est < 0
+            v_curr_fwd = max(0.0, v_curr)
+            v_curr_rev = min(0.0, v_curr)
             if self.rate_limited_speed >= 0.0:
-                if v_curr < (self.rate_limited_speed - 0.85):
-                    self.rate_limited_speed = max(0.0, v_curr)
+                if self.rate_limited_speed > (v_curr_fwd + 0.85):
+                    self.rate_limited_speed = v_curr_fwd + 0.85
             else:
-                if v_curr > (self.rate_limited_speed + 0.85):
-                    self.rate_limited_speed = min(0.0, v_curr)
+                if self.rate_limited_speed < (v_curr_rev - 0.85):
+                    self.rate_limited_speed = v_curr_rev - 0.85
 
             speed_err = target_v - self.rate_limited_speed
             is_accel = (self.rate_limited_speed >= 0.0 and speed_err > 0.0) or (self.rate_limited_speed <= 0.0 and speed_err < 0.0)

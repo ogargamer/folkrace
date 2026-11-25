@@ -12,6 +12,7 @@ WorldInfo {
   ]
   title "Folkrace Track World"
   basicTimeStep 8.333333
+  optimalThreadCount 4
   contactProperties [
     ContactProperties {
       material1 "tire"
@@ -73,6 +74,7 @@ TexturedBackground {
 }
 TexturedBackgroundLight {
   luminosity 1.2
+  castShadows FALSE
 }
 RectangleArena {
   floorSize 16 16
