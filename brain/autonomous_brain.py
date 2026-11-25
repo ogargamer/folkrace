@@ -364,7 +364,7 @@ class AutonomousBrain:
 
         # 3. C++ Smart Hybrid Costmap Processing
         t_map_0 = time.perf_counter()
-        prob_map, hazard_mask, map_ms = self.costmap.process_tof_frame(clean_tofs)
+        prob_map, hazard_mask, map_ms = self.costmap.process_tof_frame(clean_tofs, need_prob_map=full_telemetry)
         t_map_ms = (time.perf_counter() - t_map_0) * 1000.0
 
         # 4. 3-Step Composite SE(2) Forward Lookahead Anchor Projection
@@ -385,7 +385,7 @@ class AutonomousBrain:
             costmap_obj=self.costmap,
             target_lookahead_m=self.target_lookahead_m,
             steer_current=steer_3,
-            prob_map=prob_map,
+            prob_map=prob_map if full_telemetry else None,
             anchor_x=dx_3,
             anchor_y=dy_3,
             anchor_yaw=delta_yaw_3,
@@ -407,7 +407,9 @@ class AutonomousBrain:
             x0=dx_3,
             y0=dy_3,
             psi0=delta_yaw_3,
+            t_frame_start=t_start,
             pitch_rad=pitch_rad,
+            full_telemetry=full_telemetry,
         )
         t_plan_ms = (time.perf_counter() - t_plan_0) * 1000.0
         self.last_plan_res = plan_res

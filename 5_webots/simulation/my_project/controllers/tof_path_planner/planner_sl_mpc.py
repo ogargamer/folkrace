@@ -545,6 +545,7 @@ class CppCurvilinearSLMPC:
         t_frame_start: Optional[float] = None,
         frame_budget_ms: float = 15.5,
         pitch_rad: float = 0.0,
+        full_telemetry: bool = True,
     ) -> Dict[str, any]:
         """
         Solves the Curvilinear SL-MPC QP using high-speed native C++ core.
@@ -664,15 +665,12 @@ class CppCurvilinearSLMPC:
         cost_prim = float(self._out_best_cost.value)
         iters_prim = int(self._out_osqp_iters.value)
 
-        n_best_prim = _lib.sl_mpc_get_best_line(self._handle, self._buf_xs1, self._buf_ys1, self._max_pts)
-        best_line_prim = [[float(self._buf_xs1[i]), float(self._buf_ys1[i])] for i in range(n_best_prim)]
-
-        n_guide_prim = _lib.sl_mpc_get_guide_line(self._handle, self._buf_xs1, self._buf_ys1, self._max_pts)
-        guide_line_prim = [[float(self._buf_xs1[i]), float(self._buf_ys1[i])] for i in range(n_guide_prim)]
-
-        n_corr = _lib.sl_mpc_get_corridor(self._handle, self._buf_xs1, self._buf_ys1, self._buf_xs2, self._buf_ys2, self._max_pts)
-        corridor_left = [[float(self._buf_xs1[i]), float(self._buf_ys1[i])] for i in range(n_corr)]
-        corridor_right = [[float(self._buf_xs2[i]), float(self._buf_ys2[i])] for i in range(n_corr)]
+        if full_telemetry:
+            n_best_prim = _lib.sl_mpc_get_best_line(self._handle, self._buf_xs1, self._buf_ys1, self._max_pts)
+            best_line_prim = [[float(self._buf_xs1[i]), float(self._buf_ys1[i])] for i in range(n_best_prim)]
+        else:
+            best_line_prim = []
+        guide_line_prim = []
         t_prim_ms = (time.perf_counter() - t_prim_0) * 1000.0
 
         # ----------------------------------------------------------------------
@@ -760,14 +758,18 @@ class CppCurvilinearSLMPC:
                     cmd_steer_alt = float(self._out_steer.value)
                     cmd_speed_alt = float(self._out_speed.value)
                     cost_alt = float(self._out_best_cost.value)
-                    n_best_alt = _lib.sl_mpc_get_best_line(self._handle_alt, self._buf_xs1, self._buf_ys1, self._max_pts)
-                    best_line_alt = [[float(self._buf_xs1[i]), float(self._buf_ys1[i])] for i in range(n_best_alt)]
+                    if full_telemetry:
+                        n_best_alt = _lib.sl_mpc_get_best_line(self._handle_alt, self._buf_xs1, self._buf_ys1, self._max_pts)
+                        best_line_alt = [[float(self._buf_xs1[i]), float(self._buf_ys1[i])] for i in range(n_best_alt)]
                     t_alt_ms = (time.perf_counter() - t_alt_0) * 1000.0
 
         # ----------------------------------------------------------------------
         # 3. ARBITRATION BETWEEN INCUMBENT AND CHALLENGER
         # ----------------------------------------------------------------------
-        candidate_lines = [best_line_prim, best_line_alt] if (has_challenger and best_line_alt) else [best_line_prim]
+        candidate_lines = (
+            ([best_line_prim, best_line_alt] if (has_challenger and best_line_alt) else [best_line_prim])
+            if full_telemetry else []
+        )
 
         winner = 0
         depth_credit = 0.0
@@ -812,39 +814,55 @@ class CppCurvilinearSLMPC:
 
         win_handle = self._handle_alt if (winner == 1 and hasattr(self, "_handle_alt") and self._handle_alt) else self._handle
 
-        n_guide = _lib.sl_mpc_get_guide_line(win_handle, self._buf_xs1, self._buf_ys1, self._max_pts)
-        guide_line_win = [[float(self._buf_xs1[i]), float(self._buf_ys1[i])] for i in range(n_guide)] if n_guide > 0 else guide_line_prim
+        if full_telemetry:
+            n_guide = _lib.sl_mpc_get_guide_line(win_handle, self._buf_xs1, self._buf_ys1, self._max_pts)
+            guide_line_win = [[float(self._buf_xs1[i]), float(self._buf_ys1[i])] for i in range(n_guide)] if n_guide > 0 else guide_line_prim
 
-        n_corr = _lib.sl_mpc_get_corridor(win_handle, self._buf_xs1, self._buf_ys1, self._buf_xs2, self._buf_ys2, self._max_pts)
-        corridor_left = [[float(self._buf_xs1[i]), float(self._buf_ys1[i])] for i in range(n_corr)]
-        corridor_right = [[float(self._buf_xs2[i]), float(self._buf_ys2[i])] for i in range(n_corr)]
+            n_corr = _lib.sl_mpc_get_corridor(win_handle, self._buf_xs1, self._buf_ys1, self._buf_xs2, self._buf_ys2, self._max_pts)
+            corridor_left = [[float(self._buf_xs1[i]), float(self._buf_ys1[i])] for i in range(n_corr)]
+            corridor_right = [[float(self._buf_xs2[i]), float(self._buf_ys2[i])] for i in range(n_corr)]
 
-        # Extract Emergency Shield evasion branches (Step 0 Left/Right, Step 2 Left/Right, MPC Straight, Zero-Steer Straight)
-        t_shield_0 = time.perf_counter()
-        _lib.sl_mpc_get_shield_branches(
-            win_handle,
-            self._buf_xs1, self._buf_ys1, ctypes.byref(self._shield_k1_l_cnt), ctypes.byref(self._shield_k1_l_safe),
-            self._buf_xs2, self._buf_ys2, ctypes.byref(self._shield_k1_r_cnt), ctypes.byref(self._shield_k1_r_safe),
-            self._buf_xs3, self._buf_ys3, ctypes.byref(self._shield_k2_l_cnt), ctypes.byref(self._shield_k2_l_safe),
-            self._buf_xs4, self._buf_ys4, ctypes.byref(self._shield_k2_r_cnt), ctypes.byref(self._shield_k2_r_safe),
-            self._buf_xs5, self._buf_ys5, ctypes.byref(self._shield_straight_cnt), ctypes.byref(self._shield_straight_safe),
-            self._buf_xs6, self._buf_ys6, ctypes.byref(self._shield_straight_zero_cnt), ctypes.byref(self._shield_straight_zero_safe),
-            ctypes.byref(self._shield_active), ctypes.byref(self._shield_chosen)
-        )
+            # Extract Emergency Shield evasion branches (Step 0 Left/Right, Step 2 Left/Right, MPC Straight, Zero-Steer Straight)
+            t_shield_0 = time.perf_counter()
+            _lib.sl_mpc_get_shield_branches(
+                win_handle,
+                self._buf_xs1, self._buf_ys1, ctypes.byref(self._shield_k1_l_cnt), ctypes.byref(self._shield_k1_l_safe),
+                self._buf_xs2, self._buf_ys2, ctypes.byref(self._shield_k1_r_cnt), ctypes.byref(self._shield_k1_r_safe),
+                self._buf_xs3, self._buf_ys3, ctypes.byref(self._shield_k2_l_cnt), ctypes.byref(self._shield_k2_l_safe),
+                self._buf_xs4, self._buf_ys4, ctypes.byref(self._shield_k2_r_cnt), ctypes.byref(self._shield_k2_r_safe),
+                self._buf_xs5, self._buf_ys5, ctypes.byref(self._shield_straight_cnt), ctypes.byref(self._shield_straight_safe),
+                self._buf_xs6, self._buf_ys6, ctypes.byref(self._shield_straight_zero_cnt), ctypes.byref(self._shield_straight_zero_safe),
+                ctypes.byref(self._shield_active), ctypes.byref(self._shield_chosen)
+            )
 
-        n_k1_l = int(self._shield_k1_l_cnt.value)
-        n_k1_r = int(self._shield_k1_r_cnt.value)
-        n_k2_l = int(self._shield_k2_l_cnt.value)
-        n_k2_r = int(self._shield_k2_r_cnt.value)
-        n_str  = int(self._shield_straight_cnt.value)
-        n_str_zero = int(self._shield_straight_zero_cnt.value)
+            n_k1_l = int(self._shield_k1_l_cnt.value)
+            n_k1_r = int(self._shield_k1_r_cnt.value)
+            n_k2_l = int(self._shield_k2_l_cnt.value)
+            n_k2_r = int(self._shield_k2_r_cnt.value)
+            n_str  = int(self._shield_straight_cnt.value)
+            n_str_zero = int(self._shield_straight_zero_cnt.value)
 
-        k1_left_branch  = [[float(self._buf_xs1[i]), float(self._buf_ys1[i])] for i in range(n_k1_l)] if n_k1_l > 0 else []
-        k1_right_branch = [[float(self._buf_xs2[i]), float(self._buf_ys2[i])] for i in range(n_k1_r)] if n_k1_r > 0 else []
-        k2_left_branch  = [[float(self._buf_xs3[i]), float(self._buf_ys3[i])] for i in range(n_k2_l)] if n_k2_l > 0 else []
-        k2_right_branch = [[float(self._buf_xs4[i]), float(self._buf_ys4[i])] for i in range(n_k2_r)] if n_k2_r > 0 else []
-        straight_branch = [[float(self._buf_xs5[i]), float(self._buf_ys5[i])] for i in range(n_str)]  if n_str  > 0 else []
-        straight_zero_branch = [[float(self._buf_xs6[i]), float(self._buf_ys6[i])] for i in range(n_str_zero)] if n_str_zero > 0 else []
+            k1_left_branch  = [[float(self._buf_xs1[i]), float(self._buf_ys1[i])] for i in range(n_k1_l)] if n_k1_l > 0 else []
+            k1_right_branch = [[float(self._buf_xs2[i]), float(self._buf_ys2[i])] for i in range(n_k1_r)] if n_k1_r > 0 else []
+            k2_left_branch  = [[float(self._buf_xs3[i]), float(self._buf_ys3[i])] for i in range(n_k2_l)] if n_k2_l > 0 else []
+            k2_right_branch = [[float(self._buf_xs4[i]), float(self._buf_ys4[i])] for i in range(n_k2_r)] if n_k2_r > 0 else []
+            straight_branch = [[float(self._buf_xs5[i]), float(self._buf_ys5[i])] for i in range(n_str)]  if n_str  > 0 else []
+            straight_zero_branch = [[float(self._buf_xs6[i]), float(self._buf_ys6[i])] for i in range(n_str_zero)] if n_str_zero > 0 else []
+        else:
+            guide_line_win = []
+            corridor_left = []
+            corridor_right = []
+            t_shield_0 = time.perf_counter()
+            _lib.sl_mpc_get_shield_branches(
+                win_handle,
+                None, None, None, None,
+                None, None, None, None,
+                None, None, None, None,
+                None, None, None, None,
+                None, None, None, None,
+                None, None, None, None,
+                ctypes.byref(self._shield_active), ctypes.byref(self._shield_chosen)
+            )
 
         chosen_id = int(self._shield_chosen.value)
         chosen_name = None
@@ -859,26 +877,34 @@ class CppCurvilinearSLMPC:
         elif chosen_id == 4:
             chosen_name = "reverse"  # All evasion paths blocked — recovery manager should reverse
 
-        shield_info = {
-            "active": bool(self._shield_active.value),
-            "chosen_id": chosen_id,
-            "chosen_name": chosen_name,
-            "reverse_suggested": (chosen_id == 4),  # True when all 5-step evasion arcs are blocked
-            "k1_left": k1_left_branch,
-            "k1_left_safe": bool(self._shield_k1_l_safe.value),
-            "k1_right": k1_right_branch,
-            "k1_right_safe": bool(self._shield_k1_r_safe.value),
-            "k2_left": k2_left_branch,
-            "k2_left_safe": bool(self._shield_k2_l_safe.value),
-            "k2_right": k2_right_branch,
-            "k2_right_safe": bool(self._shield_k2_r_safe.value),
-            "straight": straight_branch,
-            "straight_safe": bool(self._shield_straight_safe.value),
-            "straight_mpc": straight_branch,
-            "straight_mpc_safe": bool(self._shield_straight_safe.value),
-            "straight_zero": straight_zero_branch,
-            "straight_zero_safe": bool(self._shield_straight_zero_safe.value),
-        }
+        if full_telemetry:
+            shield_info = {
+                "active": bool(self._shield_active.value),
+                "chosen_id": chosen_id,
+                "chosen_name": chosen_name,
+                "reverse_suggested": (chosen_id == 4),  # True when all 5-step evasion arcs are blocked
+                "k1_left": k1_left_branch,
+                "k1_left_safe": bool(self._shield_k1_l_safe.value),
+                "k1_right": k1_right_branch,
+                "k1_right_safe": bool(self._shield_k1_r_safe.value),
+                "k2_left": k2_left_branch,
+                "k2_left_safe": bool(self._shield_k2_l_safe.value),
+                "k2_right": k2_right_branch,
+                "k2_right_safe": bool(self._shield_k2_r_safe.value),
+                "straight": straight_branch,
+                "straight_safe": bool(self._shield_straight_safe.value),
+                "straight_mpc": straight_branch,
+                "straight_mpc_safe": bool(self._shield_straight_safe.value),
+                "straight_zero": straight_zero_branch,
+                "straight_zero_safe": bool(self._shield_straight_zero_safe.value),
+            }
+        else:
+            shield_info = {
+                "active": bool(self._shield_active.value),
+                "chosen_id": chosen_id,
+                "chosen_name": chosen_name,
+                "reverse_suggested": (chosen_id == 4),
+            }
         t_shield_ms = (time.perf_counter() - t_shield_0) * 1000.0
 
         # ----------------------------------------------------------------------

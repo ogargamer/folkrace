@@ -73,6 +73,8 @@ class SmartHybridCostmapFront {
 public:
     float x_min, x_max, y_min, y_max;
     float res;
+    float inv_res;
+    float scout_step_ds;
     int width, height, total_cells;
     float r_inflation_m;
     int inflation_cells;
@@ -104,12 +106,26 @@ public:
     // Static cone cells for each of the 16 sensors (precomputed once, sorted by r)
     std::vector<ConeCell> sensor_cones[16];
 
+    // Precomputed ray LUTs for fast gap scouting (zero runtime trig / div)
+    float sensor_cos[16];
+    float sensor_sin[16];
+    float sensor_col0[16];
+    float sensor_row0[16];
+    float sensor_dcol[16];
+    float sensor_drow[16];
+
+    struct PrecomputedRay {
+        float ox, oy, cos_az, sin_az, col0, row0, dcol, drow;
+    };
+    PrecomputedRay pod_rays[180];
+
     SmartHybridCostmapFront(
         float x_min_ = -1.25f, float x_max_ = 1.25f,
         float y_min_ = 0.0f, float y_max_ = 2.60f,
         float res_ = 0.015f, float r_inflation_m_ = 0.075f
     ) : x_min(x_min_), x_max(x_max_), y_min(y_min_), y_max(y_max_),
-        res(res_), r_inflation_m(r_inflation_m_) {
+        res(res_), inv_res(1.0f / res_), scout_step_ds(std::max(res_ * 0.8f, 0.012f)),
+        r_inflation_m(r_inflation_m_) {
 
         width = static_cast<int>(std::round((x_max - x_min) / res)) + 1;
         height = static_cast<int>(std::round((y_max - y_min) / res)) + 1;
@@ -150,6 +166,49 @@ public:
 
         // Precompute static cone cells for each sensor (done ONCE at initialization)
         _precompute_sensor_cones();
+
+        // Precompute 16 ToF beam ray LUTs and 180 corner pod ray LUTs
+        for (int i = 0; i < 16; ++i) {
+            float ch = std::cos(SENSOR_RIG[i].heading);
+            float sh = std::sin(SENSOR_RIG[i].heading);
+            sensor_cos[i] = ch;
+            sensor_sin[i] = sh;
+            sensor_col0[i] = (SENSOR_RIG[i].x0 - x_min) * inv_res;
+            sensor_row0[i] = (SENSOR_RIG[i].y0 - y_min) * inv_res;
+            sensor_dcol[i] = scout_step_ds * ch * inv_res;
+            sensor_drow[i] = scout_step_ds * sh * inv_res;
+        }
+
+        constexpr int NUM_CORNER_RAYS = 90;
+        constexpr float PI_F = 3.14159265358979323846f;
+        constexpr float DEG2RAD_F = PI_F / 180.0f;
+        struct PodCfg { float ox, oy, start_deg, end_deg; };
+        const PodCfg pods[2] = {
+            {-0.0575f, 0.091f, -4.5f, 85.5f},
+            { 0.0575f, 0.091f,  4.5f, -85.5f}
+        };
+        int ray_idx = 0;
+        for (int p = 0; p < 2; ++p) {
+            float start_rel = pods[p].start_deg * DEG2RAD_F;
+            float end_rel = pods[p].end_deg * DEG2RAD_F;
+            float step_rel = (end_rel - start_rel) / static_cast<float>(NUM_CORNER_RAYS - 1);
+            for (int r_i = 0; r_i < NUM_CORNER_RAYS; ++r_i) {
+                float rel_a = start_rel + r_i * step_rel;
+                float az = (PI_F * 0.5f) - rel_a;
+                float caz = std::cos(az);
+                float saz = std::sin(az);
+                pod_rays[ray_idx++] = {
+                    pods[p].ox,
+                    pods[p].oy,
+                    caz,
+                    saz,
+                    (pods[p].ox - x_min) * inv_res,
+                    (pods[p].oy - y_min) * inv_res,
+                    scout_step_ds * caz * inv_res,
+                    scout_step_ds * saz * inv_res
+                };
+            }
+        }
     }
 
     void _precompute_sensor_cones() {
@@ -200,7 +259,7 @@ public:
     }
 
     // MAIN PROCESS FUNCTION: EXACT CONTINUOUS MATH, ZERO RUNTIME ATAN2
-    void process_frame(const float* ranges_16) {
+    void process_frame(const float* ranges_16, bool compute_prob_and_unknown = true) {
         auto t_start = std::chrono::high_resolution_clock::now();
 
         // Step 1: Flat buffer reset (< 1 microsecond)
@@ -300,30 +359,51 @@ public:
         auto t_step2b = std::chrono::high_resolution_clock::now();
 
         // Step 3: Fast Sigmoid Probability Map, Confirmed Obstacle Threshold & Unknown Space
-        constexpr float LUT_SCALE = 2047.0f / 20.0f;
-        for (int i = 0; i < total_cells; ++i) {
-            float lo = std::max(-10.0f, std::min(10.0f, log_odds[i]));
-            int lut_idx = static_cast<int>((lo + 10.0f) * LUT_SCALE);
-            lut_idx = std::max(0, std::min(2047, lut_idx));
-            float p = sigmoid_lut[lut_idx];
-            prob_map[i] = p;
+        if (compute_prob_and_unknown) {
+            constexpr float LUT_SCALE = 2047.0f / 20.0f;
+            for (int i = 0; i < total_cells; ++i) {
+                float lo = std::max(-10.0f, std::min(10.0f, log_odds[i]));
+                int lut_idx = static_cast<int>((lo + 10.0f) * LUT_SCALE);
+                lut_idx = std::max(0, std::min(2047, lut_idx));
+                float p = sigmoid_lut[lut_idx];
+                prob_map[i] = p;
 
-            // Confirmed obstacle hits only (prob >= 0.65, log_odds >= 0.62)
-            uint8_t raw = (lo >= 0.62f) ? 1 : 0;
+                // Confirmed obstacle hits only (prob >= 0.65, log_odds >= 0.62)
+                uint8_t raw = (lo >= 0.62f) ? 1 : 0;
 
-            if (raw == 1) {
-                persistence_count[i] = static_cast<uint8_t>(std::max(0, std::min(10, persistence_frames))); // Configurable persistence frames
-            } else if (lo <= -2.0f) {
-                // Actively confirmed free by direct sensor cone: cancel persistence immediately
-                persistence_count[i] = 0;
-            } else if (persistence_count[i] > 0) {
-                persistence_count[i]--;
-                raw = 1; // Retain confirmed hit during transient dropout
+                if (raw == 1) {
+                    persistence_count[i] = static_cast<uint8_t>(std::max(0, std::min(10, persistence_frames))); // Configurable persistence frames
+                } else if (lo <= -2.0f) {
+                    // Actively confirmed free by direct sensor cone: cancel persistence immediately
+                    persistence_count[i] = 0;
+                } else if (persistence_count[i] > 0) {
+                    persistence_count[i]--;
+                    raw = 1; // Retain confirmed hit during transient dropout
+                }
+                raw_hazard[i] = raw;
+
+                // Unobserved space: untouched / uncertain cells (std::abs(lo) < 0.5f, prob ~ 0.50)
+                unknown_mask[i] = (std::abs(lo) < 0.5f && raw == 0) ? 1 : 0;
             }
-            raw_hazard[i] = raw;
-
-            // Unobserved space: untouched / uncertain cells (std::abs(lo) < 0.5f, prob ~ 0.50)
-            unknown_mask[i] = (std::abs(lo) < 0.5f && raw == 0) ? 1 : 0;
+        } else if (persistence_frames <= 0) {
+            for (int i = 0; i < total_cells; ++i) {
+                raw_hazard[i] = (log_odds[i] >= 0.62f) ? 1 : 0;
+            }
+        } else {
+            const uint8_t p_frames = static_cast<uint8_t>(std::max(0, std::min(10, persistence_frames)));
+            for (int i = 0; i < total_cells; ++i) {
+                float lo = log_odds[i];
+                uint8_t raw = (lo >= 0.62f) ? 1 : 0;
+                if (raw == 1) {
+                    persistence_count[i] = p_frames;
+                } else if (lo <= -2.0f) {
+                    persistence_count[i] = 0;
+                } else if (persistence_count[i] > 0) {
+                    persistence_count[i]--;
+                    raw = 1;
+                }
+                raw_hazard[i] = raw;
+            }
         }
         auto t_step3 = std::chrono::high_resolution_clock::now();
 
@@ -364,9 +444,11 @@ public:
         }
 
         // Confirmed obstacle boundaries take precedence over unknown space
-        for (int i = 0; i < total_cells; ++i) {
-            if (hazard_mask[i] == 1) {
-                unknown_mask[i] = 0;
+        if (compute_prob_and_unknown) {
+            for (int i = 0; i < total_cells; ++i) {
+                if (hazard_mask[i] == 1) {
+                    unknown_mask[i] = 0;
+                }
             }
         }
         auto t_end = std::chrono::high_resolution_clock::now();
@@ -455,28 +537,32 @@ public:
                 if (n_cand >= MAX_CAND) break;
                 float sx = SENSOR_RIG[i].x0;
                 float sy = SENSOR_RIG[i].y0;
-                float heading = SENSOR_RIG[i].heading;
                 float max_range = SENSOR_RIG[i].max_range;
                 float z = std::min(max_range, std::max(0.10f, ranges_16[i]));
 
-                float cos_h = std::cos(heading);
-                float sin_h = std::sin(heading);
+                float cos_h = sensor_cos[i];
+                float sin_h = sensor_sin[i];
                 float clear_dist = z;
                 bool hit_obs = false;
 
                 int n_b_steps = static_cast<int>(z / step_ds);
-                for (int s = 1; s <= n_b_steps; ++s) {
-                    float d = s * step_ds;
-                    float px = sx + d * cos_h;
-                    float py = sy + d * sin_h;
-                    int col = static_cast<int>(std::round((px - x_min) / res));
-                    int row = static_cast<int>(std::round((py - y_min) / res));
-                    if (col < 0 || col >= width || row < 0 || row >= height) {
-                        clear_dist = std::max(0.0f, d - step_ds);
+                float dcol = sensor_dcol[i];
+                float drow = sensor_drow[i];
+                float cf = sensor_col0[i] + dcol;
+                float rf = sensor_row0[i] + drow;
+                for (int s = 1; s <= n_b_steps; ++s, cf += dcol, rf += drow) {
+                    if (cf < -0.5f || rf < -0.5f) {
+                        clear_dist = std::max(0.0f, s * step_ds - step_ds);
+                        break;
+                    }
+                    int col = static_cast<int>(cf + 0.5f);
+                    int row = static_cast<int>(rf + 0.5f);
+                    if (col >= width || row >= height) {
+                        clear_dist = std::max(0.0f, s * step_ds - step_ds);
                         break;
                     }
                     if (active_haz[row * width + col] > 0) {
-                        clear_dist = std::max(0.0f, d - step_ds);
+                        clear_dist = std::max(0.0f, s * step_ds - step_ds);
                         hit_obs = true;
                         break;
                     }
@@ -500,69 +586,49 @@ public:
         }
 
         // 2. Evaluate 180 dense radial exploration rays (90 Left Pod, 90 Right Pod)
-        constexpr int NUM_CORNER_RAYS = 90;
         constexpr float PI = 3.14159265358979323846f;
         constexpr float DEG2RAD = PI / 180.0f;
 
-        // Left Pod (-0.058m, 0.091m): -4.5 deg to +85.5 deg (outer edge meeting angle = 171 deg)
-        // Right Pod (+0.058m, 0.091m): +4.5 deg to -85.5 deg
-        struct PodConfig {
-            float ox, oy;
-            float start_rel_deg, end_rel_deg;
-        };
-        const PodConfig pods[2] = {
-            {-0.0575f, 0.091f, -4.5f, 85.5f},
-            {0.0575f, 0.091f, 4.5f, -85.5f}
-        };
+        for (int r_idx = 0; r_idx < 180; ++r_idx) {
+            if (n_cand >= MAX_CAND) break;
+            const auto& ray = pod_rays[r_idx];
+            float clear_dist = max_r;
+            bool hit_obs = false;
 
-        for (int p = 0; p < 2; ++p) {
-            float ox = pods[p].ox;
-            float oy = pods[p].oy;
-            float start_rel = pods[p].start_rel_deg * DEG2RAD;
-            float end_rel = pods[p].end_rel_deg * DEG2RAD;
-            float step_rel = (end_rel - start_rel) / static_cast<float>(NUM_CORNER_RAYS - 1);
-
-            for (int r_idx = 0; r_idx < NUM_CORNER_RAYS; ++r_idx) {
-                if (n_cand >= MAX_CAND) break;
-                float rel_a = start_rel + r_idx * step_rel;
-                float az = (PI * 0.5f) - rel_a;
-                float cos_az = std::cos(az);
-                float sin_az = std::sin(az);
-                float clear_dist = max_r;
-                bool hit_obs = false;
-
-                for (int s = 1; s <= n_steps; ++s) {
-                    float d = s * step_ds;
-                    float px = ox + d * cos_az;
-                    float py = oy + d * sin_az;
-                    int col = static_cast<int>(std::round((px - x_min) / res));
-                    int row = static_cast<int>(std::round((py - y_min) / res));
-                    if (col < 0 || col >= width || row < 0 || row >= height) {
-                        clear_dist = std::max(0.0f, d - step_ds);
-                        break;
-                    }
-                    if (active_haz[row * width + col] > 0) {
-                        clear_dist = std::max(0.0f, d - step_ds);
-                        hit_obs = true;
-                        break;
-                    }
+            float cf = ray.col0 + ray.dcol;
+            float rf = ray.row0 + ray.drow;
+            for (int s = 1; s <= n_steps; ++s, cf += ray.dcol, rf += ray.drow) {
+                if (cf < -0.5f || rf < -0.5f) {
+                    clear_dist = std::max(0.0f, s * step_ds - step_ds);
+                    break;
                 }
-
-                float eff_dist = hit_obs ? std::max(0.05f, clear_dist - 0.06f) : clear_dist;
-                float tx = ox + eff_dist * cos_az;
-                float ty = std::max(0.08f, oy + eff_dist * sin_az);
-
-                float d_anchor_x = tx - anchor_x;
-                float d_anchor_y = std::max(0.05f, ty - anchor_y);
-                float total_dist = std::hypot(d_anchor_x, d_anchor_y);
-                float yaw_adj = fix_yaw_sign ? anchor_yaw : -anchor_yaw;
-                float rel_angle = wrap_angle(std::atan2(d_anchor_x, d_anchor_y) + yaw_adj);
-                float steer_equiv = -rel_angle;
-                float aperture_m = std::max(GAP_MIN_WIDTH_M, std::min(1.20f, total_dist * 0.30f));
-                bool is_clear = (!hit_obs);
-
-                candidates[n_cand++] = {tx, ty, total_dist, aperture_m, steer_equiv, rel_angle, is_clear};
+                int col = static_cast<int>(cf + 0.5f);
+                int row = static_cast<int>(rf + 0.5f);
+                if (col >= width || row >= height) {
+                    clear_dist = std::max(0.0f, s * step_ds - step_ds);
+                    break;
+                }
+                if (active_haz[row * width + col] > 0) {
+                    clear_dist = std::max(0.0f, s * step_ds - step_ds);
+                    hit_obs = true;
+                    break;
+                }
             }
+
+            float eff_dist = hit_obs ? std::max(0.05f, clear_dist - 0.06f) : clear_dist;
+            float tx = ray.ox + eff_dist * ray.cos_az;
+            float ty = std::max(0.08f, ray.oy + eff_dist * ray.sin_az);
+
+            float d_anchor_x = tx - anchor_x;
+            float d_anchor_y = std::max(0.05f, ty - anchor_y);
+            float total_dist = std::hypot(d_anchor_x, d_anchor_y);
+            float yaw_adj = fix_yaw_sign ? anchor_yaw : -anchor_yaw;
+            float rel_angle = wrap_angle(std::atan2(d_anchor_x, d_anchor_y) + yaw_adj);
+            float steer_equiv = -rel_angle;
+            float aperture_m = std::max(GAP_MIN_WIDTH_M, std::min(1.20f, total_dist * 0.30f));
+            bool is_clear = (!hit_obs);
+
+            candidates[n_cand++] = {tx, ty, total_dist, aperture_m, steer_equiv, rel_angle, is_clear};
         }
 
         if (n_cand == 0) {
@@ -619,14 +685,19 @@ public:
         int n_center_steps = static_cast<int>(max_r / step_ds);
         float cos_fwd = -std::sin(anchor_yaw);
         float sin_fwd =  std::cos(anchor_yaw);
-        for (int s = 1; s <= n_center_steps; ++s) {
-            float d = s * step_ds;
-            float px = anchor_x + d * cos_fwd;
-            float py = anchor_y + 0.095f + d * sin_fwd;
-            int col = static_cast<int>(std::round((px - x_min) / res));
-            int row = static_cast<int>(std::round((py - y_min) / res));
-            if (col < 0 || col >= width || row < 0 || row >= height || active_haz[row * width + col] > 0) {
-                d_center = std::max(0.0f, d - step_ds);
+        float dcol_fwd = step_ds * cos_fwd * inv_res;
+        float drow_fwd = step_ds * sin_fwd * inv_res;
+        float cf_fwd = (anchor_x - x_min) * inv_res + dcol_fwd;
+        float rf_fwd = (anchor_y + 0.095f - y_min) * inv_res + drow_fwd;
+        for (int s = 1; s <= n_center_steps; ++s, cf_fwd += dcol_fwd, rf_fwd += drow_fwd) {
+            if (cf_fwd < -0.5f || rf_fwd < -0.5f) {
+                d_center = std::max(0.0f, s * step_ds - step_ds);
+                break;
+            }
+            int col = static_cast<int>(cf_fwd + 0.5f);
+            int row = static_cast<int>(rf_fwd + 0.5f);
+            if (col >= width || row >= height || active_haz[row * width + col] > 0) {
+                d_center = std::max(0.0f, s * step_ds - step_ds);
                 break;
             }
         }
@@ -669,6 +740,8 @@ public:
         };
         ScoredCandidate scored[MAX_CAND];
         int n_scored = 0;
+        float cand_dist_factor[MAX_CAND] = {0.0f};
+        float cand_center_penalty[MAX_CAND] = {0.0f};
 
         for (int i = 0; i < n_cand; ++i) {
             const auto& c = candidates[i];
@@ -678,6 +751,7 @@ public:
             float d_thresh = gap_dist_thresh_m;
             float dist_base = d_cand / std::max(max_clear_dist, 0.10f);
             float dist_factor = (d_cand > d_thresh) ? dist_base * std::exp(gap_dist_exp_k * (d_cand - d_thresh)) : dist_base;
+            cand_dist_factor[i] = dist_factor;
 
             float width_norm = c.aperture / 1.00f;
             float steer_diff = std::abs(c.steer_equiv - steer_current);
@@ -688,6 +762,7 @@ public:
                 float angle_ratio = 1.0f - (std::abs(c.rel_angle) / theta_shadow);
                 center_penalty = straight_block_penalty * std::exp(scout_straight_exp_k * angle_ratio);
             }
+            cand_center_penalty[i] = center_penalty;
 
             // Neighboring ToF Zone Width Bonus (0.3x lowest cost / best neighboring zone clearance)
             float neighbor_bonus = 0.0f;
@@ -762,22 +837,16 @@ public:
 
                     // Must be separated by minimum distance AND not be an immediately adjacent zone
                     if ((lat_sep >= alt_min_separation_m || is_opposite_side) && (ang_sep >= MIN_ALT_ANGULAR_SEP_RAD || is_opposite_side)) {
-                        float d_cand = c.dist;
-                        float d_thresh = gap_dist_thresh_m;
-                        float dist_base = d_cand / std::max(max_clear_dist, 0.10f);
-                        float dist_factor = (d_cand > d_thresh) ? dist_base * std::exp(gap_dist_exp_k * (d_cand - d_thresh)) : dist_base;
+                        int c_idx = scored[k].cand_idx;
+                        float dist_factor = cand_dist_factor[c_idx];
                         float width_norm = c.aperture / 1.00f;
                         float steer_diff = std::abs(c.steer_equiv - steer_current);
                         float straight_diff = std::abs(c.rel_angle);
                         float side_bonus_alt = (w_side_clearance * 0.45f) * side_diff * (-std::sin(c.rel_angle));
                         float clear_bonus_alt = c.is_clear ? (3.0f * alt_aperture_bias) : 0.0f;
-                        float center_penalty = 0.0f;
-                        if (straight_block_penalty > 0.0f && theta_shadow > 0.001f && std::abs(c.rel_angle) < theta_shadow) {
-                            float angle_ratio = 1.0f - (std::abs(c.rel_angle) / theta_shadow);
-                            center_penalty = straight_block_penalty * std::exp(scout_straight_exp_k * angle_ratio);
-                        }
+                        float center_penalty = cand_center_penalty[c_idx];
 
-                        float center_bonus_alt = (w_gap_center > 0.0f) ? (w_gap_center * (cand_edge_margin[scored[k].cand_idx] / 0.50f)) : 0.0f;
+                        float center_bonus_alt = (w_gap_center > 0.0f) ? (w_gap_center * (cand_edge_margin[c_idx] / 0.50f)) : 0.0f;
                         float score_alt = w_gap_distance * dist_factor
                                         + (w_gap_width * alt_aperture_bias) * width_norm
                                         + side_bonus_alt
@@ -847,7 +916,7 @@ COSTMAP_API void costmap_process_frame(
 ) {
     if (!handle) return;
     auto* cm = static_cast<SmartHybridCostmapFront*>(handle);
-    cm->process_frame(ranges_16);
+    cm->process_frame(ranges_16, out_prob_map != nullptr);
 
     if (out_prob_map) {
         std::memcpy(out_prob_map, cm->prob_map.data(), cm->total_cells * sizeof(float));

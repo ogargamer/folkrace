@@ -133,9 +133,11 @@ def read_tof_multi_ray(dev: Any, noise_pct: float = 0.02) -> float:
     if hasattr(dev, "getRangeImage"):
         r_img = dev.getRangeImage()
         if r_img:
-            valid_r = [v for v in r_img if not math.isinf(v) and not math.isnan(v) and v <= TOF_MAX_RANGE_M]
-            if valid_r:
-                val = float(min(valid_r))
+            best = TOF_MAX_RANGE_M
+            for v in r_img:
+                if 0.0 < v < best:
+                    best = v
+            val = float(best)
     elif hasattr(dev, "getValue"):
         raw = dev.getValue()
         if not math.isinf(raw) and not math.isnan(raw):
@@ -249,13 +251,13 @@ class FolkraceVehicle:
         # 2. Discover Sensors
         self.tofs = {}
         self.tof_devices = []
+        step_ms_int = int(round(TIME_STEP_MS))
+        tof_step_ms_int = max(1, step_ms_int * self.planner_decimation)
         for name in TOF_SENSOR_NAMES:
             dev = robot.getDevice(name)
             if dev is None:
                 short_name = name.replace("tof_front_", "tof_")
                 dev = robot.getDevice(short_name)
-            step_ms_int = int(round(TIME_STEP_MS))
-            tof_step_ms_int = max(1, int(TOF_TIME_STEP_MS))
             if dev is not None:
                 dev.enable(tof_step_ms_int)
                 self.tofs[name] = dev
@@ -766,7 +768,6 @@ class FolkraceVehicle:
         self.cached_f_tof = f_tof
 
         if self.step_counter % self.planner_decimation == 0:
-            gx_curr, gy_curr, gyaw_curr = self.get_ground_truth_pose()
             current_physical_steer = float(getattr(self.ediff, "current_steer_rad", self.active_steer))
             target_speed, target_steer, brain_telem = self.brain.step(
                 tof_readings=tof_readings,
@@ -822,12 +823,19 @@ class FolkraceVehicle:
             self.proj_steer = self.brain.pose_tracker.proj_steer
 
         # 4. Drift, Traction & Stability Control Execution
-        rear_flow = self.get_ground_truth_rear_axle_flow()
+        if ENABLE_OPTICAL_FLOW_SENSOR or self.drift_controller.enabled or full_telemetry:
+            rear_flow = self.get_ground_truth_rear_axle_flow()
+            v_fwd_flow = float(rear_flow["v_forward"])
+            beta_flow = float(rear_flow["slip_angle_rad"])
+        else:
+            rear_flow = None
+            v_fwd_flow = self.v_est
+            beta_flow = 0.0
         live_gyro_z = float(self.gyro.getValues()[2]) if self.gyro else self.cached_yaw_rate
 
         drift_res = self.drift_controller.update(
-            v_forward=float(rear_flow["v_forward"]),
-            beta_rear=float(rear_flow["slip_angle_rad"]),
+            v_forward=v_fwd_flow,
+            beta_rear=beta_flow,
             gyro_z=live_gyro_z,
             target_steer_rad=self.cached_target_steer,
             base_mu=self.base_mu,
@@ -835,11 +843,13 @@ class FolkraceVehicle:
         )
 
         # Couple Dynamic MU to Upstream SL-MPC Planner & Low-Level Harness
-        self.mu_val = float(drift_res["effective_mu"])
-        if hasattr(self.planner, "set_dynamic_mu"):
-            self.planner.set_dynamic_mu(self.mu_val)
-        if hasattr(self.brain, "set_dynamic_mu"):
-            self.brain.set_dynamic_mu(self.mu_val)
+        new_mu = float(drift_res["effective_mu"])
+        if new_mu != self.mu_val:
+            self.mu_val = new_mu
+            if hasattr(self.planner, "set_dynamic_mu"):
+                self.planner.set_dynamic_mu(self.mu_val)
+            if hasattr(self.brain, "set_dynamic_mu"):
+                self.brain.set_dynamic_mu(self.mu_val)
 
         # 4b. Ramp Detection & Speed Governance
         ramp_res = self.ramp_detector.update(
@@ -904,19 +914,24 @@ class FolkraceVehicle:
 
 
         # 8. Assemble Telemetry Payload (Full for GUI / Lean for headless GA)
-        gx, gy, gyaw = self.get_ground_truth_pose()
-        v_real = self.get_ground_truth_velocity()
+        if full_telemetry:
+            gx, gy, gyaw = self.get_ground_truth_pose()
+            v_real = self.get_ground_truth_velocity()
 
-        aww_detailed = self.watchdog.get_detailed_telemetry(
-            x=gx,
-            y=gy,
-            yaw=gyaw,
-            v_est=self.v_est,
-            yaw_rate=self.cached_yaw_rate,
-            now_s=sim_time,
-            hazard_mask=self.costmap.hazard_mask,
-        )
-        aww_detailed["corrective_substate"] = getattr(self.recovery_manager, "corrective_substate", "FORWARD")
+            aww_detailed = self.watchdog.get_detailed_telemetry(
+                x=gx,
+                y=gy,
+                yaw=gyaw,
+                v_est=self.v_est,
+                yaw_rate=self.cached_yaw_rate,
+                now_s=sim_time,
+                hazard_mask=self.costmap.hazard_mask,
+            )
+            aww_detailed["corrective_substate"] = getattr(self.recovery_manager, "corrective_substate", "FORWARD")
+        else:
+            gx, gy, gyaw = self.x_est, self.y_est, self.yaw_est
+            v_real = self.v_est
+            aww_detailed = None
         # Compose combined operational mode string (e.g. "SL_MPC", "SL_MPC_RAMP", "SL_MPC_DRIFT")
         drift_mode = drift_res.get("mode", "GRIP")
         if ramp_res["is_on_ramp"]:

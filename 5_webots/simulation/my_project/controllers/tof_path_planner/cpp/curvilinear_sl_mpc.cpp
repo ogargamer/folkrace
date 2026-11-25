@@ -53,6 +53,11 @@ struct HermiteState {
   double ny;
 };
 
+// Cached OSQP matrix values for the global solver instance
+static bool g_osqp_mat_valid = false;
+static double g_osqp_last_P[MPC_NNZ_P];
+static double g_osqp_last_A[MPC_NNZ_A];
+
 // ==============================================================================
 // OPTION 2: CURVILINEAR SL-MPC PLANNER CORE
 // ==============================================================================
@@ -159,6 +164,12 @@ public:
   double saved_x[MPC_N_VARS];
   double saved_y[MPC_N_CONSTR];
 
+  bool has_cached_dyn;
+  double cached_v_bar;
+  double cached_dt_val;
+  double cached_Ad[7][7];
+  double cached_Bd[7][2];
+
   CurvilinearSLMPCNative(void *cm_handle, CostmapProbeFn probe_fn,
                          int horizon_N = 30, double dt_val = 0.020,
                          double q_prog = 8.0, double q_lat = 18.0,
@@ -184,7 +195,8 @@ public:
         shield_k1_r_safe(false), shield_k2_l_cnt(0), shield_k2_l_safe(false),
         shield_k2_r_cnt(0), shield_k2_r_safe(false), shield_straight_cnt(0),
         shield_straight_safe(false), shield_straight_zero_cnt(0),
-        shield_straight_zero_safe(false), has_solution(false) {
+        shield_straight_zero_safe(false), has_solution(false),
+        has_cached_dyn(false), cached_v_bar(0.0), cached_dt_val(0.0) {
     // Copy constant structure of A_data
     std::memset(A_data, 0, sizeof(A_data));
     for (int k = 0; k < NUM_CONST_ENTRIES; ++k) {
@@ -394,6 +406,11 @@ public:
   // --------------------------------------------------------------------------
   void discretize_dynamics(double v_bar, double dt_val, double Ad[7][7],
                            double Bd[7][2]) {
+    if (has_cached_dyn && v_bar == cached_v_bar && dt_val == cached_dt_val) {
+      std::memcpy(Ad, cached_Ad, sizeof(cached_Ad));
+      std::memcpy(Bd, cached_Bd, sizeof(cached_Bd));
+      return;
+    }
     double Ac[7][7] = {0};
     Ac[0][3] = 1.0;
     Ac[1][2] = v_bar;
@@ -474,6 +491,11 @@ public:
       Bd[i][0] = M[i][14];
       Bd[i][1] = M[i][15];
     }
+    std::memcpy(cached_Ad, Ad, sizeof(cached_Ad));
+    std::memcpy(cached_Bd, Bd, sizeof(cached_Bd));
+    cached_v_bar = v_bar;
+    cached_dt_val = dt_val;
+    has_cached_dyn = true;
   }
 
   // --------------------------------------------------------------------------
@@ -1249,8 +1271,15 @@ public:
     }
 
     // 5. Update OSQP problem data and solve
-    osqp_update_data_mat(&solver, P_data, OSQP_NULL, MPC_NNZ_P, A_data,
-                         OSQP_NULL, MPC_NNZ_A);
+    if (!g_osqp_mat_valid ||
+        std::memcmp(P_data, g_osqp_last_P, sizeof(P_data)) != 0 ||
+        std::memcmp(A_data, g_osqp_last_A, sizeof(A_data)) != 0) {
+      osqp_update_data_mat(&solver, P_data, OSQP_NULL, MPC_NNZ_P, A_data,
+                           OSQP_NULL, MPC_NNZ_A);
+      std::memcpy(g_osqp_last_P, P_data, sizeof(P_data));
+      std::memcpy(g_osqp_last_A, A_data, sizeof(A_data));
+      g_osqp_mat_valid = true;
+    }
     osqp_update_data_vec(&solver, q_vec, l_arr, u_arr);
 
     // Load instance-specific warm start to prevent dual-solve

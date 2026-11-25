@@ -93,12 +93,17 @@ def main():
 
     cmd = [
         webots_cmd,
+        "--stdout",
+        "--stderr",
         "--mode=realtime",
         WORLD_PATH,
     ]
 
     print(f"[Launcher] Launching Webots in realtime 3D visualization mode...")
-    webots_proc = subprocess.Popen(cmd, env=env)
+    webots_proc = subprocess.Popen(cmd, env=env, cwd=MY_PROJECT_DIR)
+
+    import atexit
+    atexit.register(_kill_proc, webots_proc)
 
     try:
         while True:

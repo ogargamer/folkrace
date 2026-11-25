@@ -206,6 +206,9 @@ class CppSmartHybridCostmap:
         self.prob_map = np.zeros((self.height, self.width), dtype=np.float32)
         self.hazard_mask = np.zeros((self.height, self.width), dtype=np.uint8)
         self.unknown_mask = np.zeros((self.height, self.width), dtype=np.uint8)
+        self._prob_ptr = self.prob_map.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+        self._haz_ptr = self.hazard_mask.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8))
+        self._unk_ptr = self.unknown_mask.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8))
         self._lib = _lib
         self.raw_ranges_c = (ctypes.c_float * 16)()
 
@@ -282,7 +285,7 @@ class CppSmartHybridCostmap:
         return 2.40
 
     def process_tof_frame(
-        self, readings: Dict[str, float], noise_pct: float = 0.0
+        self, readings: Dict[str, float], noise_pct: float = 0.0, need_prob_map: bool = True
     ) -> Tuple[np.ndarray, np.ndarray, float]:
         """Drop-in 50/60 Hz Webots controller execution method returning (prob_map, hazard_mask, exec_ms)."""
         import time
@@ -300,16 +303,17 @@ class CppSmartHybridCostmap:
         _lib.costmap_process_frame(
             self._handle,
             self.raw_ranges_c,
-            self.prob_map.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
-            self.hazard_mask.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
+            self._prob_ptr if need_prob_map else None,
+            self._haz_ptr,
         )
-        if hasattr(_lib, "costmap_get_unknown_mask"):
-            _lib.costmap_get_unknown_mask(
-                self._handle,
-                self.unknown_mask.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
-            )
-        else:
-            self.unknown_mask = ((self.prob_map >= 0.38) & (self.prob_map <= 0.65) & (self.hazard_mask == 0)).astype(np.uint8)
+        if need_prob_map:
+            if hasattr(_lib, "costmap_get_unknown_mask"):
+                _lib.costmap_get_unknown_mask(
+                    self._handle,
+                    self._unk_ptr,
+                )
+            else:
+                self.unknown_mask = ((self.prob_map >= 0.38) & (self.prob_map <= 0.65) & (self.hazard_mask == 0)).astype(np.uint8)
 
         if hasattr(_lib, "costmap_get_perf"):
             _lib.costmap_get_perf(self._handle, self._perf_buf)
@@ -420,7 +424,7 @@ class CppSmartHybridCostmap:
         Returns: targets_list [(tx, ty, aperture), ...]
         """
         haz_ptr = None
-        if hazard_mask is not None:
+        if hazard_mask is not None and hazard_mask is not self.hazard_mask:
             haz_c = np.ascontiguousarray(hazard_mask, dtype=np.uint8)
             haz_ptr = haz_c.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8))
 

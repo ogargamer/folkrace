@@ -748,10 +748,12 @@ def run_fast_champion_drive(robot: any, vehicle: FolkraceVehicle) -> None:
     print("=" * 80, flush=True)
 
     # 1. Load champion configuration directly from best_planner_genome.json
+    from planner_config import BEST_GENOME_SOURCE_PATH
     best_path = os.path.join(GA_OPTIMIZER_DIR, "best_planner_genome.json")
     ckpt_path = os.path.join(GA_OPTIMIZER_DIR, "ga_checkpoint.json")
     genes: Dict[str, Any] = {}
     title = "Champion SL-MPC"
+    loaded_path: Optional[str] = None
 
     for candidate_path in [best_path, ckpt_path]:
         if os.path.exists(candidate_path):
@@ -760,12 +762,19 @@ def run_fast_champion_drive(robot: any, vehicle: FolkraceVehicle) -> None:
                     cfg = json.load(f)
                 genes = cfg.get("genes") or cfg.get("best_genome") or cfg
                 title = cfg.get("title", cfg.get("meta", {}).get("title", os.path.basename(candidate_path)))
+                loaded_path = candidate_path
                 print(f"[Fast Drive] Loaded champion genome from {os.path.basename(candidate_path)}: {title}", flush=True)
                 break
             except Exception as e:
                 print(f"[Fast Drive] Warning: Could not parse {candidate_path}: {e}", flush=True)
 
-    vehicle.configure(genes)
+    already_configured = (
+        loaded_path is not None
+        and BEST_GENOME_SOURCE_PATH is not None
+        and os.path.abspath(loaded_path) == os.path.abspath(BEST_GENOME_SOURCE_PATH)
+    )
+    if genes and not already_configured:
+        vehicle.configure(genes)
 
     traj_csv = find_trajectory_csv()
     obs_engine = ReverseObstacleEngine(traj_csv, speed_mps=MOVING_OBSTACLE_SPEED_MPS)
@@ -777,13 +786,10 @@ def run_fast_champion_drive(robot: any, vehicle: FolkraceVehicle) -> None:
         speed_mps=MOVING_OBSTACLE_SPEED_MPS,
     )
 
-    track_tracker = WebotsTrackProgressTracker(traj_csv)
-
     from ga_planner_config import ROBOT_START_POS, ROBOT_START_ROT
     start_pos = list(ROBOT_START_POS)
     start_rot = list(ROBOT_START_ROT)
     vehicle.reset(start_pos=start_pos, start_rot=start_rot)
-    track_tracker.reset(start_pos[:2])
 
     sim_time = 0.0
     last_print_time = 0.0
@@ -792,17 +798,15 @@ def run_fast_champion_drive(robot: any, vehicle: FolkraceVehicle) -> None:
 
     while robot.step(STEP_MS_INT) != -1:
         sim_time += DT
-        obs_manager.update(sim_time)
+        if not obs_manager.is_physical_robots:
+            obs_manager.update(sim_time)
         telemetry, planner_ran = vehicle.step(dt=DT, full_telemetry=False)
-
-        gx, gy, _ = vehicle.get_ground_truth_pose()
-        track_dist = track_tracker.update([gx, gy])
 
         # Throttle console telemetry to 1 Hz so stdout pipe never stalls physics
         if planner_ran and (sim_time - last_print_time >= 1.0):
             last_print_time = sim_time
             f_tof_val = telemetry.get("f_tof", 0.0)
-            v_real_val = telemetry.get("v_real", 0.0)
+            v_real_val = vehicle.get_ground_truth_velocity()
             v_cmd_val = telemetry.get("v_cmd", 0.0)
             v_plan_val = telemetry.get("v_plan", telemetry.get("v_tgt", v_cmd_val))
             steer_cmd_val = telemetry.get("steer_cmd_deg", telemetry.get("steer_deg", 0.0))
