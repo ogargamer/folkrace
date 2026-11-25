@@ -498,44 +498,21 @@ PROTO only_front_tofs [
     contactMaterial "chassis"
     boundingObject Group {
       children [
+        # Solid lower chassis core enclosing frame and wheel clearances (prevents wall/pillar tunneling & trapping)
         Pose {
-          translation 0 0.101 0.018
+          translation 0 0.0015 0.02
           children [
             Box {
-              size 0.15 0.004 0.034
+              size 0.15 0.203 0.04
             }
           ]
         }
+        # Solid upper body shell matching visual housing (prevents opponent/wall clipping above top plate)
         Pose {
-          translation 0 -0.0995 0.018
+          translation 0 -0.0075 0.067
           children [
             Box {
-              size 0.15 0.001 0.034
-            }
-          ]
-        }
-        Pose {
-          translation -0.072 0 0.018
-          children [
-            Box {
-              size 0.006 0.198 0.034
-            }
-          ]
-        }
-        Pose {
-          translation 0.072 0 0.018
-          children [
-            Box {
-              size 0.006 0.198 0.034
-            }
-          ]
-        }
-        # Top plate 20x15x1cm elevated above wheels with safety margin
-        Pose {
-          translation 0 0 0.035
-          children [
-            Box {
-              size 0.15 0.20 0.01
+              size 0.136 0.165 0.056
             }
           ]
         }
@@ -546,6 +523,10 @@ PROTO only_front_tofs [
       mass IS bodyMass
       centerOfMass [
         0 0 -0.005
+      ]
+      inertiaMatrix [
+        %<= (0.002861 * fields.bodyMass.value / 0.6).toFixed(6) >% %<= (0.002133 * fields.bodyMass.value / 0.6).toFixed(6) >% %<= (0.003769 * fields.bodyMass.value / 0.6).toFixed(6) >%
+        0 0 0
       ]
       damping Damping {
         linear 0.05
