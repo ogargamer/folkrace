@@ -217,6 +217,7 @@ MPC_NARROW_CORRIDOR_V_GAIN: float = 0.0                       # Speed moderation
 # 6.1 Recovery Kinematics & Speed Limits
 RECOVERY_STEER_ANGLE_RAD: float = MAX_STEERING_RAD     # radians (~32.22 deg) steering lock during reverse arc
 RECOVERY_REVERSE_SPEED_MPS: float = V_MIN_CRUISE       # m/s dynamic cornering speed floor (~1.33 m/s)
+RECOVERY_CORRECTIVE_180_SPEED_MPS: float = 0.9349     # m/s controlled forward U-turn speed well below TIRE_MU*g
 RECOVERY_SERVO_SLEW_RAD_S: float = SERVO_MAX_SPEED_RAD_S  # rad/s centering slew rate (15.4 rad/s at 8.4V)
 RECOVERY_ARC_LOOKAHEAD_M: float = 0.146                # meters length of kinematic escape arcs projected on costmap
 
@@ -225,6 +226,12 @@ RECOVERY_CLEARANCE_EXIT_M: float = 0.25      # meters (25 cm) minimum forward cl
 RECOVERY_REVERSE_STROKE_MAX_S: float = 1.0  # seconds maximum reverse stroke failsafe
 RECOVERY_TOTAL_TIMEOUT_S: float = 1.2       # seconds maximum total recovery duration before forced exit
 RECOVERY_EXIT_MIN_TIME_S: float = 0.0        # seconds minimum recovery stroke time before clearance check
+RECOVERY_180_TIMEOUT_S: float = 2.5          # seconds timeout for forward-only corrective 180 turn
+RECOVERY_180_TIMEOUT_WITH_REV_S: float = 3.5 # seconds timeout for corrective 180 when reverse support engaged
+RECOVERY_180_REV_CLEAR_M: float = 0.4208     # meters forward clearance required to exit CORRECTIVE_180[REVERSE]
+RECOVERY_180_REV_MIN_S: float = 0.1361       # seconds minimum reverse duration in CORRECTIVE_180[REVERSE]
+RECOVERY_180_ALIGN_DEG: float = 30.7898      # degrees target alignment tolerance for CORRECTIVE_180 exit
+RECOVERY_180_EARLY_EXIT_TURN_DEG: float = 95.0  # degrees minimum net turn before allowing early exit
 
 # 6.3 Multi-Criteria Exit Conditions
 RECOVERY_ANY_TOF_EXIT_M: float = 0.60        # meters (60 cm) minimum clearance on at least one ToF to conclude reverse
@@ -240,12 +247,19 @@ AWW_BREADCRUMB_LOOKBACK_M: float = 8.0         # meters baseline historical path
 AWW_BREADCRUMB_DURATION_SCALE: float = 0.35    # scale factor for breadcrumb fade (0.35x * 8.0m = 2.8m effective window)
 AWW_BREADCRUMB_SPACING_M: float = 0.05         # meters minimum spatial spacing between breadcrumb nodes
 AWW_BREADCRUMB_MAX_TIMEOUT_S: float = 6.0      # seconds maximum timeout before breadcrumb history expires
+AWW_CONFIRM_TIME_S: float = 0.0543             # seconds continuous confirmation (~3-4 frames @ 60 Hz)
+AWW_POST_RECOVERY_COOLDOWN_S: float = 0.3703   # seconds cooldown after CORRECTIVE_180 before re-arming
+AWW_MIN_CONFIRMED_BREADCRUMBS: int = 4         # minimum confirmed opposing LOS breadcrumbs required
+AWW_MAX_DETECT_DIST_M: float = 2.223           # meters forward LOS search envelope (within 2.4m ToF / 2.6m costmap)
+AWW_MAX_LAT_XV_M: float = 0.538                # meters lateral in-corridor bound |lat_bc| for wrong-way LOS matching
 
 # 7.2 Narrow-Cone Early Gap Exit Sentry
 AWW_EARLY_EXIT_MIN_GAP_M: float = 1.4          # meters minimum scouted gap distance to qualify as long-path early exit
 AWW_EARLY_EXIT_CONE_DEG: float = 30.0          # degrees total narrow cone width (±15 deg) oriented along candidate gap vector
 AWW_EARLY_EXIT_OPPOSING_DEG: float = 110.0     # degrees heading divergence threshold for opposing breadcrumbs in gap corridor
 AWW_EARLY_EXIT_MIN_BC_DIST_M: float = 0.15     # meters minimum distance from robot to evaluate opposing breadcrumbs in gap corridor (starts 15cm out)
+AWW_EARLY_EXIT_CORRIDOR_HALF_WIDTH_M: float = 0.35  # meters max lateral corridor half-width for early-exit capsule
+AWW_EARLY_EXIT_MIN_HALF_WIDTH_M: float = 0.08       # meters min close-range lateral half-width for early-exit capsule
 
 
 # ==============================================================================

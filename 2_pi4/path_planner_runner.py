@@ -316,12 +316,16 @@ def run_path_planner():
 
             # Ingest MCU feedback (prefer latest frame, fallback to last valid hardware frame within LINK_TIMEOUT_S)
             active_mcu = latest_mcu_pkt or (last_mcu_pkt if (now_mono - last_mcu_time <= LINK_TIMEOUT_S) else None)
+            has_imu_yaw = False
+            yaw_deg = 0.0
             if active_mcu and "rpms_act" in active_mcu:
                 v_actual = float(active_mcu.get("v_est", active_mcu.get("v_real", v_actual)))
                 steer_actual_deg = float(active_mcu.get("steer_actual_deg", steer_actual_deg))
                 gyro_z = float(active_mcu.get("gyro_z", 0.0))
                 pitch_deg = float(active_mcu.get("pitch_deg", 0.0))
                 roll_deg = float(active_mcu.get("roll_deg", 0.0))
+                has_imu_yaw = ("yaw_deg" in active_mcu)
+                yaw_deg = float(active_mcu.get("yaw_deg", 0.0))
             else:
                 v_actual = 0.0
                 steer_actual_deg = 0.0
@@ -371,6 +375,7 @@ def run_path_planner():
                     full_telemetry=need_full_telem,
                     pitch_rad=math.radians(pitch_deg),
                     roll_rad=math.radians(roll_deg),
+                    imu_yaw_rad=(math.radians(yaw_deg) if has_imu_yaw else None),
                 )
                 steer_cmd_deg = math.degrees(steer_cmd_rad)
                 run_mode_val = 1
@@ -400,6 +405,8 @@ def run_path_planner():
                 brain.cached_target_speed = 0.0
                 brain.cached_target_steer = 0.0
                 brain.recovery_manager.reset()
+                brain.watchdog.reset()
+                brain.pose_tracker.reset()
                 mode_str = "BRAKING" if run_mode_val == 1 else ("STOPPED" if not planner_running else "STANDBY")
                 status_str = "BRAKING" if run_mode_val == 1 else ("STOPPED" if not planner_running else "OFFLINE")
                 brain_telem = {

@@ -68,6 +68,7 @@ class PoseTracker:
         self.y = 0.0
         self.yaw = 0.0
         self.total_distance = 0.0
+        self._imu_yaw_offset: Optional[float] = None
 
         # Ring buffer holding past poses (x, y, yaw)
         history_len = self.tof_latency_steps + 1
@@ -86,6 +87,7 @@ class PoseTracker:
         self.y = float(y)
         self.yaw = float(yaw)
         self.total_distance = 0.0
+        self._imu_yaw_offset = None
         history_len = self.tof_latency_steps + 1
         self.pose_history = collections.deque(
             [(self.x, self.y, self.yaw) for _ in range(history_len)],
@@ -95,11 +97,18 @@ class PoseTracker:
         self.proj_v = 0.0
         self.proj_steer = 0.0
 
-    def update_odometry(self, v_est: float, yaw_rate: float, dt: float) -> Tuple[float, float, float]:
+    def update_odometry(
+        self,
+        v_est: float,
+        yaw_rate: float,
+        dt: float,
+        imu_yaw_rad: Optional[float] = None,
+    ) -> Tuple[float, float, float]:
         """
         Integrates forward velocity and yaw rate into local Cartesian coordinates.
         Robot Body convention: +Y is Forward, +X is Right, +Z is Up (turning Left is CCW / positive).
-        Uses second-order midpoint heading for curvature accuracy.
+        Uses BNO08x fused yaw directly when available (prevents 60 Hz gyro aliasing during collisions),
+        falling back to second-order midpoint gyro integration otherwise.
         Dynamically adapts past pose history buffer to active timestep dt (time-based parity).
         """
         if math.isnan(v_est) or math.isinf(v_est):
@@ -119,13 +128,21 @@ class PoseTracker:
                         current_poses.insert(0, current_poses[0] if current_poses else (self.x, self.y, self.yaw))
                     self.pose_history = collections.deque(current_poses[-target_len:], maxlen=target_len)
 
-        yaw_mid = self.yaw + 0.5 * yaw_rate * dt
+        if imu_yaw_rad is not None and not (math.isnan(imu_yaw_rad) or math.isinf(imu_yaw_rad)):
+            if self._imu_yaw_offset is None:
+                self._imu_yaw_offset = wrap_to_pi(self.yaw - float(imu_yaw_rad))
+            new_yaw = wrap_to_pi(float(imu_yaw_rad) + self._imu_yaw_offset)
+            yaw_mid = wrap_to_pi(self.yaw + 0.5 * wrap_to_pi(new_yaw - self.yaw))
+        else:
+            yaw_mid = self.yaw + 0.5 * yaw_rate * dt
+            new_yaw = wrap_to_pi(self.yaw + yaw_rate * dt)
+
         dx = -v_est * math.sin(yaw_mid) * dt
         dy =  v_est * math.cos(yaw_mid) * dt
 
         self.x += dx
         self.y += dy
-        self.yaw = wrap_to_pi(self.yaw + yaw_rate * dt)
+        self.yaw = new_yaw
         self.total_distance += abs(v_est) * dt
 
         self.pose_history.append((self.x, self.y, self.yaw))

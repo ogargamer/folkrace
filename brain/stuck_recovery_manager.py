@@ -20,9 +20,16 @@ try:
         GRAVITY_G,
         MPC_MU_FRICTION,
         RECOVERY_REVERSE_SPEED_MPS,
+        RECOVERY_CORRECTIVE_180_SPEED_MPS,
         RECOVERY_STEER_ANGLE_RAD,
         RECOVERY_REVERSE_STROKE_MAX_S,
         RECOVERY_TOTAL_TIMEOUT_S,
+        RECOVERY_180_TIMEOUT_S,
+        RECOVERY_180_TIMEOUT_WITH_REV_S,
+        RECOVERY_180_REV_CLEAR_M,
+        RECOVERY_180_REV_MIN_S,
+        RECOVERY_180_ALIGN_DEG,
+        RECOVERY_180_EARLY_EXIT_TURN_DEG,
         RECOVERY_CLEARANCE_EXIT_M,
         RECOVERY_ANY_TOF_EXIT_M,
         RECOVERY_EXIT_MIN_TIME_S,
@@ -38,9 +45,16 @@ except ImportError:
         GRAVITY_G,
         MPC_MU_FRICTION,
         RECOVERY_REVERSE_SPEED_MPS,
+        RECOVERY_CORRECTIVE_180_SPEED_MPS,
         RECOVERY_STEER_ANGLE_RAD,
         RECOVERY_REVERSE_STROKE_MAX_S,
         RECOVERY_TOTAL_TIMEOUT_S,
+        RECOVERY_180_TIMEOUT_S,
+        RECOVERY_180_TIMEOUT_WITH_REV_S,
+        RECOVERY_180_REV_CLEAR_M,
+        RECOVERY_180_REV_MIN_S,
+        RECOVERY_180_ALIGN_DEG,
+        RECOVERY_180_EARLY_EXIT_TURN_DEG,
         RECOVERY_CLEARANCE_EXIT_M,
         RECOVERY_ANY_TOF_EXIT_M,
         RECOVERY_EXIT_MIN_TIME_S,
@@ -87,6 +101,7 @@ class StuckRecoveryManager:
         self,
         reverse_speed_m_s: float = RECOVERY_REVERSE_SPEED_MPS,
         forward_speed_m_s: float = V_MIN_CRUISE,
+        corrective_forward_speed_m_s: float = RECOVERY_CORRECTIVE_180_SPEED_MPS,
         steer_angle_rad: float = RECOVERY_STEER_ANGLE_RAD,
         clearance_exit_m: float = RECOVERY_CLEARANCE_EXIT_M,
         any_tof_exit_m: float = RECOVERY_ANY_TOF_EXIT_M,
@@ -100,6 +115,7 @@ class StuckRecoveryManager:
         self.state = StuckRecoveryState.NORMAL_DRIVE
         self.reverse_speed = float(reverse_speed_m_s)
         self.forward_speed = float(forward_speed_m_s)
+        self.corrective_forward_speed = float(corrective_forward_speed_m_s)
         self.steer_angle = float(steer_angle_rad)
         self.clearance_exit_m = float(clearance_exit_m)
         self.any_tof_exit_m = float(any_tof_exit_m)
@@ -118,10 +134,18 @@ class StuckRecoveryManager:
         self.target_corrective_yaw: Optional[float] = None
         self.last_corrective_yaw: float = 0.0
         self.corrective_accumulated_turn: float = 0.0
+        self.corrective_net_turn: float = 0.0
+        self.corrective_used_reverse: bool = False
         self.corrective_substate: str = "FORWARD"  # "FORWARD" or "REVERSE"
         self.corrective_steer_dir: float = 1.0     # +1.0 (Left) or -1.0 (Right) towards more open side
         self.corrective_reverse_timer: float = 0.0
         self.forward_grace_timer: float = 0.0
+        self._rev_best_d_straight: float = 0.0
+        self._rev_stall_timer: float = 0.0
+        self.corrective_rev_clear_m: float = float(kwargs.get("corrective_rev_clear_m", RECOVERY_180_REV_CLEAR_M))
+        self.corrective_rev_min_s: float = float(kwargs.get("corrective_rev_min_s", RECOVERY_180_REV_MIN_S))
+        self.corrective_align_rad: float = math.radians(float(kwargs.get("corrective_align_deg", RECOVERY_180_ALIGN_DEG)))
+        self.corrective_early_exit_turn_rad: float = math.radians(float(kwargs.get("corrective_early_exit_turn_deg", RECOVERY_180_EARLY_EXIT_TURN_DEG)))
 
         # --- KINEMATIC ESCAPE ARCS PRECOMPUTATION ---
         self.wheelbase = float(wheelbase_m)
@@ -167,10 +191,14 @@ class StuckRecoveryManager:
         self.target_corrective_yaw = None
         self.last_corrective_yaw = 0.0
         self.corrective_accumulated_turn = 0.0
+        self.corrective_net_turn = 0.0
+        self.corrective_used_reverse = False
         self.corrective_substate = "FORWARD"
         self.corrective_steer_dir = 1.0
         self.corrective_reverse_timer = 0.0
         self.forward_grace_timer = 0.0
+        self._rev_best_d_straight = 0.0
+        self._rev_stall_timer = 0.0
 
         self.is_left_pinned = False
         self.is_right_pinned = False
@@ -240,29 +268,43 @@ class StuckRecoveryManager:
 
     @classmethod
     def parse_cached_tofs(cls, cached_tofs: Optional[Any]) -> TofSummary:
-        """Centralized parsing method for cached ToF sensor readings."""
+        """Centralized parsing method for cached ToF sensor readings (ignoring <= 0.0 offline sentinels)."""
         if isinstance(cached_tofs, TofSummary):
             return cached_tofs
         if not cached_tofs:
             return TofSummary(TOF_MAX_RANGE_M, TOF_MAX_RANGE_M, TOF_MAX_RANGE_M, TOF_MAX_RANGE_M, TOF_MAX_RANGE_M, 0.0, 0)
 
+        def _is_valid(val: Any) -> bool:
+            try:
+                f = float(val)
+                return f > 0.0 and not math.isnan(f) and not math.isinf(f)
+            except (TypeError, ValueError):
+                return False
+
         if isinstance(cached_tofs, dict):
-            d_str = min(float(cached_tofs.get("tof_front_left_4.1deg", TOF_MAX_RANGE_M)),
-                        float(cached_tofs.get("tof_front_right_4.1deg", TOF_MAX_RANGE_M)))
-            l_v = [float(v) for k, v in cached_tofs.items() if cls._is_sensor_left(k)]
-            r_v = [float(v) for k, v in cached_tofs.items() if cls._is_sensor_right(k)]
-            all_v = [float(v) for v in cached_tofs.values()]
+            f_vals = [
+                float(cached_tofs[k])
+                for k in ("tof_front_left_4.1deg", "tof_front_right_4.1deg")
+                if k in cached_tofs and _is_valid(cached_tofs[k])
+            ]
+            d_str = min(f_vals) if f_vals else TOF_MAX_RANGE_M
+            l_v = [float(v) for k, v in cached_tofs.items() if cls._is_sensor_left(k) and _is_valid(v)]
+            r_v = [float(v) for k, v in cached_tofs.items() if cls._is_sensor_right(k) and _is_valid(v)]
+            all_v = [float(v) for v in cached_tofs.values() if _is_valid(v)]
         else:
             vals = [float(v) for v in cached_tofs]
             half = len(vals) // 2
-            d_str, l_v, r_v, all_v = (min(vals) if vals else TOF_MAX_RANGE_M), vals[:half], vals[half:], vals
+            l_v = [v for v in vals[:half] if _is_valid(v)]
+            r_v = [v for v in vals[half:] if _is_valid(v)]
+            all_v = [v for v in vals if _is_valid(v)]
+            d_str = min(all_v) if all_v else TOF_MAX_RANGE_M
 
         min_l = min(l_v) if l_v else TOF_MAX_RANGE_M
         min_r = min(r_v) if r_v else TOF_MAX_RANGE_M
         avg_l = sum(l_v) / len(l_v) if l_v else TOF_MAX_RANGE_M
         avg_r = sum(r_v) / len(r_v) if r_v else TOF_MAX_RANGE_M
         max_any = max(all_v) if all_v else 0.0
-        return TofSummary(min_l, min_r, avg_l, avg_r, d_str, max_any, len(cached_tofs))
+        return TofSummary(min_l, min_r, avg_l, avg_r, d_str, max_any, len(all_v))
 
     def evaluate_costmap_escape_arcs(
         self,
@@ -275,7 +317,7 @@ class StuckRecoveryManager:
 
         res = getattr(costmap_obj, "res", 0.015)
         x_min = getattr(costmap_obj, "x_min", -1.25)
-        y_min = getattr(costmap_obj, "y_min", -0.10)
+        y_min = getattr(costmap_obj, "y_min", 0.00)
         h, w = hazard_mask.shape
 
         def _trace(pts: np.ndarray) -> float:
@@ -304,7 +346,7 @@ class StuckRecoveryManager:
         is_r = (tof.min_r <= 0.035)
 
         if hazard_mask is not None and costmap_obj is not None:
-            res = getattr(costmap_obj, "res", 0.010)
+            res = getattr(costmap_obj, "res", 0.015)
             x_min = getattr(costmap_obj, "x_min", -1.25)
             y_min = getattr(costmap_obj, "y_min", 0.00)
             h, w = hazard_mask.shape
@@ -563,6 +605,10 @@ class StuckRecoveryManager:
                 arc_clearance=arc_cl,
                 cached_tofs=cached_tofs,
                 front_clearance_m=d_front,
+                hazard_mask=hazard_mask,
+                costmap_obj=costmap_obj,
+                is_left_pinned=is_left_pinned,
+                is_right_pinned=is_right_pinned,
             )
             return
 
@@ -602,6 +648,10 @@ class StuckRecoveryManager:
         arc_clearance: Optional[Tuple[float, float, float]] = None,
         cached_tofs: Optional[Any] = None,
         front_clearance_m: float = 1.0,
+        hazard_mask: Optional[np.ndarray] = None,
+        costmap_obj: Optional[Any] = None,
+        is_left_pinned: Optional[bool] = None,
+        is_right_pinned: Optional[bool] = None,
     ):
         """Engages Anti-Wrong-Way corrective turn."""
         tof = self.parse_cached_tofs(cached_tofs)
@@ -618,7 +668,10 @@ class StuckRecoveryManager:
         self.target_corrective_yaw = target_yaw
         self.last_corrective_yaw = current_yaw
         self.corrective_accumulated_turn = 0.0
+        self.corrective_net_turn = 0.0
         self.corrective_reverse_timer = 0.0
+        self._rev_best_d_straight = float(d_front)
+        self._rev_stall_timer = 0.0
 
         if steer_sign is None:
             cl = arc_clearance or (0.5, 0.5, 0.5)
@@ -629,18 +682,26 @@ class StuckRecoveryManager:
         self.preferred_yaw_sign = self.corrective_steer_dir
 
         if d_front < 0.22:
+            self.corrective_used_reverse = True
             self.corrective_substate = "REVERSE"
             target_steer = self.compute_reverse_steer(
+                min_l_tof=tof.min_l,
+                min_r_tof=tof.min_r,
                 current_yaw=current_yaw,
                 target_yaw=self.target_corrective_yaw,
                 current_v=-self.reverse_speed,
                 preferred_sign=self.corrective_steer_dir,
+                is_left_pinned=is_left_pinned,
+                is_right_pinned=is_right_pinned,
+                hazard_mask=hazard_mask,
+                costmap_obj=costmap_obj,
             )
             self._cmd(-self.reverse_speed, target_steer)
         else:
+            self.corrective_used_reverse = False
             self.corrective_substate = "FORWARD"
             self.forward_grace_timer = 0.35
-            self._cmd(self.forward_speed, self.corrective_steer_dir * self.steer_angle)
+            self._cmd(self.corrective_forward_speed, self.corrective_steer_dir * self.steer_angle)
 
     def engage_corrective_reverse(self, force: bool = False):
         """Engages reverse support phase during CORRECTIVE_180 when an obstacle is encountered."""
@@ -648,6 +709,8 @@ class StuckRecoveryManager:
             if force or self.forward_grace_timer <= 0.0:
                 self.corrective_substate = "REVERSE"
                 self.corrective_reverse_timer = 0.0
+                self._rev_best_d_straight = 0.0
+                self._rev_stall_timer = 0.0
 
     def update(
         self,
@@ -689,7 +752,27 @@ class StuckRecoveryManager:
         front_blocked = (tof.d_straight < 0.15)
         is_unpinned = (not is_l_pinned and not is_r_pinned)
         front_cleared = (tof.d_straight >= self.clearance_exit_m and not front_blocked and is_unpinned)
+        phys_unpinned = (tof.min_l > 0.035 and tof.min_r > 0.035)
+        corrective_front_cleared = (tof.d_straight >= self.clearance_exit_m and not front_blocked and phys_unpinned)
         any_tof_cleared = (tof.max_any >= self.any_tof_exit_m) or (tof.count <= 2 and tof.max_any >= self.clearance_exit_m)
+
+        # Track signed net turn across BOTH REVERSE and FORWARD substates of CORRECTIVE_180
+        yaw_aligned = False
+        is_turn_sufficient = False
+        if self.state == StuckRecoveryState.CORRECTIVE_180:
+            d_yaw_signed = wrap_to_pi(current_yaw - self.last_corrective_yaw)
+            self.corrective_net_turn += d_yaw_signed
+            self.corrective_accumulated_turn = abs(self.corrective_net_turn)
+            self.last_corrective_yaw = current_yaw
+
+            yaw_aligned = (
+                self.target_corrective_yaw is not None
+                and abs(wrap_to_pi(self.target_corrective_yaw - current_yaw)) <= self.corrective_align_rad
+            )
+            if self.target_corrective_yaw is not None:
+                is_turn_sufficient = yaw_aligned and abs(self.corrective_net_turn) >= math.radians(60.0)
+            else:
+                is_turn_sufficient = abs(self.corrective_net_turn) >= math.radians(145.0)
 
         # REVERSE STROKE EXECUTION (Shared by PIVOT_REVERSE and CORRECTIVE_180[REVERSE])
         if self.state == StuckRecoveryState.PIVOT_REVERSE or (
@@ -714,8 +797,12 @@ class StuckRecoveryManager:
                         arc_clearance=arc_cl,
                         cached_tofs=tof,
                         front_clearance_m=tof.d_straight,
+                        hazard_mask=hazard_mask,
+                        costmap_obj=costmap_obj,
+                        is_left_pinned=is_l_pinned,
+                        is_right_pinned=is_r_pinned,
                     )
-                    return self._cmd(self.forward_speed, self.corrective_steer_dir * self.steer_angle)
+                    return self._cmd(self.corrective_forward_speed, self.corrective_steer_dir * self.steer_angle)
 
                 if self.total_recovery_timer >= RECOVERY_TOTAL_TIMEOUT_S and tof.d_straight >= self.clearance_exit_m:
                     return self._finish_recovery()
@@ -726,20 +813,61 @@ class StuckRecoveryManager:
                 t_yaw = target_breadcrumb_yaw
                 p_sign = self.preferred_yaw_sign
             else:
+                self.corrective_used_reverse = True
                 self.corrective_reverse_timer += dt
-                has_min_reverse_time = (self.corrective_reverse_timer >= RECOVERY_EXIT_MIN_TIME_S)
+                if tof.d_straight > self._rev_best_d_straight + 0.02:
+                    self._rev_best_d_straight = tof.d_straight
+                    self._rev_stall_timer = 0.0
+                else:
+                    self._rev_stall_timer += dt
+
+                # If reverse stroke completed alignment and clearance opened up, exit cleanly
+                if is_turn_sufficient and corrective_front_cleared and any_tof_cleared:
+                    return self._enter_decel_and_center()
+                if self.total_recovery_timer >= RECOVERY_180_TIMEOUT_WITH_REV_S:
+                    return self._enter_decel_and_center()
+
+                has_min_reverse_time = (self.corrective_reverse_timer >= max(RECOVERY_EXIT_MIN_TIME_S, self.corrective_rev_min_s))
                 reverse_timeout = (self.corrective_reverse_timer >= RECOVERY_REVERSE_STROKE_MAX_S)
-                if (tof.d_straight >= self.clearance_exit_m and has_min_reverse_time) or reverse_timeout:
+                rev_clear_target = max(self.clearance_exit_m, self.corrective_rev_clear_m)
+                rev_stalled_with_room = (
+                    self.corrective_reverse_timer >= 0.45
+                    and self._rev_stall_timer >= 0.25
+                    and tof.d_straight >= 0.20
+                )
+                if (has_min_reverse_time and (tof.d_straight >= rev_clear_target or rev_stalled_with_room)) or reverse_timeout:
                     self.corrective_substate = "FORWARD"
                     self.stroke_timer = 0.0
                     self.forward_grace_timer = 0.35
                     d_esc_l, d_esc_r, _ = self.evaluate_costmap_escape_arcs(hazard_mask, costmap_obj)
-                    if abs(d_esc_l - d_esc_r) > 0.04:
-                        self.corrective_steer_dir = 1.0 if d_esc_l > d_esc_r else -1.0
-                        self.preferred_yaw_sign = self.corrective_steer_dir
-                    return self._cmd(self.forward_speed, self.corrective_steer_dir * self.steer_angle)
+
+                    chosen_dir = self.corrective_steer_dir
+                    if self.target_corrective_yaw is not None:
+                        rem_err = wrap_to_pi(self.target_corrective_yaw - current_yaw)
+                        if abs(rem_err) < math.radians(135.0) and abs(rem_err) > math.radians(10.0):
+                            desired = 1.0 if rem_err > 0.0 else -1.0
+                            desired_blocked = (desired > 0.0 and (is_l_pinned or (d_esc_l < 0.18 and d_esc_r >= 0.28))) or (
+                                desired < 0.0 and (is_r_pinned or (d_esc_r < 0.18 and d_esc_l >= 0.28))
+                            )
+                            if not desired_blocked:
+                                chosen_dir = desired
+                            elif abs(d_esc_l - d_esc_r) > 0.04:
+                                chosen_dir = 1.0 if d_esc_l > d_esc_r else -1.0
+                        elif abs(d_esc_l - d_esc_r) > 0.04:
+                            chosen_dir = 1.0 if d_esc_l > d_esc_r else -1.0
+                    elif abs(d_esc_l - d_esc_r) > 0.04:
+                        chosen_dir = 1.0 if d_esc_l > d_esc_r else -1.0
+
+                    self.corrective_steer_dir = chosen_dir
+                    self.preferred_yaw_sign = self.corrective_steer_dir
+                    return self._cmd(self.corrective_forward_speed, self.corrective_steer_dir * self.steer_angle)
                 t_yaw = self.target_corrective_yaw
                 p_sign = self.corrective_steer_dir
+                rev_l_pin = (tof.min_l <= 0.04) if tof.d_straight >= 0.14 else is_l_pinned
+                rev_r_pin = (tof.min_r <= 0.04) if tof.d_straight >= 0.14 else is_r_pinned
+                return self._step_reverse_stroke(
+                    tof, current_yaw, t_yaw, current_v, p_sign, rev_l_pin, rev_r_pin, hazard_mask, costmap_obj
+                )
 
             return self._step_reverse_stroke(
                 tof, current_yaw, t_yaw, current_v, p_sign, is_l_pinned, is_r_pinned, hazard_mask, costmap_obj
@@ -747,32 +875,38 @@ class StuckRecoveryManager:
 
         # PHASE 2: CORRECTIVE 180 AUTO-CORRECTION ARC (FORWARD SUBSTATE)
         if self.state == StuckRecoveryState.CORRECTIVE_180:
-            # If a safe long-path early exit is found and front is open, immediately terminate U-turn
-            if (early_exit_available or kwargs.get("early_exit_available", False)) and tof.d_straight >= 0.80 and self.corrective_substate == "FORWARD":
+            # If a safe long-path early exit is found, front is open, and chassis has turned enough, terminate U-turn
+            if self.target_corrective_yaw is not None:
+                can_early_exit = abs(wrap_to_pi(self.target_corrective_yaw - current_yaw)) <= math.radians(55.0)
+            else:
+                can_early_exit = abs(self.corrective_net_turn) >= self.corrective_early_exit_turn_rad
+            if (early_exit_available or kwargs.get("early_exit_available", False)) and can_early_exit and tof.d_straight >= 0.80 and self.corrective_substate == "FORWARD":
                 return self._finish_recovery()
 
-            d_yaw = abs(wrap_to_pi(current_yaw - self.last_corrective_yaw))
-            self.corrective_accumulated_turn += d_yaw
-            self.last_corrective_yaw = current_yaw
-
-            yaw_aligned = (
-                self.target_corrective_yaw is not None
-                and abs(wrap_to_pi(self.target_corrective_yaw - current_yaw)) <= math.radians(30.0)
-            )
-            has_turned_135 = (self.corrective_accumulated_turn >= math.radians(135.0))
-            is_turn_sufficient = has_turned_135 or (yaw_aligned and self.corrective_accumulated_turn >= math.radians(75.0))
-
-            if (self.total_recovery_timer >= 1.2 and tof.d_straight >= 0.20 and is_turn_sufficient) or self.total_recovery_timer >= 2.0:
+            if is_turn_sufficient and corrective_front_cleared and any_tof_cleared:
                 return self._finish_recovery()
 
-            if is_turn_sufficient and front_cleared and any_tof_cleared:
-                return self._enter_decel_and_center()
+            max_180_timeout = RECOVERY_180_TIMEOUT_WITH_REV_S if self.corrective_used_reverse else RECOVERY_180_TIMEOUT_S
+            if (self.total_recovery_timer >= 1.2 and tof.d_straight >= 0.20 and is_turn_sufficient) or self.total_recovery_timer >= max_180_timeout:
+                return self._finish_recovery()
 
-            # Collision / stall check: do not reverse if front is open!
+            # Proactive stopping-distance & corner-clearance reverse trigger so we stop BEFORE wall impact
+            d_proactive_rev = max(0.16, min(0.28, 0.15 + 0.14 * max(0.0, current_v)))
+            outer_corner_dist = tof.min_r if self.corrective_steer_dir > 0.0 else tof.min_l
+            inner_corner_dist = tof.min_l if self.corrective_steer_dir > 0.0 else tof.min_r
             is_front_blocked = (tof.d_straight < 0.16)
-            is_stalled = (self.forward_grace_timer <= 0.0 and abs(current_v) < 0.10 and self.stroke_timer > 0.15 and is_front_blocked)
-            is_wall_collision = is_front_blocked or (
-                tof.d_straight < 0.20 and (is_l_pinned or is_r_pinned or tof.min_l <= 0.035 or tof.min_r <= 0.035)
+            is_proactive_blocked = (self.forward_grace_timer <= 0.0 and tof.d_straight < d_proactive_rev)
+            is_corner_imminent = (
+                self.forward_grace_timer <= 0.0
+                and (outer_corner_dist < 0.12 or inner_corner_dist < 0.08)
+                and tof.d_straight < 0.35
+            )
+            is_stalled = (self.forward_grace_timer <= 0.0 and abs(current_v) < 0.10 and self.stroke_timer > 0.25)
+            is_wall_collision = (
+                is_front_blocked
+                or is_proactive_blocked
+                or (tof.d_straight < 0.20 and (tof.min_l <= 0.04 or tof.min_r <= 0.04))
+                or is_corner_imminent
             )
             if is_wall_collision:
                 self.engage_corrective_reverse(force=True)
@@ -780,12 +914,20 @@ class StuckRecoveryManager:
                 self.engage_corrective_reverse(force=False)
 
             if self.corrective_substate == "REVERSE":
+                rev_l_pin = (tof.min_l <= 0.04) if tof.d_straight >= 0.14 else is_l_pinned
+                rev_r_pin = (tof.min_r <= 0.04) if tof.d_straight >= 0.14 else is_r_pinned
                 return self._step_reverse_stroke(
                     tof, current_yaw, self.target_corrective_yaw, current_v,
-                    self.corrective_steer_dir, is_l_pinned, is_r_pinned, hazard_mask, costmap_obj
+                    self.corrective_steer_dir, rev_l_pin, rev_r_pin, hazard_mask, costmap_obj
                 )
 
-            return self._cmd(self.forward_speed, self.corrective_steer_dir * self.steer_angle)
+            # Smoothly taper forward U-turn speed as front clearance shrinks below 0.50m
+            if tof.d_straight < 0.50:
+                taper_v = max(0.35, 1.5 * (tof.d_straight - 0.12))
+                fwd_cmd_v = min(self.corrective_forward_speed, taper_v)
+            else:
+                fwd_cmd_v = self.corrective_forward_speed
+            return self._cmd(fwd_cmd_v, self.corrective_steer_dir * self.steer_angle)
 
         return False, 0.0, 0.0
 

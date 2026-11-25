@@ -847,6 +847,366 @@ def run_fast_champion_drive(robot: any, vehicle: FolkraceVehicle) -> None:
 
 
 # ==============================================================================
+# MODE 3B: AUTOMATED WRONG-WAY & RECOVERY EVALUATION (HEADLESS WEBOTS)
+# ==============================================================================
+def run_wrong_way_eval(robot: any, vehicle: FolkraceVehicle) -> None:
+    """
+    Runs automated wrong-way detection, discrimination, and recovery scenarios
+    in real 3D Webots physics and writes a JSON report to AWW_EVAL_OUT.
+    """
+    world_tag = os.environ.get("AWW_EVAL_WORLD", "test_wrong_way").lower()
+    req_scenarios = os.environ.get("AWW_EVAL_SCENARIOS", "all")
+    out_path = os.environ.get("AWW_EVAL_OUT", "")
+    params_raw = os.environ.get("AWW_EVAL_PARAMS_JSON", "").strip()
+    eval_params: Dict[str, Any] = {}
+    if params_raw:
+        try:
+            eval_params = json.loads(params_raw)
+        except Exception as e:
+            print(f"[WrongWayEval] Warning: Failed to parse AWW_EVAL_PARAMS_JSON: {e}", flush=True)
+
+    def _apply_eval_params():
+        if not eval_params:
+            return
+        wd = vehicle.watchdog
+        bc = wd.breadcrumb_watchdog
+        rm = vehicle.recovery_manager
+        if "aww_duration_scale" in eval_params:
+            wd.set_duration_scale(float(eval_params["aww_duration_scale"]))
+        if "aww_max_detect_dist_m" in eval_params:
+            bc.max_detect_dist_m = float(eval_params["aww_max_detect_dist_m"])
+        if "aww_max_lat_xv_m" in eval_params:
+            bc.max_lat_xv_m = float(eval_params["aww_max_lat_xv_m"])
+        if "aww_min_confirmed" in eval_params:
+            bc.min_confirmed = max(1, int(eval_params["aww_min_confirmed"]))
+        if "aww_confirm_time_s" in eval_params:
+            wd.confirm_time_s = float(eval_params["aww_confirm_time_s"])
+        if "aww_post_cooldown_s" in eval_params:
+            wd.post_recovery_cooldown_duration_s = float(eval_params["aww_post_cooldown_s"])
+        if "rec_180_speed_mps" in eval_params:
+            rm.corrective_forward_speed = float(eval_params["rec_180_speed_mps"])
+        if "rec_180_rev_clear_m" in eval_params:
+            rm.corrective_rev_clear_m = float(eval_params["rec_180_rev_clear_m"])
+        if "rec_180_rev_min_s" in eval_params:
+            rm.corrective_rev_min_s = float(eval_params["rec_180_rev_min_s"])
+        if "rec_180_align_deg" in eval_params:
+            rm.corrective_align_rad = math.radians(float(eval_params["rec_180_align_deg"]))
+        if "rec_180_early_exit_turn_deg" in eval_params:
+            rm.corrective_early_exit_turn_rad = math.radians(float(eval_params["rec_180_early_exit_turn_deg"]))
+
+    traj_csv = find_trajectory_csv()
+    is_track_racing = ("track_racing" in world_tag)
+
+    obs_manager = None
+    track_tracker = None
+    if is_track_racing:
+        obs_engine = ReverseObstacleEngine(traj_csv, speed_mps=MOVING_OBSTACLE_SPEED_MPS)
+        obs_manager = MovingObstacleManager(
+            robot=robot,
+            engine=obs_engine,
+            obstacle_names=MOVING_OBSTACLE_NAMES,
+            elevation_z=MOVING_OBSTACLE_Z_ELEVATION,
+            speed_mps=MOVING_OBSTACLE_SPEED_MPS,
+            direction=MOVING_OBSTACLE_DIRECTION,
+        )
+        track_tracker = WebotsTrackProgressTracker(traj_csv)
+
+    start_pos = [0.0, 0.0, 0.0275]
+    start_rot = [0.0, 0.0, 1.0, -1.5707953071795862]
+
+    front_pillar_node = robot.getFromDef("FRONT_PILLAR") if (vehicle.is_supervisor and hasattr(robot, "getFromDef")) else None
+    front_pillar_trans = front_pillar_node.getField("translation") if front_pillar_node else None
+    back_pillar_node = robot.getFromDef("BACK_PILLAR") if (vehicle.is_supervisor and hasattr(robot, "getFromDef")) else None
+    back_pillar_trans = back_pillar_node.getField("translation") if back_pillar_node else None
+
+    def _set_pillars(raised: bool):
+        if front_pillar_trans:
+            front_pillar_trans.setSFVec3f([2.60, 0.40, 0.06 if raised else -5.0])
+        if back_pillar_trans:
+            back_pillar_trans.setSFVec3f([-0.2066, 0.39, 0.06 if raised else -5.0])
+
+    def _wrap_pi(a: float) -> float:
+        return math.atan2(math.sin(a), math.cos(a))
+
+    def _reset_world_robot(obs_speed_mps: Optional[float] = None):
+        if obs_manager is not None:
+            eff_obs_speed = float(obs_speed_mps) if obs_speed_mps is not None else float(MOVING_OBSTACLE_SPEED_MPS)
+            obs_engine.speed_mps = eff_obs_speed
+            obs_manager.speed_mps = eff_obs_speed
+        vehicle.reset(start_pos=start_pos, start_rot=start_rot)
+        _apply_eval_params()
+        if obs_manager is not None:
+            obs_manager.reset()
+        if hasattr(robot, "simulationResetPhysics"):
+            robot.simulationResetPhysics()
+        for m in vehicle.motors.values():
+            if m:
+                m.setPosition(float("inf"))
+                m.setVelocity(0.0)
+        for s in vehicle.servos.values():
+            if s:
+                s.setPosition(0.0)
+        for _ in range(10):
+            robot.step(STEP_MS_INT)
+        vehicle.fusion.reset()
+        vehicle.ediff.reset()
+        vehicle.pose_tracker.reset(start_pos[0], start_pos[1], 0.0)
+        vehicle.v_est = 0.0
+        if track_tracker is not None:
+            track_tracker.reset(start_pos[:2])
+
+    def _inject_perturbation(delta_yaw_rad: float, fwd_shove_m: float = 0.0, lat_shift_m: float = 0.0):
+        gx, gy, gyaw = vehicle.get_ground_truth_pose()
+        # Robot forward in Webots world: (-sin(gyaw), cos(gyaw)); Right: (cos(gyaw), sin(gyaw))
+        nx = gx + (-math.sin(gyaw)) * fwd_shove_m + math.cos(gyaw) * lat_shift_m
+        ny = gy + math.cos(gyaw) * fwd_shove_m + math.sin(gyaw) * lat_shift_m
+        nyaw = _wrap_pi(gyaw + delta_yaw_rad)
+        if vehicle._trans_field:
+            vehicle._trans_field.setSFVec3f([float(nx), float(ny), 0.0275])
+        if vehicle._rot_field:
+            vehicle._rot_field.setSFRotation([0.0, 0.0, 1.0, float(nyaw)])
+        if vehicle.robot_node:
+            try:
+                vehicle.robot_node.setVelocity([0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+            except Exception:
+                pass
+        for wn in vehicle.wheel_nodes:
+            try:
+                wn.setVelocity([0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+            except Exception:
+                pass
+        for m in vehicle.motors.values():
+            if m:
+                m.setVelocity(0.0)
+        # Step 1 physics tick so IMU/sensors refresh at new pose without clearing breadcrumbs
+        robot.step(STEP_MS_INT)
+        vehicle.fusion.v_est = 0.0
+        vehicle.fusion.v_wheels = 0.0
+        vehicle.fusion.v_front = 0.0
+        vehicle.fusion.v_rear = 0.0
+        vehicle.v_est = 0.0
+        return gyaw
+
+    def _run_spin_scenario(
+        name: str,
+        drive_s: float,
+        delta_yaw_rad: float,
+        fwd_shove_m: float = 0.0,
+        lat_shift_m: float = 0.0,
+        max_rec_s: float = 4.5,
+        raise_pillars: bool = False,
+        min_post_dist_m: float = 0.40,
+    ) -> Dict[str, Any]:
+        _set_pillars(raise_pillars)
+        _reset_world_robot()
+        sim_t = 0.0
+        flipped = False
+        pre_ww = 0
+
+        steps_drive = int(round(drive_s / DT))
+        for _ in range(steps_drive):
+            if robot.step(STEP_MS_INT) == -1:
+                break
+            sim_t += DT
+            if obs_manager is not None:
+                obs_manager.update(sim_t)
+            telem, _ = vehicle.step(dt=DT, full_telemetry=False)
+            if telem.get("is_wrong_way"):
+                pre_ww += 1
+            if abs(vehicle.fusion.roll_deg) > 70.0 or abs(vehicle.fusion.pitch_deg) > 70.0:
+                flipped = True
+
+        pre_yaw = _inject_perturbation(delta_yaw_rad, fwd_shove_m=fwd_shove_m, lat_shift_m=lat_shift_m)
+        pgx, pgy, pgyaw = vehicle.get_ground_truth_pose()
+        n_bc = len(vehicle.watchdog.breadcrumb_watchdog.breadcrumbs)
+        print(
+            f"[WrongWayEval:{name}] Injected at gt=({pgx:.2f},{pgy:.2f},{math.degrees(pgyaw):.1f}deg) "
+            f"pt=({vehicle.pose_tracker.x:.2f},{vehicle.pose_tracker.y:.2f},{math.degrees(vehicle.pose_tracker.yaw):.1f}deg) "
+            f"pre_yaw={math.degrees(pre_yaw):.1f}deg bcs={n_bc}",
+            flush=True,
+        )
+        t_spin = sim_t
+        detect_lat = None
+        rec_done_lat = None
+        was_in_180 = False
+        aligned_at_exit = False
+        retriggers = 0
+        post_rec_dist = 0.0
+        prev_pos = vehicle.get_ground_truth_pose()[:2]
+
+        steps_rec = int(round(max_rec_s / DT))
+        for step_idx in range(steps_rec):
+            if robot.step(STEP_MS_INT) == -1:
+                break
+            sim_t += DT
+            if obs_manager is not None:
+                obs_manager.update(sim_t)
+            telem, planner_ran = vehicle.step(dt=DT, full_telemetry=False)
+            gx, gy, gyaw = vehicle.get_ground_truth_pose()
+            if abs(vehicle.fusion.roll_deg) > 70.0 or abs(vehicle.fusion.pitch_deg) > 70.0:
+                flipped = True
+
+            is_ww = bool(vehicle.last_aww_status and vehicle.last_aww_status.is_wrong_way)
+            rec_state = str(vehicle.recovery_manager.state)
+            in_180 = ("CORRECTIVE_180" in rec_state)
+
+            if planner_ran and step_idx in (2, 12, 60, 120):
+                rays = vehicle.last_aww_status.sightline_rays if vehicle.last_aww_status else []
+                n_clr_opp = sum(1 for r in rays if r.get("clear") and r.get("opposing"))
+                n_opp = sum(1 for r in rays if r.get("opposing"))
+                print(
+                    f"  [t+{sim_t-t_spin:.2f}s] gt_yaw={math.degrees(gyaw):.1f}deg pt_yaw={math.degrees(vehicle.pose_tracker.yaw):.1f}deg "
+                    f"v={vehicle.v_est:.2f} rec={rec_state} ww={is_ww} rays={len(rays)} opp={n_opp} clr_opp={n_clr_opp}",
+                    flush=True,
+                )
+
+            if is_ww and detect_lat is None:
+                detect_lat = sim_t - t_spin
+            if rec_done_lat is None and was_in_180 and not in_180:
+                rec_done_lat = sim_t - t_spin
+                aligned_at_exit = abs(_wrap_pi(gyaw - pre_yaw)) <= math.radians(45.0)
+            elif rec_done_lat is not None:
+                if is_ww:
+                    retriggers += 1
+                post_rec_dist += math.hypot(gx - prev_pos[0], gy - prev_pos[1])
+            prev_pos = (gx, gy)
+            was_in_180 = in_180
+
+        _, _, final_yaw = vehicle.get_ground_truth_pose()
+        v_final = float(vehicle.v_est)
+        passed = (
+            (not flipped)
+            and pre_ww == 0
+            and detect_lat is not None and detect_lat <= 0.60
+            and rec_done_lat is not None and rec_done_lat <= 3.6
+            and aligned_at_exit
+            and retriggers == 0
+            and (post_rec_dist >= min_post_dist_m or v_final >= 0.50)
+        )
+        return {
+            "name": name,
+            "passed": bool(passed),
+            "pre_ww": int(pre_ww),
+            "detect_s": round(detect_lat, 3) if detect_lat is not None else None,
+            "rec_done_s": round(rec_done_lat, 3) if rec_done_lat is not None else None,
+            "aligned_at_exit": bool(aligned_at_exit),
+            "retriggers": int(retriggers),
+            "post_rec_dist_m": round(post_rec_dist, 2),
+            "v_final": round(v_final, 2),
+            "final_yaw_err_deg": round(math.degrees(_wrap_pi(final_yaw - pre_yaw)), 1),
+            "flipped": bool(flipped),
+        }
+
+    def _run_clean_drive_scenario(
+        name: str,
+        duration_s: float,
+        lower_pillars: bool = False,
+        obs_speed_mps: Optional[float] = None,
+        min_progress_m: float = 8.0,
+        allow_off_track: bool = False,
+    ) -> Dict[str, Any]:
+        _set_pillars(not lower_pillars)
+        _reset_world_robot(obs_speed_mps=obs_speed_mps)
+        sim_t = 0.0
+        ww_triggers = 0
+        ww_fp = 0
+        ww_tp = 0
+        flipped = False
+        dist = 0.0
+        prev_pos = vehicle.get_ground_truth_pose()[:2]
+
+        steps = int(round(duration_s / DT))
+        for _ in range(steps):
+            if robot.step(STEP_MS_INT) == -1:
+                break
+            sim_t += DT
+            if obs_manager is not None:
+                obs_manager.update(sim_t)
+            telem, _ = vehicle.step(dt=DT, full_telemetry=False)
+            gx, gy, gyaw_chk = vehicle.get_ground_truth_pose()
+            dist += math.hypot(gx - prev_pos[0], gy - prev_pos[1])
+            prev_pos = (gx, gy)
+            if track_tracker is not None:
+                track_tracker.update([gx, gy])
+            if telem.get("is_wrong_way"):
+                ww_triggers += 1
+                is_true_pos = False
+                if track_tracker is not None and track_tracker.n_pts >= 2:
+                    i0 = track_tracker.last_idx
+                    i1 = (i0 + 1) % track_tracker.n_pts
+                    seg_dx = float(track_tracker.traj_pts[i1, 0] - track_tracker.traj_pts[i0, 0])
+                    seg_dy = float(track_tracker.traj_pts[i1, 1] - track_tracker.traj_pts[i0, 1])
+                    track_fwd_yaw = math.atan2(-seg_dx, seg_dy)
+                    if abs(_wrap_pi(gyaw_chk - track_fwd_yaw)) >= math.radians(90.0):
+                        is_true_pos = True
+                if is_true_pos:
+                    ww_tp += 1
+                else:
+                    ww_fp += 1
+                if ww_triggers <= 3:
+                    rays_w4 = vehicle.last_aww_status.sightline_rays if vehicle.last_aww_status else []
+                    clr_opp = [r for r in rays_w4 if r.get("clear") and r.get("opposing")]
+                    print(
+                        f"  [W4 WW #{ww_triggers} ({'TP' if is_true_pos else 'FP'}) t={sim_t:.2f}s] gt=({gx:.2f},{gy:.2f},{math.degrees(gyaw_chk):.1f}deg) "
+                        f"pt=({vehicle.pose_tracker.x:.2f},{vehicle.pose_tracker.y:.2f},{math.degrees(vehicle.pose_tracker.yaw):.1f}deg) "
+                        f"clr_opp={len(clr_opp)} sample={clr_opp[0] if clr_opp else None}",
+                        flush=True,
+                    )
+            if abs(vehicle.fusion.roll_deg) > 70.0 or abs(vehicle.fusion.pitch_deg) > 70.0:
+                flipped = True
+
+        prog = float(track_tracker.total_progress_m) if track_tracker is not None else dist
+        off_track = bool(track_tracker.off_track) if track_tracker is not None else False
+        passed = (ww_fp == 0) and (not flipped) and (allow_off_track or not off_track) and (prog >= min_progress_m)
+        return {
+            "name": name,
+            "passed": bool(passed),
+            "ww_fp": int(ww_fp),
+            "ww_tp": int(ww_tp),
+            "ww_triggers": int(ww_triggers),
+            "progress_m": round(prog, 2),
+            "off_track": bool(off_track),
+            "flipped": bool(flipped),
+        }
+
+    if is_track_racing:
+        suite = {
+            "T1_clean_fwd_opponents_25s": lambda: _run_clean_drive_scenario("T1_clean_fwd_opponents_25s", 25.0, obs_speed_mps=1.0, min_progress_m=45.0),
+            "T2_clean_rev_opponents_25s": lambda: _run_clean_drive_scenario("T2_clean_rev_opponents_25s", 25.0, obs_speed_mps=-1.0, min_progress_m=15.0, allow_off_track=True),
+            "T3_midrace_straight_180": lambda: _run_spin_scenario("T3_midrace_straight_180", 3.5, math.pi, min_post_dist_m=0.50),
+            "T4_midrace_corner_160": lambda: _run_spin_scenario("T4_midrace_corner_160", 6.5, math.radians(160.0), min_post_dist_m=0.50),
+            "T5_midrace_shoved_wall_180": lambda: _run_spin_scenario("T5_midrace_shoved_wall_180", 3.5, math.pi, fwd_shove_m=0.55, lat_shift_m=0.10, min_post_dist_m=0.50),
+        }
+    else:
+        suite = {
+            "W1_straight_180": lambda: _run_spin_scenario("W1_straight_180", 1.25, math.pi),
+            "W2_wall_hug_right_170": lambda: _run_spin_scenario("W2_wall_hug_right_170", 1.25, math.radians(170.0), lat_shift_m=0.22),
+            "W3_wall_hug_left_170": lambda: _run_spin_scenario("W3_wall_hug_left_170", 1.25, math.radians(-170.0), lat_shift_m=-0.22),
+            "W4_shoved_fwd_180": lambda: _run_spin_scenario("W4_shoved_fwd_180", 1.25, math.pi, fwd_shove_m=0.85),
+            "W5_diagonal_135_spin": lambda: _run_spin_scenario("W5_diagonal_135_spin", 1.25, math.radians(135.0)),
+            "W6_pillar_occluded_spin": lambda: _run_spin_scenario("W6_pillar_occluded_spin", 1.25, math.pi, max_rec_s=3.5, raise_pillars=True, min_post_dist_m=0.40),
+            "W7_hairpin_clean_endurance": lambda: _run_clean_drive_scenario("W7_hairpin_clean_endurance", 15.0, lower_pillars=True, min_progress_m=18.0),
+        }
+
+    selected = list(suite.keys()) if req_scenarios == "all" else [s.strip() for s in req_scenarios.split(",") if s.strip() in suite]
+    results = []
+    for s_name in selected:
+        print(f"[WrongWayEval] Running {s_name}...", flush=True)
+        res = suite[s_name]()
+        results.append(res)
+        print(f"[WrongWayEval] {'PASS' if res['passed'] else 'FAIL'} {s_name}: {res}", flush=True)
+
+    payload = {"world": world_tag, "results": results, "all_passed": all(r["passed"] for r in results)}
+    if out_path:
+        os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+
+    if hasattr(robot, "simulationQuit"):
+        robot.simulationQuit(0 if payload["all_passed"] else 1)
+
+
+# ==============================================================================
 # MODE 3: GA OPTIMIZER HEADLESS EVALUATION WORKER
 # ==============================================================================
 def run_ga_worker(robot: any, vehicle: FolkraceVehicle) -> None:
@@ -1259,10 +1619,12 @@ def main():
 
     vehicle = FolkraceVehicle(robot, is_supervisor=is_supervisor)
 
-    # Determine mode: GA worker, Champion preview, Fast champion drive, or Racing studio
+    # Determine mode: GA worker, Wrong-Way Eval, Champion preview, Fast champion drive, or Racing studio
     mode = os.environ.get("WEBOTS_CONTROLLER_MODE", "").lower()
     if os.environ.get("GA_WORKER_PORT") or mode in ("ga_eval", "eval", "ga"):
         run_ga_worker(robot, vehicle)
+    elif mode in ("wrong_way_eval", "aww_eval"):
+        run_wrong_way_eval(robot, vehicle)
     elif mode in ("fast_drive", "pure_drive", "realtime_drive", "fast_preview"):
         run_fast_champion_drive(robot, vehicle)
     elif mode in ("preview", "champion_preview", "replay"):

@@ -2727,7 +2727,7 @@
         const tgtWorld = Number(pkt.target_yaw || 0.0);
         const relYaw = Math.atan2(Math.sin(tgtWorld - gyaw), Math.cos(tgtWorld - gyaw));
         const arrowLenM = 0.85;
-        const axv = arrowLenM * Math.sin(relYaw);
+        const axv = -arrowLenM * Math.sin(relYaw);
         const ayv = arrowLenM * Math.cos(relYaw);
         const [px0, py0] = toPixel(0.0, 0.0);
         const [px1, py1] = toPixel(axv, ayv);

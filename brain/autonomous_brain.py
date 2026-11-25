@@ -30,13 +30,22 @@ CURR_DIR = os.path.dirname(os.path.abspath(__file__))
 if CURR_DIR not in sys.path:
     sys.path.insert(0, CURR_DIR)
 
-from pose_tracker import PoseTracker, wrap_to_pi
-from cpp_smart_hybrid_costmap import CppSmartHybridCostmap, SENSOR_NAMES
-from tof_gap_scout import ToFGapScout
-from planner_sl_mpc import CurvilinearSLMPC
-from stuck_recovery_manager import StuckRecoveryManager, StuckRecoveryState
-from anti_wrong_way_watchdog import AntiWrongWayWatchdog
-from ramp_detector import RampDetector
+try:
+    from .pose_tracker import PoseTracker, wrap_to_pi
+    from .cpp_smart_hybrid_costmap import CppSmartHybridCostmap, SENSOR_NAMES
+    from .tof_gap_scout import ToFGapScout
+    from .planner_sl_mpc import CurvilinearSLMPC
+    from .stuck_recovery_manager import StuckRecoveryManager, StuckRecoveryState
+    from .anti_wrong_way_watchdog import AntiWrongWayWatchdog
+    from .ramp_detector import RampDetector
+except ImportError:
+    from pose_tracker import PoseTracker, wrap_to_pi
+    from cpp_smart_hybrid_costmap import CppSmartHybridCostmap, SENSOR_NAMES
+    from tof_gap_scout import ToFGapScout
+    from planner_sl_mpc import CurvilinearSLMPC
+    from stuck_recovery_manager import StuckRecoveryManager, StuckRecoveryState
+    from anti_wrong_way_watchdog import AntiWrongWayWatchdog
+    from ramp_detector import RampDetector
 
 try:
     from .planner_config import (
@@ -51,6 +60,7 @@ try:
         MAX_STEERING_RAD,
         SERVO_MAX_SPEED_RAD_S,
         RECOVERY_REVERSE_SPEED_MPS,
+        RECOVERY_CORRECTIVE_180_SPEED_MPS,
         RECOVERY_STEER_ANGLE_RAD,
         RECOVERY_CLEARANCE_EXIT_M,
         RECOVERY_ANY_TOF_EXIT_M,
@@ -82,6 +92,7 @@ except ImportError:
         MAX_STEERING_RAD,
         SERVO_MAX_SPEED_RAD_S,
         RECOVERY_REVERSE_SPEED_MPS,
+        RECOVERY_CORRECTIVE_180_SPEED_MPS,
         RECOVERY_STEER_ANGLE_RAD,
         RECOVERY_CLEARANCE_EXIT_M,
         RECOVERY_ANY_TOF_EXIT_M,
@@ -128,6 +139,7 @@ class AutonomousBrain:
         self.recovery_manager = StuckRecoveryManager(
             reverse_speed_m_s=RECOVERY_REVERSE_SPEED_MPS,
             forward_speed_m_s=V_MIN_CRUISE,
+            corrective_forward_speed_m_s=RECOVERY_CORRECTIVE_180_SPEED_MPS,
             steer_angle_rad=RECOVERY_STEER_ANGLE_RAD,
             clearance_exit_m=RECOVERY_CLEARANCE_EXIT_M,
             any_tof_exit_m=RECOVERY_ANY_TOF_EXIT_M,
@@ -261,6 +273,7 @@ class AutonomousBrain:
 
         self.recovery_manager = StuckRecoveryManager(
             reverse_speed_m_s=rec_speed,
+            corrective_forward_speed_m_s=RECOVERY_CORRECTIVE_180_SPEED_MPS,
             steer_angle_rad=rec_steer,
             clearance_exit_m=float(genes.get("recovery_clearance_exit_m", RECOVERY_CLEARANCE_EXIT_M)),
             any_tof_exit_m=float(genes.get("recovery_any_tof_exit_m", RECOVERY_ANY_TOF_EXIT_M)),
@@ -310,6 +323,7 @@ class AutonomousBrain:
         full_telemetry: bool = True,
         pitch_rad: float = 0.0,
         roll_rad: float = 0.0,
+        imu_yaw_rad: Optional[float] = None,
     ) -> Tuple[float, float, Dict[str, Any]]:
         """
         Executes one full autonomous perception and trajectory optimization step (typically @ 60 Hz).
@@ -352,14 +366,18 @@ class AutonomousBrain:
                 else:
                     clean_tofs[name] = max(MIN_TOF_PHYSICAL_M, min(TOF_MAX_RANGE_M, val))
 
-        f_tof = min(
+        _f_vals = [
             clean_tofs.get("tof_front_left_4.1deg", TOF_MAX_RANGE_M),
             clean_tofs.get("tof_front_right_4.1deg", TOF_MAX_RANGE_M),
-        )
+        ]
+        _valid_f = [v for v in _f_vals if v > 0.0]
+        f_tof = min(_valid_f) if _valid_f else TOF_MAX_RANGE_M
         self.cached_f_tof = f_tof
 
         # 2. Dead-Reckoning Odometry Update
-        self.pose_tracker.update_odometry(v_est=v_est, yaw_rate=gyro_z_rad_s, dt=dt)
+        self.pose_tracker.update_odometry(
+            v_est=v_est, yaw_rate=gyro_z_rad_s, dt=dt, imu_yaw_rad=imu_yaw_rad
+        )
         nav_pose = ground_truth_pose if ground_truth_pose is not None else (self.pose_tracker.x, self.pose_tracker.y, self.pose_tracker.yaw)
 
         # 3. C++ Smart Hybrid Costmap Processing
@@ -417,17 +435,23 @@ class AutonomousBrain:
         raw_target_steer = float(plan_res.get("cmd_steer_rad", 0.0))
         raw_target_speed = float(plan_res.get("cmd_speed_mps", self.v_cruise_min))
 
-        min_fwd_dist = min(
-            clean_tofs.get("tof_front_left_4.1deg", 1.0),
-            clean_tofs.get("tof_front_right_4.1deg", 1.0),
-        )
+        min_fwd_dist = f_tof
 
-        # 7. Candidate Gap Scout Targets for Early Exit
+        # 7. Candidate Gap Scout Target for Early Exit (primary target only — what SL-MPC will execute)
         candidate_gaps = []
         if min_fwd_dist >= 0.50:
-            for tgt in (getattr(self.gap_scout, "last_targets", []) or []):
+            raw_targets = getattr(self.gap_scout, "last_targets", []) or []
+            if raw_targets:
+                tgt = raw_targets[0]
                 if isinstance(tgt, (list, tuple)) and len(tgt) >= 2:
-                    candidate_gaps.append((float(tgt[0]), float(tgt[1])))
+                    gx_c, gy_c = float(tgt[0]), float(tgt[1])
+                    tgt_corr_yaw = getattr(self.recovery_manager, "target_corrective_yaw", None)
+                    gap_aligned = True
+                    if tgt_corr_yaw is not None and math.hypot(gx_c, gy_c) > 1e-3:
+                        gap_world_yaw = wrap_to_pi(nav_pose[2] - math.atan2(gx_c, gy_c))
+                        gap_aligned = abs(wrap_to_pi(tgt_corr_yaw - gap_world_yaw)) <= math.radians(55.0)
+                    if gap_aligned:
+                        candidate_gaps.append((gx_c, gy_c))
 
         # 8. Anti-Wrong-Way Watchdog
         if getattr(self.watchdog, "mode", "DISABLED") != "DISABLED":
@@ -442,16 +466,11 @@ class AutonomousBrain:
                 hazard_mask=hazard_mask,
                 state=self.recovery_manager.state,
                 candidate_gaps=candidate_gaps,
+                costmap_obj=self.costmap,
+                unknown_mask=self.costmap.unknown_mask,
+                dt=dt,
             )
             self.last_aww_status = aww_status
-
-            if (
-                aww_status.early_exit_found
-                and self.recovery_manager.state == StuckRecoveryState.CORRECTIVE_180
-                and getattr(self.recovery_manager, "corrective_substate", "") == "FORWARD"
-                and min_fwd_dist >= 0.80
-            ):
-                self.recovery_manager.finish_recovery_early()
 
             if aww_status.is_wrong_way and self.recovery_manager.state == StuckRecoveryState.NORMAL_DRIVE:
                 tgt_yaw = aww_status.target_recovery_yaw if aww_status.target_recovery_yaw is not None else wrap_to_pi(nav_pose[2] + math.pi)
@@ -472,6 +491,10 @@ class AutonomousBrain:
                     arc_clearance=arc_cl,
                     cached_tofs=clean_tofs,
                     front_clearance_m=min_fwd_dist,
+                    hazard_mask=hazard_mask,
+                    costmap_obj=self.costmap,
+                    is_left_pinned=is_l_pin,
+                    is_right_pinned=is_r_pin,
                 )
         else:
             self.last_aww_status = None
@@ -536,6 +559,8 @@ class AutonomousBrain:
         )
 
         if is_recovering:
+            if not self.was_recovering:
+                self.rate_limited_speed = min(self.rate_limited_speed, max(0.0, v_est)) if rec_v >= 0.0 else min(self.rate_limited_speed, v_est)
             target_speed = rec_v
             target_steer = rec_steer
             self.active_steer = rec_steer
@@ -605,8 +630,10 @@ class AutonomousBrain:
 
         # 10c. Unified Dynamic Speed Rate Limiter (Smooth takeoff, no 0 -> 400 RPM step shock)
         if is_recovering:
-            # During reverse recovery, target_speed is negative (e.g. -1.2 m/s)
+            # During recovery, snap down immediately if physical speed is much lower (e.g. post-spin/impact)
             target_v = target_speed
+            if target_v >= 0.0 and v_est < (self.rate_limited_speed - 0.25):
+                self.rate_limited_speed = max(0.0, v_est)
             d_limit = min(BRAKE_DECEL_MAX, BRAKE_DECEL_RATIO * self.mu_val * GRAVITY_G)
             speed_err = target_v - self.rate_limited_speed
             max_dv = d_limit * dt

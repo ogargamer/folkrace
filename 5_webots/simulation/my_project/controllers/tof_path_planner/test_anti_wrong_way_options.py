@@ -30,6 +30,7 @@ from anti_wrong_way_watchdog import (
     AWW_BREADCRUMB_DURATION_SCALE,
     AWW_BREADCRUMB_MAX_TIMEOUT_S,
 )
+from planner_config import GRID_X_MIN, GRID_Y_MIN, GRID_RES
 from stuck_recovery_manager import StuckRecoveryManager, StuckRecoveryState
 
 
@@ -56,7 +57,9 @@ def test_option1_breadcrumb():
 
     # Test 2: Unobstructed 180 reversal in open track -> Raycast clear -> Wrong-way confirmed
     # Vehicle spins 180 in place at (0.0, 3.0) facing yaw = pi (looking back down +Y towards y=0)
-    hazard_mask_clear = np.zeros((190, 250), dtype=np.uint8)
+    grid_h = int(round((2.60 - GRID_Y_MIN) / GRID_RES)) + 1
+    grid_w = int(round((1.25 - GRID_X_MIN) / GRID_RES)) + 1
+    hazard_mask_clear = np.zeros((grid_h, grid_w), dtype=np.uint8)
     is_ww, conf, target_yaw, rays = dog.check_wrong_way(0.0, 3.0, math.pi, hazard_mask=hazard_mask_clear)
     print(f"  [Test 2 - Open Track Reversal] Wrong Way: {is_ww} (Confidence: {conf:.2f}, Target Yaw: {target_yaw:.2f} rad, Rays: {len(rays)})")
     assert is_ww is True, "Option 1 failed to catch unobstructed in-lane wrong-way reversal!"
@@ -66,9 +69,10 @@ def test_option1_breadcrumb():
     # Test 1: Hairpin track with wall in between -> Raycast blocked -> Zero false positives
     # Vehicle traversed 180 hairpin into adjacent corridor at x = 0.60 m, y = 2.0 m, facing yaw = pi
     # Dividing wall is at x_world = 0.30 m. In vehicle frame (at x=0.60, yaw=pi):
-    # xv_wall = 0.30 m -> col_w = int(round((0.30 - (-1.25)) / 0.010)) = 155
-    hazard_mask_wall = np.zeros((190, 250), dtype=np.uint8)
-    hazard_mask_wall[:, 150:160] = 1  # 10cm thick dividing wall between lanes
+    # xv_wall = 0.30 m -> col_w = floor((0.30 - GRID_X_MIN) / GRID_RES)
+    hazard_mask_wall = np.zeros((grid_h, grid_w), dtype=np.uint8)
+    col_w = int(math.floor((0.30 - GRID_X_MIN) / GRID_RES))
+    hazard_mask_wall[:, max(0, col_w - 3):min(grid_w, col_w + 4)] = 1  # ~10cm thick dividing wall between lanes
 
     is_ww_hairpin, conf_hp, _, rays_hp = dog.check_wrong_way(0.60, 2.0, math.pi, hazard_mask=hazard_mask_wall)
     print(f"  [Test 1 - Hairpin Dividing Wall] Wrong Way: {is_ww_hairpin} (Confidence: {conf_hp:.2f}, Blocked Rays: {sum(1 for r in rays_hp if not r['clear'])})")
@@ -483,14 +487,15 @@ def test_early_gap_exit_sentry():
     assert has_opp_fwd is False, "Breadcrumb at 14.6 deg should be outside the forward gap cone"
     assert has_opp_ang is True, "Breadcrumb at 14.6 deg must be inside the cone centered on the angled gap vector"
 
-    # Test 1F: Recovery Early Exit Termination for CORRECTIVE_180
+    # Test 1F: Recovery Early Exit Termination for CORRECTIVE_180 (once chassis has turned >= 95 deg or is within 55 deg of target)
     rec = StuckRecoveryManager()
     rec.state = StuckRecoveryState.CORRECTIVE_180
     rec.corrective_substate = "FORWARD"
     rec.target_corrective_yaw = math.pi
+    rec.last_corrective_yaw = math.radians(150.0)
     # Provide open front ToF (d_straight = 1.0m)
     tofs_open = {"tof_front_left_4.1deg": 1.0, "tof_front_right_4.1deg": 1.0}
-    is_rec, _, _ = rec.update(dt=0.016, current_v=1.0, cached_tofs=tofs_open, early_exit_available=True)
+    is_rec, _, _ = rec.update(dt=0.016, current_v=1.0, cached_tofs=tofs_open, current_yaw=math.radians(150.0), early_exit_available=True)
     print(f"  [Test 1F - 180 Early Abort] State: {rec.state}, is_recovering: {is_rec}")
     assert rec.state == StuckRecoveryState.NORMAL_DRIVE, "CORRECTIVE_180 must return to NORMAL_DRIVE on early exit with open front"
     assert is_rec is False, "is_recovering must be False after early exit finish"
@@ -611,6 +616,116 @@ def test_breadcrumb_duration_scale():
     print("  -> Breadcrumb Duration Scale: PASSED (0.6x parameter verified, prevents full-lap overlap on small tracks)")
 
 
+def test_regression_fixes():
+    print("\n--- Testing Wrong-Way & Recovery Regression Fixes ---")
+    grid_h = int(round((2.60 - GRID_Y_MIN) / GRID_RES)) + 1
+    grid_w = int(round((1.25 - GRID_X_MIN) / GRID_RES)) + 1
+
+    # R1: unknown_mask blocks sightline across unmapped region
+    dog = BreadcrumbWatchdog(lookback_m=8.0, spacing_m=0.05)
+    for i in range(60):
+        dog.add_point(0.0, i * 0.05, 0.0, 1.5, i * 0.03, state="DRIVE")
+    haz_clear = np.zeros((grid_h, grid_w), dtype=np.uint8)
+    unk_wall = np.zeros((grid_h, grid_w), dtype=np.uint8)
+    unk_wall[30:40, :] = 1
+    is_ww_unk, _, _, _ = dog.check_wrong_way(0.0, 3.0, math.pi, hazard_mask=haz_clear, unknown_mask=unk_wall)
+    assert is_ww_unk is False, "unknown_mask band must block LOS sightline!"
+
+    # R2: Single leaked breadcrumb (< 3) does NOT trip; cluster >= 3 DOES trip with circular mean
+    dog_cluster = BreadcrumbWatchdog(lookback_m=8.0, spacing_m=0.05, min_confirmed=3)
+    for i in range(5):
+        dog_cluster.add_point(10.0, 10.0 + i * 0.1, 0.0, 1.5, i * 0.05, state="DRIVE")
+    dog_cluster.cumulative_dist_m = 5.0
+    dog_cluster.breadcrumbs.clear()
+    # 5 points, only 1 in-cone (rest out of bounds), -> must NOT trip with min_confirmed=3
+    for k in range(4):
+        dog_cluster.breadcrumbs.append(Breadcrumb(x=5.0, y=5.0, yaw=0.0, v=1.5, timestamp=1.0, s_dist=1.0))
+    dog_cluster.breadcrumbs.append(Breadcrumb(x=0.0, y=1.0, yaw=0.0, v=1.5, timestamp=1.0, s_dist=3.0))
+    is_ww_single, _, _, _ = dog_cluster.check_wrong_way(0.0, 2.0, math.pi, hazard_mask=haz_clear)
+    assert is_ww_single is False, "Single leaked breadcrumb must not trip min_confirmed=3!"
+
+    # Add 2 more opposing points with yaws around +/- pi (circular mean test near pi)
+    dog_cluster.breadcrumbs.append(Breadcrumb(x=0.0, y=0.9, yaw=math.radians(175.0), v=1.5, timestamp=1.0, s_dist=2.9))
+    dog_cluster.breadcrumbs.append(Breadcrumb(x=0.0, y=0.8, yaw=math.radians(-175.0), v=1.5, timestamp=1.0, s_dist=2.8))
+    dog_cluster.breadcrumbs.append(Breadcrumb(x=0.0, y=0.7, yaw=math.radians(180.0), v=1.5, timestamp=1.0, s_dist=2.7))
+    # Robot at (0.0, 0.0) facing 0.0 (+Y), looking at opposing cluster at y=0.7..1.0 (opposing ~pi)
+    is_ww_multi, _, tgt_mean, _ = dog_cluster.check_wrong_way(0.0, 0.0, 0.0, hazard_mask=haz_clear)
+    assert is_ww_multi is True, "Cluster >= 3 must trip!"
+    assert abs(abs(tgt_mean) - math.pi) < 0.15, f"Expected circular mean near +-pi, got {tgt_mean}"
+
+    # R3: Debounce counter capped & reset across CORRECTIVE_180 + post-recovery cooldown
+    aww = AntiWrongWayWatchdog(mode=WrongWayOptionMode.OPTION_1_BREADCRUMB)
+    for i in range(60):
+        aww.update(0.0, i * 0.05, 0.0, v_est=2.0, yaw_rate=0.0, now_s=i * 0.02, dt=0.02)
+    for k in range(30):
+        aww.update(0.0, 3.0, math.pi, v_est=0.2, yaw_rate=0.0, now_s=2.0 + k * 0.016, hazard_mask=haz_clear, state="DRIVE", dt=0.016)
+    assert aww.consecutive_ww_steps == aww.CONFIRM_STEPS_THRESHOLD, f"Debounce counter leaked above cap: {aww.consecutive_ww_steps}"
+    # Enter and exit CORRECTIVE_180 -> must reset counter & start cooldown
+    aww.update(0.0, 3.0, math.pi, v_est=0.8, yaw_rate=2.0, now_s=2.5, hazard_mask=haz_clear, state="CORRECTIVE_180", dt=0.016)
+    assert aww.consecutive_ww_steps == 0, "Entering CORRECTIVE_180 must reset consecutive_ww_steps"
+    st_cool = aww.update(0.0, 3.0, math.pi, v_est=0.8, yaw_rate=0.0, now_s=2.52, hazard_mask=haz_clear, state="DRIVE", dt=0.016)
+    assert st_cool.is_wrong_way is False and aww.post_recovery_cooldown_s > 0.0, "Post-recovery cooldown must suppress immediate re-trigger"
+
+    # R4: Unsigned wiggle (+-70 deg) does NOT falsely exit; signed alignment during REVERSE DOES exit
+    rec = StuckRecoveryManager()
+    rec.trigger_corrective_180(target_yaw=0.0, steer_sign=1.0, current_yaw=math.pi, front_clearance_m=0.80)
+    tofs_open = {"tof_front_left_4.1deg": 0.80, "tof_front_right_4.1deg": 0.80}
+    # Wiggle +70 deg then -70 deg (net 0 deg)
+    rec.update(dt=0.016, current_v=0.8, cached_tofs=tofs_open, current_yaw=wrap_to_pi(math.pi + math.radians(70.0)))
+    rec.update(dt=0.016, current_v=0.8, cached_tofs=tofs_open, current_yaw=math.pi)
+    assert rec.state == StuckRecoveryState.CORRECTIVE_180, "Unsigned wiggle must NOT exit CORRECTIVE_180!"
+
+    # Signed alignment during REVERSE -> exits cleanly to DECEL_AND_CENTER
+    rec.trigger_corrective_180(target_yaw=0.0, steer_sign=1.0, current_yaw=math.pi, front_clearance_m=0.10)
+    assert rec.corrective_substate == "REVERSE"
+    tofs_rev_done = {"tof_front_left_4.1deg": 0.50, "tof_front_right_4.1deg": 0.50, "tof_front_left_82.9deg": 0.80}
+    rec.update(dt=0.016, current_v=-0.5, cached_tofs=tofs_rev_done, current_yaw=math.radians(15.0))
+    assert rec.state == StuckRecoveryState.DECEL_AND_CENTER, f"Aligned REVERSE should enter DECEL_AND_CENTER, got {rec.state}"
+
+    # R5: check_gap_channel checks gap's world heading (rejects wrong-way angled gap mid-turn)
+    bc_gap = BreadcrumbWatchdog()
+    for i in range(60):
+        bc_gap.add_point(0.0, i * 0.05, 0.0, 2.0, i * 0.05, state="DRIVE")
+    # Robot at (0.0, 3.0) mid-turn facing yaw = +pi/2 (Left, -X), gap angled -90 deg left (xg=-1.5, yg=0.01 -> points south along old +Y trail!)
+    # Chassis yaw (+pi/2) vs trail yaw (0.0) is only 90 deg (< 110 deg), BUT gap_world_yaw (~pi) vs trail yaw (0.0) is 180 deg!
+    has_opp_gap, _, _ = bc_gap.check_gap_channel(0.0, 3.0, math.pi / 2.0, gap_xg=-1.5, gap_yg=0.01)
+    assert has_opp_gap is True, "check_gap_channel must check gap_world_yaw and catch wrong-way gap mid-turn!"
+
+    # R6: Corner-catch stall (v = 0, d_straight = 0.35m) triggers reverse support
+    rec_stall = StuckRecoveryManager()
+    rec_stall.trigger_corrective_180(target_yaw=0.0, steer_sign=1.0, current_yaw=math.pi, front_clearance_m=0.50)
+    rec_stall.forward_grace_timer = 0.0
+    rec_stall.stroke_timer = 0.30
+    tofs_corner = {"tof_front_left_4.1deg": 0.35, "tof_front_right_4.1deg": 0.35}
+    rec_stall.update(dt=0.016, current_v=0.02, cached_tofs=tofs_corner, current_yaw=math.pi)
+    assert rec_stall.corrective_substate == "REVERSE", "Corner-catch stall with open straight ToF must trigger REVERSE!"
+
+    # R7: Offline 0.0 ToF sentinel does NOT trigger false pinned state
+    tofs_offline = {"tof_front_left_4.1deg": 0.0, "tof_front_right_4.1deg": 0.50}
+    summary = StuckRecoveryManager.parse_cached_tofs(tofs_offline)
+    assert summary.d_straight == 0.50, f"Offline 0.0 sentinel leaked into d_straight: {summary.d_straight}"
+    is_l_p, is_r_p = rec_stall.evaluate_pinned_state(None, None, tofs_offline)
+    assert is_l_p is False and is_r_p is False, "Offline 0.0 sentinel must not trigger pinned state!"
+
+    # R8: Standstill > 6s expires stale breadcrumbs
+    dog_stale = BreadcrumbWatchdog(max_timeout_s=6.0)
+    for i in range(10):
+        dog_stale.add_point(0.0, i * 0.1, 0.0, 1.5, i * 0.05, state="DRIVE")
+    dog_stale.add_point(0.0, 0.9, 0.0, 0.0, 10.0, state="DRIVE")
+    assert len(dog_stale.breadcrumbs) == 0, "Standstill > 6s in DRIVE must expire stale breadcrumbs!"
+
+    # R9: Diagonal 135-deg spin in same corridor triggers, while parallel hairpin lane (1.0m offset) is rejected
+    dog_diag = BreadcrumbWatchdog(lookback_m=8.0, spacing_m=0.05)
+    for i in range(41):
+        dog_diag.add_point(0.0, i * 0.05, 0.0, 1.5, i * 0.03, state="DRIVE")
+    is_ww_diag, _, _, _ = dog_diag.check_wrong_way(0.0, 2.0, math.radians(135.0), hazard_mask=haz_clear)
+    assert is_ww_diag is True, "Diagonal 135-deg spin in same corridor must detect wrong way!"
+    is_ww_adj_diag, _, _, _ = dog_diag.check_wrong_way(1.0, 2.0, math.radians(135.0), hazard_mask=haz_clear)
+    assert is_ww_adj_diag is False, "Adjacent hairpin lane at 1.0m lateral offset must still be rejected!"
+
+    print("  -> Regression Fixes (R1-R9): PASSED")
+
+
 if __name__ == "__main__":
     print("================================================================================")
     print("  RUNNING ANTI-WRONG-WAY & U-TURN DISCRIMINATION TEST SUITE")
@@ -620,6 +735,7 @@ if __name__ == "__main__":
     test_early_gap_exit_sentry()
     test_smart_reverse_recovery()
     test_unified_coordinator_and_benchmark()
+    test_regression_fixes()
     print("\n================================================================================")
     print("  ALL TESTS PASSED SUCCESSFULLY! 100% PASS RATE ACROSS ALL MODES.")
     print("================================================================================")

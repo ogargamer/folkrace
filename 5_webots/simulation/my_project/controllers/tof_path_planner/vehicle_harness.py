@@ -494,6 +494,10 @@ class FolkraceVehicle:
         self.drift_controller.reset()
         self.ramp_detector.reset()
         self.last_aww_status = None
+        self.last_tofs = {name: TOF_MAX_RANGE_M for name in TOF_SENSOR_NAMES}
+        self.cached_f_tof = TOF_MAX_RANGE_M
+        self.last_gap_info = (0.0, 1.0, 0.50, 0.0)
+        self.last_plan_res = {}
         self.step_counter = 0
         self.active_steer = 0.0
         self.cached_target_steer = 0.0
@@ -780,6 +784,7 @@ class FolkraceVehicle:
                 full_telemetry=full_telemetry,
                 pitch_rad=self.fusion.pitch,
                 roll_rad=self.fusion.roll,
+                imu_yaw_rad=(self.fusion.yaw if self.imu_dev is not None else None),
             )
 
             is_recovering = (self.recovery_manager.state != StuckRecoveryState.NORMAL_DRIVE)
@@ -868,8 +873,9 @@ class FolkraceVehicle:
         combined_alpha = drift_res["rear_alpha"]
 
         # 5-6. ESP32-Matched Option A1 Speed Envelope, Ramp Ceiling & 4WD Electronic Differential
-        bypass_speed_envelope = override_speed is not None
-        if bypass_speed_envelope:
+        in_recovery_mode = (self.recovery_manager.state != StuckRecoveryState.NORMAL_DRIVE)
+        bypass_speed_envelope = (override_speed is not None) or in_recovery_mode
+        if override_speed is not None:
             cmd_target_v = float(override_speed)
         else:
             cmd_target_v = float(self.cached_target_speed)
@@ -892,7 +898,7 @@ class FolkraceVehicle:
             v_ground_RR=drift_res["v_ground_RR"],
             is_drifting=is_drift_active,
             mu=self.mu_val,
-            v_curr=self.v_est,
+            v_curr=(cmd_target_v if in_recovery_mode else self.v_est),
             bypass_speed_envelope=bypass_speed_envelope,
         )
         self.rate_limited_speed = float(diff_res["rate_limited_v"])
@@ -919,13 +925,15 @@ class FolkraceVehicle:
             v_real = self.get_ground_truth_velocity()
 
             aww_detailed = self.watchdog.get_detailed_telemetry(
-                x=gx,
-                y=gy,
-                yaw=gyaw,
+                x=self.pose_tracker.x,
+                y=self.pose_tracker.y,
+                yaw=self.pose_tracker.yaw,
                 v_est=self.v_est,
                 yaw_rate=self.cached_yaw_rate,
                 now_s=sim_time,
                 hazard_mask=self.costmap.hazard_mask,
+                costmap_obj=self.costmap,
+                unknown_mask=self.costmap.unknown_mask,
             )
             aww_detailed["corrective_substate"] = getattr(self.recovery_manager, "corrective_substate", "FORWARD")
         else:
@@ -989,6 +997,8 @@ class FolkraceVehicle:
                 "step_cpu_ms": round((time.process_time() - t_step_cpu_start) * 1000.0, 2),
                 "gc_ms": round(float(_gc_stats["step_gc_ms"]), 2),
                 "escape_state": str(getattr(self.recovery_manager.state, "name", self.recovery_manager.state)),
+                "recovery_state": str(self.recovery_manager.state),
+                "is_wrong_way": bool(self.last_aww_status.is_wrong_way) if self.last_aww_status else False,
                 "watchdog_mode": str(getattr(self.watchdog.mode, "name", self.watchdog.mode)),
                 "f_tof": round(float(self.cached_f_tof), 2),
                 "aww": aww_detailed,
@@ -1105,6 +1115,8 @@ class FolkraceVehicle:
             "grid_data": grid_compressed,
             "hazard_data": hazard_compressed,
             "escape_state": str(getattr(self.recovery_manager.state, "name", self.recovery_manager.state)),
+            "recovery_state": str(self.recovery_manager.state),
+            "is_wrong_way": bool(self.last_aww_status.is_wrong_way) if self.last_aww_status else False,
             "watchdog_mode": str(getattr(self.watchdog.mode, "name", self.watchdog.mode)),
             "aww": aww_detailed,
             "plan": self.last_plan_res,
