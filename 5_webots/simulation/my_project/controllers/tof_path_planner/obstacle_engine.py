@@ -191,7 +191,7 @@ class MovingObstacleManager:
             custom_field = opp.get("custom")
             if custom_field is None:
                 continue
-            is_rev = (self.direction < 0) and (idx in (1, 2))
+            is_rev = (self.direction < 0)
             payload = {
                 "trial": self._reset_counter,
                 "paused": bool(paused),
@@ -208,7 +208,7 @@ class MovingObstacleManager:
             self._reset_counter += 1
             speed_scale = max(0.2, min(1.5, float(self._speed_mps)))
             for idx, opp in enumerate(self.opponent_robots):
-                is_rev = (self.direction < 0) and (idx in (1, 2))
+                is_rev = (self.direction < 0)
                 try:
                     opp["trans"].setSFVec3f(list(opp["spawn_pos"]))
                     if opp["rot"] is not None:

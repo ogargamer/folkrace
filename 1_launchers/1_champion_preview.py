@@ -8,7 +8,8 @@
   evaluates lap times with full 3D visual preview.
 
   Usage:
-    python 1_launchers/1_champion_preview.py             (Launches Webots + Live GUI)
+    python 1_launchers/1_champion_preview.py             (Track 2 default: Webots + Live GUI)
+    python 1_launchers/1_champion_preview.py --track 1   (Track 1: Forward opponents)
     python 1_launchers/1_champion_preview.py --no-gui    (Webots only)
 ================================================================================
 """
@@ -32,7 +33,7 @@ BEST_GENOME_PATH = os.path.join(GA_OPTIMIZER_DIR, "best_planner_genome.json")
 ACTIVE_CHAMPION_INFO = {}
 
 
-def activate_champion_config() -> bool:
+def activate_champion_config(track: int = 2) -> bool:
     global ACTIVE_CHAMPION_INFO
 
     if not os.path.isfile(BEST_GENOME_PATH):
@@ -52,16 +53,19 @@ def activate_champion_config() -> bool:
         metrics = data.get("metrics", data.get("best_metrics", {}))
         planner = data.get("planner", "OPTION_2_SL_MPC")
         title = data.get("title", f"{planner} Best Champion (Fitness {fitness})")
+        ACTIVE_CHAMPION_INFO = {"title": title, "fitness": fitness}
 
         dist = metrics.get("distance_m", "N/A")
         speed = metrics.get("mean_speed_mps", "N/A")
         laps = metrics.get("laps_completed", "N/A")
+        track_label = "Track 2 (Reverse Opponents)" if track == 2 else "Track 1 (Forward Opponents)"
 
         print(f"[Ready] Activated best GA champion genome:")
         print(f"        Source:   {os.path.basename(BEST_GENOME_PATH)}")
         print(f"        Title:    {title}")
         print(f"        Fitness:  {fitness}")
         print(f"        Stats:    Dist: {dist}m | Speed: {speed}m/s | Laps: {laps}")
+        print(f"        Mode:     {track_label}")
         return True
     except Exception as e:
         print(f"[Error] Failed to activate configuration: {e}")
@@ -84,7 +88,7 @@ def _kill_proc(proc):
             pass
 
 
-def launch_webots(launch_gui: bool = True, telemetry_hz: int = 60):
+def launch_webots(launch_gui: bool = True, telemetry_hz: int = 60, track: int = 2):
     if not os.path.exists(WEBOTS_BIN):
         print(f"[Error] Webots executable not found at {WEBOTS_BIN}")
         return
@@ -110,6 +114,7 @@ def launch_webots(launch_gui: bool = True, telemetry_hz: int = 60):
     ])
     env["WEBOTS_CONTROLLER_MODE"] = "preview"
     env["WEBOTS_TELEMETRY_HZ"] = str(telemetry_hz)
+    env["FOLKRACE_OBS_DIRECTION"] = "-1" if track == 2 else "1"
     env["PYTHONUNBUFFERED"] = "1"
 
     gui_proc = None
@@ -129,9 +134,11 @@ def launch_webots(launch_gui: bool = True, telemetry_hz: int = 60):
     ]
 
     champ_title = ACTIVE_CHAMPION_INFO.get("title", "Best GA Champion")
+    track_label = "Track 2 (Reverse Opponents)" if track == 2 else "Track 1 (Forward Opponents)"
     print("=" * 80)
     print(f"  LAUNCHING REAL-TIME 3D WEBOTS CHAMPION PREVIEW + LIVE TELEMETRY GUI ({telemetry_hz} Hz)")
     print(f"  World:        {WORLD_PATH}")
+    print(f"  Track Mode:   {track_label}")
     print(f"  Champion:     {champ_title}")
     print(f"  Telemetry Hz: {telemetry_hz} Hz (Adjustable live via GUI slider 1-60 Hz)")
     print("=" * 80)
@@ -167,18 +174,21 @@ def launch_webots(launch_gui: bool = True, telemetry_hz: int = 60):
 
 def main():
     parser = argparse.ArgumentParser(description="Launch Webots Real-Time Preview with C++ SL-MPC Champion Config")
+    parser.add_argument("--track", type=int, choices=(1, 2), default=2, help="Track mode: 1 = Forward opponents, 2 = Reverse opponents (default)")
+    parser.add_argument("--reverse", action="store_true", help="Shortcut for --track 2 (reverse opponents)")
     parser.add_argument("--no-gui", action="store_true", help="Do not launch live 2D telemetry map GUI alongside Webots")
     parser.add_argument("--no-launch", action="store_true", help="Only set active config without launching Webots")
     parser.add_argument("--telemetry-hz", "--hz", type=int, default=60, help="Initial streaming frequency for GUI and Webots terminal telemetry (1-60 Hz, default: 60)")
 
     args = parser.parse_args()
+    track = 2 if args.reverse else args.track
     telem_hz = max(1, min(60, args.telemetry_hz))
 
-    if not activate_champion_config():
+    if not activate_champion_config(track=track):
         return
 
     if not args.no_launch:
-        launch_webots(launch_gui=not args.no_gui, telemetry_hz=telem_hz)
+        launch_webots(launch_gui=not args.no_gui, telemetry_hz=telem_hz, track=track)
 
 
 if __name__ == "__main__":

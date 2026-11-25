@@ -460,7 +460,7 @@ class AutonomousBrain:
                     if gap_aligned:
                         candidate_gaps.append((gx_c, gy_c))
 
-        # 8. Anti-Wrong-Way Watchdog
+        # 8. Anti-Wrong-Way Watchdog (Detection before recovery arbitration; recording deferred until post-recovery speed/state settle)
         if getattr(self.watchdog, "mode", "DISABLED") != "DISABLED":
             aww_status = self.watchdog.update(
                 x=nav_pose[0],
@@ -476,6 +476,7 @@ class AutonomousBrain:
                 costmap_obj=self.costmap,
                 unknown_mask=self.costmap.unknown_mask,
                 dt=dt,
+                record_breadcrumbs=False,
             )
             self.last_aww_status = aww_status
 
@@ -682,6 +683,37 @@ class AutonomousBrain:
         target_speed = self.rate_limited_speed
         self.cached_target_speed = target_speed
         self.cached_target_steer = self.active_steer
+
+        # 10d. Breadcrumb Recording / Freeze State (post-recovery & post-command arbitration)
+        if getattr(self.watchdog, "mode", "DISABLED") != "DISABLED":
+            is_aww_frozen = (
+                is_recovering
+                or self.recovery_manager.state != StuckRecoveryState.NORMAL_DRIVE
+                or v_est < 0.0
+                or target_speed <= 0.0
+                or raw_target_speed <= 0.0
+                or shield_reverse
+                or is_wall_contact
+                or is_stall
+                or abs(gyro_z_rad_s) > 3.5
+                or bool(
+                    self.last_aww_status
+                    and (self.last_aww_status.pending_wrong_way or self.last_aww_status.is_wrong_way)
+                )
+            )
+            self.watchdog.record_breadcrumb(
+                x=nav_pose[0],
+                y=nav_pose[1],
+                yaw=nav_pose[2],
+                v_est=v_est,
+                yaw_rate=gyro_z_rad_s,
+                now_s=sim_time_s,
+                state=self.recovery_manager.state,
+                freeze_recording=is_aww_frozen,
+                freeze_old_state=is_aww_frozen,
+                dt=dt,
+            )
+
         t_total_ms = (time.perf_counter() - t_start) * 1000.0
 
         # 11. Compile Telemetry Dictionary

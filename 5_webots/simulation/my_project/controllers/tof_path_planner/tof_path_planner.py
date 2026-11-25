@@ -449,6 +449,10 @@ def run_champion_preview(robot: any, vehicle: FolkraceVehicle) -> None:
     vehicle.configure(genes)
 
     traj_csv = find_trajectory_csv()
+    try:
+        obs_dir = int(os.environ.get("FOLKRACE_OBS_DIRECTION", MOVING_OBSTACLE_DIRECTION))
+    except ValueError:
+        obs_dir = MOVING_OBSTACLE_DIRECTION
     obs_engine = ReverseObstacleEngine(traj_csv, speed_mps=MOVING_OBSTACLE_SPEED_MPS)
     obs_manager = MovingObstacleManager(
         robot=robot,
@@ -456,7 +460,7 @@ def run_champion_preview(robot: any, vehicle: FolkraceVehicle) -> None:
         obstacle_names=MOVING_OBSTACLE_NAMES,
         elevation_z=MOVING_OBSTACLE_Z_ELEVATION,
         speed_mps=MOVING_OBSTACLE_SPEED_MPS,
-        direction=MOVING_OBSTACLE_DIRECTION,
+        direction=obs_dir,
     )
 
     track_tracker = WebotsTrackProgressTracker(traj_csv)
@@ -466,6 +470,7 @@ def run_champion_preview(robot: any, vehicle: FolkraceVehicle) -> None:
     start_pos = list(ROBOT_START_POS)
     start_rot = list(ROBOT_START_ROT)
     vehicle.reset(start_pos=start_pos, start_rot=start_rot)
+    obs_manager.reset()
     track_tracker.reset(start_pos[:2])
 
     gui_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -548,8 +553,10 @@ def run_champion_preview(robot: any, vehicle: FolkraceVehicle) -> None:
                 c = cmd_pkt.get("cmd", "")
                 if c == "pause":
                     sim_paused = True
+                    obs_manager.set_paused(True)
                 elif c == "play":
                     sim_paused = False
+                    obs_manager.set_paused(False)
                 elif c == "step":
                     sim_step_requested = True
                 elif c == "set_speed":
@@ -571,9 +578,15 @@ def run_champion_preview(robot: any, vehicle: FolkraceVehicle) -> None:
                 elif c == "set_obstacle_direction":
                     d = int(cmd_pkt.get("val", 1))
                     obs_manager.set_direction(d)
+                    if obs_manager.is_physical_robots:
+                        obs_manager.reset()
+                        obs_manager.set_paused(sim_paused)
                     print(f"[Champion Preview] Moving obstacle direction set to: {'Forward (+)' if obs_manager.direction > 0 else 'Reverse (-)'}", flush=True)
                 elif c == "toggle_obstacle_direction":
                     obs_manager.toggle_direction()
+                    if obs_manager.is_physical_robots:
+                        obs_manager.reset()
+                        obs_manager.set_paused(sim_paused)
                     print(f"[Champion Preview] Moving obstacle direction toggled to: {'Forward (+)' if obs_manager.direction > 0 else 'Reverse (-)'}", flush=True)
                 elif c == "reset_obstacles":
                     obs_manager.reset()

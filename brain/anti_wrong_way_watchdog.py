@@ -178,7 +178,10 @@ class BreadcrumbWatchdog:
         self.cumulative_dist_m = 0.0
         self.last_x: Optional[float] = None
         self.last_y: Optional[float] = None
+        self.last_yaw: Optional[float] = None
         self.last_in_lane_opposing_count: int = 0
+        self._last_add_time_s: Optional[float] = None
+        self._was_frozen: bool = False
 
     @property
     def effective_lookback_m(self) -> float:
@@ -202,7 +205,10 @@ class BreadcrumbWatchdog:
         self.cumulative_dist_m = 0.0
         self.last_x = None
         self.last_y = None
+        self.last_yaw = None
         self.last_in_lane_opposing_count = 0
+        self._last_add_time_s = None
+        self._was_frozen = False
 
     def add_point(
         self,
@@ -214,11 +220,50 @@ class BreadcrumbWatchdog:
         state: str = "DRIVE",
         yaw_rate: float = 0.0,
         freeze_recording: bool = False,
+        freeze_old_state: Optional[bool] = None,
+        dt: Optional[float] = None,
     ):
         state_str = getattr(state, "value", getattr(state, "name", str(state)))
-        # Freeze both pruning and recording during active recovery maneuvers
-        if state_str not in ("DRIVE", "NORMAL_DRIVE"):
+        in_recovery = state_str not in ("DRIVE", "NORMAL_DRIVE")
+        is_reversing = (v < 0.0)
+        is_spinning = (abs(yaw_rate) > 3.5)
+
+        if dt is not None and dt >= 0.0:
+            dt_step = float(dt)
+        elif self._last_add_time_s is not None:
+            dt_step = max(0.0, min(0.25, float(now_s) - self._last_add_time_s))
+        else:
+            dt_step = 0.0
+        self._last_add_time_s = float(now_s)
+
+        if freeze_old_state is None:
+            eff_freeze_old = in_recovery or is_reversing or is_spinning or bool(freeze_recording)
+        else:
+            eff_freeze_old = bool(freeze_old_state) or in_recovery or is_reversing or is_spinning
+
+        # Freeze both pruning and recording during recovery, reversing, spinning, or occlusion
+        if eff_freeze_old:
+            if dt_step > 0.0 and self.breadcrumbs:
+                for bc in self.breadcrumbs:
+                    bc.timestamp += dt_step
+            self._was_frozen = True
             return
+
+        if self._was_frozen:
+            self._was_frozen = False
+            if self.last_x is not None and self.last_y is not None:
+                dx_u = x - self.last_x
+                dy_u = y - self.last_y
+                fwd_u = -math.sin(yaw) * dx_u + math.cos(yaw) * dy_u
+                lat_u = abs(math.cos(yaw) * dx_u + math.sin(yaw) * dy_u)
+                yaw_chg = abs(wrap_to_pi(yaw - self.last_yaw)) if self.last_yaw is not None else math.pi
+                # Re-anchor without distance jump if heading changed (U-turn/bypass), laterally shifted,
+                # or moved ahead of the last recorded breadcrumb. If simply backed straight up behind it,
+                # keep last_x/last_y so forward motion re-engages smoothly once past the old tip.
+                if yaw_chg > math.radians(45.0) or lat_u > 0.30 or fwd_u > 0.0:
+                    self.last_x = x
+                    self.last_y = y
+                    self.last_yaw = yaw
 
         # Effective spatial lookback distance accounting for duration scale
         effective_lookback = self.effective_lookback_m
@@ -242,10 +287,15 @@ class BreadcrumbWatchdog:
             self.breadcrumbs.append(Breadcrumb(x, y, yaw, v, now_s, s_dist=self.cumulative_dist_m))
             self.last_x = x
             self.last_y = y
+            self.last_yaw = yaw
             return
 
         dx = x - self.last_x
         dy = y - self.last_y
+        # Require forward progress along current heading (+Y forward = (-sin(yaw), cos(yaw)))
+        if (-math.sin(yaw) * dx + math.cos(yaw) * dy) <= 0.0:
+            return
+
         dist = math.hypot(dx, dy)
 
         if dist >= self.spacing_m:
@@ -253,6 +303,7 @@ class BreadcrumbWatchdog:
             self.breadcrumbs.append(Breadcrumb(x, y, yaw, v, now_s, s_dist=self.cumulative_dist_m))
             self.last_x = x
             self.last_y = y
+            self.last_yaw = yaw
 
             while self.breadcrumbs and (
                 (now_s - self.breadcrumbs[0].timestamp) > self.max_history_s
@@ -689,6 +740,7 @@ class AntiWrongWayWatchdog:
         self.post_recovery_cooldown_s = 0.0
         self._last_update_s: Optional[float] = None
         self._was_in_rec_180: bool = False
+        self._last_frozen: bool = False
 
     def set_duration_scale(self, scale: float):
         """Dynamically updates how fast breadcrumbs disappear."""
@@ -710,6 +762,46 @@ class AntiWrongWayWatchdog:
         self.post_recovery_cooldown_s = 0.0
         self._last_update_s = None
         self._was_in_rec_180 = False
+        self._last_frozen = False
+
+    def record_breadcrumb(
+        self,
+        x: float,
+        y: float,
+        yaw: float,
+        v_est: float,
+        yaw_rate: float,
+        now_s: float,
+        state: str = "DRIVE",
+        freeze_recording: bool = False,
+        freeze_old_state: Optional[bool] = None,
+        dt: Optional[float] = None,
+    ) -> None:
+        """Records or freezes breadcrumb state for the current frame."""
+        if self.mode == WrongWayOptionMode.DISABLED or self.mode == "DISABLED":
+            self._last_frozen = False
+            return
+        in_lane_occ = self.breadcrumb_watchdog.last_in_lane_opposing_count
+        eff_freeze_rec = bool(freeze_recording) or (in_lane_occ >= AWW_MIN_CONFIRMED_BREADCRUMBS)
+        state_str = getattr(state, "value", getattr(state, "name", str(state)))
+        in_recovery = state_str not in ("DRIVE", "NORMAL_DRIVE")
+        if freeze_old_state is None:
+            eff_freeze_old = in_recovery or (v_est < 0.0) or (abs(yaw_rate) > 3.5) or eff_freeze_rec
+        else:
+            eff_freeze_old = bool(freeze_old_state) or in_recovery or (v_est < 0.0) or (abs(yaw_rate) > 3.5) or eff_freeze_rec
+        self._last_frozen = eff_freeze_old
+        self.breadcrumb_watchdog.add_point(
+            x,
+            y,
+            yaw,
+            v_est,
+            now_s,
+            state=state,
+            yaw_rate=yaw_rate,
+            freeze_recording=eff_freeze_rec,
+            freeze_old_state=eff_freeze_old,
+            dt=dt,
+        )
 
     def update(
         self,
@@ -726,6 +818,7 @@ class AntiWrongWayWatchdog:
         costmap_obj: Optional[Any] = None,
         unknown_mask: Optional[np.ndarray] = None,
         dt: Optional[float] = None,
+        record_breadcrumbs: bool = True,
         **kwargs,
     ) -> WrongWayStatus:
         """
@@ -765,6 +858,8 @@ class AntiWrongWayWatchdog:
         # 1. Check Line-of-Sight Breadcrumb Overlap BEFORE recording new breadcrumbs
         #    so we can detect occluded opposing in-lane trails and prevent overwrite.
         status = WrongWayStatus()
+        state_str = getattr(state, "value", getattr(state, "name", str(state)))
+        in_recovery = state_str not in ("DRIVE", "NORMAL_DRIVE")
         is_ww, score, target_yaw, rays = self.breadcrumb_watchdog.check_wrong_way(
             x,
             y,
@@ -773,15 +868,24 @@ class AntiWrongWayWatchdog:
             now_s=now_s,
             costmap_obj=costmap_obj,
             unknown_mask=unknown_mask,
-            freeze_expiry=is_rec_180,
+            freeze_expiry=(is_rec_180 or in_recovery or self._last_frozen),
         )
         in_lane_occ = self.breadcrumb_watchdog.last_in_lane_opposing_count
 
         # 2. Breadcrumb logging with anti-contamination & occlusion anti-overwrite gating
-        freeze_rec = (in_lane_occ >= AWW_MIN_CONFIRMED_BREADCRUMBS)
-        self.breadcrumb_watchdog.add_point(
-            x, y, yaw, v_est, now_s, state=state, yaw_rate=yaw_rate, freeze_recording=freeze_rec
-        )
+        if record_breadcrumbs:
+            freeze_rec = (in_lane_occ >= AWW_MIN_CONFIRMED_BREADCRUMBS)
+            self.record_breadcrumb(
+                x=x,
+                y=y,
+                yaw=yaw,
+                v_est=v_est,
+                yaw_rate=yaw_rate,
+                now_s=now_s,
+                state=state,
+                freeze_recording=freeze_rec,
+                dt=dt_step,
+            )
 
         status.sightline_rays = rays
         status.overlap_score = score
@@ -941,6 +1045,7 @@ class AntiWrongWayWatchdog:
             now_s=now_s,
             costmap_obj=costmap_obj,
             unknown_mask=unknown_mask,
+            freeze_expiry=self._last_frozen,
         )
         n_bc = len(self.breadcrumb_watchdog.breadcrumbs)
         eff_lookback = self.breadcrumb_watchdog.effective_lookback_m
@@ -955,6 +1060,7 @@ class AntiWrongWayWatchdog:
 
         return {
             "mode": self.mode.name if hasattr(self.mode, "name") else str(self.mode),
+            "pose": [round(float(x), 3), round(float(y), 3), round(float(yaw), 3)],
             "is_wrong_way": self.latest_status.is_wrong_way,
             "detected_by": self.latest_status.detected_by_option,
             "action": self.latest_status.corrective_action,

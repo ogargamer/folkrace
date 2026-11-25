@@ -888,7 +888,7 @@ class PlannerCostmapCanvas(QtWidgets.QWidget):
             rel_yaw = wrap_to_pi(tgt_world - gyaw)
 
             arrow_len_m = 0.85
-            arrow_xv = arrow_len_m * math.sin(rel_yaw)
+            arrow_xv = -arrow_len_m * math.sin(rel_yaw)
             arrow_yv = arrow_len_m * math.cos(rel_yaw)
 
             p_orig = self.world_to_screen(0.0, 0.0)
@@ -1230,9 +1230,17 @@ class ComprehensivePlannerGUI(QMainWindow):
         # Direction Control Row
         obs_dir_row = QHBoxLayout()
         obs_dir_row.addWidget(QLabel("Direction:"))
-        self.obs_direction = 1
-        self.btn_obs_dir = QPushButton("▶ Forward (+)")
-        self.btn_obs_dir.setStyleSheet("background-color: #1b5e20; color: #a5d6a7; font-weight: bold; padding: 5px; border-radius: 4px;")
+        try:
+            init_obs_dir = -1 if int(os.environ.get("FOLKRACE_OBS_DIRECTION", "1")) < 0 else 1
+        except ValueError:
+            init_obs_dir = 1
+        self.obs_direction = init_obs_dir
+        if self.obs_direction > 0:
+            self.btn_obs_dir = QPushButton("▶ Forward (+)")
+            self.btn_obs_dir.setStyleSheet("background-color: #1b5e20; color: #a5d6a7; font-weight: bold; padding: 5px; border-radius: 4px;")
+        else:
+            self.btn_obs_dir = QPushButton("◀ Reverse (-)")
+            self.btn_obs_dir.setStyleSheet("background-color: #b71c1c; color: #ffcdd2; font-weight: bold; padding: 5px; border-radius: 4px;")
         self.btn_obs_dir.setToolTip("Toggle dynamic obstacle direction along track racing line: Forward (+) vs Reverse (-)")
         self.btn_obs_dir.clicked.connect(self._toggle_obs_direction)
         obs_dir_row.addWidget(self.btn_obs_dir)
@@ -1912,7 +1920,8 @@ class ComprehensivePlannerGUI(QMainWindow):
                 or ("180" in str(rec_state))
             )
             target_yaw = float(aww.get("target_yaw", 0.0)) if isinstance(aww, dict) else 0.0
-            pose = pkt.get("pose", [0.0, 0.0, 0.0])
+            aww_pose = aww.get("pose") if isinstance(aww, dict) else None
+            pose = aww_pose if (isinstance(aww_pose, (list, tuple)) and len(aww_pose) >= 3) else pkt.get("pose", [0.0, 0.0, 0.0])
 
             self.canvas.set_data(
                 prob_map,

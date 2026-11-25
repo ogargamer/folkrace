@@ -10,9 +10,9 @@
   physics and real-time driving performance.
 
   Usage:
-    python 1_launchers/2_fast_champion_drive.py
-    python 1_launchers/2_fast_champion_drive.py --track 2
-    python 1_launchers/2_fast_champion_drive.py --reverse
+    python 1_launchers/2_fast_champion_drive.py           (Track 2 default: Reverse opponents)
+    python 1_launchers/2_fast_champion_drive.py --track 1 (Track 1: Forward opponents)
+    python 1_launchers/2_fast_champion_drive.py --reverse (Track 2: Reverse opponents)
 ================================================================================
 """
 
@@ -32,7 +32,7 @@ BEST_GENOME_PATH = os.path.join(GA_OPTIMIZER_DIR, "best_planner_genome.json")
 WEBOTS_BIN = r"C:\Program Files\Webots\msys64\mingw64\bin\webots.exe"
 
 
-def activate_champion_config(track: int = 1) -> bool:
+def activate_champion_config(track: int = 2) -> bool:
     if not os.path.isfile(BEST_GENOME_PATH):
         print(f"[Error] Champion genome file does not exist: {BEST_GENOME_PATH}")
         return False
@@ -91,8 +91,8 @@ def parse_args():
         "--track",
         type=int,
         choices=(1, 2),
-        default=1,
-        help="Track mode: 1 = Forward opponents (default), 2 = Reverse opponents",
+        default=2,
+        help="Track mode: 1 = Forward opponents, 2 = Reverse opponents (default)",
     )
     parser.add_argument(
         "--reverse",
