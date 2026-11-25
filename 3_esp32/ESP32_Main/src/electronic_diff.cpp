@@ -313,27 +313,24 @@ ElectronicDiffOutputs IRAM_ATTR ElectronicDifferential4WD::update(
         }
     }
 
-    // Wide collision resync
-    if (rate_limited_speed_ >= 0.0f) {
-        if (v_curr < (rate_limited_speed_ - 0.85f)) {
-            rate_limited_speed_ = v_curr;
-        }
-    } else {
-        if (v_curr > (rate_limited_speed_ + 0.85f)) {
-            rate_limited_speed_ = v_curr;
-        }
+    // Directional collision resync (never snap across zero away from effective_target_v)
+    if (rate_limited_speed_ > (v_curr + 0.85f)) {
+        rate_limited_speed_ = fmaxf(fminf(effective_target_v, 0.0f), v_curr);
+    } else if (rate_limited_speed_ < (v_curr - 0.85f)) {
+        rate_limited_speed_ = fminf(fmaxf(effective_target_v, 0.0f), v_curr);
     }
 
     if (effective_target_v <= v_curr) {
         if (rate_limited_speed_ > v_curr) {
-            rate_limited_speed_ = v_curr;
+            rate_limited_speed_ = fmaxf(effective_target_v, v_curr);
         }
     } else {
         if (rate_limited_speed_ < v_curr) {
-            rate_limited_speed_ = v_curr;
+            rate_limited_speed_ = fminf(effective_target_v, v_curr);
         }
     }
 
+    float prev_v = rate_limited_speed_;
     float speed_err = effective_target_v - rate_limited_speed_;
     bool is_accel = (rate_limited_speed_ >= 0.0f && speed_err > 0.0f) || (rate_limited_speed_ <= 0.0f && speed_err < 0.0f);
     float max_dv = (is_accel ? kEnvAccelMaxMps2 : kEnvDecelMaxMps2) * safe_dt;
@@ -343,24 +340,29 @@ ElectronicDiffOutputs IRAM_ATTR ElectronicDifferential4WD::update(
         rate_limited_speed_ += copysignf(max_dv, speed_err);
     }
 
-    // Reasonable overspeed / ABS underspeed envelope (~18 rad/s floor, 15% high-speed margin)
+    // Reasonable overspeed / monotonic ABS underspeed envelope (~18 rad/s floor, 15% high-speed margin)
     float max_overspeed = fmaxf(kOverspeedFloorRadS * R_w_, kSlipCeilingRatio * fabsf(v_curr));
     float max_underspeed = fmaxf(kUnderspeedFloorRadS * R_w_, kSlipCeilingRatio * fabsf(v_curr));
     if (rate_limited_speed_ > 0.0f) {
         rate_limited_speed_ = fminf(rate_limited_speed_, fmaxf(0.0f, v_curr) + max_overspeed);
-        if (v_curr > 0.30f) {
-            rate_limited_speed_ = fmaxf(rate_limited_speed_, v_curr - max_underspeed);
-        }
     } else if (rate_limited_speed_ < 0.0f) {
         rate_limited_speed_ = fmaxf(rate_limited_speed_, fminf(0.0f, v_curr) - max_overspeed);
-        if (v_curr < -0.30f) {
-            rate_limited_speed_ = fminf(rate_limited_speed_, v_curr + max_underspeed);
-        }
+    }
+
+    if (v_curr > 0.30f && effective_target_v < v_curr) {
+        float abs_floor = fminf(prev_v, v_curr - max_underspeed);
+        rate_limited_speed_ = fmaxf(rate_limited_speed_, abs_floor);
+    } else if (v_curr < -0.30f && effective_target_v > v_curr) {
+        float abs_ceil = fmaxf(prev_v, v_curr + max_underspeed);
+        rate_limited_speed_ = fminf(rate_limited_speed_, abs_ceil);
     }
     out.rate_limited_v = rate_limited_speed_;
 
     // Longitudinal acceleration feedforward (V_trq,ff = Ka * a_x_cmd)
-    float v_err_long = effective_target_v - v_curr;
+    float v_ff_target = (rate_limited_speed_ < -0.05f && effective_target_v >= 0.0f)
+                            ? rate_limited_speed_
+                            : effective_target_v;
+    float v_err_long = v_ff_target - v_curr;
     float a_x_cmd = 0.0f;
     if (fabsf(v_err_long) > 0.05f) {
         a_x_cmd = fmaxf(-kFfDecelMaxMps2, fminf(kFfAccelMaxMps2, v_err_long / kFfTrackTauS));

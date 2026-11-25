@@ -326,21 +326,20 @@ class ElectronicDifferential4WD:
                 elif effective_target_v < 0.0:
                     effective_target_v = max(effective_target_v, -v_emerg)
 
-            # Wide collision resync
-            if self.rate_limited_speed >= 0.0:
-                if v_curr_val < (self.rate_limited_speed - COLLISION_RESYNC_MARGIN_MPS):
-                    self.rate_limited_speed = v_curr_val
-            else:
-                if v_curr_val > (self.rate_limited_speed + COLLISION_RESYNC_MARGIN_MPS):
-                    self.rate_limited_speed = v_curr_val
+            # Directional collision resync (never snap across zero away from effective_target_v)
+            if self.rate_limited_speed > (v_curr_val + COLLISION_RESYNC_MARGIN_MPS):
+                self.rate_limited_speed = max(min(effective_target_v, 0.0), v_curr_val)
+            elif self.rate_limited_speed < (v_curr_val - COLLISION_RESYNC_MARGIN_MPS):
+                self.rate_limited_speed = min(max(effective_target_v, 0.0), v_curr_val)
 
             if effective_target_v <= v_curr_val:
                 if self.rate_limited_speed > v_curr_val:
-                    self.rate_limited_speed = v_curr_val
+                    self.rate_limited_speed = max(effective_target_v, v_curr_val)
             else:
                 if self.rate_limited_speed < v_curr_val:
-                    self.rate_limited_speed = v_curr_val
+                    self.rate_limited_speed = min(effective_target_v, v_curr_val)
 
+            prev_v = self.rate_limited_speed
             speed_err = effective_target_v - self.rate_limited_speed
             is_accel = (self.rate_limited_speed >= 0.0 and speed_err > 0.0) or (
                 self.rate_limited_speed <= 0.0 and speed_err < 0.0
@@ -351,20 +350,24 @@ class ElectronicDifferential4WD:
             else:
                 self.rate_limited_speed += math.copysign(max_dv, speed_err)
 
-            # Reasonable overspeed / ABS underspeed envelope
+            # Reasonable overspeed / monotonic ABS underspeed envelope
             max_overspeed = max(OVERSPEED_FLOOR_RAD_S * self.R_w, SLIP_CEILING_RATIO * abs(v_curr_val))
             max_underspeed = max(UNDERSPEED_FLOOR_RAD_S * self.R_w, SLIP_CEILING_RATIO * abs(v_curr_val))
             if self.rate_limited_speed > 0.0:
                 self.rate_limited_speed = min(self.rate_limited_speed, max(0.0, v_curr_val) + max_overspeed)
-                if v_curr_val > ABS_MIN_SPEED_MPS:
-                    self.rate_limited_speed = max(self.rate_limited_speed, v_curr_val - max_underspeed)
             elif self.rate_limited_speed < 0.0:
                 self.rate_limited_speed = max(self.rate_limited_speed, min(0.0, v_curr_val) - max_overspeed)
-                if v_curr_val < -ABS_MIN_SPEED_MPS:
-                    self.rate_limited_speed = min(self.rate_limited_speed, v_curr_val + max_underspeed)
+
+            if v_curr_val > ABS_MIN_SPEED_MPS and effective_target_v < v_curr_val:
+                abs_floor = min(prev_v, v_curr_val - max_underspeed)
+                self.rate_limited_speed = max(self.rate_limited_speed, abs_floor)
+            elif v_curr_val < -ABS_MIN_SPEED_MPS and effective_target_v > v_curr_val:
+                abs_ceil = max(prev_v, v_curr_val + max_underspeed)
+                self.rate_limited_speed = min(self.rate_limited_speed, abs_ceil)
 
         # Longitudinal acceleration feedforward (V_trq,ff = Ka * a_x_cmd)
-        v_err_long = effective_target_v - v_curr_val
+        v_ff_target = self.rate_limited_speed if (self.rate_limited_speed < -0.05 and effective_target_v >= 0.0) else effective_target_v
+        v_err_long = v_ff_target - v_curr_val
         a_x_cmd = 0.0
         if abs(v_err_long) > 0.05:
             a_x_cmd = max(-FF_DECEL_MAX_MPS2, min(FF_ACCEL_MAX_MPS2, v_err_long / FF_TRACK_TAU_S))

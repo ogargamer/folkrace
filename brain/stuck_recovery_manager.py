@@ -85,6 +85,7 @@ class StuckRecoveryState:
     PIVOT_REVERSE = "PIVOT_REVERSE"
     DECEL_AND_CENTER = "DECEL_AND_CENTER"
     CORRECTIVE_180 = "CORRECTIVE_180"
+    WIGGLE_ESCAPE = "WIGGLE_ESCAPE"
 
 
 class StuckRecoveryManager:
@@ -142,6 +143,15 @@ class StuckRecoveryManager:
         self.forward_grace_timer: float = 0.0
         self._rev_best_d_straight: float = 0.0
         self._rev_stall_timer: float = 0.0
+        self._rev_phys_stall_timer: float = 0.0
+        self._rev_stroke_elapsed: float = 0.0
+        self._wiggle_step: int = 0
+        self._wiggle_phase_timer: float = 0.0
+        self._wiggle_stall_timer: float = 0.0
+        self._wiggle_steer_sign: float = 1.0
+        self._wiggle_max_steps: int = 6
+        self._wiggle_phase_duration_s: float = 0.30
+        self._wiggle_attempts: int = 0
         self.corrective_rev_clear_m: float = float(kwargs.get("corrective_rev_clear_m", RECOVERY_180_REV_CLEAR_M))
         self.corrective_rev_min_s: float = float(kwargs.get("corrective_rev_min_s", RECOVERY_180_REV_MIN_S))
         self.corrective_align_rad: float = math.radians(float(kwargs.get("corrective_align_deg", RECOVERY_180_ALIGN_DEG)))
@@ -199,6 +209,13 @@ class StuckRecoveryManager:
         self.forward_grace_timer = 0.0
         self._rev_best_d_straight = 0.0
         self._rev_stall_timer = 0.0
+        self._rev_phys_stall_timer = 0.0
+        self._rev_stroke_elapsed = 0.0
+        self._wiggle_step = 0
+        self._wiggle_phase_timer = 0.0
+        self._wiggle_stall_timer = 0.0
+        self._wiggle_steer_sign = 1.0
+        self._wiggle_attempts = 0
 
         self.is_left_pinned = False
         self.is_right_pinned = False
@@ -218,9 +235,46 @@ class StuckRecoveryManager:
     def _enter_decel_and_center(self) -> Tuple[bool, float, float]:
         self.state = StuckRecoveryState.DECEL_AND_CENTER
         self.stroke_timer = 0.0
+        self._rev_phys_stall_timer = 0.0
+        self._rev_stroke_elapsed = 0.0
         self.current_cmd_v = 0.0
         self.current_cmd_steer = 0.0
         return True, 0.0, 0.0
+
+    def _wiggle_cmd_for_step(self, step: int, front_dist_m: float = 0.25) -> Tuple[float, float]:
+        """Returns (velocity, steer) for the given wiggle phase index."""
+        is_fwd = (step % 2 == 0)
+        pair_idx = step // 2
+        pair_sign = self._wiggle_steer_sign if (pair_idx % 2 == 0) else -self._wiggle_steer_sign
+        step_sign = pair_sign if is_fwd else -pair_sign
+        if is_fwd:
+            fwd_cap = 0.65 if front_dist_m < 0.12 else 0.95
+            wiggle_v = min(self.forward_speed, fwd_cap)
+        else:
+            wiggle_v = -self.reverse_speed
+        return wiggle_v, step_sign * self.steer_angle
+
+    def _enter_wiggle_escape(self, initial_steer_sign: Optional[float] = None) -> Tuple[bool, float, float]:
+        """Transitions to alternating forward/reverse wiggle escape when reverse stalls."""
+        self.state = StuckRecoveryState.WIGGLE_ESCAPE
+        self.stroke_timer = 0.0
+        self._wiggle_step = 0
+        self._wiggle_phase_timer = 0.0
+        self._wiggle_stall_timer = 0.0
+        self._rev_phys_stall_timer = 0.0
+        self._rev_stroke_elapsed = 0.0
+        self._wiggle_attempts += 1
+
+        if initial_steer_sign is not None:
+            self._wiggle_steer_sign = 1.0 if initial_steer_sign >= 0.0 else -1.0
+        else:
+            base_sign = -self.preferred_yaw_sign
+            self._wiggle_steer_sign = base_sign if (self._wiggle_attempts % 2 == 1) else -base_sign
+
+        # Flip preferred_yaw_sign so subsequent reverse attempts don't repeat the same wedged arc
+        self.preferred_yaw_sign = -self.preferred_yaw_sign
+        v_cmd, steer_cmd = self._wiggle_cmd_for_step(0)
+        return self._cmd(v_cmd, steer_cmd)
 
     def _cmd(self, v: float, steer: float) -> Tuple[bool, float, float]:
         self.current_cmd_v = float(v)
@@ -615,6 +669,8 @@ class StuckRecoveryManager:
         self.state = StuckRecoveryState.PIVOT_REVERSE
         self.stroke_timer = 0.0
         self.total_recovery_timer = 0.0
+        self._rev_phys_stall_timer = 0.0
+        self._rev_stroke_elapsed = 0.0
 
         if steer_dir is not None:
             self.preferred_yaw_sign = 1.0 if steer_dir > 0 else -1.0
@@ -672,6 +728,8 @@ class StuckRecoveryManager:
         self.corrective_reverse_timer = 0.0
         self._rev_best_d_straight = float(d_front)
         self._rev_stall_timer = 0.0
+        self._rev_phys_stall_timer = 0.0
+        self._rev_stroke_elapsed = 0.0
 
         if steer_sign is None:
             cl = arc_clearance or (0.5, 0.5, 0.5)
@@ -711,6 +769,8 @@ class StuckRecoveryManager:
                 self.corrective_reverse_timer = 0.0
                 self._rev_best_d_straight = 0.0
                 self._rev_stall_timer = 0.0
+                self._rev_phys_stall_timer = 0.0
+                self._rev_stroke_elapsed = 0.0
 
     def update(
         self,
@@ -742,7 +802,8 @@ class StuckRecoveryManager:
         # PHASE 3: DECELERATE SPEED TO 0 WHILE CENTERING SERVO
         if self.state == StuckRecoveryState.DECEL_AND_CENTER:
             is_centered = (abs(active_steer) <= 0.04) and (abs(self.current_cmd_steer) <= 0.02)
-            if is_centered or (self.stroke_timer >= 0.08):
+            is_stopped = (abs(current_v) <= 0.15)
+            if (is_centered and is_stopped) or (self.stroke_timer >= 0.25):
                 return self._finish_recovery()
             return self._cmd(0.0, 0.0)
 
@@ -774,10 +835,55 @@ class StuckRecoveryManager:
             else:
                 is_turn_sufficient = abs(self.corrective_net_turn) >= math.radians(145.0)
 
+        # WIGGLE ESCAPE: Alternating forward/reverse pulses with alternating steering
+        if self.state == StuckRecoveryState.WIGGLE_ESCAPE:
+            self._wiggle_phase_timer += dt
+            is_moving_freely = (
+                abs(current_v) >= 0.25
+                and tof.d_straight >= self.clearance_exit_m
+                and not (is_l_pinned and is_r_pinned)
+            )
+            is_open_exit = (front_cleared and any_tof_cleared and self._wiggle_phase_timer >= 0.10)
+            if is_open_exit or is_moving_freely:
+                self._wiggle_attempts = 0
+                if current_v < -0.15:
+                    return self._enter_decel_and_center()
+                return self._finish_recovery()
+
+            is_fwd = (self._wiggle_step % 2 == 0)
+            phase_dur = (0.22 if tof.d_straight < 0.12 else self._wiggle_phase_duration_s) if is_fwd else 0.35
+            if self._wiggle_phase_timer >= 0.16:
+                phase_stalled = (current_v < 0.10) if is_fwd else (current_v > -0.10)
+                if phase_stalled:
+                    self._wiggle_stall_timer += dt
+                else:
+                    self._wiggle_stall_timer = 0.0
+            else:
+                self._wiggle_stall_timer = 0.0
+
+            if self._wiggle_phase_timer >= phase_dur or self._wiggle_stall_timer >= 0.14:
+                self._wiggle_step += 1
+                self._wiggle_phase_timer = 0.0
+                self._wiggle_stall_timer = 0.0
+                if self._wiggle_step >= self._wiggle_max_steps or self.total_recovery_timer >= 3.2:
+                    return self._enter_decel_and_center()
+
+            v_cmd, steer_cmd = self._wiggle_cmd_for_step(self._wiggle_step, front_dist_m=tof.d_straight)
+            return self._cmd(v_cmd, steer_cmd)
+
         # REVERSE STROKE EXECUTION (Shared by PIVOT_REVERSE and CORRECTIVE_180[REVERSE])
         if self.state == StuckRecoveryState.PIVOT_REVERSE or (
             self.state == StuckRecoveryState.CORRECTIVE_180 and self.corrective_substate == "REVERSE"
         ):
+            # Only start reverse stall timer once forward braking has completed (current_v <= 0.05)
+            if current_v <= 0.05:
+                self._rev_stroke_elapsed += dt
+            if self._rev_stroke_elapsed >= 0.30 and current_v > -0.10:
+                self._rev_phys_stall_timer += dt
+            else:
+                self._rev_phys_stall_timer = 0.0
+            is_rev_phys_stalled = (self._rev_phys_stall_timer >= 0.25)
+
             if self.state == StuckRecoveryState.PIVOT_REVERSE:
                 # Check if facing wrong way with open front -> transition to U-turn!
                 is_facing_ww = False
@@ -806,10 +912,15 @@ class StuckRecoveryManager:
 
                 if self.total_recovery_timer >= RECOVERY_TOTAL_TIMEOUT_S and tof.d_straight >= self.clearance_exit_m:
                     return self._finish_recovery()
-                if (self.stroke_timer >= RECOVERY_EXIT_MIN_TIME_S and front_cleared and any_tof_cleared) or (
-                    self.stroke_timer >= RECOVERY_REVERSE_STROKE_MAX_S
-                ):
+                if self.stroke_timer >= RECOVERY_EXIT_MIN_TIME_S and front_cleared and any_tof_cleared:
+                    self._wiggle_attempts = 0
                     return self._enter_decel_and_center()
+                if is_rev_phys_stalled:
+                    return self._enter_wiggle_escape()
+                if self.stroke_timer >= RECOVERY_REVERSE_STROKE_MAX_S:
+                    if tof.d_straight >= self.clearance_exit_m:
+                        return self._enter_decel_and_center()
+                    return self._enter_wiggle_escape()
                 t_yaw = target_breadcrumb_yaw
                 p_sign = self.preferred_yaw_sign
             else:
@@ -827,6 +938,9 @@ class StuckRecoveryManager:
                 if self.total_recovery_timer >= RECOVERY_180_TIMEOUT_WITH_REV_S:
                     return self._enter_decel_and_center()
 
+                if is_rev_phys_stalled and tof.d_straight < 0.18:
+                    return self._enter_wiggle_escape(initial_steer_sign=-self.corrective_steer_dir)
+
                 has_min_reverse_time = (self.corrective_reverse_timer >= max(RECOVERY_EXIT_MIN_TIME_S, self.corrective_rev_min_s))
                 reverse_timeout = (self.corrective_reverse_timer >= RECOVERY_REVERSE_STROKE_MAX_S)
                 rev_clear_target = max(self.clearance_exit_m, self.corrective_rev_clear_m)
@@ -835,7 +949,7 @@ class StuckRecoveryManager:
                     and self._rev_stall_timer >= 0.18
                     and tof.d_straight >= 0.22
                 )
-                if (has_min_reverse_time and (tof.d_straight >= rev_clear_target or rev_stalled_with_room)) or reverse_timeout:
+                if (has_min_reverse_time and (tof.d_straight >= rev_clear_target or rev_stalled_with_room or is_rev_phys_stalled)) or reverse_timeout:
                     self.corrective_substate = "FORWARD"
                     self.stroke_timer = 0.0
                     self.forward_grace_timer = 0.35

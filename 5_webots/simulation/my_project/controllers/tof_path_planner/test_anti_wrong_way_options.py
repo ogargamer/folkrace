@@ -723,7 +723,48 @@ def test_regression_fixes():
     is_ww_adj_diag, _, _, _ = dog_diag.check_wrong_way(1.0, 2.0, math.radians(135.0), hazard_mask=haz_clear)
     assert is_ww_adj_diag is False, "Adjacent hairpin lane at 1.0m lateral offset must still be rejected!"
 
-    print("  -> Regression Fixes (R1-R9): PASSED")
+    # R10: Reverse stall detection in PIVOT_REVERSE triggers WIGGLE_ESCAPE with alternating fwd/rev + steer
+    rec_wig = StuckRecoveryManager()
+    tofs_wedged = {"tof_front_left_4.1deg": 0.08, "tof_front_right_4.1deg": 0.08, "tof_front_left_82.9deg": 0.15}
+    rec_wig.trigger_emergency_recovery(heading_err=0.0, current_v=0.0, front_clearance_m=0.08, cached_tofs=tofs_wedged)
+    assert rec_wig.state == StuckRecoveryState.PIVOT_REVERSE
+    dt = 0.02
+    entered_wiggle = False
+    seen_cmds = []
+    for _ in range(80):  # up to 1.6s
+        is_rec, v_c, s_c = rec_wig.update(dt=dt, current_v=0.0, cached_tofs=tofs_wedged)
+        if rec_wig.state == StuckRecoveryState.WIGGLE_ESCAPE:
+            entered_wiggle = True
+            seen_cmds.append((v_c > 0.0, s_c > 0.0))
+    assert entered_wiggle, f"Reverse stall must enter WIGGLE_ESCAPE, got {rec_wig.state}"
+    assert any(v_pos for v_pos, _ in seen_cmds) and any(not v_pos for v_pos, _ in seen_cmds), (
+        f"WIGGLE_ESCAPE must alternate forward and reverse pulses, saw {set(seen_cmds)}"
+    )
+    assert any(s_pos for _, s_pos in seen_cmds) and any(not s_pos for _, s_pos in seen_cmds), (
+        f"WIGGLE_ESCAPE must alternate left and right steering, saw {set(seen_cmds)}"
+    )
+
+    # R11: WIGGLE_ESCAPE exits cleanly when clearance opens, and CORRECTIVE_180[REVERSE] stall with blocked front enters WIGGLE_ESCAPE
+    tofs_freed = {"tof_front_left_4.1deg": 0.50, "tof_front_right_4.1deg": 0.50, "tof_front_left_82.9deg": 0.80}
+    rec_wig._enter_wiggle_escape()
+    rec_wig._wiggle_phase_timer = 0.12
+    is_rec_done, _, _ = rec_wig.update(dt=0.02, current_v=0.35, cached_tofs=tofs_freed)
+    assert rec_wig.state == StuckRecoveryState.NORMAL_DRIVE and not is_rec_done, (
+        f"WIGGLE_ESCAPE should finish cleanly when front opens, got {rec_wig.state}"
+    )
+
+    rec_180_wig = StuckRecoveryManager()
+    rec_180_wig.trigger_corrective_180(target_yaw=0.0, steer_sign=1.0, current_yaw=math.pi, cached_tofs=tofs_wedged, front_clearance_m=0.08)
+    assert rec_180_wig.corrective_substate == "REVERSE"
+    for _ in range(30):  # 0.60s
+        rec_180_wig.update(dt=0.02, current_v=0.0, cached_tofs=tofs_wedged, current_yaw=math.pi)
+        if rec_180_wig.state == StuckRecoveryState.WIGGLE_ESCAPE:
+            break
+    assert rec_180_wig.state == StuckRecoveryState.WIGGLE_ESCAPE, (
+        f"CORRECTIVE_180[REVERSE] stall with blocked front must enter WIGGLE_ESCAPE, got {rec_180_wig.state}"
+    )
+
+    print("  -> Regression Fixes (R1-R11): PASSED")
 
 
 if __name__ == "__main__":
