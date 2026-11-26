@@ -1,0 +1,1053 @@
+=== BUNDLE: folkrace_04_webots_tools_part3of17.txt (11 files/sections) ===
+  - 5_webots/robotics/ros2_cartographer/scripts/convert_track_json_to_ros_map.py
+  - 5_webots/robotics/ros2_cartographer/scripts/export_cartographer_png.py
+  - 5_webots/robotics/ros2_cartographer/scripts/install_ros2_cartographer_wsl.sh
+  - 5_webots/robotics/ros2_cartographer/scripts/launch_cartographer.sh
+  - 5_webots/robotics/ros2_cartographer/scripts/save_live_map.sh
+  - 5_webots/robotics/ros2_cartographer/scripts/stop_wsl_cartographer.sh
+  - 5_webots/robotics/ros2_cartographer/scripts/track_lidar_simulator.py
+  - 5_webots/robotics/ros2_cartographer/scripts/webots_cartographer_bridge.py
+  - 5_webots/robotics/ros2_cartographer/scripts/webots_live_streamer.py
+  - 5_webots/simulation/my_project/controllers/tof_path_planner/anti_wrong_way_watchdog.py
+  - 5_webots/simulation/my_project/controllers/tof_path_planner/cpp/build_dlls.py
+
+=== FILE: 5_webots/robotics/ros2_cartographer/scripts/convert_track_json_to_ros_map.py ===
+#!/usr/bin/env python3
+"""
+Converts track_layout JSON into:
+1. Standard ROS Occupancy Grid (.pgm image + .yaml metadata) for Nav2 Map Server
+2. Accurate 2D Wall coordinates for verification and pure localization
+"""
+
+import os
+import sys
+import json
+import math
+import numpy as np
+from PIL import Image, ImageDraw
+
+DIR_VECTORS = [
+    np.array([1.0, 0.0]),   # 0: East (+X)
+    np.array([0.0, 1.0]),   # 1: North (+Y)
+    np.array([-1.0, 0.0]),  # 2: West (-X)
+    np.array([0.0, -1.0])   # 3: South (-Y)
+]
+
+LEFT_VECTORS = [
+    np.array([0.0, 1.0]),   # 0: North
+    np.array([-1.0, 0.0]),  # 1: West
+    np.array([0.0, -1.0]),  # 2: South
+    np.array([1.0, 0.0])    # 3: East
+]
+
+def build_polygons(track_data, step_size=0.01):
+    params = track_data.get("parameters", {})
+    tile_size = float(params.get("tileSize", 1.2))
+    track_width = float(params.get("trackWidth", 1.0))
+    blocks = track_data.get("blocks", [])
+    
+    half_width = track_width / 2.0
+    left_wall, right_wall, centerline = [], [], []
+    
+    for b in blocks:
+        b_type = b.get("type", "straight")
+        start_x = float(b.get("startX", 0.0))
+        start_y = float(b.get("startY", 0.0))
+        cur_h = int(b.get("startHeading", 0)) % 4
+        fwd = DIR_VECTORS[cur_h]
+        left = LEFT_VECTORS[cur_h]
+        
+        if b_type == "straight":
+            steps = max(10, int(math.ceil(tile_size / step_size)))
+            for i in range(1, steps + 1):
+                t = i / steps
+                px = start_x + fwd[0] * tile_size * t
+                py = start_y + fwd[1] * tile_size * t
+                left_wall.append((px + left[0] * half_width, py + left[1] * half_width))
+                right_wall.append((px - left[0] * half_width, py - left[1] * half_width))
+                centerline.append((px, py))
+                
+        elif b_type == "turn_left":
+            r_center = tile_size / 2.0
+            c_data = b.get("center", {})
+            cx = float(c_data.get("x", start_x + left[0] * r_center))
+            cy = float(c_data.get("y", start_y + left[1] * r_center))
+            start_angle = math.atan2(start_y - cy, start_x - cx)
+            arc_len = (math.pi / 2.0) * r_center
+            steps = max(20, int(math.ceil(arc_len / step_size)))
+            
+            for i in range(1, steps + 1):
+                angle = start_angle + (math.pi / 2.0) * (i / steps)
+                cos_a, sin_a = math.cos(angle), math.sin(angle)
+                left_wall.append((cx + (r_center - half_width) * cos_a, cy + (r_center - half_width) * sin_a))
+                right_wall.append((cx + (r_center + half_width) * cos_a, cy + (r_center + half_width) * sin_a))
+                centerline.append((cx + r_center * cos_a, cy + r_center * sin_a))
+                
+        elif b_type == "turn_right":
+            r_center = tile_size / 2.0
+            c_data = b.get("center", {})
+            cx = float(c_data.get("x", start_x - left[0] * r_center))
+            cy = float(c_data.get("y", start_y - left[1] * r_center))
+            start_angle = math.atan2(start_y - cy, start_x - cx)
+            arc_len = (math.pi / 2.0) * r_center
+            steps = max(20, int(math.ceil(arc_len / step_size)))
+            
+            for i in range(1, steps + 1):
+                angle = start_angle - (math.pi / 2.0) * (i / steps)
+                cos_a, sin_a = math.cos(angle), math.sin(angle)
+                left_wall.append((cx + (r_center + half_width) * cos_a, cy + (r_center + half_width) * sin_a))
+                right_wall.append((cx + (r_center - half_width) * cos_a, cy + (r_center - half_width) * sin_a))
+                centerline.append((cx + r_center * cos_a, cy + r_center * sin_a))
+                
+    return left_wall, right_wall, centerline
+
+def generate_occupancy_grid(json_path, output_dir, resolution=0.02, margin=0.5):
+    with open(json_path, "r", encoding="utf-8") as f:
+        track_data = json.load(f)
+        
+    left_wall, right_wall, centerline = build_polygons(track_data)
+    
+    all_pts = left_wall + right_wall
+    xs = [p[0] for p in all_pts]
+    ys = [p[1] for p in all_pts]
+    
+    min_x = math.floor((min(xs) - margin) / resolution) * resolution
+    max_x = math.ceil((max(xs) + margin) / resolution) * resolution
+    min_y = math.floor((min(ys) - margin) / resolution) * resolution
+    max_y = math.ceil((max(ys) + margin) / resolution) * resolution
+    
+    width_px = int(round((max_x - min_x) / resolution))
+    height_px = int(round((max_y - min_y) / resolution))
+    
+    print(f"[MAP] Bounding box: X=[{min_x:.2f}, {max_x:.2f}], Y=[{min_y:.2f}, {max_y:.2f}]")
+    print(f"[MAP] Image dimensions: {width_px} x {height_px} px at {resolution*1000:.1f}mm/px")
+    
+    # In ROS Occupancy Grid standard: 254 (0xFF) = Free, 0 (0x00) = Occupied (Wall), 205 = Unknown
+    img = Image.new("L", (width_px, height_px), 205)
+    draw = ImageDraw.Draw(img)
+    
+    def world_to_px(wx, wy):
+        px = int(round((wx - min_x) / resolution))
+        # Note: image origin is top-left, ROS origin is bottom-left
+        py = height_px - 1 - int(round((wy - min_y) / resolution))
+        return (px, py)
+    
+    # 1. Fill corridor / free space with 254 (White = Free)
+    corridor_poly = [world_to_px(p[0], p[1]) for p in left_wall] + [world_to_px(p[0], p[1]) for p in reversed(right_wall)]
+    draw.polygon(corridor_poly, fill=254)
+    
+    # 2. Draw Walls as Occupied (Black = 0) with thickness = 18mm
+    wall_px_width = max(1, int(round(0.018 / resolution)))
+    for poly in [left_wall, right_wall]:
+        px_coords = [world_to_px(p[0], p[1]) for p in poly]
+        draw.line(px_coords, fill=0, width=wall_px_width)
+        
+    os.makedirs(output_dir, exist_ok=True)
+    pgm_path = os.path.join(output_dir, "folkrace_track_map.pgm")
+    yaml_path = os.path.join(output_dir, "folkrace_track_map.yaml")
+    
+    img.save(pgm_path)
+    print(f"[MAP] Saved PGM map: {pgm_path}")
+    
+    yaml_content = f"""image: folkrace_track_map.pgm
+mode: trinary
+resolution: {resolution}
+origin: [{min_x:.4f}, {min_y:.4f}, 0.000000]
+negate: 0
+occupied_thresh: 0.65
+free_thresh: 0.25
+"""
+    with open(yaml_path, "w", encoding="utf-8") as f:
+        f.write(yaml_content)
+    print(f"[MAP] Saved YAML metadata: {yaml_path}")
+
+if __name__ == "__main__":
+    src_json = sys.argv[1] if len(sys.argv) > 1 else r"C:\Users\nurmi\Downloads\track_layout_1787771901940.json"
+    out_dir = sys.argv[2] if len(sys.argv) > 2 else r"c:\Users\nurmi\Documents\Folkrace\maps"
+    generate_occupancy_grid(src_json, out_dir, resolution=0.02)
+
+
+=== FILE: 5_webots/robotics/ros2_cartographer/scripts/export_cartographer_png.py ===
+#!/usr/bin/env python3
+import sys
+import os
+import math
+import rclpy
+from rclpy.node import Node
+from nav_msgs.msg import OccupancyGrid
+from PIL import Image
+import numpy as np
+
+class MapSaverPNG(Node):
+    def __init__(self, out_path):
+        super().__init__('map_saver_png')
+        self.out_path = out_path
+        self.sub = self.create_subscription(OccupancyGrid, '/map', self.map_callback, 10)
+        self.done = False
+
+    def map_callback(self, msg):
+        w = msg.info.width
+        h = msg.info.height
+        res = msg.info.resolution
+        origin_x = msg.info.origin.position.x
+        origin_y = msg.info.origin.position.y
+
+        # Reject uninitialized or singular 0x0 grids from initial ROS2 topic creation
+        if w <= 0 or h <= 0 or abs(origin_x) > 1e10 or abs(origin_y) > 1e10 or len(msg.data) == 0:
+            self.get_logger().warn(f"Received uninitialized /map ({w}x{h}, origin=[{origin_x:.2f}, {origin_y:.2f}]), waiting for valid submaps...")
+            return
+
+        self.get_logger().info(f"Received valid /map from Cartographer: {w}x{h} cells (res={res:.3f}m, origin=[{origin_x:.2f}, {origin_y:.2f}])")
+        
+        # Grid data: -1=Unknown, 0=Free, 100=Occupied
+        raw_data = np.array(msg.data, dtype=np.int8).reshape((h, w))
+        
+        # Color mapping: Occupied -> Yellow/White, Free -> Dark, Unknown -> Mid-gray
+        # Matplotlib visualization
+        try:
+            import matplotlib.pyplot as plt
+            fig, ax = plt.subplots(figsize=(10, 8), dpi=200, facecolor='#0d1117')
+            ax.set_facecolor('#0d1117')
+            
+            extent = [origin_x, origin_x + w * res, origin_y, origin_y + h * res]
+            display_grid = np.zeros((h, w), dtype=np.float32)
+            display_grid[raw_data == -1] = 0.5   # Unknown
+            display_grid[raw_data == 0] = 0.0    # Free
+            display_grid[raw_data > 50] = 1.0    # Occupied
+            
+            im = ax.imshow(display_grid, origin='lower', extent=extent, cmap='viridis', vmin=0.0, vmax=1.0)
+            cbar = plt.colorbar(im, ax=ax, fraction=0.035, pad=0.04)
+            cbar.set_label('Live Google Cartographer SLAM Occupancy', color='#c9d1d9', fontsize=9)
+            cbar.ax.yaxis.set_tick_params(color='#8b949e')
+            plt.setp(plt.getp(cbar.ax.axes, 'yticklabels'), color='#8b949e', fontsize=8)
+            
+            ax.set_title("Google Cartographer 2D SLAM - Live Webots Sensor Feed", color='white', fontsize=12, pad=12, fontweight='bold')
+            ax.set_xlabel("X Position (meters)", color='#c9d1d9', fontsize=10)
+            ax.set_ylabel("Y Position (meters)", color='#c9d1d9', fontsize=10)
+            ax.tick_params(colors='#8b949e', labelsize=8)
+            
+            for spine in ax.spines.values():
+                spine.set_color('#30363d')
+                
+            plt.tight_layout()
+            plt.savefig(self.out_path, dpi=200)
+            plt.close()
+            self.get_logger().info(f"Saved pure Cartographer live map image to {self.out_path}")
+
+            # Export standard ROS2 Cartographer PGM and YAML map files
+            base_dir = os.path.dirname(self.out_path)
+            # PGM encoding: 0 (black)=Occupied Wall, 254 (white)=Free, 205 (gray)=Unknown
+            pgm_grid = np.full((h, w), 205, dtype=np.uint8)
+            pgm_grid[raw_data == 0] = 254
+            pgm_grid[raw_data > 50] = 0
+            pgm_grid = np.flipud(pgm_grid)
+
+            # Save in sweep results directory
+            pgm_path = os.path.join(base_dir, "cartographer_2d_slam_static_map.pgm")
+            with open(pgm_path, "wb") as f_pgm:
+                f_pgm.write(f"P5\n{w} {h}\n255\n".encode("ascii"))
+                f_pgm.write(pgm_grid.tobytes())
+
+            yaml_path = os.path.join(base_dir, "cartographer_2d_slam_static_map.yaml")
+            yaml_content = f"""image: cartographer_2d_slam_static_map.pgm
+mode: trinary
+resolution: {res}
+origin: [{origin_x:.4f}, {origin_y:.4f}, 0.000000]
+negate: 0
+occupied_thresh: 0.65
+free_thresh: 0.25
+"""
+            with open(yaml_path, "w", encoding="utf-8") as f_yaml:
+                f_yaml.write(yaml_content)
+
+            # Also update canonical map in maps/cyan_champion_clean_static/
+            clean_dir = "/mnt/c/Users/nurmi/Documents/Folkrace/maps/cyan_champion_clean_static"
+            try:
+                os.makedirs(clean_dir, exist_ok=True)
+                with open(os.path.join(clean_dir, "cartographer_2d_slam_static_map.pgm"), "wb") as f_clean:
+                    f_clean.write(f"P5\n{w} {h}\n255\n".encode("ascii"))
+                    f_clean.write(pgm_grid.tobytes())
+                with open(os.path.join(clean_dir, "cartographer_2d_slam_static_map.yaml"), "w", encoding="utf-8") as f_clean_yaml:
+                    f_clean_yaml.write(yaml_content)
+                self.get_logger().info(f"Updated canonical Cartographer SLAM map in {clean_dir}")
+            except Exception as ex:
+                self.get_logger().warn(f"Could not copy to canonical dir: {ex}")
+
+            self.done = True
+        except Exception as e:
+            self.get_logger().error(f"Error rendering map PNG: {e}")
+
+def main():
+    rclpy.init()
+    out_path = sys.argv[1] if len(sys.argv) > 1 else "/mnt/c/Users/nurmi/Documents/Folkrace/maps/cyan_champion_clean_static/cartographer_2d_slam_static_result.png"
+    node = MapSaverPNG(out_path)
+    
+    print("[MAP RENDERER] Waiting for live /map from Cartographer (up to 25s)...")
+    for _ in range(250):
+        rclpy.spin_once(node, timeout_sec=0.1)
+        if node.done:
+            break
+            
+    node.destroy_node()
+    rclpy.shutdown()
+
+if __name__ == '__main__':
+    main()
+
+
+=== FILE: 5_webots/robotics/ros2_cartographer/scripts/install_ros2_cartographer_wsl.sh ===
+#!/bin/bash
+set -e
+
+echo "=== 1. Setting up locales ==="
+apt-get update
+apt-get install -y locales curl gnupg lsb-release
+locale-gen en_US en_US.UTF-8
+update-locale LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8
+export LANG=en_US.UTF-8
+
+echo "=== 2. Adding ROS 2 repository ==="
+curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key -o /usr/share/keyrings/ros-archive-keyring.gpg
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu $(lsb_release -cs) main" > /etc/apt/sources.list.d/ros2.list
+
+echo "=== 3. Installing ROS 2 Humble Desktop & Cartographer ==="
+apt-get update
+DEBIAN_FRONTEND=noninteractive apt-get install -y \
+  ros-humble-desktop \
+  ros-humble-cartographer \
+  ros-humble-cartographer-ros \
+  ros-humble-nav2-map-server \
+  ros-humble-tf2-tools \
+  python3-colcon-common-extensions \
+  python3-rosdep \
+  python3-vcstool
+
+echo "=== 4. Setting up Environment for user gold ==="
+if [ ! -f /etc/ros/rosdep/sources.list.d/20-default.list ]; then
+  rosdep init || true
+fi
+su - gold -c "rosdep update || true"
+
+if ! grep -q "/opt/ros/humble/setup.bash" /home/gold/.bashrc; then
+  echo "source /opt/ros/humble/setup.bash" >> /home/gold/.bashrc
+fi
+
+echo "=== Installation Completed Successfully ==="
+
+
+=== FILE: 5_webots/robotics/ros2_cartographer/scripts/launch_cartographer.sh ===
+#!/usr/bin/env bash
+# ==============================================================================
+# Launch Google Cartographer SLAM Node with Webots live UDP Bridge
+# ==============================================================================
+source /opt/ros/humble/setup.bash
+
+CONFIG_DIR="${HOME}/folkrace_cartographer_ws/config"
+SCRIPTS_DIR="${HOME}/folkrace_cartographer_ws/scripts"
+
+echo "=============================================================================="
+echo "  STARTING GOOGLE CARTOGRAPHER 2D SLAM (ROS 2 HUMBLE) + WEBOTS LIVE BRIDGE"
+echo "=============================================================================="
+
+# 1. Start Webots Live UDP -> ROS 2 Bridge in background
+python3 "${SCRIPTS_DIR}/webots_cartographer_bridge.py" &
+BRIDGE_PID=$!
+echo "[LAUNCH] Webots UDP Bridge started (PID: ${BRIDGE_PID})."
+
+# 2. Start Cartographer Node
+ros2 run cartographer_ros cartographer_node \
+    -configuration_directory "${CONFIG_DIR}" \
+    -configuration_basename folkrace_2d.lua \
+    --ros-args \
+    --remap scan:=/scan \
+    --remap imu:=/imu &
+CARTO_PID=$!
+echo "[LAUNCH] Cartographer Node started (PID: ${CARTO_PID})."
+
+# 3. Start Cartographer Occupancy Grid Node
+ros2 run cartographer_ros cartographer_occupancy_grid_node \
+    -resolution 0.02 \
+    -publish_period_sec 0.5 &
+GRID_PID=$!
+echo "[LAUNCH] Occupancy Grid Node started (PID: ${GRID_PID})."
+
+echo "[LAUNCH] All Cartographer nodes running. Press Ctrl+C to stop."
+wait
+
+
+=== FILE: 5_webots/robotics/ros2_cartographer/scripts/save_live_map.sh ===
+#!/usr/bin/env bash
+# ==============================================================================
+# Save Live Cartographer SLAM Map to PGM and YAML
+# ==============================================================================
+source /opt/ros/humble/setup.bash
+
+OUT_DIR="${1:-${HOME}/folkrace_cartographer_ws/maps}"
+mkdir -p "${OUT_DIR}"
+
+echo "[MAP SAVER] Requesting Cartographer map from /map topic..."
+ros2 run nav2_map_server map_saver_cli -f "${OUT_DIR}/cartographer_live_map" --fmt png --occ 0.65 --free 0.25
+
+echo "[MAP SAVER] Map saved to ${OUT_DIR}/cartographer_live_map.pgm / .yaml / .png"
+
+
+=== FILE: 5_webots/robotics/ros2_cartographer/scripts/stop_wsl_cartographer.sh ===
+#!/usr/bin/env bash
+pkill -9 -f cartographer_node 2>/dev/null || true
+pkill -9 -f cartographer_occupancy_grid_node 2>/dev/null || true
+pkill -9 -f webots_cartographer_bridge.py 2>/dev/null || true
+
+
+=== FILE: 5_webots/robotics/ros2_cartographer/scripts/track_lidar_simulator.py ===
+#!/usr/bin/env python3
+"""
+Simulates a virtual 360-degree LiDAR scan from the track map and streams it
+along with IMU to Cartographer/ROS 2 to initialize or verify SLAM.
+"""
+
+import os
+import sys
+import json
+import math
+import numpy as np
+import time
+
+from convert_track_json_to_ros_map import build_polygons
+
+def ray_intersect_segment(p, r_dir, a, b):
+    # p: ray origin [2], r_dir: ray unit dir [2]
+    # a, b: segment endpoints [2]
+    v1 = p - a
+    v2 = b - a
+    v3 = np.array([-r_dir[1], r_dir[0]])
+    dot = np.dot(v2, v3)
+    if abs(dot) < 1e-8:
+        return float('inf')
+    t1 = (v2[0] * v1[1] - v2[1] * v1[0]) / dot
+    t2 = np.dot(v1, v3) / dot
+    if t1 >= 0.0 and 0.0 <= t2 <= 1.0:
+        return t1
+    return float('inf')
+
+def simulate_lidar_scan(pose_x, pose_y, pose_yaw, wall_segments, n_rays=450, max_range=5.0, min_range=0.05):
+    ranges = np.full(n_rays, max_range, dtype=np.float32)
+    angles = np.linspace(-math.pi, math.pi, n_rays, endpoint=False) + pose_yaw
+    pos = np.array([pose_x, pose_y])
+    
+    for i, ang in enumerate(angles):
+        r_dir = np.array([math.cos(ang), math.sin(ang)])
+        min_dist = max_range
+        for (a, b) in wall_segments:
+            d = ray_intersect_segment(pos, r_dir, a, b)
+            if d < min_dist and d >= min_range:
+                min_dist = d
+        ranges[i] = min_dist
+    return ranges
+
+if __name__ == "__main__":
+    print("[SIM] LiDAR Raycast Engine for Track Layout verified.")
+
+
+=== FILE: 5_webots/robotics/ros2_cartographer/scripts/webots_cartographer_bridge.py ===
+"""
+================================================================================
+  WEBOTS TO ROS 2 GOOGLE CARTOGRAPHER BRIDGE
+  Listens on UDP (port 9876) from live Webots folkrace_drive controller
+  Publishes ms200k 360-LiDAR (/scan), BNO08X IMU (/imu), and Static TF Frames
+================================================================================
+"""
+
+import sys
+import math
+import json
+import socket
+import select
+import numpy as np
+
+import base64
+import zlib
+
+try:
+    import rclpy
+    from rclpy.node import Node
+    from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy, qos_profile_sensor_data
+    from sensor_msgs.msg import LaserScan, Imu
+    from nav_msgs.msg import OccupancyGrid
+    from geometry_msgs.msg import TransformStamped, PoseStamped
+    import tf2_ros
+except ImportError:
+    print("[ERROR] ROS 2 Python packages (rclpy, sensor_msgs, nav_msgs, tf2_ros) not installed in current environment.")
+    print("Please run within your ROS 2 WSL2 environment.")
+
+
+import struct
+
+def get_windows_host_ip():
+    try:
+        with open("/proc/net/route", "r") as f:
+            for line in f:
+                fields = line.strip().split()
+                if len(fields) >= 3 and fields[1] == "00000000":
+                    return socket.inet_ntoa(struct.pack("<L", int(fields[2], 16)))
+    except Exception:
+        pass
+    return "127.0.0.1"
+
+
+class WebotsCartographerBridgeNode(Node):
+    def __init__(self, udp_port=9876):
+        super().__init__('webots_cartographer_bridge')
+        
+        # Publishers for Cartographer 2D SLAM
+        self.scan_pub = self.create_publisher(LaserScan, '/scan', 10)
+        self.imu_pub = self.create_publisher(Imu, '/imu', 50)
+        self.tf_broadcaster = tf2_ros.TransformBroadcaster(self)
+        self.tf_static_broadcaster = tf2_ros.StaticTransformBroadcaster(self)
+
+        # Subscriber for Cartographer's estimated robot pose (SensorData QoS matches BestEffort publisher)
+        self.pose_sub = self.create_subscription(
+            PoseStamped, '/tracked_pose', self._tracked_pose_cb, qos_profile_sensor_data
+        )
+
+        # Subscriber for Cartographer's live OccupancyGrid map
+        self.map_sub = self.create_subscription(
+            OccupancyGrid, '/map', self._map_cb, 1
+        )
+
+        self._broadcast_static_transforms()
+
+        # UDP Receiver for live Webots sensor stream
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.bind(('0.0.0.0', udp_port))
+        self.sock.setblocking(False)
+
+        # Windows Host IP for cross-VM networking
+        self.win_host_ip = get_windows_host_ip()
+        self.pose_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.mppi_pose_port = 9877
+        self.map_port = 9875
+
+        # Timer to pump UDP packets at 100 Hz
+        self.create_timer(0.005, self._poll_udp)
+        self.get_logger().info(f"Webots -> Cartographer ROS 2 Bridge Node initialized (Listening on UDP :{udp_port}, streaming to Windows Host {self.win_host_ip}:{self.mppi_pose_port}).")
+
+    def _tracked_pose_cb(self, msg: PoseStamped):
+        """Broadcasts the real-time filtered Google Cartographer SLAM pose directly to MPPI."""
+        x = float(msg.pose.position.x)
+        y = float(msg.pose.position.y)
+        q = msg.pose.orientation
+        siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
+        cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+        yaw = math.atan2(siny_cosp, cosy_cosp)
+        t = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+
+        # Filtered linear velocity and yaw rate directly from Cartographer pose trajectory
+        if hasattr(self, "_prev_pose_t") and (t - self._prev_pose_t) > 1e-4:
+            dt = t - self._prev_pose_t
+            dx = x - self._prev_pose_x
+            dy = y - self._prev_pose_y
+            dyaw = (yaw - self._prev_pose_yaw + math.pi) % (2.0 * math.pi) - math.pi
+            v = math.hypot(dx, dy) / dt
+            wz = dyaw / dt
+        else:
+            v = 0.0
+            wz = 0.0
+
+        self._prev_pose_t = t
+        self._prev_pose_x = x
+        self._prev_pose_y = y
+        self._prev_pose_yaw = yaw
+
+        pkt = {
+            "x": round(x, 4),
+            "y": round(y, 4),
+            "yaw": round(yaw, 4),
+            "v": round(v, 3),
+            "wz": round(wz, 4),
+            "time": round(t, 4),
+        }
+        payload = json.dumps(pkt).encode("utf-8")
+        try:
+            self.pose_sock.sendto(payload, ('127.0.0.1', self.mppi_pose_port))
+            if self.win_host_ip != '127.0.0.1':
+                self.pose_sock.sendto(payload, (self.win_host_ip, self.mppi_pose_port))
+        except Exception:
+            pass
+
+    def _map_cb(self, msg: OccupancyGrid):
+        """Broadcasts live Cartographer occupancy grid to MPPI & Costmap visualizer."""
+        w = msg.info.width
+        h = msg.info.height
+        res = msg.info.resolution
+        origin_x = msg.info.origin.position.x
+        origin_y = msg.info.origin.position.y
+        raw_bytes = bytes(msg.data)
+        compressed_data = zlib.compress(raw_bytes)
+
+        pkt = {
+            "w": w,
+            "h": h,
+            "res": res,
+            "origin": [round(origin_x, 4), round(origin_y, 4)],
+            "data_z64": base64.b64encode(compressed_data).decode("ascii"),
+            "time": msg.info.map_load_time.sec + msg.info.map_load_time.nanosec * 1e-9,
+        }
+        payload = json.dumps(pkt).encode("utf-8")
+        try:
+            self.pose_sock.sendto(payload, ('127.0.0.1', self.map_port))
+            if self.win_host_ip != '127.0.0.1':
+                self.pose_sock.sendto(payload, (self.win_host_ip, self.map_port))
+        except Exception:
+            pass
+
+    def _broadcast_static_transforms(self):
+        """Broadcasts static robot transforms matching Webots robot dimensions."""
+        now = self.get_clock().now().to_msg()
+
+        # 1. Base Link -> Laser Frame (Lidar mount: z = +0.0725 m, y = +0.01 m)
+        tf_laser = TransformStamped()
+        tf_laser.header.stamp = now
+        tf_laser.header.frame_id = "base_link"
+        tf_laser.child_frame_id = "laser"
+        tf_laser.transform.translation.x = 0.0
+        tf_laser.transform.translation.y = 0.01
+        tf_laser.transform.translation.z = 0.0725
+        tf_laser.transform.rotation.w = 1.0
+
+        # 2. Base Link -> IMU Frame (BNO08X: z = +0.015 m, y = -0.01 m)
+        tf_imu = TransformStamped()
+        tf_imu.header.stamp = now
+        tf_imu.header.frame_id = "base_link"
+        tf_imu.child_frame_id = "imu_link"
+        tf_imu.transform.translation.x = 0.0
+        tf_imu.transform.translation.y = -0.01
+        tf_imu.transform.translation.z = 0.015
+        tf_imu.transform.rotation.w = 1.0
+
+        self.tf_static_broadcaster.sendTransform([tf_laser, tf_imu])
+
+    def _reset_cartographer(self):
+        """Cleans and resets Cartographer SLAM on Webots world reset."""
+        self.get_logger().info("[RESET] Simulation reset detected. Resetting Cartographer SLAM...")
+        self._prev_pose_t = None
+        self._prev_pose_x = None
+        self._prev_pose_y = None
+        self._prev_pose_yaw = None
+
+        import subprocess
+        try:
+            subprocess.run("pkill -9 -f cartographer_node; pkill -9 -f cartographer_occupancy_grid_node; rm -rf /dev/shm/*", shell=True)
+            cfg_dir = "/mnt/c/Users/nurmi/Documents/Folkrace/5_webots/robotics/ros2_cartographer/config"
+            subprocess.Popen(f"nohup ros2 run cartographer_ros cartographer_node -configuration_directory '{cfg_dir}' -configuration_basename folkrace_2d.lua --remap scan:=/scan --remap imu:=/imu > /tmp/carto_live.log 2>&1 &", shell=True)
+            subprocess.Popen("nohup ros2 run cartographer_ros cartographer_occupancy_grid_node -resolution 0.02 -publish_period_sec 0.066 > /tmp/grid_live.log 2>&1 &", shell=True)
+        except Exception as e:
+            self.get_logger().warn(f"Error resetting Cartographer: {e}")
+
+    def _poll_udp(self):
+        while True:
+            try:
+                data, _ = self.sock.recvfrom(65535)
+                if not data:
+                    break
+                packet = json.loads(data.decode('utf-8'))
+
+                if packet.get("reset", False):
+                    self._reset_cartographer()
+                    break
+
+                t_pkt = packet.get("time", 0.0)
+                if hasattr(self, "_last_sim_time") and (t_pkt < self._last_sim_time - 0.5):
+                    self._reset_cartographer()
+                self._last_sim_time = t_pkt
+
+                ranges = packet.get("ranges", [])
+                rpy = packet.get("rpy", [0.0, 0.0, 0.0])
+                gyro = packet.get("gyro", [0.0, 0.0, 0.0])
+                accel = packet.get("accel", [0.0, 0.0, 0.0])
+                
+                if ranges:
+                    self.publish_webots_lidar(ranges)
+                if rpy:
+                    self.publish_webots_imu(rpy, accel, gyro)
+            except (BlockingIOError, socket.error):
+                break
+            except Exception as e:
+                self.get_logger().warn(f"Error decoding live Webots UDP packet: {e}")
+                break
+
+    def publish_webots_lidar(self, range_image, fov_rad=6.2831853, min_range=0.12, max_range=5.0):
+        """Publishes 360-degree LiDAR range array as LaserScan."""
+        scan = LaserScan()
+        scan.header.stamp = self.get_clock().now().to_msg()
+        scan.header.frame_id = "laser"
+
+        n_samples = len(range_image)
+        if n_samples == 0:
+            return
+
+        scan.angle_min = -math.pi
+        scan.angle_max = math.pi
+        scan.angle_increment = 2.0 * math.pi / float(n_samples)
+        scan.time_increment = 0.0
+        scan.scan_time = 0.02
+        scan.range_min = float(min_range)
+        scan.range_max = float(max_range)
+        # Webots LiDAR sweeps clockwise from +pi to -pi; reverse array to make it CCW from -pi to +pi for ROS 2
+        scan.ranges = [float(r) for r in reversed(range_image)]
+
+        self.scan_pub.publish(scan)
+
+    def publish_webots_imu(self, rpy, accel_xyz, gyro_xyz):
+        """Publishes orientation, linear acceleration, and angular velocity to /imu."""
+        imu = Imu()
+        imu.header.stamp = self.get_clock().now().to_msg()
+        imu.header.frame_id = "imu_link"
+
+        # Convert Roll/Pitch/Yaw to Quaternion
+        roll, pitch, yaw = rpy[0], rpy[1], rpy[2]
+        cy = math.cos(yaw * 0.5)
+        sy = math.sin(yaw * 0.5)
+        cp = math.cos(pitch * 0.5)
+        sp = math.sin(pitch * 0.5)
+        cr = math.cos(roll * 0.5)
+        sr = math.sin(roll * 0.5)
+
+        imu.orientation.w = cr * cp * cy + sr * sp * sy
+        imu.orientation.x = sr * cp * cy - cr * sp * sy
+        imu.orientation.y = cr * sp * cy + sr * cp * sy
+        imu.orientation.z = cr * cp * sy - sr * sp * cy
+
+        # IMU Gyro (rad/s)
+        imu.angular_velocity.x = float(gyro_xyz[0])
+        imu.angular_velocity.y = float(gyro_xyz[1])
+        imu.angular_velocity.z = float(gyro_xyz[2])
+
+        # Accelerometer (m/s^2)
+        imu.linear_acceleration.x = float(accel_xyz[0])
+        imu.linear_acceleration.y = float(accel_xyz[1])
+        imu.linear_acceleration.z = float(accel_xyz[2])
+
+        # Covariance matrices (-1 in orientation disables uncalibrated quaternion drift in Cartographer)
+        imu.orientation_covariance = [-1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        imu.angular_velocity_covariance = [0.0001, 0.0, 0.0, 0.0, 0.0001, 0.0, 0.0, 0.0, 0.0001]
+        imu.linear_acceleration_covariance = [0.01, 0.0, 0.0, 0.0, 0.01, 0.0, 0.0, 0.0, 0.01]
+
+        self.imu_pub.publish(imu)
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = WebotsCartographerBridgeNode()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()
+
+
+=== FILE: 5_webots/robotics/ros2_cartographer/scripts/webots_live_streamer.py ===
+"""
+================================================================================
+  WEBOTS LIVE ROS 2 SENSORS STREAMER
+  Reads Webots ms200k_lidar and bno08x_imu and streams them via UDP to WSL2 ROS 2
+================================================================================
+"""
+
+import json
+import socket
+import struct
+
+class WebotsLiveStreamer:
+    def __init__(self, host="127.0.0.1", port=9876):
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.target = (host, port)
+        self.enabled = True
+
+    def send_scan_and_imu(self, timestamp, ranges, rpy, gyro, accel):
+        if not self.enabled or not ranges:
+            return
+        try:
+            payload = {
+                "t": round(float(timestamp), 4),
+                "ranges": [round(float(r), 4) for r in ranges],
+                "rpy": [round(float(x), 4) for x in rpy],
+                "gyro": [round(float(x), 4) for x in gyro],
+                "accel": [round(float(x), 4) for x in accel]
+            }
+            data = json.dumps(payload).encode("utf-8")
+            self.sock.sendto(data, self.target)
+        except Exception:
+            pass
+
+
+=== FILE: 5_webots/simulation/my_project/controllers/tof_path_planner/anti_wrong_way_watchdog.py ===
+"""
+Single-source-of-truth re-export shim for brain.anti_wrong_way_watchdog.
+"""
+
+import os
+import sys
+
+_CURR_DIR = os.path.dirname(os.path.abspath(__file__))
+_REPO_ROOT = os.path.abspath(os.path.join(_CURR_DIR, "..", "..", "..", "..", ".."))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+from brain.anti_wrong_way_watchdog import (
+    ANTI_WRONG_WAY_MODE,
+    AWW_BREADCRUMB_DURATION_SCALE,
+    AWW_BREADCRUMB_LOOKBACK_M,
+    AWW_BREADCRUMB_MAX_TIMEOUT_S,
+    AWW_BREADCRUMB_SPACING_M,
+    AWW_CONFIRM_TIME_S,
+    AWW_EARLY_EXIT_CONE_DEG,
+    AWW_EARLY_EXIT_CORRIDOR_HALF_WIDTH_M,
+    AWW_EARLY_EXIT_MIN_BC_DIST_M,
+    AWW_EARLY_EXIT_MIN_GAP_M,
+    AWW_EARLY_EXIT_MIN_HALF_WIDTH_M,
+    AWW_EARLY_EXIT_OPPOSING_DEG,
+    AWW_MAX_DETECT_DIST_M,
+    AWW_MIN_CONFIRMED_BREADCRUMBS,
+    AWW_POST_RECOVERY_COOLDOWN_S,
+    AntiWrongWayWatchdog,
+    Breadcrumb,
+    BreadcrumbWatchdog,
+    WrongWayOptionMode,
+    WrongWayStatus,
+    wrap_to_pi,
+)
+
+__all__ = [
+    "ANTI_WRONG_WAY_MODE",
+    "AWW_BREADCRUMB_DURATION_SCALE",
+    "AWW_BREADCRUMB_LOOKBACK_M",
+    "AWW_BREADCRUMB_MAX_TIMEOUT_S",
+    "AWW_BREADCRUMB_SPACING_M",
+    "AWW_CONFIRM_TIME_S",
+    "AWW_EARLY_EXIT_CONE_DEG",
+    "AWW_EARLY_EXIT_CORRIDOR_HALF_WIDTH_M",
+    "AWW_EARLY_EXIT_MIN_BC_DIST_M",
+    "AWW_EARLY_EXIT_MIN_GAP_M",
+    "AWW_EARLY_EXIT_MIN_HALF_WIDTH_M",
+    "AWW_EARLY_EXIT_OPPOSING_DEG",
+    "AWW_MAX_DETECT_DIST_M",
+    "AWW_MIN_CONFIRMED_BREADCRUMBS",
+    "AWW_POST_RECOVERY_COOLDOWN_S",
+    "AntiWrongWayWatchdog",
+    "Breadcrumb",
+    "BreadcrumbWatchdog",
+    "WrongWayOptionMode",
+    "WrongWayStatus",
+    "wrap_to_pi",
+]
+
+
+=== FILE: 5_webots/simulation/my_project/controllers/tof_path_planner/cpp/build_dlls.py ===
+"""
+================================================================================
+  UNIFIED C++ DLL BUILD TOOL FOR AUTONOMOUS TOF CONTROLLER
+  Compiles:
+    1. smart_hybrid_costmap_front.dll (AVX2 Fast Circle Triangulation Costmap)
+    2. curvilinear_sl_mpc.dll (AVX2 OSQP Curvilinear Slack-Constrained SL-MPC)
+================================================================================
+"""
+
+import os
+import shutil
+import subprocess
+import sys
+import time
+from typing import Optional, Tuple
+
+
+def _find_workspace_root(controller_dir: str) -> str:
+    """Walks up from controller_dir to locate the repository root containing .git."""
+    workspace_root = os.path.abspath(os.path.join(controller_dir, *[".."] * 4))
+    # If workspace_root does not contain .git, step up one more level
+    if not os.path.exists(os.path.join(workspace_root, ".git")):
+        workspace_root = os.path.dirname(workspace_root)
+    return workspace_root
+
+
+def find_compiler() -> Tuple[str, dict]:
+    """Locates g++ with AVX2 support from PATH or known w64devkit directories."""
+    cpp_dir = os.path.dirname(os.path.abspath(__file__))
+    controller_dir = os.path.dirname(cpp_dir)
+    workspace_root = _find_workspace_root(controller_dir)
+
+    candidates = [
+        # Check system PATH first
+        shutil.which("g++"),
+        # Check workspace tools
+        os.path.join(workspace_root, "5_webots", "optimization", "ga_planner_optimizer", "w64devkit", "bin", "g++.exe"),
+        os.path.join(workspace_root, "5_webots", "tools", "w64devkit", "bin", "g++.exe"),
+        os.path.join(workspace_root, "tools", "w64devkit", "bin", "g++.exe"),
+        # Direct relative path from cpp_dir
+        os.path.abspath(os.path.join(cpp_dir, "..", "..", "..", "..", "optimization", "ga_planner_optimizer", "w64devkit", "bin", "g++.exe")),
+    ]
+
+    env = os.environ.copy()
+    for cand in candidates:
+        if cand and os.path.exists(cand):
+            bin_dir = os.path.dirname(cand)
+            env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
+            return cand, env
+
+    return "g++", env
+
+
+def compile_costmap(compiler: str, env: dict, cpp_dir: str, output_dir: str) -> bool:
+    source_file = os.path.join(cpp_dir, "smart_hybrid_costmap_front.cpp")
+    dll_output = os.path.join(output_dir, "smart_hybrid_costmap_front.dll")
+
+    old_dll = dll_output + ".old"
+    if os.path.exists(dll_output):
+        try:
+            os.replace(dll_output, old_dll)
+        except Exception as e:
+            print(f"[Costmap] Notice: Could not rotate existing DLL: {e}")
+
+    cmd = [
+        compiler,
+        "-O3",
+        "-shared",
+        "-fPIC",
+        "-mavx2",
+        "-std=c++17",
+        "-Wall",
+        "-Wextra",
+        "-o", dll_output,
+        source_file,
+    ]
+
+    print(f"[BUILD 1/2] Compiling Smart Hybrid Costmap DLL -> {os.path.basename(dll_output)}")
+    t0 = time.perf_counter()
+    result = subprocess.run(cmd, env=env, capture_output=True, text=True)
+    dt = (time.perf_counter() - t0) * 1000.0
+
+    if result.returncode != 0:
+        print("[BUILD ERROR] Costmap compilation failed:")
+        print(result.stderr)
+        return False
+
+    if os.path.exists(old_dll):
+        try:
+            os.remove(old_dll)
+        except Exception:
+            pass
+
+    size_kb = os.path.getsize(dll_output) / 1024.0
+    print(f"  -> SUCCESS ({size_kb:.1f} KB in {dt:.0f} ms)")
+    return True
+
+
+def compile_sl_mpc(compiler: str, env: dict, cpp_dir: str, output_dir: str) -> bool:
+    source_file = os.path.join(cpp_dir, "curvilinear_sl_mpc.cpp")
+    dll_output = os.path.join(output_dir, "curvilinear_sl_mpc.dll")
+    osqp_dir = os.path.join(cpp_dir, "osqp_codegen_sl_mpc")
+    osqp_lib = os.path.join(osqp_dir, "libosqp.a")
+
+    if not os.path.exists(osqp_lib):
+        print(f"[BUILD ERROR] libosqp.a not found at {osqp_lib}")
+        return False
+
+    inc_dirs = [
+        f"-I{cpp_dir}",
+        f"-I{osqp_dir}",
+        f"-I{os.path.join(osqp_dir, 'inc', 'public')}",
+        f"-I{os.path.join(osqp_dir, 'inc', 'private')}",
+    ]
+
+    old_dll = dll_output + ".old"
+    if os.path.exists(dll_output):
+        try:
+            os.replace(dll_output, old_dll)
+        except Exception as e:
+            print(f"[SL-MPC] Notice: Could not rotate existing DLL: {e}")
+
+    cmd = [
+        compiler,
+        "-O3",
+        "-shared",
+        "-fPIC",
+        "-mavx2",
+        "-fno-math-errno",
+        "-std=c++17",
+        "-Wall",
+        "-Wextra",
+    ] + inc_dirs + [
+        "-o", dll_output,
+        source_file,
+        osqp_lib,
+    ]
+
+    print(f"[BUILD 2/2] Compiling Curvilinear SL-MPC DLL -> {os.path.basename(dll_output)}")
+    t0 = time.perf_counter()
+    result = subprocess.run(cmd, env=env, capture_output=True, text=True)
+    dt = (time.perf_counter() - t0) * 1000.0
+
+    if result.returncode != 0:
+        print("[BUILD ERROR] SL-MPC compilation failed:")
+        print(result.stderr)
+        return False
+
+    if os.path.exists(old_dll):
+        try:
+            os.remove(old_dll)
+        except Exception:
+            pass
+
+    size_kb = os.path.getsize(dll_output) / 1024.0
+    print(f"  -> SUCCESS ({size_kb:.1f} KB in {dt:.0f} ms)")
+    return True
+
+
+def main():
+    cpp_dir = os.path.dirname(os.path.abspath(__file__))
+    output_dir = os.path.dirname(cpp_dir)
+
+    compiler, env = find_compiler()
+    print(f"[Compiler] Using: {compiler}")
+
+    build_costmap = "--sl-mpc-only" not in sys.argv
+    build_mpc = "--costmap-only" not in sys.argv
+
+    success = True
+    if build_costmap:
+        if not compile_costmap(compiler, env, cpp_dir, output_dir):
+            success = False
+
+    if build_mpc:
+        if not compile_sl_mpc(compiler, env, cpp_dir, output_dir):
+            success = False
+
+    if not success:
+        sys.exit(1)
+
+    brain_dir = os.path.join(_find_workspace_root(output_dir), "brain")
+    if os.path.isdir(brain_dir):
+        built_dlls = []
+        if build_costmap:
+            built_dlls.append("smart_hybrid_costmap_front.dll")
+        if build_mpc:
+            built_dlls.append("curvilinear_sl_mpc.dll")
+        for dll_name in built_dlls:
+            src_dll = os.path.join(output_dir, dll_name)
+            dst_dll = os.path.join(brain_dir, dll_name)
+            if os.path.exists(src_dll):
+                shutil.copy2(src_dll, dst_dll)
+                print(f"[SYNC] Copied {dll_name} -> {dst_dll}")
+
+    print("\n[ALL BUILDS COMPLETED SUCCESSFULLY]")
+
+
+if __name__ == "__main__":
+    main()
+
+

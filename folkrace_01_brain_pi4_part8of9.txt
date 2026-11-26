@@ -1,0 +1,1575 @@
+=== BUNDLE: folkrace_01_brain_pi4_part8of9.txt (2 files/sections) ===
+  - 2_pi4/mcu_uart_bridge.py
+  - 2_pi4/path_planner_runner.py
+
+=== FILE: 2_pi4/mcu_uart_bridge.py ===
+#!/usr/bin/env python3
+"""
+================================================================================
+  FOLKRACE PI 4: HIGH-SPEED MCU BINARY UART INGESTION BRIDGE
+================================================================================
+  Listens to binary UART telemetry from:
+    1. ESP32 Main (Chassis Dynamics, 4-Wheel RPMs, IMU, Servo Feedback) @ 100 Hz
+    2. ESP32 ToF Hub (VL53L8CX 16-zone distance arrays) @ 60 Hz
+
+  Feeds parsed real-hardware frames directly to:
+    - Path Planner Pipeline (Core 1)
+    - Debug Server & Black Box Flight Recorder (Core 2) via UDP 127.0.0.1:9876
+================================================================================
+"""
+
+import os
+import sys
+import time
+import signal
+import socket
+import select
+import json
+import glob
+import threading
+from typing import Optional, Dict, Any, Tuple, List, Set
+
+CURR_DIR = os.path.dirname(os.path.abspath(__file__))
+if CURR_DIR not in sys.path:
+    sys.path.insert(0, CURR_DIR)
+
+from mcu_telemetry_protocol import (
+    MCU_SYNC,
+    PI_SYNC,
+    MSG_ID_CHASSIS_TELEM,
+    MSG_ID_TOF_TELEM,
+    MSG_ID_TOF_SUB_TELEM,
+    CHASSIS_SIZE,
+    TOF_SIZE,
+    TOF_SUB_SIZE,
+    TOF_SUB44_SIZE,
+    TOF_SUB52_SIZE,
+    TOF_SUB60_SIZE,
+    CMD_SIZE,
+    decode_chassis_packet,
+    decode_tof_packet,
+    decode_tof_sub_packet,
+    encode_motion_command,
+)
+from tof_latency_compensator import ToFLatencyCompensator, SENSOR_NAMES
+
+# Mapping of sensor_id (1..4) from ESP32_ToF to 16-channel array slots matching SENSOR_NAMES:
+# Sensor 1: Front-Left Outer (49.1° to 82.9° Left)  -> slots 4..7
+# Sensor 2: Front-Left Center (4.1° to 37.9° Left)   -> slots 0..3
+# Sensor 3: Front-Right Outer (49.1° to 82.9° Right) -> slots 12..15
+# Sensor 4: Front-Right Center (4.1° to 37.9° Right) -> slots 8..11
+SENSOR_CHANNEL_SLOTS = {
+    1: [4, 5, 6, 7],
+    2: [0, 1, 2, 3],
+    3: [12, 13, 14, 15],
+    4: [8, 9, 10, 11],
+}
+CRITICAL_TOF_SENSORS = (2, 4)  # Front-Left Center & Front-Right Center (critical for forward driving)
+
+try:
+    import serial
+    HAS_SERIAL = True
+except ImportError:
+    HAS_SERIAL = False
+
+UDP_DISPATCH_HOST = "127.0.0.1"
+UDP_DISPATCH_PORT = 9876
+UDP_CMD_PORT = 9877
+UART_BAUD = 921600
+LINK_TIMEOUT_S = 0.25          # 250ms link-loss failsafe (matches ESP32-STM32 250ms timeout)
+RECONNECT_SILENCE_S = 1.2      # 1.2s total silence before tearing down & re-probing USB port
+FRONT_TOF_REBOOT_S = 0.40      # 400ms front-ToF stall before auto-rebooting ESP32_ToF
+TOF_BOOT_GRACE_S = 3.0         # 3.0s grace period after connect for VL53L8CX firmware upload
+TOF_REBOOT_COOLDOWN_S = 5.0    # Minimum seconds between automatic ESP32_ToF reboots
+
+
+class BinaryStreamParser:
+    """Zero-allocation rolling stream parser for binary UART packets."""
+
+    def __init__(self, is_tof_port: bool = False):
+        self.is_tof_port = is_tof_port
+        self.buffer = bytearray()
+
+    def feed(self, chunk: bytes):
+        self.buffer.extend(chunk)
+
+    def extract_packets(self):
+        """Yields (msg_type, decoded_dict) for all valid packets in buffer."""
+        while len(self.buffer) >= 3:
+            # 1. Search for sync header 0xAA 0x55
+            idx = self.buffer.find(MCU_SYNC)
+            if idx == -1:
+                # Check for complete ASCII text lines from MCU (e.g. status or command responses)
+                if not self.is_tof_port and b"\n" in self.buffer:
+                    nl_idx = self.buffer.rfind(b"\n")
+                    text_bytes = bytes(self.buffer[:nl_idx])
+                    del self.buffer[:nl_idx + 1]
+                    try:
+                        text_str = text_bytes.decode("utf-8", errors="ignore")
+                        for line in text_str.splitlines():
+                            line = line.strip()
+                            if line and len(line) >= 3 and all(c.isprintable() or c in "\r\n\t" for c in line):
+                                yield ("TEXT", line)
+                    except Exception:
+                        pass
+                else:
+                    # Keep last byte in case header split across reads
+                    self.buffer = self.buffer[-1:]
+                break
+
+            if idx > 0:
+                if not self.is_tof_port:
+                    prefix = bytes(self.buffer[:idx])
+                    if b"\n" in prefix:
+                        try:
+                            text_str = prefix.decode("utf-8", errors="ignore")
+                            for line in text_str.splitlines():
+                                line = line.strip()
+                                if line and len(line) >= 3 and all(c.isprintable() or c in "\r\n\t" for c in line):
+                                    yield ("TEXT", line)
+                        except Exception:
+                            pass
+                del self.buffer[:idx]
+
+            if len(self.buffer) < 3:
+                break
+
+            msg_type_or_sensor_id = self.buffer[2]
+
+            if not self.is_tof_port:
+                # ESP32-Main Port
+                if msg_type_or_sensor_id == MSG_ID_CHASSIS_TELEM:
+                    if len(self.buffer) >= 4 and self.buffer[3] != (CHASSIS_SIZE - 5):
+                        # False sync header inside payload; advance 2 bytes to rescan
+                        del self.buffer[:2]
+                        continue
+                    if len(self.buffer) < CHASSIS_SIZE:
+                        break
+                    raw_pkt = bytes(self.buffer[:CHASSIS_SIZE])
+                    decoded = decode_chassis_packet(raw_pkt)
+                    if decoded:
+                        del self.buffer[:CHASSIS_SIZE]
+                        yield (MSG_ID_CHASSIS_TELEM, decoded)
+                    else:
+                        # Checksum mismatch on false sync; advance 2 bytes so nested header isn't lost
+                        del self.buffer[:2]
+                else:
+                    del self.buffer[:2]
+            else:
+                # ESP32-ToF Port (supports 44B multi-target Pi frame, 52B debug frame, 20B lean frame, and 78B full array)
+                if 1 <= msg_type_or_sensor_id <= 4:
+                    matched_pkt = None
+                    for pkt_size in (TOF_SUB44_SIZE, TOF_SUB52_SIZE, TOF_SUB_SIZE):
+                        if len(self.buffer) >= pkt_size:
+                            chk_calc = 0
+                            for b in self.buffer[: pkt_size - 1]:
+                                chk_calc ^= b
+                            if chk_calc == self.buffer[pkt_size - 1]:
+                                raw_pkt = bytes(self.buffer[:pkt_size])
+                                decoded = decode_tof_sub_packet(raw_pkt)
+                                if decoded:
+                                    del self.buffer[:pkt_size]
+                                    matched_pkt = decoded
+                                    break
+
+                    if matched_pkt is not None:
+                        yield (MSG_ID_TOF_SUB_TELEM, matched_pkt)
+                        continue
+
+                    if len(self.buffer) >= TOF_SUB52_SIZE:
+                        del self.buffer[:2]
+                        continue
+                    else:
+                        break
+                elif msg_type_or_sensor_id == MSG_ID_TOF_TELEM:
+                    if len(self.buffer) < TOF_SIZE:
+                        break
+                    raw_pkt = bytes(self.buffer[:TOF_SIZE])
+                    del self.buffer[:TOF_SIZE]
+                    decoded = decode_tof_packet(raw_pkt)
+                    if decoded:
+                        yield (MSG_ID_TOF_TELEM, decoded)
+                else:
+                    del self.buffer[:2]
+
+
+def open_low_latency_serial(port: str, baud: int = UART_BAUD) -> Any:
+    """
+    Opens a serial port with non-blocking raw I/O, clears HUPCL so closing/reopening
+    never drops DTR/RTS to reset the ESP32, and enables kernel ASYNC_LOW_LATENCY.
+    """
+    ser = serial.Serial(port, baud, timeout=0.0, write_timeout=0.0)
+
+    # Configure Linux termios (~HUPCL + VMIN=0/VTIME=0) and kernel low-latency flag
+    if sys.platform == "linux":
+        try:
+            import fcntl
+            import termios
+            import array
+            fd = ser.fileno()
+            attrs = termios.tcgetattr(fd)
+            # Clear HUPCL so closing the port never pulses DTR/RTS to reset the ESP32
+            attrs[2] &= ~termios.HUPCL
+            # Raw VMIN=0, VTIME=0 for instant non-blocking os.read()
+            attrs[6][termios.VMIN] = 0
+            attrs[6][termios.VTIME] = 0
+            termios.tcsetattr(fd, termios.TCSANOW, attrs)
+            try:
+                # TIOCGSERIAL = 0x541E, TIOCSSERIAL = 0x541F, ASYNC_LOW_LATENCY = 0x2000
+                buf = array.array("i", [0] * 32)
+                fcntl.ioctl(fd, 0x541E, buf, True)
+                buf[4] |= 0x2000
+                fcntl.ioctl(fd, 0x541F, buf, False)
+            except Exception:
+                pass
+        except Exception:
+            pass
+    return ser
+
+
+def get_available_serial_ports() -> List[str]:
+    """Returns sorted list of unique canonical (realpath) USB/ACM serial port device nodes."""
+    ports: List[str] = []
+    seen_real: Set[str] = set()
+
+    def _add(path_candidate: str):
+        if not path_candidate or not os.path.exists(path_candidate):
+            return
+        try:
+            real_p = os.path.realpath(path_candidate)
+        except Exception:
+            real_p = path_candidate
+        base = os.path.basename(real_p)
+        # Skip onboard Pi SoC UARTs (/dev/ttyS0, /dev/ttyAMA0) when auto-scanning USB MCUs
+        if base.startswith(("ttyS", "ttyAMA", "ttyprintk")):
+            return
+        if real_p not in seen_real and os.path.exists(real_p):
+            seen_real.add(real_p)
+            ports.append(real_p)
+
+    if HAS_SERIAL:
+        try:
+            import serial.tools.list_ports
+            for p in serial.tools.list_ports.comports():
+                if p.device:
+                    _add(p.device)
+        except Exception:
+            pass
+
+    for pattern in ["/dev/ttyUSB*", "/dev/ttyACM*", "/dev/serial/by-id/*"]:
+        for p in glob.glob(pattern):
+            _add(p)
+
+    return sorted(ports)
+
+
+def probe_port_role(port: str, baud: int = UART_BAUD) -> Optional[str]:
+    """
+    Non-intrusively sniffs live binary frames on port (~10 ms typical) to identify ESP32 role
+    using full XOR checksum validation before falling back to ASCII PING.
+    """
+    if not HAS_SERIAL or not os.path.exists(port):
+        return None
+    ser = None
+    try:
+        ser = open_low_latency_serial(port, baud)
+        fd = ser.fileno()
+        main_parser = BinaryStreamParser(is_tof_port=False)
+        tof_parser = BinaryStreamParser(is_tof_port=True)
+        accum = bytearray()
+
+        # Phase 1: Passive binary/boot stream sniff (returns in ~10ms once streaming, up to 600ms on cold boot)
+        t_deadline = time.perf_counter() + 0.600
+        while time.perf_counter() < t_deadline:
+            rem = max(0.001, t_deadline - time.perf_counter())
+            rlist, _, _ = select.select([fd], [], [], rem)
+            if rlist:
+                chunk = os.read(fd, 4096)
+                if chunk:
+                    accum.extend(chunk)
+                    main_parser.feed(chunk)
+                    for msg_type, _ in main_parser.extract_packets():
+                        if msg_type == MSG_ID_CHASSIS_TELEM:
+                            return "main"
+                    tof_parser.feed(chunk)
+                    for msg_type, _ in tof_parser.extract_packets():
+                        if msg_type in (MSG_ID_TOF_SUB_TELEM, MSG_ID_TOF_TELEM):
+                            return "tof"
+                    if (
+                        b"PONG" in accum
+                        or b"FOLKRACE" in accum
+                        or b"STATUS REPORT" in accum
+                        or b"[SPI Attempt" in accum
+                        or b"STM32" in accum
+                    ):
+                        return "main"
+                    if (
+                        b"VL53L8CX" in accum
+                        or b"[ToF " in accum
+                        or b"Waking ToF" in accum
+                        or b"RANGING" in accum
+                    ):
+                        return "tof"
+
+        # Phase 2: Active ASCII ping fallback if stream was silent
+        os.write(fd, b"PING\n")
+        t_deadline = time.perf_counter() + 0.150
+        while time.perf_counter() < t_deadline:
+            rem = max(0.001, t_deadline - time.perf_counter())
+            rlist, _, _ = select.select([fd], [], [], rem)
+            if rlist:
+                chunk = os.read(fd, 4096)
+                if chunk:
+                    accum.extend(chunk)
+                    main_parser.feed(chunk)
+                    for msg_type, _ in main_parser.extract_packets():
+                        if msg_type == MSG_ID_CHASSIS_TELEM:
+                            return "main"
+                    tof_parser.feed(chunk)
+                    for msg_type, _ in tof_parser.extract_packets():
+                        if msg_type in (MSG_ID_TOF_SUB_TELEM, MSG_ID_TOF_TELEM):
+                            return "tof"
+                    if b"PONG" in accum or b"FOLKRACE" in accum or b"STATUS" in accum or b"STM32" in accum:
+                        return "main"
+                    if b"VL53L8CX" in accum or b"[ToF " in accum or b"Waking ToF" in accum or b"RANGING" in accum:
+                        return "tof"
+    except Exception:
+        pass
+    finally:
+        if ser is not None:
+            try:
+                ser.close()
+            except Exception:
+                pass
+    return None
+
+
+def resolve_serial_ports(
+    main_port: Optional[str] = "auto",
+    tof_port: Optional[str] = "auto",
+    baud: int = UART_BAUD
+) -> Tuple[Optional[str], Optional[str]]:
+    """Auto-detects and binds USB / UART serial ports to ESP32 Main and ESP32 ToF."""
+    candidates = get_available_serial_ports()
+
+    resolved_main = main_port if main_port and main_port != "auto" and os.path.exists(main_port) else None
+    resolved_tof = tof_port if tof_port and tof_port != "auto" and os.path.exists(tof_port) else None
+
+    # Filter out already explicitly claimed ports
+    available = [c for c in candidates if c not in (resolved_main, resolved_tof) and os.path.exists(c)]
+
+    # If both need detection, probe each available USB port
+    if (resolved_main is None or resolved_tof is None) and available:
+        probed_roles = {}
+        for p in available:
+            role = probe_port_role(p, baud)
+            if role:
+                probed_roles[p] = role
+
+        # Assign based on probe findings
+        for p, role in probed_roles.items():
+            if role == "main" and resolved_main is None:
+                resolved_main = p
+            elif role == "tof" and resolved_tof is None:
+                resolved_tof = p
+
+        # Fallback for remaining unprobed or unassigned ports
+        remaining = [p for p in available if p not in (resolved_main, resolved_tof)]
+        if resolved_main is None and remaining:
+            resolved_main = remaining.pop(0)
+        if resolved_tof is None and remaining:
+            resolved_tof = remaining.pop(0)
+
+    return resolved_main, resolved_tof
+
+
+class MCU_UART_Bridge:
+    def __init__(
+        self,
+        main_port: Optional[str] = "auto",
+        tof_port: Optional[str] = "auto",
+        baud: int = UART_BAUD,
+        udp_host: str = UDP_DISPATCH_HOST,
+        udp_port: int = UDP_DISPATCH_PORT,
+    ):
+        self.main_port_arg = main_port
+        self.tof_port_arg = tof_port
+        self.baud = baud
+        self.udp_host = udp_host
+        self.udp_target = (udp_host, udp_port)
+        self.running = False
+
+        self.assigned_ports: Dict[str, Optional[str]] = {"ESP32_Main": None, "ESP32_ToF": None}
+        self.last_known_ports: Dict[str, Optional[str]] = {"main": None, "tof": None}
+        self.link_active: Dict[str, bool] = {"ESP32_Main": False, "ESP32_ToF": False}
+        self.last_rx_timestamp: Dict[str, float] = {"ESP32_Main": 0.0, "ESP32_ToF": 0.0}
+        self.force_reconnect_flag = False
+        self.reconnect_gen = 0  # bumped per reset request so BOTH links always see it
+        self.tof_reconnect_gen = 0  # bumped to reboot ONLY ESP32_ToF without resetting ESP32_Main
+        self._last_tof_reboot_ts = 0.0
+        self.discovery_lock = threading.Lock()
+
+        self.udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            self.udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 524288)
+        except Exception:
+            pass
+        self.udp_sock.setblocking(False)
+
+        self.serial_lock = threading.Lock()
+        self.main_serial: Optional[Any] = None
+        self.tof_serial: Optional[Any] = None
+        self.latest_mcu_msg: str = ""
+        self.mcu_log: list = []
+
+        # State aggregation & Option 1 Latency Compensator
+        self.compensator = ToFLatencyCompensator()
+        self.lock = threading.Lock()
+        self.latest_chassis: Dict[str, Any] = {}
+        self.latest_esp_servo_center_us: Optional[float] = None
+        self.latest_esp_servo_trim_us: Optional[float] = None
+        self.latest_tof_ranges = [0.0] * 16
+        self.latest_tof_ranges_raw = [0.0] * 16
+        self.latest_tof_target0_mm = [0] * 16
+        self.latest_tof_target1_mm = [0] * 16
+        self.latest_tof_target0_status = [255] * 16
+        self.latest_tof_target1_status = [255] * 16
+        self.last_tof_sensor_rx: Dict[int, float] = {sid: 0.0 for sid in SENSOR_CHANNEL_SLOTS}
+        self._last_debug_dispatch = 0.0
+
+    def _is_link_fresh(self, label: str, now: Optional[float] = None) -> bool:
+        """True only when valid packets have arrived within LINK_TIMEOUT_S (mirrors STM32Channel::isConnected)."""
+        if not self.link_active.get(label, False):
+            return False
+        t_rx = self.last_rx_timestamp.get(label, 0.0)
+        if t_rx <= 0.0:
+            return False
+        t_now = time.monotonic() if now is None else now
+        return (t_now - t_rx) <= LINK_TIMEOUT_S
+
+    def _are_front_tofs_fresh(self, now: Optional[float] = None) -> bool:
+        """True only when ALL critical front ToF sensors (2 & 4) have reported within LINK_TIMEOUT_S."""
+        t_now = time.monotonic() if now is None else now
+        for sid in CRITICAL_TOF_SENSORS:
+            t_rx = self.last_tof_sensor_rx.get(sid, 0.0)
+            if t_rx <= 0.0 or (t_now - t_rx) > LINK_TIMEOUT_S:
+                return False
+        return True
+
+    def trigger_tof_reboot(self, reason: str = "Front ToF failure") -> bool:
+        """Pulses EN on ESP32_ToF only (with cooldown) without disrupting ESP32_Main."""
+        now = time.monotonic()
+        if (now - self._last_tof_reboot_ts) < TOF_REBOOT_COOLDOWN_S:
+            return False
+        self._last_tof_reboot_ts = now
+        print(f"[MCU Bridge] Auto-rebooting ESP32_ToF ({reason})...")
+        self.tof_reconnect_gen += 1
+        return True
+
+    def _clear_link_state(self, label: str):
+        """Resets cached telemetry for a disconnected/timed-out MCU link (zero fake/stale data)."""
+        with self.lock:
+            if label == "ESP32_ToF":
+                self.latest_tof_ranges = [0.0] * 16
+                self.latest_tof_ranges_raw = [0.0] * 16
+                self.latest_tof_target0_mm = [0] * 16
+                self.latest_tof_target1_mm = [0] * 16
+                self.latest_tof_target0_status = [255] * 16
+                self.latest_tof_target1_status = [255] * 16
+                for sid in self.last_tof_sensor_rx:
+                    self.last_tof_sensor_rx[sid] = 0.0
+            else:
+                self.latest_chassis = {}
+                self.latest_esp_servo_center_us = None
+                self.latest_esp_servo_trim_us = None
+
+    @property
+    def main_port(self) -> Optional[str]:
+        return self.assigned_ports.get("ESP32_Main")
+
+    @property
+    def tof_port(self) -> Optional[str]:
+        return self.assigned_ports.get("ESP32_ToF")
+
+    def trigger_reconnect(self):
+        """Forces immediate re-probe and reconnect across all MCU serial links."""
+        print("[MCU Bridge] Manual reconnect command received. Re-detecting all MCU links...")
+        self.reconnect_gen += 1
+        self.force_reconnect_flag = True
+        def _clear():
+            time.sleep(1.0)
+            self.force_reconnect_flag = False
+        threading.Thread(target=_clear, daemon=True).start()
+
+    def find_matching_port(self, target_role: str, excluded_ports: Set[Optional[str]]) -> Optional[str]:
+        """
+        Dynamically searches available serial ports for a matching MCU role ('main' or 'tof').
+        Excludes canonical realpath ports actively assigned to other workers.
+        """
+        excluded_real = set()
+        for ep in excluded_ports:
+            if ep:
+                try:
+                    excluded_real.add(os.path.realpath(ep))
+                except Exception:
+                    excluded_real.add(ep)
+
+        candidates = get_available_serial_ports()
+        available = [p for p in candidates if p and p not in excluded_real and os.path.exists(p)]
+        if not available:
+            return None
+
+        # Prioritize last known good port for this role to minimize reconnection time
+        preferred = self.last_known_ports.get(target_role)
+        if preferred and preferred in available:
+            available.remove(preferred)
+            available.insert(0, preferred)
+
+        # 1. Probe roles
+        for p in available:
+            role = probe_port_role(p, self.baud)
+            if role:
+                self.last_known_ports[role] = p
+            if role == target_role:
+                return p
+
+        # 2. Check explicit configured arg if it exists and wasn't claimed
+        configured = self.tof_port_arg if target_role == "tof" else self.main_port_arg
+        if configured and configured != "auto":
+            try:
+                conf_real = os.path.realpath(configured)
+            except Exception:
+                conf_real = configured
+            if conf_real in available:
+                return conf_real
+
+        return None
+
+    def start(self):
+        if not HAS_SERIAL:
+            print("[MCU Bridge ERROR] pyserial is not installed on this system!")
+            return
+
+        self.running = True
+
+        # Start Command Ingestion Worker (listens for uplink packets to forward to ESP32 Main)
+        t_cmd = threading.Thread(target=self._command_listener_worker, name="MCUCommandWorker", daemon=True)
+        t_cmd.start()
+
+        # Start resilient supervisor workers for both ESP32 Main and ESP32 ToF Hub
+        t_main = threading.Thread(target=self._mcu_worker, args=("ESP32_Main",), name="Worker_ESP32_Main", daemon=True)
+        t_main.start()
+
+        t_tof = threading.Thread(target=self._mcu_worker, args=("ESP32_ToF",), name="Worker_ESP32_ToF", daemon=True)
+        t_tof.start()
+
+    def stop(self):
+        self.send_to_main_mcu(b"ESTOP\n")
+        self.running = False
+
+    def _command_listener_worker(self):
+        """Listens on UDP 127.0.0.1:9877 for motion/motor commands from GUI or planner and writes to ESP32."""
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 262144)
+        except Exception:
+            pass
+        try:
+            sock.bind((self.udp_host, UDP_CMD_PORT))
+            print(f"[MCU Bridge] Uplink Command Listener active on {self.udp_host}:{UDP_CMD_PORT}")
+        except Exception as e:
+            print(f"[MCU Bridge ERROR] Cannot bind UDP command port {UDP_CMD_PORT}: {e}")
+            return
+
+        sock.setblocking(False)
+        while self.running:
+            try:
+                rlist, _, _ = select.select([sock], [], [], 0.05)
+                if not rlist:
+                    continue
+
+                latest_motion_cmd: Optional[bytes] = None
+                # Drain socket so bursts of 60Hz binary motion commands coalesce to the freshest frame
+                while True:
+                    try:
+                        data, _ = sock.recvfrom(2048)
+                    except (BlockingIOError, socket.error):
+                        break
+                    if not data:
+                        continue
+
+                    # Fast-path for 13-byte binary MotionCommandPacket (0x55 0xAA)
+                    if len(data) == CMD_SIZE and data[:2] == PI_SYNC:
+                        latest_motion_cmd = data
+                        continue
+
+                    d_strip = data.strip()
+                    if d_strip in (b"RECONNECT", b"RESET_PORTS", b"RESTART_BRIDGE"):
+                        self.trigger_reconnect()
+                        continue
+                    try:
+                        if d_strip.startswith(b"{"):
+                            cmd_obj = json.loads(data.decode("utf-8", errors="ignore"))
+                            if isinstance(cmd_obj, dict) and cmd_obj.get("action") in ("reconnect", "reset_ports"):
+                                self.trigger_reconnect()
+                                continue
+                    except Exception:
+                        pass
+
+                    # Immediate dispatch for explicit ASCII/control commands
+                    self.send_to_main_mcu(data)
+
+                if latest_motion_cmd is not None:
+                    # Safety interlock: never drive without a fresh ToF link AND both critical front ToFs
+                    if not self._is_link_fresh("ESP32_ToF") or not self._are_front_tofs_fresh():
+                        latest_motion_cmd = encode_motion_command(0.0, 0.0, 0, 0)
+                    self.send_to_main_mcu(latest_motion_cmd)
+            except Exception:
+                pass
+        try:
+            sock.close()
+        except Exception:
+            pass
+
+    def send_to_tof_mcu(self, data: bytes):
+        """Thread-safe transmission to ESP32 ToF Hub over USB Serial."""
+        with self.serial_lock:
+            if self.tof_serial and getattr(self.tof_serial, "is_open", False):
+                try:
+                    os.write(self.tof_serial.fileno(), data)
+                except Exception as e:
+                    print(f"[MCU Bridge ERROR] Failed writing to ESP32 ToF: {e}")
+
+    def send_to_main_mcu(self, data: bytes):
+        """Thread-safe zero-blocking transmission to ESP32 Main over USB Serial."""
+        is_binary_motion = (len(data) == CMD_SIZE and data[:2] == PI_SYNC)
+        with self.serial_lock:
+            if self.main_serial and getattr(self.main_serial, "is_open", False):
+                try:
+                    os.write(self.main_serial.fileno(), data)
+                    if not is_binary_motion:
+                        preview = data.decode("utf-8", errors="replace").strip()
+                        print(f"[MCU Bridge -> ESP32] Sent: {preview}")
+                except Exception as e:
+                    if not is_binary_motion:
+                        print(f"[MCU Bridge ERROR] Failed writing to ESP32: {e}")
+            elif not is_binary_motion:
+                print(f"[MCU Bridge WARN] Cannot dispatch command (ESP32 serial offline)")
+
+    def _mcu_worker(self, label: str):
+        """
+        Self-healing low-latency worker for an MCU connection.
+        Uses event-driven select() + os.read() for <0.2ms packet ingestion latency
+        (zero 256-byte buffering lag), detects disconnects, and reconnects in 250ms.
+        """
+        is_tof = (label == "ESP32_ToF")
+        role_target = "tof" if is_tof else "main"
+        configured_port = self.tof_port_arg if is_tof else self.main_port_arg
+
+        while self.running:
+            # 1. Port Acquisition Phase
+            port = None
+            if configured_port and configured_port != "auto" and os.path.exists(configured_port):
+                try:
+                    conf_real = os.path.realpath(configured_port)
+                except Exception:
+                    conf_real = configured_port
+                with self.discovery_lock:
+                    other_label = "ESP32_ToF" if label == "ESP32_Main" else "ESP32_Main"
+                    if conf_real != self.assigned_ports.get(other_label):
+                        port = conf_real
+            else:
+                with self.discovery_lock:
+                    other_label = "ESP32_ToF" if label == "ESP32_Main" else "ESP32_Main"
+                    excluded = {self.assigned_ports.get(other_label)}
+                    port = self.find_matching_port(role_target, excluded)
+
+            if not port:
+                self.link_active[label] = False
+                self.assigned_ports[label] = None
+                time.sleep(0.5)
+                continue
+
+            self.assigned_ports[label] = port
+            self.last_known_ports[role_target] = port
+            print(f"[MCU Bridge] Connecting to {label} on {port} @ {self.baud} baud...")
+
+            # 2. Connection and Low-Latency Event-Driven Streaming Phase
+            parser = BinaryStreamParser(is_tof_port=is_tof)
+            ser = None
+            try:
+                ser = open_low_latency_serial(port, self.baud)
+                fd = ser.fileno()
+
+                with self.serial_lock:
+                    if is_tof:
+                        self.tof_serial = ser
+                    else:
+                        self.main_serial = ser
+
+                # Initialize MCU parameters without resetting or blocking
+                try:
+                    if is_tof:
+                        os.write(fd, b"T\n")  # Pi multi-target mode: 44B (no SPAD)
+                    else:
+                        os.write(fd, b"STATUS\n")
+                        os.write(fd, b"TRIM_GET\n")
+                except Exception:
+                    pass
+
+                print(f"[MCU Bridge] Connected to {label} ({port}). Waiting for valid telemetry...")
+                # Do NOT mark link_active=True until a checksum-validated packet arrives
+                self.link_active[label] = False
+                last_pkt_time = time.monotonic()
+                connect_time = last_pkt_time
+                my_gen = self.reconnect_gen
+                my_tof_gen = self.tof_reconnect_gen
+
+                while self.running:
+                    if self.reconnect_gen != my_gen or (is_tof and self.tof_reconnect_gen != my_tof_gen):
+                        print(f"[MCU Bridge] Reset requested for {label}. Sending reboot & pulsing EN...")
+                        if is_tof:
+                            try:
+                                os.write(fd, b"R\n")  # Software ESP.restart() for native USB CDC (ttyACM*)
+                            except Exception:
+                                pass
+                        try:
+                            ser.dtr = False
+                            ser.rts = True
+                            time.sleep(0.1)
+                            ser.rts = False
+                        except Exception:
+                            pass
+                        break
+
+                    # Event-driven wait: wakes immediately (<0.1ms) when USB URB arrives
+                    rlist, _, _ = select.select([fd], [], [], 0.020)
+                    now = time.monotonic()
+                    if rlist:
+                        data = os.read(fd, 4096)
+                        if not data:
+                            # EOF on tty device node (USB unplugged)
+                            raise OSError("Serial device returned EOF (USB disconnected)")
+
+                        parser.feed(data)
+                        had_valid_packet = False
+                        needs_dispatch = False
+                        for msg_type, decoded in parser.extract_packets():
+                            if self._ingest_packet(msg_type, decoded):
+                                needs_dispatch = True
+                            had_valid_packet = True
+
+                        if had_valid_packet:
+                            last_pkt_time = now
+                            self.last_rx_timestamp[label] = now
+                            self.link_active[label] = True
+
+                        if needs_dispatch:
+                            self._dispatch_telemetry(now)
+
+                    # Fast link-loss safeguard (250 ms): mark offline and clear stale state immediately
+                    if self.link_active.get(label, False) and (now - self.last_rx_timestamp.get(label, 0.0) > LINK_TIMEOUT_S):
+                        print(f"[MCU Bridge] Failsafe: {label} telemetry timed out (>{int(LINK_TIMEOUT_S*1000)}ms). Marking OFFLINE.")
+                        self.link_active[label] = False
+                        self._clear_link_state(label)
+                        self._dispatch_telemetry(now)
+
+                    # Per-ToF front sensor watchdog: if either front ToF (2 or 4) stalls/never boots,
+                    # zero its slots immediately and auto-reboot ESP32_ToF (respecting boot grace & cooldown).
+                    if is_tof and self.link_active.get(label, False):
+                        front_missing = [
+                            sid for sid in CRITICAL_TOF_SENSORS
+                            if (self.last_tof_sensor_rx.get(sid, 0.0) <= 0.0 and (now - connect_time) > TOF_BOOT_GRACE_S)
+                            or (self.last_tof_sensor_rx.get(sid, 0.0) > 0.0 and (now - self.last_tof_sensor_rx.get(sid, 0.0)) > FRONT_TOF_REBOOT_S)
+                        ]
+                        if front_missing:
+                            self.trigger_tof_reboot(reason=f"Front ToF {front_missing} offline/stalled")
+
+                    # Watchdog: Silence detection (1.2 seconds with no valid telemetry packets)
+                    if now - last_pkt_time > RECONNECT_SILENCE_S:
+                        print(f"[MCU Bridge] Watchdog: No telemetry from {label} on {port} for {RECONNECT_SILENCE_S:.1f}s. Reconnecting...")
+                        if is_tof and (now - self._last_tof_reboot_ts) >= TOF_REBOOT_COOLDOWN_S:
+                            self._last_tof_reboot_ts = now
+                            try:
+                                os.write(fd, b"R\n")
+                            except Exception:
+                                pass
+                            try:
+                                ser.dtr = False
+                                ser.rts = True
+                                time.sleep(0.1)
+                                ser.rts = False
+                            except Exception:
+                                pass
+                        break
+
+            except (serial.SerialException, OSError) as e:
+                print(f"[MCU Bridge] Connection lost on {label} ({port}): {e}")
+            except Exception as e:
+                print(f"[MCU Bridge] Error in {label} worker ({port}): {e}")
+            finally:
+                with self.serial_lock:
+                    if is_tof:
+                        self.tof_serial = None
+                    else:
+                        self.main_serial = None
+                if ser is not None:
+                    try:
+                        ser.close()
+                    except Exception:
+                        pass
+                self.link_active[label] = False
+                self.last_rx_timestamp[label] = 0.0
+                self.assigned_ports[label] = None
+                self._clear_link_state(label)
+                self._dispatch_telemetry(time.monotonic())
+                print(f"[MCU Bridge] {label} disconnected. Re-probing in 0.25s...")
+                time.sleep(0.25)
+
+    def _ingest_packet(self, msg_type: Any, pkt: Any) -> bool:
+        """Updates internal state for a single decoded packet. Returns True if telemetry should be dispatched."""
+        with self.lock:
+            if msg_type == "TEXT":
+                text = str(pkt)
+                self.latest_mcu_msg = text
+                self.mcu_log.append(text)
+                if len(self.mcu_log) > 50:
+                    self.mcu_log = self.mcu_log[-50:]
+                if text.startswith("{") and "servo_center_us" in text:
+                    try:
+                        trim_obj = json.loads(text)
+                        if isinstance(trim_obj, dict) and "servo_center_us" in trim_obj:
+                            self.latest_esp_servo_center_us = float(trim_obj["servo_center_us"])
+                            if "servo_trim_us" in trim_obj:
+                                self.latest_esp_servo_trim_us = float(trim_obj["servo_trim_us"])
+                    except Exception:
+                        pass
+                print(f"[MCU Main Text] {text}")
+                return True
+
+            if msg_type == MSG_ID_CHASSIS_TELEM:
+                self.latest_chassis = pkt
+                return True
+            elif msg_type == MSG_ID_TOF_SUB_TELEM:
+                now_rx = time.monotonic()
+                sensor_id = pkt.get("sensor_id", 0)
+                dists = pkt.get("distances_m", [])
+                slots = SENSOR_CHANNEL_SLOTS.get(sensor_id, [])
+                if sensor_id in self.last_tof_sensor_rx:
+                    self.last_tof_sensor_rx[sensor_id] = now_rx
+                t0_mm = pkt.get("target0_mm")
+                t1_mm = pkt.get("target1_mm")
+                t0_st = pkt.get("target0_status")
+                t1_st = pkt.get("target1_status")
+                for i, slot in enumerate(slots):
+                    if i < len(dists):
+                        self.latest_tof_ranges_raw[slot] = dists[i]
+                    if t0_mm is not None and i < len(t0_mm):
+                        self.latest_tof_target0_mm[slot] = t0_mm[i]
+                    if t1_mm is not None and i < len(t1_mm):
+                        self.latest_tof_target1_mm[slot] = t1_mm[i]
+                    if t0_st is not None and i < len(t0_st):
+                        self.latest_tof_target0_status[slot] = t0_st[i]
+                    if t1_st is not None and i < len(t1_st):
+                        self.latest_tof_target1_status[slot] = t1_st[i]
+
+                # Zero out any individual ToF sensor whose packets have gone stale (> LINK_TIMEOUT_S)
+                for sid, s_slots in SENSOR_CHANNEL_SLOTS.items():
+                    t_sid = self.last_tof_sensor_rx.get(sid, 0.0)
+                    if t_sid <= 0.0 or (now_rx - t_sid) > LINK_TIMEOUT_S:
+                        for s_idx in s_slots:
+                            self.latest_tof_ranges_raw[s_idx] = 0.0
+                            self.latest_tof_target0_mm[s_idx] = 0
+                            self.latest_tof_target1_mm[s_idx] = 0
+                            self.latest_tof_target0_status[s_idx] = 255
+                            self.latest_tof_target1_status[s_idx] = 255
+
+                v_est = float(self.latest_chassis.get("v_est", self.latest_chassis.get("v_real", 0.0)))
+                gyro_z = float(self.latest_chassis.get("gyro_z", 0.0))
+                self.latest_tof_ranges = self.compensator.compensate_list(
+                    self.latest_tof_ranges_raw, v_est=v_est, gyro_z=gyro_z, dt=0.01667
+                )
+                return True
+            elif msg_type == MSG_ID_TOF_TELEM:
+                now_rx = time.monotonic()
+                dists = pkt.get("distances_m", [])
+                if len(dists) == 16:
+                    for sid in self.last_tof_sensor_rx:
+                        self.last_tof_sensor_rx[sid] = now_rx
+                    self.latest_tof_ranges_raw = list(dists)
+                    v_est = float(self.latest_chassis.get("v_est", self.latest_chassis.get("v_real", 0.0)))
+                    gyro_z = float(self.latest_chassis.get("gyro_z", 0.0))
+                    self.latest_tof_ranges = self.compensator.compensate_list(
+                        dists, v_est=v_est, gyro_z=gyro_z, dt=0.01667
+                    )
+                return True
+        return False
+
+    def _dispatch_telemetry(self, now: float):
+        """Composes and dispatches telemetry once per read batch to Core 1 Planner and Core 2 Debug Server."""
+        send_debug = (now - self._last_debug_dispatch >= 0.05)
+        main_fresh = self._is_link_fresh("ESP32_Main", now)
+        tof_fresh = self._is_link_fresh("ESP32_ToF", now)
+        front_tofs_ok = tof_fresh and self._are_front_tofs_fresh(now)
+        with self.lock:
+            telemetry = dict(self.latest_chassis) if main_fresh else {}
+            telemetry["timestamp"] = time.time()
+            if tof_fresh:
+                # Zero any individual sensor slots that have gone stale (> LINK_TIMEOUT_S)
+                for sid, s_slots in SENSOR_CHANNEL_SLOTS.items():
+                    t_sid = self.last_tof_sensor_rx.get(sid, 0.0)
+                    if t_sid <= 0.0 or (now - t_sid) > LINK_TIMEOUT_S:
+                        for s_idx in s_slots:
+                            self.latest_tof_ranges_raw[s_idx] = 0.0
+                            self.latest_tof_ranges[s_idx] = 0.0
+                            self.latest_tof_target0_mm[s_idx] = 0
+                            self.latest_tof_target1_mm[s_idx] = 0
+                            self.latest_tof_target0_status[s_idx] = 255
+                            self.latest_tof_target1_status[s_idx] = 255
+                tof_comp = list(self.latest_tof_ranges)
+                tof_raw = list(self.latest_tof_ranges_raw)
+                t0_mm_list = list(self.latest_tof_target0_mm)
+                t1_mm_list = list(self.latest_tof_target1_mm)
+                t0_st_list = list(self.latest_tof_target0_status)
+                t1_st_list = list(self.latest_tof_target1_status)
+            else:
+                tof_comp = [0.0] * 16
+                tof_raw = [0.0] * 16
+                t0_mm_list = [0] * 16
+                t1_mm_list = [0] * 16
+                t0_st_list = [255] * 16
+                t1_st_list = [255] * 16
+            telemetry["tof_ranges"] = tof_comp
+            telemetry["tof_ranges_raw"] = tof_raw
+            telemetry["tof_target0_mm"] = t0_mm_list
+            telemetry["tof_target1_mm"] = t1_mm_list
+            telemetry["tof_target0_status"] = t0_st_list
+            telemetry["tof_target1_status"] = t1_st_list
+            telemetry["f_tof"] = round(float(min(tof_comp)), 3) if tof_fresh and tof_comp else 0.0
+            telemetry["f_tof_raw"] = round(float(min(tof_raw)), 3) if tof_fresh and tof_raw else 0.0
+            telemetry["mcu_msg"] = self.latest_mcu_msg
+            telemetry["mcu_log"] = list(self.mcu_log[-10:])
+            telemetry["mcu_main_connected"] = main_fresh
+            telemetry["mcu_tof_connected"] = tof_fresh
+            telemetry["tof_front_ok"] = front_tofs_ok
+            telemetry["tof_sensor_online"] = {
+                str(sid): (
+                    tof_fresh
+                    and self.last_tof_sensor_rx.get(sid, 0.0) > 0.0
+                    and (now - self.last_tof_sensor_rx.get(sid, 0.0)) <= LINK_TIMEOUT_S
+                )
+                for sid in SENSOR_CHANNEL_SLOTS
+            }
+            telemetry["mcu_main_port"] = self.assigned_ports.get("ESP32_Main") or "Offline"
+            telemetry["mcu_tof_port"] = self.assigned_ports.get("ESP32_ToF") or "Offline"
+            if main_fresh and self.latest_esp_servo_center_us is not None:
+                telemetry["esp_servo_center_us"] = self.latest_esp_servo_center_us
+                if self.latest_esp_servo_trim_us is not None:
+                    telemetry["esp_servo_trim_us"] = self.latest_esp_servo_trim_us
+
+            debug_telemetry = None
+            if send_debug:
+                self._last_debug_dispatch = now
+                debug_telemetry = dict(telemetry)
+                debug_telemetry["tof"] = {
+                    SENSOR_NAMES[i]: round(tof_comp[i], 3)
+                    for i in range(min(len(SENSOR_NAMES), len(tof_comp)))
+                }
+                debug_telemetry["tof_raw"] = {
+                    SENSOR_NAMES[i]: round(tof_raw[i], 3)
+                    for i in range(min(len(SENSOR_NAMES), len(tof_raw)))
+                }
+                debug_telemetry["tof_target0_mm"] = t0_mm_list
+                debug_telemetry["tof_target1_mm"] = t1_mm_list
+                debug_telemetry["tof_target0_status"] = t0_st_list
+                debug_telemetry["tof_target1_status"] = t1_st_list
+                v_curr = float(telemetry.get("v_est", 0.0))
+                w_curr = float(telemetry.get("gyro_z", 0.0))
+                debug_telemetry["tof_anchor_proj"] = list(self.compensator.compute_projected_anchor(v_curr, w_curr, 0.01667))
+
+        try:
+            raw = json.dumps(telemetry).encode("utf-8")
+            self.udp_sock.sendto(raw, (self.udp_host, 9875))  # Real-time feed to Path Planner Core 1 (unchanged)
+            if debug_telemetry is not None:
+                debug_raw = json.dumps(debug_telemetry).encode("utf-8")
+                self.udp_sock.sendto(debug_raw, self.udp_target)
+        except Exception:
+            pass
+
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="Folkrace MCU Binary UART Bridge")
+    parser.add_argument("--main", default="auto", help="ESP32 Main serial device (auto-detects /dev/ttyUSB0, /dev/ttyACM0, etc.)")
+    parser.add_argument("--tof", default="auto", help="ESP32 ToF Hub serial device (auto-detects /dev/ttyUSB1, /dev/ttyACM1, etc.)")
+    parser.add_argument("--baud", type=int, default=UART_BAUD, help="UART baud rate")
+    args = parser.parse_args()
+
+    def _handle_sigterm(_signum, _frame):
+        raise KeyboardInterrupt()
+
+    signal.signal(signal.SIGTERM, _handle_sigterm)
+
+    bridge = MCU_UART_Bridge(main_port=args.main, tof_port=args.tof, baud=args.baud)
+    bridge.start()
+
+    print("[MCU Bridge] Active. Press Ctrl+C to terminate.")
+    try:
+        while True:
+            time.sleep(1.0)
+    except KeyboardInterrupt:
+        bridge.stop()
+        print("\n[MCU Bridge] Terminated.")
+
+
+
+=== FILE: 2_pi4/path_planner_runner.py ===
+#!/usr/bin/env python3
+"""
+================================================================================
+  FOLKRACE PI 4: REAL-TIME PATH PLANNER RUNNER (CORE 1 HARD PINNED)
+================================================================================
+  Hardware Policy & Determinism:
+    - Strictly pinned to CPU Core 1 (os.sched_setaffinity(0, {1})).
+    - Hard isolation guarantees zero preemption from the Debug Server (Core 2)
+      or Linux OS / network stack (Core 0).
+    - Asynchronous, non-blocking telemetry broadcast over loopback UDP (Port 9876).
+    - If the debug server or SD card experiences latency, packets are dropped
+      immediately with zero delay to the planning loop.
+================================================================================
+"""
+
+import os
+import sys
+import time
+import signal
+import json
+import math
+import zlib
+import base64
+import socket
+import csv
+import queue
+import threading
+import gc
+from typing import Dict, List, Optional, Any
+import numpy as np
+
+# Tune Python GC to prevent mid-frame garbage collection pauses on Core 1
+gc.set_threshold(50000, 50, 50)
+
+# Ensure pi4 folder is in sys.path
+CURR_DIR = os.path.dirname(os.path.abspath(__file__))
+if CURR_DIR not in sys.path:
+    sys.path.insert(0, CURR_DIR)
+
+ROOT_DIR = os.path.dirname(CURR_DIR)
+BRAIN_DIR = os.path.join(ROOT_DIR, "brain")
+CONTROLLERS_DIR = os.path.join(ROOT_DIR, "5_webots", "simulation", "my_project", "controllers", "tof_path_planner")
+for d in (BRAIN_DIR, CONTROLLERS_DIR, os.path.join(CURR_DIR, "brain")):
+    if os.path.exists(d) and d not in sys.path:
+        sys.path.insert(0, d)
+
+from core_manager import set_core_affinity, set_process_priority, get_core_affinity
+from brain import AutonomousBrain, SENSOR_NAMES
+from mcu_telemetry_protocol import encode_motion_command
+from brain.planner_config import (
+    GRID_X_MIN,
+    GRID_X_MAX,
+    GRID_Y_MIN,
+    GRID_Y_MAX,
+    GRID_RES,
+    R_INFLATION_M,
+    GAP_MAX_LOOKAHEAD_M,
+    V_MAX_CRUISE,
+    MAX_STEERING_RAD,
+)
+
+TARGET_HZ = 60.0
+DT_STEP = 1.0 / TARGET_HZ
+LINK_TIMEOUT_S = 0.25  # 250ms link-loss failsafe (matches MCU bridge & ESP32-STM32)
+BRAKE_DURATION_S = 2.0  # Active braking hold duration before disabling motor drivers
+TELEM_HZ = 60.0
+TELEM_DECIMATION = int(round(TARGET_HZ / TELEM_HZ))  # Full 60 Hz for flight recorder; debug_server throttles live WS to 20 Hz
+DEBUG_UDP_PORT = int(os.environ.get("DEBUG_UDP_PORT", 9876))
+DEBUG_UDP_HOST = os.environ.get("DEBUG_UDP_HOST", "127.0.0.1")
+SENSOR_UDP_PORT = int(os.environ.get("SENSOR_UDP_PORT", 9875))
+PLANNER_CMD_UDP_PORT = int(os.environ.get("PLANNER_CMD_UDP_PORT", 9878))
+
+
+def create_nonblocking_udp_socket() -> socket.socket:
+    """Creates a UDP socket that will never block under any circumstance."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setblocking(False)
+    # 512 KB socket buffer for high-rate full-fidelity telemetry
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 524288)
+    except Exception:
+        pass
+    return sock
+
+
+
+def run_path_planner():
+    def _handle_sigterm(_signum, _frame):
+        raise KeyboardInterrupt()
+
+    signal.signal(signal.SIGTERM, _handle_sigterm)
+
+    print("=" * 70)
+    print("  FOLKRACE PI 4: REAL-TIME PATH PLANNER (CORE 1 DEDICATED)")
+    print("=" * 70)
+
+    # 1. HARD HARDWARE ISOLATION: Pin strictly to CPU Core 1
+    pinned = set_core_affinity({1}, "PathPlanner")
+    set_process_priority(niceness=-15, realtime_fifo=True, priority=50)
+
+    affinity = get_core_affinity()
+    print(f"[Planner Core 1] Verified active CPU affinity: {affinity}")
+    if 1 not in affinity:
+        print("[Planner Core 1 WARNING] Process is not running on Core 1!")
+
+    # 2. Initialize Shared Autonomous Brain (C++ Costmap, Gap Scout, Curvilinear SL-MPC, Recovery & Watchdog)
+    print(f"[Planner Core 1] Initializing Shared Autonomous Brain...")
+    brain = AutonomousBrain()
+
+    # 3. Setup Non-Blocking Sockets
+    target_addr = (DEBUG_UDP_HOST, DEBUG_UDP_PORT)
+    cmd_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    cmd_sock.setblocking(False)
+    mcu_cmd_target = ("127.0.0.1", 9877)
+
+    # Lightweight Telemetry Dispatch Worker: offloads JSON dumping and UDP socket I/O to Core 2/3
+    telem_queue = queue.Queue(maxsize=90)
+
+    def telemetry_worker():
+        try:
+            set_core_affinity({2, 3})
+        except Exception:
+            pass
+
+        # Dedicated background sender socket with 2MB send buffer and safe timeout
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 2097152)
+        except Exception:
+            pass
+        sock.settimeout(0.05)
+
+        while True:
+            try:
+                telem_dict = telem_queue.get()
+                if telem_dict is None:
+                    break
+                pkt_bytes = json.dumps(telem_dict).encode("utf-8")
+                sock.sendto(pkt_bytes, target_addr)
+            except Exception:
+                pass
+
+    worker_thread = threading.Thread(target=telemetry_worker, daemon=True, name="TelemetryWorker")
+    worker_thread.start()
+
+    sensor_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sensor_sock.setblocking(False)
+    try:
+        sensor_sock.bind(("127.0.0.1", SENSOR_UDP_PORT))
+    except Exception as e:
+        print(f"[Planner Core 1] Note on sensor socket: {e}")
+
+    planner_cmd_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    planner_cmd_sock.setblocking(False)
+    try:
+        planner_cmd_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        planner_cmd_sock.bind(("127.0.0.1", PLANNER_CMD_UDP_PORT))
+        print(f"[Planner Core 1] Listening for Start/Stop commands on 127.0.0.1:{PLANNER_CMD_UDP_PORT}...")
+    except Exception as e:
+        print(f"[Planner Core 1] Note on planner command socket: {e}")
+
+    def dispatch_stop_hw():
+        try:
+            cmd_sock.sendto(b"ESTOP\n", mcu_cmd_target)
+            cmd_sock.sendto(b"RESET\n", mcu_cmd_target)
+            cmd_sock.sendto(encode_motion_command(0.0, 0.0, 0, step_counter), mcu_cmd_target)
+        except Exception:
+            pass
+
+    def dispatch_start_hw():
+        try:
+            cmd_sock.sendto(b"E\n", mcu_cmd_target)
+            cmd_sock.sendto(b"MOTORS\n", mcu_cmd_target)
+        except Exception:
+            pass
+
+    planner_running = False
+    was_mcu_main_connected = False
+    was_driving_links_ok = False
+    seen_stm32_front = False
+    seen_stm32_rear = False
+    brake_until = 0.0
+
+    live_tof_list: List[float] = [0.0] * 16
+    has_live_sensor_feed = False
+    last_sensor_time = 0.0
+    last_mcu_time = 0.0
+    last_mcu_pkt: Optional[Dict[str, Any]] = None
+    last_tof_pkt: Optional[Dict[str, Any]] = None
+
+    print(f"[Planner Core 1] Starting Deterministic {TARGET_HZ:.0f} Hz Loop (Period: {DT_STEP*1000:.2f} ms)...")
+    print(f"[Planner Core 1] Listening for live ToF stream on 127.0.0.1:{SENSOR_UDP_PORT}...")
+    print("=" * 70)
+
+    step_counter = 0
+    sim_time = 0.0
+
+    # Kinematic tracking states
+    v_actual = 0.0
+    steer_actual_deg = 0.0
+    gyro_z = 0.0
+
+    t_loop_next = time.perf_counter()
+
+    try:
+        while True:
+            t_step_start = time.perf_counter()
+            sim_time += DT_STEP
+            step_counter += 1
+
+            # 0. Drain Start/Stop Planner Commands
+            while True:
+                try:
+                    p_cmd_bytes, _ = planner_cmd_sock.recvfrom(512)
+                    p_cmd = p_cmd_bytes.decode("utf-8", errors="ignore").strip().upper()
+                    if p_cmd == "START":
+                        brake_until = 0.0
+                        if not planner_running:
+                            planner_running = True
+                            dispatch_start_hw()
+                            print("[Planner Core 1] ▶ STARTED (Line calc active, motor drivers enabled)")
+                    elif p_cmd == "STOP":
+                        if planner_running:
+                            planner_running = False
+                            if was_driving_links_ok or was_mcu_main_connected:
+                                brake_until = time.perf_counter() + BRAKE_DURATION_S
+                                print(f"[Planner Core 1] 🛑 STOPPING — Braking for {BRAKE_DURATION_S:.1f}s before disabling motor drivers...")
+                            else:
+                                brake_until = 0.0
+                                dispatch_stop_hw()
+                                print("[Planner Core 1] ⏹ STOPPED (Line calc stopped, motors disabled, servo centered)")
+                        elif brake_until == 0.0:
+                            dispatch_stop_hw()
+                            print("[Planner Core 1] ⏹ STOPPED (Line calc stopped, motors disabled, servo centered)")
+                    elif p_cmd == "TOGGLE":
+                        if not planner_running:
+                            brake_until = 0.0
+                            planner_running = True
+                            dispatch_start_hw()
+                            print("[Planner Core 1] ▶ STARTED (Line calc active, motor drivers enabled)")
+                        else:
+                            planner_running = False
+                            if was_driving_links_ok or was_mcu_main_connected:
+                                brake_until = time.perf_counter() + BRAKE_DURATION_S
+                                print(f"[Planner Core 1] 🛑 STOPPING — Braking for {BRAKE_DURATION_S:.1f}s before disabling motor drivers...")
+                            else:
+                                brake_until = 0.0
+                                dispatch_stop_hw()
+                                print("[Planner Core 1] ⏹ STOPPED (Line calc stopped, motors disabled, servo centered)")
+                except (BlockingIOError, socket.error):
+                    break
+                except Exception:
+                    break
+
+            # 1. Perception Ingestion: Drain sensor UDP socket to receive latest real-time frame.
+            # Coalesce raw datagrams before JSON decoding so bursty packets never waste Core 1 CPU.
+            latest_mcu_pkt = None
+            raw_mcu_bytes = None
+            raw_tof_bytes = None
+            now_mono = time.monotonic()
+            while True:
+                try:
+                    raw_bytes, _ = sensor_sock.recvfrom(4096)
+                    if b'"rpms_act"' in raw_bytes:
+                        raw_mcu_bytes = raw_bytes
+                    if b'"tof_ranges_raw"' in raw_bytes or b'"tof"' in raw_bytes:
+                        raw_tof_bytes = raw_bytes
+                except (BlockingIOError, socket.error):
+                    break
+                except Exception:
+                    break
+
+            if raw_mcu_bytes is not None:
+                try:
+                    pkt = json.loads(raw_mcu_bytes.decode("utf-8"))
+                    latest_mcu_pkt = pkt
+                    last_mcu_pkt = pkt
+                    last_mcu_time = now_mono
+                    if raw_tof_bytes == raw_mcu_bytes:
+                        raw_tof_bytes = None
+                        last_tof_pkt = pkt
+                        if not pkt.get("mcu_tof_connected", False) or not pkt.get("tof_front_ok", True):
+                            has_live_sensor_feed = False
+                            live_tof_list = [0.0] * 16
+                        elif "tof_ranges_raw" in pkt:
+                            r_in = pkt["tof_ranges_raw"]
+                            live_tof_list = [float(r_in[i]) if i < len(r_in) else 0.0 for i in range(16)]
+                            has_live_sensor_feed = True
+                            last_sensor_time = now_mono
+                except Exception:
+                    pass
+
+            if raw_tof_bytes is not None:
+                try:
+                    pkt = json.loads(raw_tof_bytes.decode("utf-8"))
+                    last_tof_pkt = pkt
+                    if not pkt.get("mcu_tof_connected", False) or not pkt.get("tof_front_ok", True):
+                        has_live_sensor_feed = False
+                        live_tof_list = [0.0] * 16
+                    elif "tof_ranges_raw" in pkt:
+                        r_in = pkt["tof_ranges_raw"]
+                        live_tof_list = [float(r_in[i]) if i < len(r_in) else 0.0 for i in range(16)]
+                        has_live_sensor_feed = True
+                        last_sensor_time = now_mono
+                    elif "tof" in pkt and isinstance(pkt["tof"], dict):
+                        t_dict = pkt["tof"]
+                        live_tof_list = [float(t_dict.get(k, 0.0)) for k in SENSOR_NAMES]
+                        has_live_sensor_feed = True
+                        last_sensor_time = now_mono
+                except Exception:
+                    pass
+
+            if has_live_sensor_feed and (now_mono - last_sensor_time > LINK_TIMEOUT_S):
+                has_live_sensor_feed = False
+                live_tof_list = [0.0] * 16
+
+            # Ingest MCU feedback (prefer latest frame, fallback to last valid hardware frame within LINK_TIMEOUT_S)
+            active_mcu = latest_mcu_pkt or (last_mcu_pkt if (now_mono - last_mcu_time <= LINK_TIMEOUT_S) else None)
+            has_imu_yaw = False
+            yaw_deg = 0.0
+            if active_mcu and "rpms_act" in active_mcu:
+                v_actual = float(active_mcu.get("v_est", active_mcu.get("v_real", v_actual)))
+                steer_actual_deg = float(active_mcu.get("steer_actual_deg", steer_actual_deg))
+                gyro_z = float(active_mcu.get("gyro_z", 0.0))
+                pitch_deg = float(active_mcu.get("pitch_deg", 0.0))
+                roll_deg = float(active_mcu.get("roll_deg", 0.0))
+                has_imu_yaw = ("yaw_deg" in active_mcu)
+                yaw_deg = float(active_mcu.get("yaw_deg", 0.0))
+            else:
+                v_actual = 0.0
+                steer_actual_deg = 0.0
+                gyro_z = 0.0
+                pitch_deg = 0.0
+                roll_deg = 0.0
+
+            # Ensure hardware starts in safe stopped state when ESP32 Main first connects
+            mcu_main_now = bool(active_mcu and active_mcu.get("mcu_main_connected", False))
+            flags_dict = (active_mcu.get("flags") or {}) if isinstance(active_mcu, dict) else {}
+            if not isinstance(flags_dict, dict):
+                flags_dict = {}
+            stm32_front_now = bool(flags_dict.get("stm32_front", False))
+            stm32_rear_now = bool(flags_dict.get("stm32_rear", False))
+            if mcu_main_now and not was_mcu_main_connected and not planner_running:
+                dispatch_stop_hw()
+            was_mcu_main_connected = mcu_main_now
+
+            if not planner_running:
+                seen_stm32_front = False
+                seen_stm32_rear = False
+            elif mcu_main_now:
+                if stm32_front_now:
+                    seen_stm32_front = True
+                if stm32_rear_now:
+                    seen_stm32_rear = True
+
+            axles_ok = (
+                (not seen_stm32_front or stm32_front_now)
+                and (not seen_stm32_rear or stm32_rear_now)
+                and (stm32_front_now or stm32_rear_now)
+            )
+
+            # 2. Execute Shared Autonomous Brain Step (only when started AND Main, ToF & STM32 links are live)
+            driving_links_ok = has_live_sensor_feed and mcu_main_now and axles_ok
+            if planner_running and driving_links_ok:
+                was_driving_links_ok = True
+                steer_rad = math.radians(steer_actual_deg)
+                need_full_telem = (step_counter % TELEM_DECIMATION == 0)
+                v_cmd, steer_cmd_rad, brain_telem = brain.step(
+                    tof_readings=live_tof_list,
+                    v_est=v_actual,
+                    steer_actual_rad=steer_rad,
+                    gyro_z_rad_s=gyro_z,
+                    dt=DT_STEP,
+                    sim_time_s=sim_time,
+                    full_telemetry=need_full_telem,
+                    pitch_rad=math.radians(pitch_deg),
+                    roll_rad=math.radians(roll_deg),
+                    imu_yaw_rad=(math.radians(yaw_deg) if has_imu_yaw else None),
+                )
+                steer_cmd_deg = math.degrees(steer_cmd_rad)
+                run_mode_val = 1
+            else:
+                if planner_running and was_driving_links_ok:
+                    print(f"[Planner Core 1] ⚠ FAILSAFE: MCU/ToF link lost — braking {BRAKE_DURATION_S:.1f}s before disabling drivers.")
+                    if mcu_main_now:
+                        brake_until = time.perf_counter() + BRAKE_DURATION_S
+                    else:
+                        brake_until = 0.0
+                        dispatch_stop_hw()
+                was_driving_links_ok = False
+                v_cmd = 0.0
+                steer_cmd_rad = 0.0
+                steer_cmd_deg = 0.0
+                if brake_until > 0.0:
+                    if time.perf_counter() < brake_until:
+                        run_mode_val = 1
+                    else:
+                        brake_until = 0.0
+                        dispatch_stop_hw()
+                        run_mode_val = 0
+                        print("[Planner Core 1] ⏹ STOPPED (Brake complete, motor drivers disabled, servo centered)")
+                else:
+                    run_mode_val = 0
+                brain.rate_limited_speed = 0.0
+                brain.cached_target_speed = 0.0
+                brain.cached_target_steer = 0.0
+                brain.recovery_manager.reset()
+                brain.watchdog.reset()
+                brain.pose_tracker.reset()
+                mode_str = "BRAKING" if run_mode_val == 1 else ("STOPPED" if not planner_running else "STANDBY")
+                status_str = "BRAKING" if run_mode_val == 1 else ("STOPPED" if not planner_running else "OFFLINE")
+                brain_telem = {
+                    "mode": mode_str,
+                    "status": status_str,
+                    "v_cmd": 0.0,
+                    "steer_cmd_deg": 0.0,
+                    "plan_ms": 0.0,
+                    "map_ms": 0.0,
+                    "scout_ms": 0.0,
+                    "osqp_iters": 0,
+                    "osqp_iters_alt": 0,
+                    "iters_prim": 0,
+                    "iters_alt": 0,
+                    "step_ms": 0.0,
+                    "best_line": [],
+                    "candidate_lines": [],
+                    "guide_line": [],
+                    "corridor_left": [],
+                    "corridor_right": [],
+                    "targets": [],
+                }
+
+            # 3. Motion Command Uplink: Dispatch binary packet to ESP32 Main via MCU UART Bridge
+            cmd_bytes = encode_motion_command(
+                target_v_mps=v_cmd,
+                target_steer_rad=steer_cmd_rad,
+                run_mode=run_mode_val,
+                seq=step_counter,
+            )
+            try:
+                cmd_sock.sendto(cmd_bytes, mcu_cmd_target)
+            except Exception:
+                pass
+
+            # True closed-loop control actuation latency (from ToF receipt to command dispatch)
+            t_ctrl_ms = (time.perf_counter() - t_step_start) * 1000.0
+
+            # 4. Compose & Dispatch Telemetry at exact 20 Hz (every 3rd 60 Hz step)
+            if step_counter % TELEM_DECIMATION == 0:
+                telemetry = dict(brain_telem)
+                telemetry["time_step"] = step_counter
+                telemetry["timestamp"] = time.time()
+                telemetry["sim_time"] = round(sim_time, 3)
+                telemetry["v_real"] = round(v_actual, 2)
+                telemetry["v_est"] = round(v_actual, 3)
+                telemetry["steer_actual_deg"] = round(steer_actual_deg, 1)
+
+                if active_mcu and "rpms_act" in active_mcu:
+                    telemetry["rpms_cmd"] = active_mcu.get("rpms_cmd", [0, 0, 0, 0])
+                    telemetry["rpms_act"] = active_mcu.get("rpms_act", [0, 0, 0, 0])
+                    telemetry["yaw_deg"] = float(active_mcu.get("yaw_deg", 0.0))
+                    telemetry["pitch_deg"] = float(active_mcu.get("pitch_deg", 0.0))
+                    telemetry["roll_deg"] = float(active_mcu.get("roll_deg", 0.0))
+                    telemetry["gyro_z"] = round(gyro_z, 3)
+                    telemetry["accel_fwd"] = float(active_mcu.get("accel_fwd", 0.0))
+                    telemetry["accel_lat"] = float(active_mcu.get("accel_lat", 0.0))
+                    telemetry["slip_state"] = str(active_mcu.get("slip_state", "NORMAL"))
+                    telemetry["slip_ratio"] = float(active_mcu.get("slip_ratio", 0.0))
+                    telemetry["servo_pulse_us"] = int(active_mcu.get("servo_pulse_us", 1565))
+                    telemetry["flags"] = dict(active_mcu.get("flags", {}))
+                    telemetry["mcu_msg"] = active_mcu.get("mcu_msg", "")
+                    telemetry["mcu_log"] = active_mcu.get("mcu_log", [])
+                    telemetry["mcu_main_connected"] = bool(active_mcu.get("mcu_main_connected", False))
+                    telemetry["mcu_tof_connected"] = bool(active_mcu.get("mcu_tof_connected", has_live_sensor_feed))
+                    telemetry["mcu_main_port"] = str(active_mcu.get("mcu_main_port", ""))
+                    telemetry["mcu_tof_port"] = str(active_mcu.get("mcu_tof_port", ""))
+                else:
+                    telemetry["rpms_cmd"] = [0, 0, 0, 0]
+                    telemetry["rpms_act"] = [0, 0, 0, 0]
+                    telemetry["yaw_deg"] = 0.0
+                    telemetry["pitch_deg"] = 0.0
+                    telemetry["roll_deg"] = 0.0
+                    telemetry["gyro_z"] = 0.0
+                    telemetry["accel_fwd"] = 0.0
+                    telemetry["accel_lat"] = 0.0
+                    telemetry["slip_state"] = "OFFLINE"
+                    telemetry["slip_ratio"] = 0.0
+                    telemetry["servo_pulse_us"] = 1565
+                    telemetry["flags"] = {"fake_data": False, "standalone_sim": False}
+                    telemetry["mcu_msg"] = ""
+                    telemetry["mcu_log"] = []
+                    telemetry["mcu_main_connected"] = False
+                    telemetry["mcu_tof_connected"] = bool(has_live_sensor_feed)
+                    telemetry["mcu_main_port"] = ""
+                    telemetry["mcu_tof_port"] = str(last_tof_pkt.get("mcu_tof_port", "")) if last_tof_pkt else ""
+
+                telemetry["tof_ranges_raw"] = [round(v, 3) for v in live_tof_list] if has_live_sensor_feed else [0.0] * 16
+                if has_live_sensor_feed and last_tof_pkt:
+                    for tk in (
+                        "tof_target0_mm",
+                        "tof_target1_mm",
+                        "tof_target0_status",
+                        "tof_target1_status",
+                        "tof_front_ok",
+                        "tof_sensor_online",
+                    ):
+                        if tk in last_tof_pkt:
+                            telemetry[tk] = last_tof_pkt[tk]
+                else:
+                    telemetry["tof_target0_mm"] = [0] * 16
+                    telemetry["tof_target1_mm"] = [0] * 16
+                    telemetry["tof_target0_status"] = [255] * 16
+                    telemetry["tof_target1_status"] = [255] * 16
+                telemetry["step_ms"] = round(t_ctrl_ms, 2)
+                telemetry["grid_shape"] = [int(s) for s in brain.costmap.shape]
+                telemetry["grid_bounds"] = [GRID_X_MIN, GRID_X_MAX, GRID_Y_MIN, GRID_Y_MAX]
+                telemetry["planner_running"] = planner_running
+                if not isinstance(telemetry.get("flags"), dict):
+                    telemetry["flags"] = {}
+                telemetry["flags"]["planner_running"] = planner_running
+
+                # Non-blocking handoff to background worker
+                try:
+                    if telem_queue.full():
+                        _ = telem_queue.get_nowait()
+                    telem_queue.put_nowait(telemetry)
+                except Exception:
+                    pass
+
+            # 8. Deterministic 60 Hz Rate Keeper
+            t_loop_next += DT_STEP
+            t_sleep = t_loop_next - time.perf_counter()
+            if t_sleep > 0:
+                time.sleep(t_sleep)
+            else:
+                # Loop overrun: reset deadline
+                t_loop_next = time.perf_counter()
+
+    except KeyboardInterrupt:
+        print("\n[Planner Core 1] Stopped by user.")
+    finally:
+        dispatch_stop_hw()
+
+
+if __name__ == "__main__":
+    run_path_planner()
+
+

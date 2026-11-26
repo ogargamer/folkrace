@@ -1,0 +1,1837 @@
+=== BUNDLE: folkrace_04_webots_tools_part2of17.txt (12 files/sections) ===
+  - 5_webots/optimization/ga_planner_optimizer/ga_planner_config.py
+  - 5_webots/optimization/ga_planner_optimizer/launch_ga_optimization.py
+  - 5_webots/optimization/ga_planner_optimizer/run_tight_10k_population.py
+  - 5_webots/optimization/ga_planner_optimizer/run_tight_50m_regime.py
+  - 5_webots/optimization/ga_planner_optimizer/test_ga_optimizer_offline.py
+  - 5_webots/robotics/ros2_cartographer/README.md
+  - 5_webots/robotics/ros2_cartographer/config/custom_run_carto.lua
+  - 5_webots/robotics/ros2_cartographer/config/folkrace_2d.lua
+  - 5_webots/robotics/ros2_cartographer/config/official_webots_cartographer.lua
+  - 5_webots/robotics/ros2_cartographer/config/turtlebot3_standard_cartographer.lua
+  - 5_webots/robotics/ros2_cartographer/docs/ros2_cartographer_webots_guide.md
+  - 5_webots/robotics/ros2_cartographer/scripts/check_map_empty.py
+
+=== FILE: 5_webots/optimization/ga_planner_optimizer/ga_planner_config.py ===
+"""
+================================================================================
+  HEADLESS GENETIC ALGORITHM (GA) CONFIGURATION & GENE SPECIFICATIONS
+================================================================================
+  Central control file for tuning the C++ Curvilinear SL-MPC planner in Webots.
+  Exposes all GA parameters, CPU worker settings, fitness parameters,
+  and individual gene tables for the C++ SL-MPC architecture.
+================================================================================
+"""
+
+import os
+import sys
+import math
+import json
+from typing import Dict, List, Tuple, Any, Optional
+import numpy as np
+
+# ==============================================================================
+# 1. GA OPTIMIZER & WORKER POOL HYPERPARAMETERS
+# ==============================================================================
+
+# Number of parallel headless Webots workers / CPU cores to utilize (8 physical / 16 SMT threads -> 10 optimal)
+NUM_CPU_CORES: int = 10
+
+# Population size per generation (40 candidates: 4 full 10-worker batches)
+POPULATION_SIZE: int = 40
+
+# Maximum number of generations to run
+NUM_GENERATIONS: int = 9999
+
+# Base evaluation duration per candidate in simulation seconds (starting at 25.0s)
+EVALUATION_DURATION_S: float = 25.0
+
+# Automatic Linear Evaluation Duration Scaling (+2.5s per wall-clock hour = +5.0s per 2 hours continuously)
+AUTO_SCALE_EVAL_DURATION: bool = True
+EVAL_DURATION_HOURLY_GROWTH_S: float = 2.50  # Linear seconds added per wall-clock hour (+5s every 2h)
+EVAL_DURATION_MAX_S: float = 60.0            # Maximum simulation duration ceiling
+
+# Number of evaluation runs per candidate to average (1 for deterministic, >1 if noisy)
+RUNS_PER_EVALUATION: int = 1
+
+# Optimization Algorithm: 'CMA_ES' (Covariance Matrix Adaptation), 'GA' (Genetic Algorithm)
+ALGORITHM: str = "CMA_ES"
+
+# Seed initial search distribution/population from best_planner_genome.json instead of defaults
+SEED_FROM_BEST_GENOME_DEFAULT: bool = True
+BEST_GENOME_PATH: str = os.path.join(os.path.dirname(os.path.abspath(__file__)), "best_planner_genome.json")
+
+# CMA-ES Hyperparameters (Wide exploration sigma = 0.30 across normalized [0, 1] parameter space)
+CMA_SIGMA0: float = 0.25             # Initial search step size in normalized [0, 1] parameter space
+CMA_RESTART_ON_CONVERGENCE: bool = True  # Automatically re-seed if search distribution collapses
+
+# Genetic Operator Rates (Used when ALGORITHM == 'GA')
+CROSSOVER_RATE: float = 0.85
+MUTATION_RATE: float = 0.25
+MUTATION_SCALE: float = 0.22     # Gaussian mutation sigma as a fraction of gene span
+ELITISM_COUNT: int = 4           # Top candidates guaranteed to survive untouched
+TOURNAMENT_SIZE: int = 3         # Selection pressure for GA tournament selection
+
+# Active Path Planner to Optimize (Exclusively C++ Curvilinear S-L MPC)
+ACTIVE_PLANNER: str = "OPTION_2_SL_MPC"
+
+# Headless Webots Simulation Settings
+WEBOTS_BINARY: str = r"C:\Program Files\Webots\msys64\mingw64\bin\webots.exe"
+BASE_WORKER_PORT: int = 10200
+TIMEOUT_PER_TRIAL_WALL_S: float = 420.0
+
+# Moving Obstacle Parameters (Track 1 = 1.00 m/s forward, Track 2 = 1.00 m/s reverse/opposite)
+ENABLE_MOVING_OBSTACLES: bool = True
+USE_TRACK2: bool = True  # Whether to evaluate candidate on 2nd track (-1.00 m/s opposite direction) alongside Track 1 (1.00 m/s)
+MOVING_OBSTACLE_SPEED_MPS: float = 1.00
+TRACK1_MOVING_OBSTACLE_SPEED_MPS: float = 1.00
+TRACK2_MOVING_OBSTACLE_SPEED_MPS: float = -1.00
+MOVING_OBSTACLE_NAMES: List[str] = [
+    "MOVING_OBSTACLE",
+    "MOVING_OBSTACLE_2",
+    "MOVING_OBSTACLE_3",
+]
+
+# Track Origin Start Pose:
+ROBOT_START_POS: List[float] = [0.0, 0.0, 0.0275]
+ROBOT_START_ROT: List[float] = [0.0, 0.0, 1.0, -1.5707953071795862]
+
+
+# ==============================================================================
+# 2. FITNESS & DISQUALIFICATION REWARD WEIGHTS
+# ==============================================================================
+
+FITNESS_PROGRESS_WEIGHT: float = 150.0
+FITNESS_SPEED_WEIGHT: float = 30.0
+FITNESS_LAP_BONUS: float = 150.0
+FITNESS_COLLISION_PENALTY: float = 450.0
+FITNESS_STALL_PENALTY: float = 900.0
+
+STALL_SPEED_THRESHOLD_MPS: float = 0.15
+STALL_MAX_DURATION_S: float = 1.50
+
+# Duration Normalization & Survival Bonus Hyperparameters
+FITNESS_BASE_DURATION_S: float = 25.0        # Reference baseline duration (s) for standard ~10k fitness scaling
+FITNESS_DURATION_BONUS_MAX: float = 0.10     # Max bonus fraction (+10%) for running longer sim without crashing
+
+
+
+# ==============================================================================
+# 3. GENE SPECIFICATIONS FOR C++ CURVILINEAR SL-MPC
+# ==============================================================================
+# Format: (gene_name, min_val, max_val, type, default_val, description)
+
+OPTION_2_SL_MPC_GENE_SPECS: List[Tuple[str, float, float, type, float, str]] = [
+    # Speeds & Limits (Real-world physical wheel ceiling = 3.84 m/s from vehicle_config.json)
+    ("v_cruise_max",         3.84,   3.84,   float,  3.84,   "Max straight clearing speed (m/s, real-world physical limit)"),
+    ("v_cruise_min",         1.223,   1.223,   float,  1.223,  "Min corner crawl speed (m/s)"),
+    # Horizon & Discretization (Fixed at N=30, dt=1/60s to match native C++ OSQP codegen & 60 Hz Pi/ToF loop)
+    ("horizon_N",           30.0,   30.0,    int,   30.0,    "MPC prediction horizon steps (fixed at 30 in native QP tables)"),
+    ("dt",                   0.016667, 0.016667, float, 0.016667, "MPC prediction discretization timestep (s)"),
+    # Tire Friction & Costmap Inflation (Real-world MU = 0.80, real-world inflation = 0.075 m)
+    ("mu_friction",          0.80,   0.80,   float,  0.80,   "Tire friction coefficient governing steer vs brake loads"),
+    ("r_inflation_m",        0.075,  0.075,  float,  0.075,  "ToF obstacle expansion / inflation radius (m, real-world costmap)"),
+    # MPC Objective Weights (Defaulted to best_planner_genome.json)
+    ("q_progress",           0.50,  40.00,   float, 25.143,  "Longitudinal progress reward weight"),
+    ("q_cte",                1.00,  60.00,   float, 59.998,  "Cross-track error penalty weight"),
+    ("q_heading",            2.00,  25.00,   float,  2.788,  "Heading error penalty weight"),
+    ("r_steer",              1.00,  15.00,   float,  3.631,  "Steering angle effort penalty weight"),
+    ("r_accel",              0.01,   6.00,   float,  1.722,  "Acceleration/braking effort penalty weight"),
+    ("r_steer_rate",         0.50,  35.00,   float,  2.020,  "Steering rate slew penalty weight"),
+    ("v_corner_factor",      0.60,   0.98,   float,  0.677,  "Friction circle speed scaling for curvature"),
+    ("center_bias",          0.00,   0.50,   float,  0.000,  "Corridor centering blend (0=guide line, 1=corridor midpoint)"),
+    # Gap Scout Parameters (Defaulted to best_planner_genome.json)
+    ("target_lookahead_m",   2.30,   2.30,   float,  2.30,   "Scout lookahead target projection distance (m)"),
+    ("w_gap_distance",       1.00,  10.00,   float,  8.198,  "Gap scout distance reward weight"),
+    ("w_gap_width",          0.20,   4.00,   float,  0.542,  "Gap scout aperture width reward weight"),
+    ("w_gap_steer",          0.20,   4.00,   float,  1.805,  "Gap scout steering alignment penalty weight"),
+    ("w_gap_straight",       0.05,   2.00,   float,  0.589,  "Gap scout straight heading alignment reward weight"),
+    ("w_side_clearance",     0.00,   6.00,   float,  1.913,  "Gap scout side asymmetry clearance weight"),
+    ("gap_dist_exp_k",       0.20,   1.50,   float,  0.837,  "Gap scout exponential distance reward factor"),
+    ("gap_dist_thresh_m",    0.80,   1.30,   float,  1.292,  "Gap scout distance threshold (m) to engage exponential reward"),
+    ("scout_obs_width_m",    0.05,   0.45,   float,  0.176,  "Effective obstacle width (m) for angular shadow projection"),
+    ("scout_straight_pen_k", 0.50,   5.00,   float,  0.637,  "Base straight obstacle penalty scaling factor"),
+    ("scout_straight_exp_k", 0.10,   3.00,   float,  1.922,  "Exponential curvature factor peaking at dead center (0 deg)"),
+    ("gap_latch_hysteresis", 0.20,   3.50,   float,  2.345,  "Gap scout corridor latch score margin"),
+    ("gap_latch_dist_m",     0.12,   0.60,   float,  0.253,  "Gap scout corridor latch spatial association radius (m)"),
+    # Dual-Path Line Choice & Challenger Selection (Primary vs Alternative)
+    ("alt_min_separation_m", 0.05,   0.40,   float,  0.116,  "Min lateral separation (m) between primary and challenger lines"),
+    ("alt_aperture_bias",    1.00,   4.00,   float,  3.309,  "Challenger aperture width bias multiplier"),
+    ("alt_switch_hysteresis",1.00,  50.00,   float, 18.330,  "MPC cost reduction threshold needed to switch lines"),
+    ("w_gap_clear",          0.00,  50.00,   float, 13.997,  "Lookahead projection depth credit and clear gap weight in dual-line arbitration"),
+    # Straight Quieting & Anti-Oscillation Adaptive Steering Response
+    ("aggr_dist_far_m",      2.30,   2.30,   float,  2.30,   "Forward clearance distance (m) to engage max straight quieting"),
+    ("aggr_dist_close_m",    0.80,   1.30,   float,  1.042,  "Emergency distance threshold (m) below which 100% steering authority is engaged"),
+    ("aggr_min_scale",       0.70,   1.00,   float,  0.719,  "Minimal steering authority scale on open straights"),
+    ("steer_deadband_rad",   0.000,  0.005,  float,  0.002,  "Steering error deadband (rad) for sensor noise quieting"),
+    # Stuck & Emergency Recovery
+    ("recovery_clearance_exit_m", 0.25, 0.25, float, 0.25,   "Front clearance threshold (m) to conclude reverse and center steering"),
+    ("recovery_steer_angle_rad",0.5623, 0.5623, float, 0.5623, "Recovery pivot steering angle (rad)"),
+    ("recovery_arc_lookahead_m",0.10, 0.15,  float,  0.139,  "Kinematic escape arc lookahead length (m) on costmap"),
+    # Track-Aware Cornering & Corridor Flow (4-Robot Validated SL-MPC Extensions; Neutral Defaults = Baseline)
+    ("use_corridor_flow",        0.00,   1.00,    int,   0.0,   "Enable corridor-aware blockage and narrow-gap speed flow (0=baseline, 1=flow)"),
+    ("track_width_cap_m",        0.82,   1.25,  float,  1.25,   "One-sided 1.0m track-width corridor clamp (m; 1.25=off)"),
+    ("corner_outer_bias",        0.00,   0.75,  float,  0.00,   "Soft outside-entry bias inside free corridor on turns"),
+    ("inner_corner_margin_m",    0.00,   0.08,  float,  0.00,   "Inner-apex kinematic turn-radius clearance margin (m)"),
+    ("blind_turn_kappa",         0.00,   1.40,  float,  0.00,   "Blind 90-deg corner curvature floor (1/m)"),
+    ("brake_decel_scale",        0.60,   1.25,  float,  1.00,   "Backward braking deceleration multiplier"),
+    ("narrow_corridor_v_gain",   0.00,   1.00,  float,  0.00,   "Speed moderation in genuinely narrow (<0.48m) corridors"),
+    ("w_gap_center",             0.00,   3.00,  float,  0.832,  "True-aperture corridor edge-clearance centering weight"),
+]
+
+
+# ==============================================================================
+# 4. CHROMOSOME CODEC & REPAIR ENGINE
+# ==============================================================================
+
+class BasePlannerGenome:
+    """Generic genome wrapper providing serialization, clamping, and repair."""
+
+    def __init__(self, specs: List[Tuple[str, float, float, type, float, str]], values: Optional[Dict[str, Any]] = None):
+        self.specs = specs
+        self.values: Dict[str, Any] = {}
+        for name, min_v, max_v, vtype, def_v, _ in specs:
+            if values and name in values:
+                self.values[name] = vtype(values[name])
+            elif values and name == "w_gap_clear" and "alt_lookahead_depth_weight" in values:
+                self.values[name] = vtype(values["alt_lookahead_depth_weight"])
+            else:
+                self.values[name] = vtype(def_v)
+        self.clamp_and_repair()
+
+    def to_dict(self) -> Dict[str, Any]:
+        return dict(self.values)
+
+    def to_array(self) -> np.ndarray:
+        arr = []
+        for name, _, _, _, _, _ in self.specs:
+            arr.append(float(self.values[name]))
+        return np.array(arr, dtype=np.float64)
+
+    def from_array(self, arr: np.ndarray):
+        for idx, (name, min_v, max_v, vtype, _, _) in enumerate(self.specs):
+            if idx < len(arr):
+                val = arr[idx]
+                if vtype is int:
+                    val = int(round(val))
+                self.values[name] = vtype(val)
+        self.clamp_and_repair()
+
+    def clamp_and_repair(self):
+        for name, min_v, max_v, vtype, _, _ in self.specs:
+            val = self.values[name]
+            val = max(min_v, min(max_v, val))
+            if vtype is int:
+                val = int(round(val))
+            elif vtype is float:
+                if min_v == max_v:
+                    # Preserve full precision for fixed physical constants (e.g. dt=0.016667, recovery_steer=0.5623)
+                    val = float(min_v)
+                else:
+                    val = round(float(val), 3)
+            self.values[name] = vtype(val)
+
+    def get_bounds(self) -> Tuple[np.ndarray, np.ndarray]:
+        lower = np.array([s[1] for s in self.specs], dtype=np.float64)
+        upper = np.array([s[2] for s in self.specs], dtype=np.float64)
+        return lower, upper
+
+
+class Option2SLMPCGenome(BasePlannerGenome):
+    def __init__(self, values: Optional[Dict[str, Any]] = None):
+        super().__init__(OPTION_2_SL_MPC_GENE_SPECS, values)
+
+
+def get_genome_class(planner_name: Optional[str] = None):
+    """Factory returning genome class (exclusively C++ SL-MPC)."""
+    return Option2SLMPCGenome
+
+
+def load_best_planner_genome(
+    filepath: Optional[str] = None,
+    genome_cls: Optional[Any] = None,
+) -> Tuple[Optional[BasePlannerGenome], float, Dict[str, Any]]:
+    """
+    Loads chromosome and metrics from best_planner_genome.json (or specified filepath).
+    Returns (genome_instance, fitness, metrics_dict).
+    """
+    path = filepath or BEST_GENOME_PATH
+    if not os.path.exists(path):
+        return None, -1e9, {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        genes = data.get("genes") or data.get("best_genome") or data
+        fitness = float(data.get("fitness", data.get("best_fitness", -1e9)))
+        metrics = data.get("metrics", data.get("best_metrics", {}))
+        cls = genome_cls or get_genome_class()
+        genome = cls(genes)
+        return genome, fitness, metrics
+    except Exception as e:
+        print(f"[Genome Loader] Warning: Failed to load genome from {path}: {e}", flush=True)
+        return None, -1e9, {}
+
+
+def generate_logical_initial_population(
+    genome_cls,
+    pop_size: int,
+    seed_genome: Optional[Any] = None,
+) -> List[BasePlannerGenome]:
+    """
+    Generates a structured, physically logical initial population (Gen 0)
+    combining distinct driving archetypes with stratified Latin-hypercube sampling.
+    If seed_genome is provided, it is injected as Archetype 0 and perturbations center on it.
+    """
+    sample_inst = genome_cls()
+    specs = sample_inst.specs
+    lower, upper = sample_inst.get_bounds()
+    span = upper - lower
+
+    archetypes = [
+        # 0. Cyan Champion Calibrated Baseline
+        {
+            "v_cruise_max": 3.84, "v_cruise_min": 1.223,
+            "horizon_N": 30, "dt": 0.016667,
+            "mu_friction": 0.80, "r_inflation_m": 0.075,
+            "q_progress": 15.0, "q_cte": 18.0, "q_heading": 8.0,
+            "r_steer": 5.0, "r_accel": 2.0, "r_steer_rate": 10.0,
+            "v_corner_factor": 0.95,
+            "center_bias": 0.0,
+            "target_lookahead_m": 2.30, "w_gap_distance": 3.00, "w_gap_width": 1.50,
+            "w_gap_steer": 1.00, "w_gap_straight": 0.50,
+            "w_side_clearance": 2.80,
+            "gap_dist_exp_k": 0.60, "gap_dist_thresh_m": 0.95,
+            "gap_latch_hysteresis": 1.25, "gap_latch_dist_m": 0.28,
+            "alt_min_separation_m": 0.15, "alt_aperture_bias": 1.80, "alt_switch_hysteresis": 8.00,
+            "w_gap_clear": 5.00,
+            "aggr_dist_far_m": 2.30, "aggr_dist_close_m": 1.00, "aggr_min_scale": 0.72,
+            "steer_deadband_rad": 0.002,
+            "recovery_clearance_exit_m": 0.25, "recovery_steer_angle_rad": 0.5623,
+            "recovery_arc_lookahead_m": 0.13,
+        },
+        # 1. High-Momentum Apex Striker
+        {
+            "v_cruise_max": 3.84, "v_cruise_min": 1.50,
+            "horizon_N": 30, "dt": 0.016667,
+            "mu_friction": 0.80, "r_inflation_m": 0.075,
+            "q_progress": 18.0, "q_cte": 14.0, "q_heading": 6.0,
+            "r_steer": 3.5, "r_accel": 1.5, "r_steer_rate": 8.0,
+            "v_corner_factor": 0.95,
+            "center_bias": 0.0,
+            "target_lookahead_m": 2.30, "w_gap_distance": 4.00, "w_gap_width": 1.80,
+            "w_gap_steer": 0.80, "w_gap_straight": 0.50,
+            "w_side_clearance": 2.50,
+            "gap_dist_exp_k": 0.70, "gap_dist_thresh_m": 0.95,
+            "gap_latch_hysteresis": 1.10, "gap_latch_dist_m": 0.25,
+            "alt_min_separation_m": 0.15, "alt_aperture_bias": 1.80, "alt_switch_hysteresis": 7.00,
+            "w_gap_clear": 6.00,
+            "aggr_dist_far_m": 2.30, "aggr_dist_close_m": 1.10, "aggr_min_scale": 0.75,
+            "steer_deadband_rad": 0.002,
+            "recovery_clearance_exit_m": 0.25, "recovery_steer_angle_rad": 0.5623,
+            "recovery_arc_lookahead_m": 0.12,
+        },
+        # 2. Safe High-Clearance Sentinel
+        {
+            "v_cruise_max": 3.84, "v_cruise_min": 1.15,
+            "horizon_N": 30, "dt": 0.016667,
+            "mu_friction": 0.80, "r_inflation_m": 0.075,
+            "q_progress": 10.0, "q_cte": 22.0, "q_heading": 10.0,
+            "r_steer": 6.0, "r_accel": 2.5, "r_steer_rate": 12.0,
+            "v_corner_factor": 0.90,
+            "center_bias": 0.40,
+            "target_lookahead_m": 2.30, "w_gap_distance": 3.00, "w_gap_width": 2.20,
+            "w_gap_steer": 1.10, "w_gap_straight": 0.40,
+            "w_side_clearance": 3.20,
+            "gap_dist_exp_k": 0.50, "gap_dist_thresh_m": 0.98,
+            "gap_latch_hysteresis": 1.50, "gap_latch_dist_m": 0.32,
+            "alt_min_separation_m": 0.20, "alt_aperture_bias": 2.00, "alt_switch_hysteresis": 12.00,
+            "w_gap_clear": 4.00,
+            "aggr_dist_far_m": 2.30, "aggr_dist_close_m": 1.20, "aggr_min_scale": 0.80,
+            "steer_deadband_rad": 0.003,
+            "recovery_clearance_exit_m": 0.25, "recovery_steer_angle_rad": 0.5623,
+            "recovery_arc_lookahead_m": 0.15,
+        },
+    ]
+
+    # Inject seed genome as primary archetype if provided
+    if seed_genome is not None:
+        if isinstance(seed_genome, BasePlannerGenome):
+            archetypes[0] = seed_genome.to_dict()
+        elif isinstance(seed_genome, dict):
+            genes_dict = seed_genome.get("genes") or seed_genome.get("best_genome") or seed_genome
+            arch = dict(genes_dict)
+            if "alt_lookahead_depth_weight" in arch and "w_gap_clear" not in arch:
+                arch["w_gap_clear"] = arch["alt_lookahead_depth_weight"]
+            archetypes[0] = arch
+
+    population: List[BasePlannerGenome] = []
+    for arch in archetypes:
+        if len(population) < pop_size:
+            population.append(genome_cls(arch))
+
+    n_remain = pop_size - len(population)
+    if n_remain > 0:
+        base_arr = genome_cls(archetypes[0]).to_array()
+        for k in range(n_remain):
+            grid_frac = (k + 0.5) / n_remain
+            noise = (np.random.uniform(-0.35, 0.35, size=base_arr.shape) + (grid_frac - 0.5) * 0.50) * span
+            cand_arr = np.clip(base_arr + noise, lower, upper)
+            cand = genome_cls()
+            cand.from_array(cand_arr)
+            if "v_cruise_min" in cand.values and "v_cruise_max" in cand.values:
+                cand.values["v_cruise_min"] = min(cand.values["v_cruise_min"], cand.values["v_cruise_max"] - 0.30)
+            cand.clamp_and_repair()
+            population.append(cand)
+
+    return population
+
+
+def compute_efficiency_multiplier(gene_dict: Optional[Dict[str, Any]]) -> float:
+    """SL-MPC uses constant-time native C++ OSQP solves; multiplier is normalized."""
+    return 1.0
+
+
+SPEED_PHYSICAL_MAX_MPS: float = 3.84
+DISTANCE_VALID_MIN_M: float = 0.10
+
+
+def compute_scalar_fitness(
+    metrics: Dict[str, Any],
+    gene_dict: Optional[Dict[str, Any]] = None,
+    eval_duration_s: Optional[float] = None,
+) -> float:
+    """Computes duration-normalized scalar optimization fitness from Webots trial metrics.
+
+    Normalizes distance and lap metrics relative to FITNESS_BASE_DURATION_S (25.0s) so that
+    longer simulation runs (e.g. 50s-60s) do not inflate the fitness score. When a candidate
+    survives longer runs without crashing or stalling, a modest bonus (up to +10% at
+    EVAL_DURATION_MAX_S) is applied to reward extended collision-free survival.
+    """
+    dist_m = float(metrics.get("distance_m", 0.0))
+    mean_speed = float(metrics.get("mean_speed_mps", 0.0))
+    laps = int(metrics.get("laps_completed", 0))
+    crashed = bool(metrics.get("crashed", False))
+    stuck = bool(metrics.get("stalled", False))
+
+    if math.isnan(dist_m) or dist_m <= DISTANCE_VALID_MIN_M:
+        return -5000.0
+
+    if math.isnan(mean_speed) or mean_speed < 0.0:
+        mean_speed = 0.0
+    elif mean_speed > SPEED_PHYSICAL_MAX_MPS:
+        mean_speed = SPEED_PHYSICAL_MAX_MPS
+
+    # Determine planned trial evaluation duration for normalization
+    trial_dur = eval_duration_s
+    if trial_dur is None:
+        trial_dur = metrics.get("eval_duration_s") or metrics.get("target_duration_s")
+    if trial_dur is None:
+        # Fallback to duration_s; if crashed/stuck early, guard against small sim_time inflating distance
+        raw_dur = float(metrics.get("duration_s", FITNESS_BASE_DURATION_S))
+        trial_dur = max(FITNESS_BASE_DURATION_S, raw_dur) if (crashed or stuck) else raw_dur
+    trial_dur = max(1.0, float(trial_dur))
+
+    # Duration normalization: scale distance and laps to baseline 25.0s equivalent
+    norm_scale = FITNESS_BASE_DURATION_S / trial_dur
+    effective_dist_m = dist_m * norm_scale
+    effective_laps = laps * norm_scale
+
+    base_score = (
+        (effective_dist_m * FITNESS_PROGRESS_WEIGHT)
+        + (mean_speed * FITNESS_SPEED_WEIGHT)
+        + (effective_laps * FITNESS_LAP_BONUS)
+    )
+
+    if crashed:
+        return float(base_score - FITNESS_COLLISION_PENALTY)
+    elif stuck:
+        return float(base_score - FITNESS_STALL_PENALTY)
+    else:
+        # Survival bonus: up to +10% for completing longer evaluations without crashing
+        dur_excess = max(0.0, trial_dur - FITNESS_BASE_DURATION_S)
+        dur_span = max(1.0, EVAL_DURATION_MAX_S - FITNESS_BASE_DURATION_S)
+        bonus_factor = min(1.0, dur_excess / dur_span)
+        duration_bonus_mult = 1.0 + (FITNESS_DURATION_BONUS_MAX * bonus_factor)
+        return float(base_score * duration_bonus_mult)
+
+
+
+=== FILE: 5_webots/optimization/ga_planner_optimizer/launch_ga_optimization.py ===
+"""
+================================================================================
+  1-CLICK LAUNCHER FOR HEADLESS OPTIMIZER (C++ CURVILINEAR SL-MPC)
+================================================================================
+  Usage:
+    python launch_ga_optimization.py
+    python launch_ga_optimization.py --algorithm CMA_ES --generations 50 --cores 14
+================================================================================
+"""
+
+import os
+import sys
+import argparse
+import subprocess
+
+CURR_DIR = os.path.dirname(os.path.abspath(__file__))
+GA_OPTIMIZER_DIR = CURR_DIR
+WORKSPACE_ROOT = os.path.dirname(GA_OPTIMIZER_DIR)
+
+for p in [GA_OPTIMIZER_DIR, WORKSPACE_ROOT]:
+    if p not in sys.path and os.path.exists(p):
+        sys.path.insert(0, p)
+
+from ga_planner_config import (
+    NUM_CPU_CORES,
+    POPULATION_SIZE,
+    NUM_GENERATIONS,
+    EVALUATION_DURATION_S,
+    ACTIVE_PLANNER,
+    ALGORITHM,
+    USE_TRACK2,
+)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Launch Headless Optimizer for Curvilinear SL-MPC")
+    parser.add_argument("--planner", type=str, default=ACTIVE_PLANNER, help="Path planner to optimize (default: OPTION_2_SL_MPC)")
+    parser.add_argument("--algorithm", type=str, default=ALGORITHM, choices=["CMA_ES", "cma_es", "cma", "GA", "ga", "genetic_algorithm"], help="Optimization engine (CMA_ES or GA)")
+    parser.add_argument("--cores", type=int, default=NUM_CPU_CORES, help="Number of CPU cores / Webots instances")
+    parser.add_argument("--pop-size", type=int, default=POPULATION_SIZE, help="Population size")
+    parser.add_argument("--generations", type=int, default=NUM_GENERATIONS, help="Generations")
+    parser.add_argument("--duration", type=float, default=EVALUATION_DURATION_S, help="Trial evaluation duration in sim seconds (default: 20s)")
+    parser.add_argument("--resume", action="store_true", help="Resume from last checkpoint")
+    parser.add_argument("--use-best-genome", "--use-best", "--seed-from-best", dest="use_best_genome", action="store_true", help="Seed optimizer using best_planner_genome.json instead of defaults")
+    parser.add_argument("--seed-file", type=str, default=None, help="Custom path to genome JSON file to seed from")
+    parser.add_argument("--no-track2", dest="use_track2", action="store_false", default=USE_TRACK2, help="Disable 2nd track (opposite 1.0 m/s obstacles) evaluations, evaluating only Track 1 (1.0 m/s)")
+    parser.add_argument("--use-track2", dest="use_track2", action="store_true", help="Enable 2nd track (opposite 1.0 m/s obstacles) evaluations alongside Track 1 (1.0 m/s)")
+
+    args = parser.parse_args()
+    planner_key = "OPTION_2_SL_MPC"
+
+    cmd = [
+        sys.executable,
+        os.path.join(GA_OPTIMIZER_DIR, "ga_optimizer.py"),
+        "--planner", planner_key,
+        "--algorithm", args.algorithm,
+        "--cores", str(args.cores),
+        "--pop-size", str(args.pop_size),
+        "--generations", str(args.generations),
+        "--duration", str(args.duration),
+    ]
+    if args.resume:
+        cmd.append("--resume")
+    if args.use_best_genome:
+        cmd.append("--use-best-genome")
+    if args.seed_file:
+        cmd.extend(["--seed-file", args.seed_file])
+    if not args.use_track2:
+        cmd.append("--no-track2")
+    else:
+        cmd.append("--use-track2")
+
+    print("=" * 80, flush=True)
+    print("  LAUNCHING HEADLESS GA OPTIMIZER", flush=True)
+    print(f"  Command: {' '.join(cmd)}", flush=True)
+    print("=" * 80, flush=True)
+
+    subprocess.run(cmd, cwd=GA_OPTIMIZER_DIR)
+
+
+if __name__ == "__main__":
+    main()
+
+
+=== FILE: 5_webots/optimization/ga_planner_optimizer/run_tight_10k_population.py ===
+"""
+================================================================================
+  TARGETED SINGLE-GENERATION 84-POPULATION GA EVALUATOR AROUND 10.2k+ REGIME
+================================================================================
+  1. Loads known 10k+ champions (10.874k all-time champion, 10.259k CMA xbest).
+  2. Constructs a population of 84 individuals tightly clustered around this regime:
+     - Exact 10.874k champion and 10.259k CMA best
+     - Convex interpolations between 10.8k and 10.2k
+     - Micro-perturbations (1% - 3% span) around both peaks
+  3. Evaluates all 84 candidates across 14 headless Webots workers in parallel.
+  4. Records metrics, reports any candidates beating 10.2k and the champion, and
+     updates the champion file if a new record is set.
+================================================================================
+"""
+
+import os
+import sys
+import time
+import json
+import csv
+import pickle
+import numpy as np
+
+CURR_DIR = os.path.dirname(os.path.abspath(__file__))
+if CURR_DIR not in sys.path:
+    sys.path.insert(0, CURR_DIR)
+
+from ga_planner_config import (
+    NUM_CPU_CORES,
+    EVALUATION_DURATION_S,
+    ACTIVE_PLANNER,
+    Option2SLMPCGenome,
+    OPTION_2_SL_MPC_GENE_SPECS,
+)
+from ga_evaluator import ParallelWorkerPool
+
+
+def build_tight_population_84() -> list:
+    """Builds 84 individuals clustered tightly around the >= 10.2k parameters."""
+    # 1. Load 10.874k champion
+    champ_path = os.path.join(CURR_DIR, "best_planner_genome.json")
+    with open(champ_path, "r", encoding="utf-8") as f:
+        champ_json = json.load(f)
+    champ_genes = champ_json["genes"]
+
+    # 2. Load 10.259k CMA-ES best
+    cma_path = os.path.join(CURR_DIR, "cma_state.pkl")
+    with open(cma_path, "rb") as f:
+        cma_data = pickle.load(f)
+    es = cma_data["es"]
+
+    g_dummy = Option2SLMPCGenome()
+    lower, upper = g_dummy.get_bounds()
+    span = upper - lower
+
+    u_best = es.result.xbest
+    x_cma = lower + u_best * span
+    g_cma = Option2SLMPCGenome()
+    g_cma.from_array(x_cma)
+    cma_genes = g_cma.to_dict()
+
+    pop = []
+
+    # Candidate 0: Exact 10.874k Champion
+    pop.append(Option2SLMPCGenome(champ_genes))
+    # Candidate 1: Exact 10.259k CMA Best
+    pop.append(Option2SLMPCGenome(cma_genes))
+
+    arr_champ = Option2SLMPCGenome(champ_genes).to_array()
+    arr_cma = Option2SLMPCGenome(cma_genes).to_array()
+
+    # Candidates 2-15: Direct linear interpolations between 10.8k and 10.2k
+    for alpha in np.linspace(0.05, 0.95, 14):
+        interp = (1.0 - alpha) * arr_champ + alpha * arr_cma
+        g = Option2SLMPCGenome()
+        g.from_array(interp)
+        pop.append(g)
+
+    # Candidates 16-49: Ultra-tight Gaussian mutations around 10.8k Champion (sigma 0.5% - 2.5% span)
+    np.random.seed(42)
+    for sig in [0.005, 0.010, 0.015, 0.020, 0.025]:
+        for _ in range(7):
+            noise = np.random.normal(0.0, sig, size=span.shape) * span
+            cand = np.clip(arr_champ + noise, lower, upper)
+            g = Option2SLMPCGenome()
+            g.from_array(cand)
+            pop.append(g)
+
+    # Candidates 50-83: Ultra-tight Gaussian mutations around 10.2k CMA Best (sigma 0.5% - 2.5% span)
+    for sig in [0.005, 0.010, 0.015, 0.020, 0.025]:
+        for _ in range(7):
+            noise = np.random.normal(0.0, sig, size=span.shape) * span
+            cand = np.clip(arr_cma + noise, lower, upper)
+            g = Option2SLMPCGenome()
+            g.from_array(cand)
+            pop.append(g)
+
+    # Truncate or pad to exactly 84
+    while len(pop) < 84:
+        noise = np.random.normal(0.0, 0.01, size=span.shape) * span
+        cand = np.clip(arr_champ + noise, lower, upper)
+        g = Option2SLMPCGenome()
+        g.from_array(cand)
+        pop.append(g)
+
+    return pop[:84]
+
+
+def main():
+    print("=" * 80)
+    print("  STARTING SINGLE-GENERATION 84-POPULATION GA EVALUATION")
+    print(f"  Target: Clustered tightly around >= 10.2k parameter space")
+    print(f"  Workers: {NUM_CPU_CORES} CPU Cores | Eval Duration: {EVALUATION_DURATION_S}s per candidate")
+    print("=" * 80, flush=True)
+
+    pop = build_tight_population_84()
+    print(f"[Population] Constructed {len(pop)} candidates clustered around 10k+ peaks.\n", flush=True)
+
+    pool = ParallelWorkerPool(num_workers=NUM_CPU_CORES)
+    t0 = time.time()
+
+    try:
+        results = pool.evaluate_population(
+            planner_name=ACTIVE_PLANNER,
+            population_genomes=pop,
+            duration_s=EVALUATION_DURATION_S,
+        )
+    finally:
+        pool.shutdown()
+
+    elapsed = time.time() - t0
+    fitnesses = [r[0] for r in results]
+    metrics_list = [r[1] for r in results]
+
+    print("\n" + "=" * 80)
+    print(f"  EVALUATION COMPLETE ({elapsed:.1f}s elapsed for 84 candidates)")
+    print("=" * 80, flush=True)
+
+    # Parse and sort results
+    indexed_results = []
+    for idx, (fit, met) in enumerate(results):
+        indexed_results.append({
+            "idx": idx,
+            "fitness": fit,
+            "metrics": met,
+            "genome": pop[idx],
+        })
+
+    indexed_results.sort(key=lambda x: x["fitness"], reverse=True)
+
+    # Count > 10k and > 10.2k
+    count_10k = sum(1 for r in indexed_results if r["fitness"] >= 10000.0)
+    count_10_2k = sum(1 for r in indexed_results if r["fitness"] >= 10200.0)
+
+    print(f"\n[Summary Statistics]")
+    print(f"  Total Evaluated:        {len(indexed_results)}")
+    print(f"  Candidates >= 10,000:   {count_10k} / {len(indexed_results)} ({count_10k/len(indexed_results)*100:.1f}%)")
+    print(f"  Candidates >= 10,200:   {count_10_2k} / {len(indexed_results)} ({count_10_2k/len(indexed_results)*100:.1f}%)")
+    print(f"  Max Fitness Achieved:   {indexed_results[0]['fitness']:.2f}")
+    print(f"  Mean Fitness:           {np.mean(fitnesses):.2f}")
+
+    # Display all candidates with fitness >= 10,200
+    print("\n" + "=" * 80)
+    print("  ALL CANDIDATES WITH FITNESS >= 10,200:")
+    print("=" * 80)
+    print(f"{'Rank':<5} {'Cand#':<7} {'Fitness':<12} {'Dist (m)':<10} {'Speed (m/s)':<12} {'Laps':<6} {'Crashed'}")
+    print("-" * 80)
+
+    high_candidates = [r for r in indexed_results if r["fitness"] >= 10200.0]
+    for rank, r in enumerate(high_candidates, 1):
+        m = r["metrics"]
+        print(f"{rank:<5} #{r['idx']:<6} {r['fitness']:<12.2f} {m.get('distance_m', 0.0):<10.2f} {m.get('mean_speed_mps', 0.0):<12.2f} {m.get('laps_completed', 0):<6} {m.get('crashed', False)}")
+
+    # Check if we beat the all-time champion
+    best_cand = indexed_results[0]
+    champ_path = os.path.join(CURR_DIR, "best_planner_genome.json")
+    with open(champ_path, "r", encoding="utf-8") as f:
+        curr_champ = json.load(f)
+
+    curr_best_fit = curr_champ.get("fitness", 0.0)
+    print("\n" + "-" * 80)
+    print(f"Current Best Champion Fitness: {curr_best_fit:.2f}")
+    print(f"Generation Top Candidate Fitness: {best_cand['fitness']:.2f}")
+
+    if best_cand["fitness"] > curr_best_fit:
+        print(f"  *** NEW ALL-TIME CHAMPION FOUND! Updating {champ_path} ***")
+        with open(champ_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "planner": ACTIVE_PLANNER,
+                "fitness": round(best_cand["fitness"], 2),
+                "metrics": best_cand["metrics"],
+                "genes": best_cand["genome"].to_dict(),
+                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            }, f, indent=2)
+    else:
+        print("  Existing champion remains unbeaten.")
+
+    # Save detailed evaluation log to CSV
+    data_dir = os.path.join(CURR_DIR, "data")
+    os.makedirs(data_dir, exist_ok=True)
+    csv_out = os.path.join(data_dir, "ga_tight_84_run_results.csv")
+    with open(csv_out, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["Rank", "Candidate_Idx", "Fitness", "Distance_m", "Mean_Speed_mps", "Laps", "Crashed", "Crash_Reason"])
+        for rank, r in enumerate(indexed_results, 1):
+            m = r["metrics"]
+            writer.writerow([
+                rank,
+                r["idx"],
+                round(r["fitness"], 2),
+                round(m.get("distance_m", 0.0), 3),
+                round(m.get("mean_speed_mps", 0.0), 3),
+                m.get("laps_completed", 0),
+                m.get("crashed", False),
+                m.get("crash_reason", ""),
+            ])
+    print(f"\n[Artifact] Full results saved to: {csv_out}")
+
+
+if __name__ == "__main__":
+    main()
+
+
+=== FILE: 5_webots/optimization/ga_planner_optimizer/run_tight_50m_regime.py ===
+"""
+================================================================================
+  TARGETED 2-GENERATION TIGHT EXPLORATION (SIGMA = 0.05)
+  - Gen 1: Explicitly includes the 32 historical >50m candidate genomes + 10 tight mutations (Pop=42)
+  - Gen 2: Follow-up CMA-ES generation with tight sigma = 0.05 around top performers
+================================================================================
+"""
+
+import os
+import sys
+import time
+import json
+import csv
+import numpy as np
+
+CURR_DIR = os.path.dirname(os.path.abspath(__file__))
+if CURR_DIR not in sys.path:
+    sys.path.insert(0, CURR_DIR)
+
+from ga_planner_config import (
+    NUM_CPU_CORES,
+    POPULATION_SIZE,
+    EVALUATION_DURATION_S,
+    ACTIVE_PLANNER,
+    Option2SLMPCGenome,
+    load_best_planner_genome,
+)
+from ga_evaluator import ParallelWorkerPool
+from ga_optimizer import CMAESOptimizerAdapter
+
+
+def build_gen1_population(target_pop_size: int = 42) -> list:
+    """Builds Gen 1 population with the 32 historical candidate genomes + tight mutations."""
+    champ_genome, champ_fit, champ_metrics = load_best_planner_genome()
+    lower, upper = champ_genome.get_bounds()
+    span = upper - lower
+    span[span <= 1e-9] = 1.0
+
+    # Load checkpoint population
+    ckpt_path = os.path.join(CURR_DIR, "ga_checkpoint.json")
+    pop_dicts = []
+    if os.path.exists(ckpt_path):
+        with open(ckpt_path, "r", encoding="utf-8") as f:
+            ckpt = json.load(f)
+            pop_dicts = ckpt.get("population", [])
+
+    pop = []
+    # Candidate 0: Champion
+    pop.append(champ_genome)
+
+    # Candidates 1..31: Distinct individuals from the checkpoint population
+    for ind_dict in pop_dicts:
+        if len(pop) >= 32:
+            break
+        # Avoid duplicate champion
+        g = Option2SLMPCGenome(ind_dict)
+        if len(pop) == 1 or np.max(np.abs(g.to_array() - champ_genome.to_array())) > 1e-4:
+            pop.append(g)
+
+    # If we need more up to 32, create tight micro-interpolations around champion
+    arr_champ = champ_genome.to_array()
+    np.random.seed(42)
+    while len(pop) < 32:
+        noise = np.random.normal(0.0, 0.02, size=span.shape) * span
+        cand_arr = np.clip(arr_champ + noise, lower, upper)
+        g = Option2SLMPCGenome()
+        g.from_array(cand_arr)
+        pop.append(g)
+
+    # Pad remaining 10 candidates with tight sigma=0.05 mutations to reach pop_size=42
+    while len(pop) < target_pop_size:
+        noise = np.random.normal(0.0, 0.05, size=span.shape) * span
+        cand_arr = np.clip(arr_champ + noise, lower, upper)
+        g = Option2SLMPCGenome()
+        g.from_array(cand_arr)
+        pop.append(g)
+
+    return pop[:target_pop_size]
+
+
+def run_tight_exploration(num_generations: int = 2, sigma: float = 0.05, pop_size: int = 42):
+    print("=" * 80)
+    print("  TARGETED TIGHT 2-GENERATION GA EXPLORATION (SIGMA = 0.05)")
+    print(f"  - Gen 1: Explicitly contains all 32 >50m historical genomes + tight variations")
+    print(f"  - Gen 2: Follow-up CMA-ES tight exploration (sigma = {sigma:.3f})")
+    print(f"  Workers: {NUM_CPU_CORES} Webots Instances | Eval Duration: {EVALUATION_DURATION_S}s")
+    print("=" * 80, flush=True)
+
+    champ_genome, champ_fit, champ_metrics = load_best_planner_genome()
+    print(f"[Champion] Seed champion: Fitness = {champ_fit:.2f}, Distance = {champ_metrics.get('distance_m', 0.0):.2f}m\n", flush=True)
+
+    gen1_pop = build_gen1_population(target_pop_size=pop_size)
+    print(f"[Population] Gen 1 loaded with {len(gen1_pop)} candidates (including all 32 >50m candidate genomes).\n", flush=True)
+
+    adapter = CMAESOptimizerAdapter(
+        genome_cls=Option2SLMPCGenome,
+        pop_size=pop_size,
+        sigma0=sigma,
+        initial_genome=champ_genome,
+    )
+    # Align adapter to Gen 1
+    adapter.set_current_population(gen1_pop)
+
+    pool = ParallelWorkerPool(num_workers=NUM_CPU_CORES)
+    t_start = time.time()
+
+    all_eval_results = []
+    curr_best_fit = champ_fit
+    curr_best_genome = champ_genome
+    curr_best_metrics = champ_metrics
+
+    try:
+        # ----------------------------------------------------------------------
+        # GENERATION 1: Evaluate the 32 >50m candidates + variations
+        # ----------------------------------------------------------------------
+        print(f"================================================================================")
+        print(f"  GENERATION 1 / {num_generations}  [Evaluating 32 >50m Candidates + Variations]")
+        print(f"================================================================================", flush=True)
+        print(f"--- Evaluating {len(gen1_pop)} Candidates on {NUM_CPU_CORES} Parallel Workers ---", flush=True)
+
+        t_gen_start = time.time()
+        results_gen1 = pool.evaluate_population(
+            planner_name=ACTIVE_PLANNER,
+            population_genomes=gen1_pop,
+            duration_s=EVALUATION_DURATION_S,
+        )
+        t_gen_elapsed = time.time() - t_gen_start
+
+        fitnesses_gen1 = [r[0] for r in results_gen1]
+        metrics_gen1 = [r[1] for r in results_gen1]
+
+        best_idx1 = int(np.argmax(fitnesses_gen1))
+        gen1_best_fit = float(fitnesses_gen1[best_idx1])
+        gen1_mean_fit = float(np.mean(fitnesses_gen1))
+        gen1_best_metrics = metrics_gen1[best_idx1]
+        gen1_crashes = sum(1 for m in metrics_gen1 if m.get("crashed", False))
+
+        print(
+            f"[Gen 01 Results] Best Fit: {gen1_best_fit:7.1f} | Mean Fit: {gen1_mean_fit:7.1f} | "
+            f"Dist: {gen1_best_metrics.get('distance_m', 0.0):5.2f}m | "
+            f"Speed: {gen1_best_metrics.get('mean_speed_mps', 0.0):4.2f}m/s | "
+            f"Laps: {gen1_best_metrics.get('laps_completed', 0)} | "
+            f"Crashes: {gen1_crashes:2d}/{pop_size} | Time: {t_gen_elapsed:4.1f}s",
+            flush=True,
+        )
+
+        for idx, (fit, met) in enumerate(results_gen1):
+            all_eval_results.append({
+                "generation": 1,
+                "candidate_idx": idx,
+                "fitness": fit,
+                "metrics": met,
+                "genome": gen1_pop[idx],
+            })
+
+        if gen1_best_fit > curr_best_fit:
+            curr_best_fit = gen1_best_fit
+            curr_best_genome = gen1_pop[best_idx1]
+            curr_best_metrics = gen1_best_metrics
+            champ_path = os.path.join(CURR_DIR, "best_planner_genome.json")
+            print(f"  *** NEW ALL-TIME CHAMPION FOUND! Fitness: {curr_best_fit:.2f}, Dist: {curr_best_metrics.get('distance_m', 0.0):.2f}m ***", flush=True)
+            with open(champ_path, "w", encoding="utf-8") as f:
+                json.dump({
+                    "planner": ACTIVE_PLANNER,
+                    "fitness": round(curr_best_fit, 2),
+                    "metrics": curr_best_metrics,
+                    "genes": curr_best_genome.to_dict(),
+                    "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                }, f, indent=2)
+
+        # Update CMA-ES with Gen 1 results
+        adapter.tell(fitnesses_gen1)
+
+        # ----------------------------------------------------------------------
+        # GENERATION 2: Tight CMA-ES exploration around best performers (Sigma = 0.05)
+        # ----------------------------------------------------------------------
+        print(f"\n================================================================================")
+        print(f"  GENERATION 2 / {num_generations}  [Tight CMA-ES Exploration (Sigma = {sigma:.3f})]")
+        print(f"================================================================================", flush=True)
+
+        gen2_pop = adapter.ask(inject_baseline=True)
+        print(f"--- Evaluating {len(gen2_pop)} Candidates on {NUM_CPU_CORES} Parallel Workers ---", flush=True)
+
+        t_gen_start = time.time()
+        results_gen2 = pool.evaluate_population(
+            planner_name=ACTIVE_PLANNER,
+            population_genomes=gen2_pop,
+            duration_s=EVALUATION_DURATION_S,
+        )
+        t_gen_elapsed = time.time() - t_gen_start
+
+        fitnesses_gen2 = [r[0] for r in results_gen2]
+        metrics_gen2 = [r[1] for r in results_gen2]
+
+        best_idx2 = int(np.argmax(fitnesses_gen2))
+        gen2_best_fit = float(fitnesses_gen2[best_idx2])
+        gen2_mean_fit = float(np.mean(fitnesses_gen2))
+        gen2_best_metrics = metrics_gen2[best_idx2]
+        gen2_crashes = sum(1 for m in metrics_gen2 if m.get("crashed", False))
+
+        print(
+            f"[Gen 02 Results] Best Fit: {gen2_best_fit:7.1f} | Mean Fit: {gen2_mean_fit:7.1f} | "
+            f"Dist: {gen2_best_metrics.get('distance_m', 0.0):5.2f}m | "
+            f"Speed: {gen2_best_metrics.get('mean_speed_mps', 0.0):4.2f}m/s | "
+            f"Laps: {gen2_best_metrics.get('laps_completed', 0)} | "
+            f"Crashes: {gen2_crashes:2d}/{pop_size} | Time: {t_gen_elapsed:4.1f}s",
+            flush=True,
+        )
+
+        for idx, (fit, met) in enumerate(results_gen2):
+            all_eval_results.append({
+                "generation": 2,
+                "candidate_idx": idx,
+                "fitness": fit,
+                "metrics": met,
+                "genome": gen2_pop[idx],
+            })
+
+        if gen2_best_fit > curr_best_fit:
+            curr_best_fit = gen2_best_fit
+            curr_best_genome = gen2_pop[best_idx2]
+            curr_best_metrics = gen2_best_metrics
+            champ_path = os.path.join(CURR_DIR, "best_planner_genome.json")
+            print(f"  *** NEW ALL-TIME CHAMPION FOUND! Fitness: {curr_best_fit:.2f}, Dist: {curr_best_metrics.get('distance_m', 0.0):.2f}m ***", flush=True)
+            with open(champ_path, "w", encoding="utf-8") as f:
+                json.dump({
+                    "planner": ACTIVE_PLANNER,
+                    "fitness": round(curr_best_fit, 2),
+                    "metrics": curr_best_metrics,
+                    "genes": curr_best_genome.to_dict(),
+                    "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                }, f, indent=2)
+
+        adapter.tell(fitnesses_gen2)
+
+    finally:
+        pool.shutdown()
+
+    total_elapsed = time.time() - t_start
+    print("\n" + "=" * 80)
+    print(f"  TIGHT EXPLORATION RUN COMPLETE ({total_elapsed:.1f}s total)")
+    print("=" * 80, flush=True)
+
+    # Summary of Top Candidates
+    all_eval_results.sort(key=lambda x: x["fitness"], reverse=True)
+    print("\n=== TOP 10 CANDIDATES FROM TIGHT EXPLORATION RUN ===")
+    print(f"{'Rank':<5} {'Gen':<5} {'Cand#':<7} {'Fitness':<12} {'Dist (m)':<10} {'Speed (m/s)':<12} {'Laps':<6} {'Crashed'}")
+    print("-" * 80)
+    for rank, r in enumerate(all_eval_results[:10], 1):
+        m = r["metrics"]
+        print(f"{rank:<5} {r['generation']:<5} #{r['candidate_idx']:<6} {r['fitness']:<12.2f} {m.get('distance_m', 0.0):<10.2f} {m.get('mean_speed_mps', 0.0):<12.2f} {m.get('laps_completed', 0):<6} {m.get('crashed', False)}")
+
+    # Save detailed CSV
+    data_dir = os.path.join(CURR_DIR, "data")
+    os.makedirs(data_dir, exist_ok=True)
+    out_csv = os.path.join(data_dir, "tight_005_exploration_results.csv")
+    with open(out_csv, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["Rank", "Generation", "Candidate_Idx", "Fitness", "Distance_m", "Mean_Speed_mps", "Laps", "Crashed", "Crash_Reason"])
+        for rank, r in enumerate(all_eval_results, 1):
+            m = r["metrics"]
+            writer.writerow([
+                rank,
+                r["generation"],
+                r["candidate_idx"],
+                round(r["fitness"], 2),
+                round(m.get("distance_m", 0.0), 3),
+                round(m.get("mean_speed_mps", 0.0), 3),
+                m.get("laps_completed", 0),
+                m.get("crashed", False),
+                m.get("crash_reason", ""),
+            ])
+    print(f"\n[Artifact] Full results saved to: {out_csv}")
+
+
+if __name__ == "__main__":
+    run_tight_exploration(num_generations=2, sigma=0.05, pop_size=42)
+
+
+=== FILE: 5_webots/optimization/ga_planner_optimizer/test_ga_optimizer_offline.py ===
+"""
+Offline unit and validation tests for GA planner config, chromosome codecs, and reverse obstacle engine.
+"""
+
+import os
+import sys
+import numpy as np
+
+CURR_DIR = os.path.dirname(os.path.abspath(__file__))
+GA_DIR = CURR_DIR
+WEBOTS_DIR = os.path.dirname(os.path.dirname(GA_DIR))
+MY_PROJECT_DIR = os.path.join(WEBOTS_DIR, "simulation", "my_project")
+PLANNER_DIR = os.path.join(MY_PROJECT_DIR, "controllers", "tof_path_planner")
+WORKSPACE_ROOT = os.path.dirname(WEBOTS_DIR)
+
+for p in [GA_DIR, PLANNER_DIR, WORKSPACE_ROOT]:
+    if p not in sys.path and os.path.exists(p):
+        sys.path.insert(0, p)
+
+from ga_planner_config import (
+    Option2SLMPCGenome,
+    get_genome_class,
+    compute_scalar_fitness,
+    OPTION_2_SL_MPC_GENE_SPECS,
+    load_best_planner_genome,
+    generate_logical_initial_population,
+    BEST_GENOME_PATH,
+)
+from obstacle_engine import ReverseObstacleEngine
+
+
+def test_genome_codecs():
+    print("Testing Genome Codecs...")
+    g2 = Option2SLMPCGenome()
+    arr2 = g2.to_array()
+    assert len(arr2) == len(OPTION_2_SL_MPC_GENE_SPECS)
+    g2.from_array(arr2)
+    g2_dict = g2.to_dict()
+    assert "horizon_N" in g2_dict
+    assert isinstance(g2_dict["horizon_N"], int)
+    print(f"  -> Option 2 C++ SL-MPC: {len(arr2)} genes verified.")
+
+
+def test_reverse_obstacle_engine():
+    print("Testing Reverse Obstacle Engine...")
+    csv_path = os.path.join(GA_DIR, "data", "cyan_champion_trajectory.csv")
+    engine = ReverseObstacleEngine(csv_path, speed_mps=0.50)
+    assert engine.total_length > 10.0
+    print(f"  -> Track total length: {engine.total_length:.3f} m")
+
+    p0 = engine.get_position_at_s(0.0)
+    p5 = engine.get_position_at_s(5.0)
+    p10 = engine.get_position_at_s(10.0)
+    assert isinstance(p0, tuple) and len(p0) == 2
+    assert isinstance(p5, tuple) and len(p5) == 2
+    assert isinstance(p10, tuple) and len(p10) == 2
+    print(f"  -> Pose at s=0m:  ({p0[0]:.3f}, {p0[1]:.3f})")
+    print(f"  -> Pose at s=5m:  ({p5[0]:.3f}, {p5[1]:.3f})")
+    print(f"  -> Pose at s=10m: ({p10[0]:.3f}, {p10[1]:.3f})")
+
+    dt = 0.016
+    n_obs = 3
+    for step in range(5):
+        sim_t = step * dt
+        for k in range(n_obs):
+            obs_s = (k * (engine.total_length / n_obs) - 0.50 * sim_t) % engine.total_length
+            x, y = engine.get_position_at_s(obs_s)
+            assert not np.isnan(x) and not np.isnan(y)
+
+    # Verify start/finish line (s=0) continuity without teleportation jump
+    p_pos = engine.get_position_at_s(0.001)
+    p_neg = engine.get_position_at_s(-0.001)
+    gap_across_start = np.hypot(p_pos[0] - p_neg[0], p_pos[1] - p_neg[1])
+    assert gap_across_start < 0.005, f"Discontinuity at start line: {gap_across_start:.4f} m"
+    print(f"  -> Start line s=0 continuity verified (gap for 2mm ds = {gap_across_start*1000:.3f} mm).")
+    print("  -> Reverse progression test passed.")
+
+
+def test_fitness_computation():
+    print("Testing Fitness Function & Duration Scaling...")
+    clean_metrics = {"distance_m": 22.5, "mean_speed_mps": 2.2, "laps_completed": 1, "crashed": False, "stalled": False}
+    fit_clean = compute_scalar_fitness(clean_metrics)
+    assert fit_clean > 2000.0
+    print(f"  -> Clean run fitness (22.5m, 1 lap, default 25s): {fit_clean:.1f}")
+
+    crash_metrics = {"distance_m": 5.0, "mean_speed_mps": 1.5, "laps_completed": 0, "crashed": True, "stalled": False}
+    fit_crash = compute_scalar_fitness(crash_metrics)
+    print(f"  -> Crashed run fitness (5.0m): {fit_crash:.1f}")
+    assert fit_crash < fit_clean and fit_crash > 0.0
+
+    # 1. Verify duration normalization: longer sim without crashing doesn't inflate ~2.4x, but gets ~10% bonus
+    # Baseline 25s run at 2.5 m/s
+    m_25s = {"distance_m": 62.5, "mean_speed_mps": 2.5, "laps_completed": 4, "crashed": False, "stalled": False, "eval_duration_s": 25.0}
+    f_25s = compute_scalar_fitness(m_25s)
+
+    # 60s run at identical speed (2.5 m/s) -> 2.4x distance and laps (150m, 10 laps)
+    m_60s = {"distance_m": 150.0, "mean_speed_mps": 2.5, "laps_completed": 10, "crashed": False, "stalled": False, "eval_duration_s": 60.0}
+    f_60s = compute_scalar_fitness(m_60s)
+
+    # Without normalization f_60s would be ~24,000 (+140% inflation).
+    # With normalization + 10% bonus: f_60s should be ~1.10x of f_25s!
+    ratio = f_60s / f_25s
+    print(f"  -> Duration Scaling: 25s clean = {f_25s:.1f}, 60s clean = {f_60s:.1f} (Ratio: {ratio:.3f}x, expected ~1.100x)")
+    assert 1.09 <= ratio <= 1.11, f"Expected ~1.10x ratio, got {ratio:.4f}"
+
+    # 50s run at identical speed -> 2.0x distance and laps (125m, 8 laps)
+    m_50s = {"distance_m": 125.0, "mean_speed_mps": 2.5, "laps_completed": 8, "crashed": False, "stalled": False, "eval_duration_s": 50.0}
+    f_50s = compute_scalar_fitness(m_50s)
+    ratio_50 = f_50s / f_25s
+    print(f"  -> Duration Scaling: 50s clean = {f_50s:.1f} (Ratio: {ratio_50:.3f}x, expected ~1.071x)")
+    assert 1.06 <= ratio_50 <= 1.08, f"Expected ~1.071x ratio, got {ratio_50:.4f}"
+
+    # 2. Verify crashed runs: no survival bonus awarded, normalized distance stays consistent
+    m_crash_25s = {"distance_m": 31.25, "mean_speed_mps": 2.5, "laps_completed": 2, "crashed": True, "stalled": False, "eval_duration_s": 25.0}
+    m_crash_60s = {"distance_m": 75.0, "mean_speed_mps": 2.5, "laps_completed": 5, "crashed": True, "stalled": False, "eval_duration_s": 60.0}
+    f_crash_25s = compute_scalar_fitness(m_crash_25s)
+    f_crash_60s = compute_scalar_fitness(m_crash_60s)
+    diff_crash = abs(f_crash_60s - f_crash_25s)
+    print(f"  -> Halfway crash: 25s trial = {f_crash_25s:.1f}, 60s trial = {f_crash_60s:.1f} (Difference: {diff_crash:.2f})")
+    assert diff_crash <= 20.0, "Normalized crashed fitness across different durations should closely match within lap rounding!"
+
+
+
+def test_load_best_genome_and_seeding():
+    print("Testing Best Genome Loading & Initial Population Seeding...")
+    assert os.path.exists(BEST_GENOME_PATH), f"File {BEST_GENOME_PATH} not found"
+    loaded_g, fit, metrics = load_best_planner_genome(BEST_GENOME_PATH)
+    assert loaded_g is not None, "Failed to load genome from best_planner_genome.json"
+    assert fit > 0.0, f"Expected positive fitness, got {fit}"
+    print(f"  -> Successfully loaded best genome: Fitness={fit:.2f}, Dist={metrics.get('distance_m', 0):.2f}m")
+
+    # Generate population seeded from best genome
+    pop = generate_logical_initial_population(Option2SLMPCGenome, pop_size=10, seed_genome=loaded_g)
+    assert len(pop) == 10
+    # Candidate 0 must match loaded genome
+    loaded_dict = loaded_g.to_dict()
+    cand0_dict = pop[0].to_dict()
+    for k in ["q_progress", "q_cte", "r_steer", "v_corner_factor"]:
+        assert math.isclose(cand0_dict[k], loaded_dict[k], rel_tol=1e-3), f"Mismatch in gene {k}: {cand0_dict[k]} vs {loaded_dict[k]}"
+    print("  -> Verified Candidate 0 accurately seeded with best_planner_genome.json parameters.")
+
+
+if __name__ == "__main__":
+    import math
+    test_genome_codecs()
+    test_reverse_obstacle_engine()
+    test_fitness_computation()
+    test_load_best_genome_and_seeding()
+    print("\nALL GA OPTIMIZER OFFLINE TESTS PASSED!")
+
+
+=== FILE: 5_webots/robotics/ros2_cartographer/README.md ===
+# ROS 2 & Google Cartographer SLAM (Experimental / Simulation Mapping)
+
+> [!NOTE]
+> **Hardware Context**: This module serves as an experimental simulation reference for 2D SLAM and offline track map generation. The physical Folkrace racing vehicle operates with **zero LiDAR**, relying exclusively on a solid-state quad VL53L8CX Time-of-Flight array and Curvilinear SL-MPC.
+
+This package provides an integration between Webots simulation, ROS 2 Humble, and Google Cartographer 2D SLAM.
+
+---
+
+## Directory Structure
+
+```
+5_webots/robotics/ros2_cartographer/
+├── config/
+│   └── folkrace_2d.lua                  # Cartographer 2D configuration (20mm resolution, 6x6m arena)
+├── docs/
+│   └── 5_webots/robotics/ros2_cartographer_webots_guide.md# Complete installation, topic mappings & architecture guide
+├── maps/
+│   ├── folkrace_track_map.pgm           # 20mm Occupancy grid map generated from Track JSON
+│   └── folkrace_track_map.yaml          # Nav2 Map Server metadata
+├── scripts/
+│   ├── install_webots/robotics/ros2_cartographer_wsl.sh # One-click setup script for ROS 2 & Cartographer in WSL2
+│   ├── launch_cartographer.sh           # Cartographer SLAM launcher script
+│   ├── webots_cartographer_bridge.py    # Python bridge streaming /scan, /imu & static TF
+│   ├── convert_track_json_to_ros_map.py # JSON track layout to ROS Occupancy Grid generator
+│   └── track_lidar_simulator.py         # Virtual LiDAR raycast engine
+└── sim_validation/
+    ├── run_solid_cartographer_test.py   # Vectorized SLAM engine with 100% opaque solid walls
+    ├── run_fast_cartographer_test.py    # High-speed SLAM reconstructor
+    └── run_cartographer_on_backup_champion.py # SLAM runner for backup champion tracks
+```
+
+---
+
+## Quick Usage
+
+### 1. Launch Cartographer in WSL2:
+```bash
+~/folkrace_cartographer_ws/launch_cartographer.sh
+```
+
+### 2. Stream LiDAR & IMU from Webots:
+Run the bridge script or link `WebotsCartographerBridgeNode` directly in your Webots Python controller.
+
+### 3. Generate a Map from any Track JSON:
+```bash
+python 5_webots/robotics/ros2_cartographer/scripts/convert_track_json_to_ros_map.py "<path_to_track.json>" "5_webots/robotics/ros2_cartographer/maps"
+```
+
+
+=== FILE: 5_webots/robotics/ros2_cartographer/config/custom_run_carto.lua ===
+include "map_builder.lua"
+include "trajectory_builder.lua"
+
+options = {
+  map_builder = MAP_BUILDER,
+  trajectory_builder = TRAJECTORY_BUILDER,
+  map_frame = "map",
+  tracking_frame = "imu_link",
+  published_frame = "base_link",
+  odom_frame = "odom",
+  provide_odom_frame = false,
+  publish_frame_projected_to_2d = true,
+  use_odometry = false,
+  use_nav_sat = false,
+  use_landmarks = false,
+  num_laser_scans = 1,
+  num_multi_echo_laser_scans = 0,
+  num_subdivisions_per_laser_scan = 1,
+  num_point_clouds = 0,
+  lookup_transform_timeout_sec = 0.2,
+  submap_publish_period_sec = 0.3,
+  pose_publish_period_sec = 5e-3,
+  trajectory_publish_period_sec = 30e-3,
+  rangefinder_sampling_ratio = 1.,
+  odometry_sampling_ratio = 1.,
+  fixed_frame_pose_sampling_ratio = 1.,
+  imu_sampling_ratio = 1.,
+  landmarks_sampling_ratio = 1.,
+}
+
+MAP_BUILDER.use_trajectory_builder_2d = true
+MAP_BUILDER.num_background_threads = 4
+
+TRAJECTORY_BUILDER_2D.min_range = 0.12
+TRAJECTORY_BUILDER_2D.max_range = 4.5
+TRAJECTORY_BUILDER_2D.missing_data_ray_length = 0.0
+
+TRAJECTORY_BUILDER_2D.use_imu_data = true
+TRAJECTORY_BUILDER_2D.imu_gravity_time_constant = 10.0
+
+TRAJECTORY_BUILDER_2D.voxel_filter_size = 0.015
+
+TRAJECTORY_BUILDER_2D.ceres_scan_matcher.occupied_space_weight = 40.0
+TRAJECTORY_BUILDER_2D.ceres_scan_matcher.translation_weight = 10.0
+TRAJECTORY_BUILDER_2D.ceres_scan_matcher.rotation_weight = 40.0
+TRAJECTORY_BUILDER_2D.ceres_scan_matcher.ceres_solver_options.max_num_iterations = 20
+
+TRAJECTORY_BUILDER_2D.use_online_correlative_scan_matching = true
+TRAJECTORY_BUILDER_2D.real_time_correlative_scan_matcher.linear_search_window = 0.12
+TRAJECTORY_BUILDER_2D.real_time_correlative_scan_matcher.angular_search_window = math.rad(12.0)
+TRAJECTORY_BUILDER_2D.motion_filter.max_distance_meters = 0.05
+TRAJECTORY_BUILDER_2D.motion_filter.max_angle_radians = math.rad(0.1)
+
+TRAJECTORY_BUILDER_2D.submaps.num_range_data = 80
+TRAJECTORY_BUILDER_2D.submaps.grid_options_2d.grid_type = "PROBABILITY_GRID"
+TRAJECTORY_BUILDER_2D.submaps.grid_options_2d.resolution = 0.02
+TRAJECTORY_BUILDER_2D.submaps.range_data_inserter.probability_grid_range_data_inserter.hit_probability = 0.70
+TRAJECTORY_BUILDER_2D.submaps.range_data_inserter.probability_grid_range_data_inserter.miss_probability = 0.42
+
+POSE_GRAPH.optimize_every_n_nodes = 5
+POSE_GRAPH.constraint_builder.sampling_ratio = 1.0
+POSE_GRAPH.constraint_builder.min_score = 0.58
+POSE_GRAPH.constraint_builder.global_localization_min_score = 0.63
+POSE_GRAPH.constraint_builder.fast_correlative_scan_matcher.linear_search_window = 3.0
+POSE_GRAPH.constraint_builder.fast_correlative_scan_matcher.angular_search_window = math.rad(180.)
+POSE_GRAPH.constraint_builder.loop_closure_translation_weight = 100000.0
+POSE_GRAPH.constraint_builder.loop_closure_rotation_weight = 1000000.0
+
+POSE_GRAPH.optimization_problem.huber_scale = 1.0
+POSE_GRAPH.optimization_problem.ceres_solver_options.max_num_iterations = 20
+
+return options
+
+
+=== FILE: 5_webots/robotics/ros2_cartographer/config/folkrace_2d.lua ===
+include "map_builder.lua"
+include "trajectory_builder.lua"
+
+-- =============================================================================
+--  GOOGLE CARTOGRAPHER 2D SLAM TUNED FOR 6x6m HIGH-SPEED FOLKRACE CAR ON PI 5
+--  Sensors: ms200k 360-LiDAR (450 pts) + BNO08X IMU (Gyro + Accel + Orientation)
+-- =============================================================================
+
+options = {
+  map_builder = MAP_BUILDER,
+  trajectory_builder = TRAJECTORY_BUILDER,
+  map_frame = "map",
+  tracking_frame = "imu_link",            -- Tracks IMU at Center of Gravity for high-freq rotation
+  published_frame = "base_link",          -- Direct transform from map to base_link
+  odom_frame = "odom",
+  provide_odom_frame = false,
+  publish_frame_projected_to_2d = true,
+  publish_tracked_pose = true,            -- Publishes /tracked_pose for real-time MPPI vehicle localization
+  use_odometry = false,                   -- Set true if high-precision wheel odometry is fed
+  use_nav_sat = false,
+  use_landmarks = false,
+  num_laser_scans = 1,
+  num_multi_echo_laser_scans = 0,
+  num_subdivisions_per_laser_scan = 1,
+  num_point_clouds = 0,
+  lookup_transform_timeout_sec = 0.2,
+  submap_publish_period_sec = 0.3,
+  pose_publish_period_sec = 5e-3,         -- 200 Hz fast pose output for racing
+  trajectory_publish_period_sec = 30e-3,
+  rangefinder_sampling_ratio = 1.,
+  odometry_sampling_ratio = 1.,
+  fixed_frame_pose_sampling_ratio = 1.,
+  imu_sampling_ratio = 1.,                -- 100% IMU packets processed for slip/yaw detection
+  landmarks_sampling_ratio = 1.,
+}
+
+MAP_BUILDER.use_trajectory_builder_2d = true
+MAP_BUILDER.num_background_threads = 4    -- Utilizes all 4 Cortex-A76 cores on Pi 5
+
+-- -----------------------------------------------------------------------------
+-- 1. LOCAL SLAM & SENSOR WEIGHT PREFERENCES (LiDAR vs IMU)
+-- -----------------------------------------------------------------------------
+TRAJECTORY_BUILDER_2D.use_imu_data = true
+TRAJECTORY_BUILDER_2D.min_range = 0.05
+TRAJECTORY_BUILDER_2D.max_range = 4.50
+TRAJECTORY_BUILDER_2D.min_z = -0.10
+TRAJECTORY_BUILDER_2D.max_z = 0.50
+TRAJECTORY_BUILDER_2D.missing_data_ray_length = 0.0
+
+-- Sensor weighting: Prioritize sharp LiDAR scan matching with strong IMU yaw stabilization
+TRAJECTORY_BUILDER_2D.ceres_scan_matcher.occupied_space_weight = 20.0   -- High LiDAR geometric trust
+TRAJECTORY_BUILDER_2D.ceres_scan_matcher.translation_weight = 10.0      -- Translation trust
+TRAJECTORY_BUILDER_2D.ceres_scan_matcher.rotation_weight = 40.0         -- Heavy rotational penalty to prevent scan yaw jump
+TRAJECTORY_BUILDER_2D.imu_gravity_time_constant = 5.0
+
+-- Real-time Correlative Scan Matcher (Ceres seed initializer for dynamic motion)
+TRAJECTORY_BUILDER_2D.use_online_correlative_scan_matching = true
+TRAJECTORY_BUILDER_2D.real_time_correlative_scan_matcher.linear_search_window = 0.10   -- 10 cm search window in 6x6m
+TRAJECTORY_BUILDER_2D.real_time_correlative_scan_matcher.angular_search_window = math.rad(15.)
+TRAJECTORY_BUILDER_2D.real_time_correlative_scan_matcher.translation_delta_cost_weight = 1e-1
+TRAJECTORY_BUILDER_2D.real_time_correlative_scan_matcher.rotation_delta_cost_weight = 1e-1
+
+-- -----------------------------------------------------------------------------
+-- 2. HIT / MISS PROBABILITIES & DYNAMIC OBSTACLE DELETION (Grid Model)
+-- -----------------------------------------------------------------------------
+TRAJECTORY_BUILDER_2D.submaps.grid_options_2d.grid_type = "PROBABILITY_GRID"
+TRAJECTORY_BUILDER_2D.submaps.grid_options_2d.resolution = 0.02          -- 20 mm high-precision resolution
+
+-- Probability Updates:
+-- hit_probability: How quickly a solid wall/pillar is confirmed (0.55 -> ~2-3 hits to mark solid)
+-- miss_probability: How aggressively empty laser rays clear out transient/ghost hits (0.47 = fast clearance)
+TRAJECTORY_BUILDER_2D.submaps.range_data_inserter.probability_grid_range_data_inserter.hit_probability = 0.58
+TRAJECTORY_BUILDER_2D.submaps.range_data_inserter.probability_grid_range_data_inserter.miss_probability = 0.46
+TRAJECTORY_BUILDER_2D.submaps.range_data_inserter.probability_grid_range_data_inserter.insert_free_space = true
+
+-- Submap size: 60 range insertions per submap (~15 submaps for entire 6x6 circuit)
+TRAJECTORY_BUILDER_2D.submaps.num_range_data = 60
+
+-- Motion filter: Inserts on motion (dx >= 4cm or dtheta >= 2 deg); does not spam submaps when stationary
+TRAJECTORY_BUILDER_2D.motion_filter.max_time_seconds = 5.0
+TRAJECTORY_BUILDER_2D.motion_filter.max_distance_meters = 0.04
+TRAJECTORY_BUILDER_2D.motion_filter.max_angle_radians = math.rad(2.0)
+
+-- -----------------------------------------------------------------------------
+-- 3. GLOBAL POSE GRAPH & LOOP CLOSURE OPTIMIZATION (Loop Closing on 6x6 Circuit)
+-- -----------------------------------------------------------------------------
+POSE_GRAPH.optimize_every_n_nodes = 25                                   -- Run loop closure every 25 submap nodes
+POSE_GRAPH.constraint_builder.min_score = 0.60                           -- Score threshold to accept loop closures
+POSE_GRAPH.constraint_builder.global_localization_min_score = 0.65
+POSE_GRAPH.constraint_builder.max_constraint_distance = 6.0              -- 6m diagonal bounds for 6x6m arena
+POSE_GRAPH.constraint_builder.fast_correlative_scan_matcher.linear_search_window = 3.0
+POSE_GRAPH.constraint_builder.fast_correlative_scan_matcher.angular_search_window = math.rad(180.)
+
+-- Pose Graph Optimization Weights
+POSE_GRAPH.optimization_problem.huber_scale = 1e2
+POSE_GRAPH.optimization_problem.acceleration_weight = 1e3
+POSE_GRAPH.optimization_problem.rotation_weight = 3e5
+POSE_GRAPH.optimization_problem.local_slam_pose_translation_weight = 1e5
+POSE_GRAPH.optimization_problem.local_slam_pose_rotation_weight = 1e5
+POSE_GRAPH.optimization_problem.odometry_translation_weight = 1e5
+POSE_GRAPH.optimization_problem.odometry_rotation_weight = 1e5
+
+return options
+
+
+=== FILE: 5_webots/robotics/ros2_cartographer/config/official_webots_cartographer.lua ===
+include "map_builder.lua"
+include "trajectory_builder.lua"
+
+options = {
+  map_builder = MAP_BUILDER,
+  trajectory_builder = TRAJECTORY_BUILDER,
+  map_frame = "map",
+  tracking_frame = "base_link",
+  published_frame = "base_link",
+  odom_frame = "odom",
+  provide_odom_frame = false,
+  publish_frame_projected_to_2d = true,
+  use_odometry = false,
+  use_nav_sat = false,
+  use_landmarks = false,
+  num_laser_scans = 1,
+  num_multi_echo_laser_scans = 0,
+  num_subdivisions_per_laser_scan = 1,
+  num_point_clouds = 0,
+  lookup_transform_timeout_sec = 0.2,
+  submap_publish_period_sec = 0.3,
+  pose_publish_period_sec = 5e-3,
+  trajectory_publish_period_sec = 30e-3,
+  rangefinder_sampling_ratio = 1.,
+  odometry_sampling_ratio = 1.,
+  fixed_frame_pose_sampling_ratio = 1.,
+  imu_sampling_ratio = 1.,
+  landmarks_sampling_ratio = 1.,
+}
+
+MAP_BUILDER.use_trajectory_builder_2d = true
+MAP_BUILDER.num_background_threads = 4
+
+TRAJECTORY_BUILDER_2D.min_range = 0.12
+TRAJECTORY_BUILDER_2D.max_range = 4.50
+TRAJECTORY_BUILDER_2D.missing_data_ray_length = 0.0
+TRAJECTORY_BUILDER_2D.use_imu_data = false
+TRAJECTORY_BUILDER_2D.use_online_correlative_scan_matching = true
+TRAJECTORY_BUILDER_2D.real_time_correlative_scan_matcher.linear_search_window = 0.15
+TRAJECTORY_BUILDER_2D.real_time_correlative_scan_matcher.angular_search_window = math.rad(20.)
+TRAJECTORY_BUILDER_2D.motion_filter.max_angle_radians = math.rad(0.1)
+
+TRAJECTORY_BUILDER_2D.submaps.grid_options_2d.grid_type = "PROBABILITY_GRID"
+TRAJECTORY_BUILDER_2D.submaps.grid_options_2d.resolution = 0.02
+
+POSE_GRAPH.constraint_builder.min_score = 0.65
+POSE_GRAPH.constraint_builder.global_localization_min_score = 0.70
+POSE_GRAPH.optimize_every_n_nodes = 15
+
+return options
+
+
+=== FILE: 5_webots/robotics/ros2_cartographer/config/turtlebot3_standard_cartographer.lua ===
+include "map_builder.lua"
+include "trajectory_builder.lua"
+
+options = {
+  map_builder = MAP_BUILDER,
+  trajectory_builder = TRAJECTORY_BUILDER,
+  map_frame = "map",
+  tracking_frame = "base_link",
+  published_frame = "odom",
+  odom_frame = "odom",
+  provide_odom_frame = false,
+  publish_frame_projected_to_2d = true,
+  use_odometry = true,
+  use_nav_sat = false,
+  use_landmarks = false,
+  num_laser_scans = 1,
+  num_multi_echo_laser_scans = 0,
+  num_subdivisions_per_laser_scan = 1,
+  num_point_clouds = 0,
+  lookup_transform_timeout_sec = 0.2,
+  submap_publish_period_sec = 0.3,
+  pose_publish_period_sec = 5e-3,
+  trajectory_publish_period_sec = 30e-3,
+  rangefinder_sampling_ratio = 1.,
+  odometry_sampling_ratio = 1.,
+  fixed_frame_pose_sampling_ratio = 1.,
+  imu_sampling_ratio = 1.,
+  landmarks_sampling_ratio = 1.,
+}
+
+MAP_BUILDER.use_trajectory_builder_2d = true
+MAP_BUILDER.num_background_threads = 4
+
+TRAJECTORY_BUILDER_2D.min_range = 0.12
+TRAJECTORY_BUILDER_2D.max_range = 4.50
+TRAJECTORY_BUILDER_2D.missing_data_ray_length = 0.0
+TRAJECTORY_BUILDER_2D.use_imu_data = false
+TRAJECTORY_BUILDER_2D.use_online_correlative_scan_matching = true
+TRAJECTORY_BUILDER_2D.real_time_correlative_scan_matcher.linear_search_window = 0.10
+TRAJECTORY_BUILDER_2D.real_time_correlative_scan_matcher.angular_search_window = math.rad(15.)
+TRAJECTORY_BUILDER_2D.motion_filter.max_angle_radians = math.rad(0.1)
+
+TRAJECTORY_BUILDER_2D.submaps.grid_options_2d.grid_type = "PROBABILITY_GRID"
+TRAJECTORY_BUILDER_2D.submaps.grid_options_2d.resolution = 0.02
+
+POSE_GRAPH.constraint_builder.min_score = 0.65
+POSE_GRAPH.constraint_builder.global_localization_min_score = 0.70
+POSE_GRAPH.optimize_every_n_nodes = 20
+
+return options
+
+
+=== FILE: 5_webots/robotics/ros2_cartographer/docs/ros2_cartographer_webots_guide.md ===
+# Comprehensive Setup Guide: ROS 2 + Google Cartographer + Webots LiDAR & IMU Integration
+
+This guide provides the complete, end-to-end setup instructions to install ROS 2 and Google Cartographer in WSL2 (Ubuntu 22.04 LTS / Jammy or Ubuntu 24.04 LTS / Noble), build the ROS 2 Cartographer integration packages, and bridge Webots LiDAR and IMU telemetry to Cartographer for SLAM mapping and localization.
+
+---
+
+## 1. WSL 2 Ubuntu Installation & Initialization
+
+From your Windows PowerShell terminal:
+
+```powershell
+# Install Ubuntu 22.04 LTS (Recommended for ROS 2 Humble) or Ubuntu 24.04 LTS (ROS 2 Jazzy)
+wsl --install -d Ubuntu-22.04
+
+# Launch Ubuntu in WSL2
+wsl -d Ubuntu-22.04
+```
+
+---
+
+## 2. ROS 2 Installation (Inside WSL2 Ubuntu)
+
+Run the following commands inside your WSL2 terminal:
+
+```bash
+# Update package index and set locale
+sudo apt update && sudo apt install -y locales curl gnupg lsb-release
+sudo locale-gen en_US en_US.UTF-8
+sudo update-locale LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8
+export LANG=en_US.UTF-8
+
+# Add ROS 2 GPG key and official repository
+sudo curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key -o /usr/share/keyrings/ros-archive-keyring.gpg
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/ros2.list > /dev/null
+
+# Update and install ROS 2 Desktop and dev tools
+sudo apt update
+# For Ubuntu 22.04: ROS 2 Humble | For Ubuntu 24.04: ROS 2 Jazzy
+sudo apt install -y ros-humble-desktop python3-colcon-common-extensions python3-rosdep python3-vcstool
+
+# Initialize rosdep
+sudo rosdep init
+rosdep update
+
+# Add ROS environment setup to bashrc
+echo "source /opt/ros/humble/setup.bash" >> ~/.bashrc
+source /opt/ros/humble/setup.bash
+```
+
+---
+
+## 3. Google Cartographer Installation
+
+Install Google Cartographer and the ROS 2 Cartographer packages directly via apt:
+
+```bash
+sudo apt update
+sudo apt install -y \
+  ros-humble-cartographer \
+  ros-humble-cartographer-ros \
+  ros-humble-nav2-map-server \
+  ros-humble-tf2-tools \
+  ros-humble-robot-state-publisher
+```
+
+---
+
+## 4. Webots to ROS 2 Cartographer Architecture
+
+The Webots robot has:
+- **LiDAR**: `ms200k_lidar` (360 FOV, 450 points, 10-60 Hz)
+- **IMU**: `bno08x_imu` (Orientation/Quaternion) + `accelerometer` + `gyro`
+- **Frame Tree**: `map` -> `odom` -> `base_link` -> `laser` & `imu_link`
+
+### Communication Pipeline:
+1. **Webots Python Controller Bridge**: Connects to Webots controller API, reads `ms200k_lidar`, `gyro`, `accelerometer`, and `bno08x_imu`, and publishes ROS 2 standard topics:
+   - `/scan` (`sensor_msgs/msg/LaserScan`)
+   - `/imu` (`sensor_msgs/msg/Imu`)
+   - `/odom` (`nav_msgs/msg/Odometry` or via TF odometry)
+   - `/tf` (`tf2_msgs/msg/TFMessage`) for `base_link` -> `laser` & `imu_link`
+2. **Google Cartographer Node**: Subscribes to `/scan` and `/imu`, performs 2D submap scan matching and loop closure, and outputs `/map` and optimized poses.
+
+---
+
+## 5. Cartographer Configuration (`folkrace_2d.lua`)
+
+Create your Cartographer configuration file inside your ROS 2 workspace:
+
+```lua
+include "map_builder.lua"
+include "trajectory_builder.lua"
+
+options = {
+  map_builder = MAP_BUILDER,
+  trajectory_builder = TRAJECTORY_BUILDER,
+  map_frame = "map",
+  tracking_frame = "imu_link",           -- IMU frame for high-frequency inertial tracking
+  published_frame = "odom",              -- Cartographer publishes map -> odom transform
+  odom_frame = "odom",
+  provide_odom_frame = false,
+  publish_frame_projected_to_2d = true,
+  use_odometry = false,                  -- Can be enabled if wheel encoders are published
+  use_nav_sat = false,
+  use_landmarks = false,
+  num_laser_scans = 1,
+  num_multi_echo_laser_scans = 0,
+  num_subdivisions_per_laser_scan = 1,
+  num_point_clouds = 0,
+  lookup_transform_timeout_sec = 0.2,
+  submap_publish_period_sec = 0.3,
+  pose_publish_period_sec = 5e-3,
+  trajectory_publish_period_sec = 30e-3,
+  rangefinder_sampling_ratio = 1.,
+  odometry_sampling_ratio = 1.,
+  fixed_frame_pose_sampling_ratio = 1.,
+  imu_sampling_ratio = 1.,
+  landmarks_sampling_ratio = 1.,
+}
+
+MAP_BUILDER.use_trajectory_builder_2d = true
+
+-- Real-time 2D SLAM parameters tailored for fast RC folkrace car
+TRAJECTORY_BUILDER_2D.min_range = 0.12
+TRAJECTORY_BUILDER_2D.max_range = 5.00
+TRAJECTORY_BUILDER_2D.missing_data_ray_length = 5.0
+TRAJECTORY_BUILDER_2D.use_imu_data = true
+TRAJECTORY_BUILDER_2D.use_online_correlative_scan_matching = true
+TRAJECTORY_BUILDER_2D.real_time_correlative_scan_matcher.linear_search_window = 0.15
+TRAJECTORY_BUILDER_2D.real_time_correlative_scan_matcher.angular_search_window = math.rad(20.)
+
+POSE_GRAPH.optimization_problem.huber_scale = 1e2
+POSE_GRAPH.optimize_every_n_nodes = 35
+POSE_GRAPH.constraint_builder.min_score = 0.55
+
+return options
+```
+
+---
+
+## 6. Webots ROS 2 Publisher Node (`webots_webots/robotics/ros2_cartographer_bridge.py`)
+
+A clean bridge running in ROS 2 / Webots Python controller:
+
+```python
+import rclpy
+from rclpy.node import Node
+from sensor_msgs.msg import LaserScan, Imu
+from geometry_msgs.msg import TransformStamped
+import tf2_ros
+import math
+import time
+
+class WebotsCartographerBridge(Node):
+    def __init__(self):
+        super().__init__('webots_cartographer_bridge')
+        
+        self.scan_pub = self.create_publisher(LaserScan, '/scan', 10)
+        self.imu_pub = self.create_publisher(Imu, '/imu', 50)
+        self.tf_broadcaster = tf2_ros.StaticTransformBroadcaster(self)
+        
+        self.publish_static_transforms()
+        self.get_logger().info("Webots ROS 2 Cartographer Bridge Initialized.")
+
+    def publish_static_transforms(self):
+        # Base Link -> Laser Transform
+        t_laser = TransformStamped()
+        t_laser.header.stamp = self.get_clock().now().to_msg()
+        t_laser.header.frame_id = "base_link"
+        t_laser.child_frame_id = "laser"
+        t_laser.transform.translation.x = 0.0
+        t_laser.transform.translation.y = 0.01
+        t_laser.transform.translation.z = 0.0725
+        t_laser.transform.rotation.w = 1.0
+
+        # Base Link -> IMU Link Transform
+        t_imu = TransformStamped()
+        t_imu.header.stamp = self.get_clock().now().to_msg()
+        t_imu.header.frame_id = "base_link"
+        t_imu.child_frame_id = "imu_link"
+        t_imu.transform.translation.x = 0.0
+        t_imu.transform.translation.y = -0.01
+        t_imu.transform.translation.z = 0.015
+        t_imu.transform.rotation.w = 1.0
+
+        self.tf_broadcaster.sendTransform([t_laser, t_imu])
+
+    def publish_lidar_scan(self, range_image, fov_rad, min_range, max_range, stamp_sec):
+        scan_msg = LaserScan()
+        scan_msg.header.stamp.sec = int(stamp_sec)
+        scan_msg.header.stamp.nanosec = int((stamp_sec - int(stamp_sec)) * 1e9)
+        scan_msg.header.frame_id = "laser"
+        
+        num_readings = len(range_image)
+        scan_msg.angle_min = -fov_rad / 2.0
+        scan_msg.angle_max = fov_rad / 2.0
+        scan_msg.angle_increment = fov_rad / num_readings
+        scan_msg.time_increment = 0.0
+        scan_msg.scan_time = 0.02
+        scan_msg.range_min = float(min_range)
+        scan_msg.range_max = float(max_range)
+        scan_msg.ranges = [float(r) for r in range_image]
+        
+        self.scan_pub.publish(scan_msg)
+
+    def publish_imu(self, accel_xyz, gyro_xyz, quat_xyzw, stamp_sec):
+        imu_msg = Imu()
+        imu_msg.header.stamp.sec = int(stamp_sec)
+        imu_msg.header.stamp.nanosec = int((stamp_sec - int(stamp_sec)) * 1e9)
+        imu_msg.header.frame_id = "imu_link"
+        
+        imu_msg.orientation.x = float(quat_xyzw[0])
+        imu_msg.orientation.y = float(quat_xyzw[1])
+        imu_msg.orientation.z = float(quat_xyzw[2])
+        imu_msg.orientation.w = float(quat_xyzw[3])
+        
+        imu_msg.angular_velocity.x = float(gyro_xyz[0])
+        imu_msg.angular_velocity.y = float(gyro_xyz[1])
+        imu_msg.angular_velocity.z = float(gyro_xyz[2])
+        
+        imu_msg.linear_acceleration.x = float(accel_xyz[0])
+        imu_msg.linear_acceleration.y = float(accel_xyz[1])
+        imu_msg.linear_acceleration.z = float(accel_xyz[2])
+        
+        self.imu_pub.publish(imu_msg)
+```
+
+---
+
+## 7. Running SLAM with Cartographer
+
+1. **Launch Cartographer Node**:
+   ```bash
+   ros2 launch cartographer_ros cartographer.launch.py \
+     cartographer_config_dir:=/path/to/config \
+     configuration_basename:=folkrace_2d.lua
+   ```
+
+2. **Launch Occupancy Grid Node (for standard `/map` visualization in RViz2)**:
+   ```bash
+   ros2 launch cartographer_ros occupancy_grid.launch.py \
+     resolution:=0.05 \
+     publish_period_sec:=1.0
+   ```
+
+3. **Launch RViz2**:
+   ```bash
+   rviz2
+   ```
+   - Set Fixed Frame to `map`.
+   - Add **Map** display (`/map`).
+   - Add **LaserScan** display (`/scan`).
+   - Add **TF** display.
+
+
+=== FILE: 5_webots/robotics/ros2_cartographer/scripts/check_map_empty.py ===
+#!/usr/bin/env python3
+"""
+================================================================================
+  MAP CONTENT VALIDATOR & NON-EMPTY CHECKER
+  Verifies whether an exported PNG map contains rendered track data (non-empty).
+================================================================================
+"""
+
+import sys
+import os
+import numpy as np
+from PIL import Image
+
+def check_map_file(png_path):
+    if not os.path.exists(png_path):
+        return False, "File does not exist"
+    
+    if os.path.getsize(png_path) < 1000:
+        return False, "File size too small (<1KB)"
+
+    try:
+        im = Image.open(png_path).convert('RGB')
+        arr = np.array(im)
+        # Check standard deviation across channels/pixels to detect blank/solid frames
+        std_dev = np.std(arr)
+        unique_colors = len(np.unique(arr.reshape(-1, arr.shape[2]), axis=0))
+        
+        if std_dev < 1.0 or unique_colors < 10:
+            return False, f"Blank image (std_dev={std_dev:.2f}, unique_colors={unique_colors})"
+        
+        return True, f"Valid map image (unique_colors={unique_colors}, std_dev={std_dev:.2f})"
+    except Exception as e:
+        return False, f"Image read error: {e}"
+
+if __name__ == '__main__':
+    if len(sys.argv) < 2:
+        print("Usage: python check_map_empty.py <path_to_png>")
+        sys.exit(1)
+    
+    is_valid, msg = check_map_file(sys.argv[1])
+    print(f"[{'VALID' if is_valid else 'EMPTY'}] {sys.argv[1]}: {msg}")
+    sys.exit(0 if is_valid else 1)
+
+

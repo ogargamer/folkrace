@@ -1,0 +1,1767 @@
+=== BUNDLE: folkrace_04_webots_tools_part16of17.txt (7 files/sections) ===
+  - tools/test_auto_servo_center.py
+  - tools/uart_link_benchmark.py
+  - tools/wrong_way_sim_bench.py
+  - 1_launchers/10_track_studio.py
+  - 1_launchers/1_champion_preview.py
+  - 1_launchers/2_fast_champion_drive.py
+  - 1_launchers/3_ga_dashboard.py
+
+=== FILE: tools/test_auto_servo_center.py ===
+"""Unit and closed-loop simulation tests for 2_pi4/auto_servo_center.py."""
+
+import math
+import os
+import sys
+import threading
+import time
+import unittest
+from typing import Any, Callable, Dict, List, Optional
+
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PI4_DIR = os.path.join(ROOT_DIR, "2_pi4")
+for path_dir in (ROOT_DIR, PI4_DIR):
+    if path_dir not in sys.path:
+        sys.path.insert(0, path_dir)
+
+from auto_servo_center import BASE_SERVO_NEUTRAL_US, US_PER_RAD, AutoServoCenterCalibrator  # noqa: E402
+from brain.vehicle_params import WHEELBASE  # noqa: E402
+
+
+class SimulatedVehicle:
+    """Deterministic virtual-clock simulated ESP32 + chassis kinematics + IMU + ToF."""
+
+    def __init__(
+        self,
+        true_center_us: float = 1540.0,
+        steer_gain: float = 1.0,
+        static_bias: float = 0.02,
+        drive_bias: float = 0.02,
+        fwd_speed_scale: float = 1.0,
+        bwd_speed_scale: float = 1.0,
+        brake_decel_mps2: float = 1.8,
+        tof_dist_m: float = 3.0,
+        spike_hook: Optional[Callable[[int, str, float], float]] = None,
+        step_hook: Optional[Callable[["SimulatedVehicle"], None]] = None,
+    ):
+        self.true_center_us = true_center_us
+        self.steer_gain = steer_gain
+        self.static_bias = static_bias
+        self.drive_bias = drive_bias
+        self.fwd_speed_scale = fwd_speed_scale
+        self.bwd_speed_scale = bwd_speed_scale
+        self.brake_decel_mps2 = brake_decel_mps2
+        self.tof_dist_m = tof_dist_m
+        self.spike_hook = spike_hook
+        self.step_hook = step_hook
+
+        self.lock = threading.Lock()
+        self.commands: List[str] = []
+        self.saved_centers: List[float] = []
+
+        self.sim_time_s = 0.0
+        self.trim_us = 0.0
+        self.v_cmd = 0.0
+        self.v_est = 0.0
+        self.mode = "IDLE"
+        self.braking = False
+        self.gyro_assist = True
+        self.tv_enabled = True
+        self.seq = 1
+        self.mcu_us = 100_000
+        self.tof_ranges_raw = [tof_dist_m] * 16
+        self.tof_target0_status = [5] * 16
+        self.leg_sample_idx = 0
+        self.fwd_travel_m = 0.0
+        self.bwd_travel_m = 0.0
+        self.last_leg_dir = 0
+        self.override_pkt: Dict[str, Any] = {}
+
+    def stop_sim(self) -> None:
+        pass
+
+    def advance(self, dt_s: float) -> None:
+        sub_steps = max(1, int(math.ceil(dt_s / 0.010)))
+        sub_dt = dt_s / sub_steps
+        for _ in range(sub_steps):
+            with self.lock:
+                self.sim_time_s += sub_dt
+                if self.braking:
+                    dv = self.brake_decel_mps2 * sub_dt
+                    if abs(self.v_est) <= dv:
+                        self.v_est = 0.0
+                    else:
+                        self.v_est -= math.copysign(dv, self.v_est)
+                else:
+                    scale = self.fwd_speed_scale if self.v_cmd >= 0 else self.bwd_speed_scale
+                    target_v = self.v_cmd * scale
+                    dv = 2.5 * sub_dt
+                    if target_v > self.v_est:
+                        self.v_est = min(target_v, self.v_est + dv)
+                    else:
+                        self.v_est = max(target_v, self.v_est - dv)
+
+                if self.last_leg_dir > 0 and self.v_est > 0.0:
+                    self.fwd_travel_m += self.v_est * sub_dt
+                elif self.last_leg_dir < 0 and self.v_est < 0.0:
+                    self.bwd_travel_m += abs(self.v_est) * sub_dt
+
+                self.seq += 1
+                self.mcu_us = (self.mcu_us + int(round(sub_dt * 1_000_000))) & 0xFFFFFFFF
+                self.leg_sample_idx += 1
+
+            if self.step_hook is not None:
+                self.step_hook(self)
+
+    def send_cmd(self, raw: bytes) -> bool:
+        cmd = raw.decode("utf-8", errors="ignore").strip()
+        with self.lock:
+            self.commands.append(cmd)
+            upper = cmd.upper()
+            if upper.startswith("TRIM ") and upper != "TRIM_SAVE" and upper != "TRIM_GET":
+                self.trim_us = float(cmd.split()[1])
+            elif upper.startswith("V "):
+                self.v_cmd = float(cmd.split()[1])
+                self.braking = False
+                self.mode = "DRIVE" if abs(self.v_cmd) > 0.001 else "IDLE"
+                if self.v_cmd > 0.05 and self.last_leg_dir != 1:
+                    self.last_leg_dir = 1
+                    self.leg_sample_idx = 0
+                elif self.v_cmd < -0.05 and self.last_leg_dir != -1:
+                    self.last_leg_dir = -1
+                    self.leg_sample_idx = 0
+            elif upper == "BRAKE":
+                self.v_cmd = 0.0
+                self.braking = True
+                self.mode = "DRIVE"
+            elif upper == "RESET":
+                self.v_cmd = 0.0
+                self.braking = False
+                self.mode = "IDLE"
+                self.last_leg_dir = 0
+            elif upper == "GYRO 0":
+                self.gyro_assist = False
+            elif upper == "GYRO 1":
+                self.gyro_assist = True
+            elif upper == "TV 0":
+                self.tv_enabled = False
+            elif upper == "TV 1":
+                self.tv_enabled = True
+        return True
+
+    def get_center_us(self) -> float:
+        with self.lock:
+            return BASE_SERVO_NEUTRAL_US + self.trim_us
+
+    def save_center_us(self, center_us: float) -> float:
+        val = round(float(center_us), 1)
+        with self.lock:
+            self.saved_centers.append(val)
+            self.trim_us = val - BASE_SERVO_NEUTRAL_US
+        return val
+
+    def get_telemetry(self) -> Dict[str, Any]:
+        with self.lock:
+            applied_center = BASE_SERVO_NEUTRAL_US + self.trim_us
+            steer_err_rad = self.steer_gain * (self.true_center_us - applied_center) / US_PER_RAD
+            is_moving = abs(self.v_est) > 0.02
+            bias = self.drive_bias if is_moving else self.static_bias
+            gyro_z = (self.v_est * math.tan(steer_err_rad)) / WHEELBASE + bias
+
+            if self.spike_hook is not None and is_moving:
+                leg_name = "FWD" if self.v_est > 0 else "BWD"
+                gyro_z = self.spike_hook(self.leg_sample_idx, leg_name, gyro_z)
+
+            pkt: Dict[str, Any] = {
+                "seq": self.seq,
+                "mcu_timestamp_us": self.mcu_us,
+                "_pkt_age_s": 0.01,
+                "planner_running": False,
+                "mcu_main_connected": True,
+                "mcu_tof_connected": True,
+                "mode": self.mode,
+                "v_cmd": round(self.v_cmd, 3),
+                "v_est": round(self.v_est, 4),
+                "gyro_z": gyro_z,
+                "slip_ratio": 0.02,
+                "tof_ranges_raw": list(self.tof_ranges_raw),
+                "tof_target0_status": list(self.tof_target0_status),
+                "flags": {
+                    "fake_data": False,
+                    "imu_online": True,
+                    "stm32_front": True,
+                    "stm32_rear": True,
+                },
+            }
+            pkt.update(self.override_pkt)
+            return pkt
+
+
+class VirtualClockCalibrator(AutoServoCenterCalibrator):
+    """Calibrator wired to SimulatedVehicle virtual clock (runs in milliseconds)."""
+
+    def __init__(self, sim: SimulatedVehicle):
+        self._sim = sim
+        super().__init__(
+            get_telemetry=sim.get_telemetry,
+            send_cmd=sim.send_cmd,
+            get_center_us=sim.get_center_us,
+            save_center_us=sim.save_center_us,
+        )
+
+    def _now(self) -> float:
+        with self._sim.lock:
+            return self._sim.sim_time_s
+
+    def _sleep(self, seconds: float) -> None:
+        self._sim.advance(max(0.001, seconds))
+
+
+def _wait_done(cal: AutoServoCenterCalibrator, timeout_s: float = 2.0) -> Dict[str, Any]:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        st = cal.get_status()
+        if not st["running"]:
+            return st
+        time.sleep(0.001)
+    raise TimeoutError("Calibrator did not finish in time")
+
+
+class TestAutoServoCenter(unittest.TestCase):
+    def _make_cal(self, sim: SimulatedVehicle, cls=VirtualClockCalibrator) -> AutoServoCenterCalibrator:
+        return cls(sim)
+
+    def test_nominal_convergence_from_30us(self) -> None:
+        sim = SimulatedVehicle(true_center_us=BASE_SERVO_NEUTRAL_US + 30.0)
+        cal = self._make_cal(sim)
+        res = cal.start(max_iterations=6, tolerance_deg_per_m=0.8)
+        self.assertTrue(res["started"], res)
+
+        st = _wait_done(cal)
+        self.assertEqual(st["phase"], "CONVERGED", st)
+        self.assertLessEqual(len(st["history"]), 4)
+        self.assertAlmostEqual(st["servo_center_us"], BASE_SERVO_NEUTRAL_US + 30.0, delta=1.5)
+        self.assertLessEqual(abs(st["drift_deg_per_m"]), 0.8)
+
+        for entry in st["history"]:
+            if entry["step_us"] != 0.0:
+                self.assertGreater(entry["step_us"] * entry["drift_deg_per_m"], 0.0)
+
+    def test_gain_mismatch_overshoot_converges_via_bracket(self) -> None:
+        sim = SimulatedVehicle(true_center_us=BASE_SERVO_NEUTRAL_US - 32.0, steer_gain=1.6)
+        cal = self._make_cal(sim)
+        res = cal.start(max_iterations=6, tolerance_deg_per_m=0.8)
+        self.assertTrue(res["started"], res)
+
+        st = _wait_done(cal)
+        self.assertEqual(st["phase"], "CONVERGED", st)
+        self.assertLessEqual(len(st["history"]), 4)
+        self.assertAlmostEqual(st["servo_center_us"], BASE_SERVO_NEUTRAL_US - 32.0, delta=1.2)
+        methods = [h["method"] for h in st["history"]]
+        self.assertTrue("bracket" in methods or "secant" in methods, methods)
+
+    def test_asymmetric_speeds_and_residual_bias_cancellation(self) -> None:
+        sim = SimulatedVehicle(
+            true_center_us=BASE_SERVO_NEUTRAL_US + 24.0,
+            static_bias=0.01,
+            drive_bias=0.07,
+            fwd_speed_scale=1.0,
+            bwd_speed_scale=0.80,
+        )
+        cal = self._make_cal(sim)
+        res = cal.start(max_iterations=6, tolerance_deg_per_m=0.8)
+        self.assertTrue(res["started"], res)
+
+        st = _wait_done(cal)
+        self.assertEqual(st["phase"], "CONVERGED", st)
+        self.assertAlmostEqual(st["servo_center_us"], BASE_SERVO_NEUTRAL_US + 24.0, delta=1.5)
+        self.assertAlmostEqual(st["resid_bias_rad_s"], 0.06, delta=0.015)
+
+    def test_mad_outlier_rejection_with_gyro_spikes(self) -> None:
+        def inject_spikes(idx: int, _leg: str, gz: float) -> float:
+            if idx % 29 == 17:
+                return gz + 2.8
+            if idx % 37 == 23:
+                return gz - 3.2
+            return gz
+
+        sim = SimulatedVehicle(true_center_us=BASE_SERVO_NEUTRAL_US + 18.0, spike_hook=inject_spikes)
+        cal = self._make_cal(sim)
+        res = cal.start(max_iterations=6, tolerance_deg_per_m=0.8)
+        self.assertTrue(res["started"], res)
+
+        st = _wait_done(cal)
+        self.assertEqual(st["phase"], "CONVERGED", st)
+        self.assertAlmostEqual(st["servo_center_us"], BASE_SERVO_NEUTRAL_US + 18.0, delta=1.5)
+
+    def test_command_protocol_and_abort_restores_assists(self) -> None:
+        sim = SimulatedVehicle(true_center_us=BASE_SERVO_NEUTRAL_US + 15.0)
+        cal = self._make_cal(sim)
+        res = cal.start(max_iterations=6)
+        self.assertTrue(res["started"], res)
+        st = _wait_done(cal)
+        self.assertEqual(st["phase"], "CONVERGED", st)
+
+        cmds = sim.commands
+        self.assertIn("MOTORS", cmds)
+        self.assertIn("GYRO 0", cmds)
+        self.assertIn("TV 0", cmds)
+        self.assertIn("BRAKE", cmds)
+        self.assertIn("TRIM_SAVE", cmds)
+        self.assertIn("TRIM_GET", cmds)
+        self.assertEqual(cmds.count("A 90.0"), 1)
+        self.assertIn("GYRO 1", cmds)
+        self.assertIn("TV 1", cmds)
+        self.assertIn("RESET", cmds)
+        self.assertTrue(sim.gyro_assist)
+        self.assertTrue(sim.tv_enabled)
+
+        # User abort mid-run via deterministic step hook
+        sim2 = SimulatedVehicle(true_center_us=BASE_SERVO_NEUTRAL_US + 40.0)
+        cal2 = self._make_cal(sim2)
+
+        def abort_mid_leg(s: SimulatedVehicle) -> None:
+            if s.fwd_travel_m >= 0.40:
+                s.step_hook = None
+                cal2.stop("User cancelled")
+
+        sim2.step_hook = abort_mid_leg
+        self.assertTrue(cal2.start()["started"])
+        st2 = _wait_done(cal2)
+        self.assertEqual(st2["phase"], "ABORTED", st2)
+        self.assertIn("GYRO 1", sim2.commands)
+        self.assertIn("TV 1", sim2.commands)
+        self.assertIn("RESET", sim2.commands)
+        self.assertTrue(sim2.gyro_assist)
+        self.assertTrue(sim2.tv_enabled)
+
+    def test_preflight_and_tof_ranges_raw_obstacle_guard(self) -> None:
+        bad_cases = [
+            {"planner_running": True},
+            {"flags": {"fake_data": True, "imu_online": True, "stm32_front": True, "stm32_rear": True}},
+            {"flags": {"fake_data": False, "imu_online": False, "stm32_front": True, "stm32_rear": True}},
+            {"_pkt_age_s": 0.9},
+            {"mcu_main_connected": False},
+            {"tof_ranges_raw": [0.80] * 16},
+        ]
+        for override in bad_cases:
+            sim = SimulatedVehicle()
+            with sim.lock:
+                sim.override_pkt = dict(override)
+            cal = self._make_cal(sim)
+            res = cal.start(drive_distance_m=1.0)
+            self.assertFalse(res["started"], f"Expected preflight fail for {override}")
+            self.assertTrue(res.get("error"))
+
+        # Mid-leg obstacle via tof_ranges_raw only (no tof_ranges key)
+        sim_obs = SimulatedVehicle(true_center_us=BASE_SERVO_NEUTRAL_US + 20.0, tof_dist_m=3.0)
+
+        def inject_obstacle(s: SimulatedVehicle) -> None:
+            if s.fwd_travel_m >= 0.35:
+                s.step_hook = None
+                with s.lock:
+                    s.tof_ranges_raw[2] = 0.20
+
+        sim_obs.step_hook = inject_obstacle
+        cal_obs = self._make_cal(sim_obs)
+        self.assertTrue(cal_obs.start(drive_distance_m=1.0)["started"])
+        st_obs = _wait_done(cal_obs)
+        self.assertEqual(st_obs["phase"], "ERROR", st_obs)
+        self.assertIn("Obstacle", st_obs["message"])
+        self.assertIn("BRAKE", sim_obs.commands)
+        self.assertIn("GYRO 1", sim_obs.commands)
+        self.assertIn("TV 1", sim_obs.commands)
+        self.assertIn("RESET", sim_obs.commands)
+
+    def test_backward_leg_matches_forward_total_distance(self) -> None:
+        sim = SimulatedVehicle(true_center_us=BASE_SERVO_NEUTRAL_US, brake_decel_mps2=0.9)
+        cal = self._make_cal(sim)
+        res = cal.start(drive_distance_m=0.80, cruise_speed=0.75)
+        self.assertTrue(res["started"], res)
+        st = _wait_done(cal)
+        self.assertEqual(st["phase"], "CONVERGED", st)
+        self.assertAlmostEqual(sim.bwd_travel_m, sim.fwd_travel_m, delta=0.05)
+
+    def test_max_iterations_done_best_and_no_worse_overwrite(self) -> None:
+        class TinyStepCal(VirtualClockCalibrator):
+            MAX_STEP_US = 8.0
+
+        sim_imp = SimulatedVehicle(true_center_us=BASE_SERVO_NEUTRAL_US + 45.0)
+        cal_imp = self._make_cal(sim_imp, cls=TinyStepCal)
+        self.assertTrue(cal_imp.start(max_iterations=2, tolerance_deg_per_m=0.8)["started"])
+        st_imp = _wait_done(cal_imp)
+        self.assertEqual(st_imp["phase"], "DONE_BEST", st_imp)
+        self.assertEqual(len(sim_imp.saved_centers), 1)
+        self.assertGreater(sim_imp.saved_centers[0], BASE_SERVO_NEUTRAL_US)
+
+        class WrongSignCal(VirtualClockCalibrator):
+            @classmethod
+            def _compute_next_step_us(cls, **kwargs):
+                return 40.0, "forced_bad"
+
+        sim_worse = SimulatedVehicle(true_center_us=BASE_SERVO_NEUTRAL_US - 35.0)
+        cal_worse = self._make_cal(sim_worse, cls=WrongSignCal)
+        self.assertTrue(cal_worse.start(max_iterations=2, tolerance_deg_per_m=0.5)["started"])
+        st_worse = _wait_done(cal_worse)
+        self.assertEqual(st_worse["phase"], "DONE_BEST", st_worse)
+        self.assertEqual(len(sim_worse.saved_centers), 0)
+        self.assertNotIn("TRIM_SAVE", sim_worse.commands)
+        self.assertAlmostEqual(st_worse["servo_center_us"], BASE_SERVO_NEUTRAL_US, delta=0.1)
+
+    def test_mid_leg_tof_loss_aborts_and_restores_assists(self) -> None:
+        sim = SimulatedVehicle(true_center_us=BASE_SERVO_NEUTRAL_US + 20.0, tof_dist_m=3.0)
+
+        def drop_tof(s: SimulatedVehicle) -> None:
+            if s.fwd_travel_m >= 0.30:
+                s.step_hook = None
+                with s.lock:
+                    s.override_pkt["mcu_tof_connected"] = False
+
+        sim.step_hook = drop_tof
+        cal = self._make_cal(sim)
+        self.assertTrue(cal.start(drive_distance_m=1.0)["started"])
+        st = _wait_done(cal)
+        self.assertEqual(st["phase"], "ERROR", st)
+        self.assertIn("ToF", st["message"])
+        self.assertIn("BRAKE", sim.commands)
+        self.assertIn("GYRO 1", sim.commands)
+        self.assertIn("TV 1", sim.commands)
+        self.assertIn("RESET", sim.commands)
+        self.assertTrue(sim.gyro_assist)
+        self.assertTrue(sim.tv_enabled)
+
+    def test_active_brake_sends_periodic_keepalive(self) -> None:
+        sim = SimulatedVehicle(true_center_us=BASE_SERVO_NEUTRAL_US, brake_decel_mps2=1.0)
+        cal = self._make_cal(sim)
+        sim.v_cmd = 0.80
+        sim.v_est = 0.80
+        res = cal._active_brake_stop(+1, "BRAKE_FWD", 0.5, 1.0)
+        self.assertTrue(res["ok"], res)
+        brake_count = sum(1 for c in sim.commands if c == "BRAKE")
+        self.assertGreaterEqual(brake_count, 3, sim.commands)
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+=== FILE: tools/uart_link_benchmark.py ===
+#!/usr/bin/env python3
+"""Motor-free performance benchmark for the ESP32 <-> STM32 UART protocol.
+
+The default benchmark uses synthetic byte streams and does not open a serial
+port or command a motor. It compares the old unbounded parser behavior with
+the bounded/latest-command-wins behavior used by the firmware.
+
+Examples:
+    python tools/uart_link_benchmark.py
+    python tools/uart_link_benchmark.py --scenario steady --duration 5
+    python tools/uart_link_benchmark.py --live-port COM7 --duration 10
+"""
+
+from __future__ import annotations
+
+import argparse
+import struct
+import time
+from dataclasses import dataclass
+from typing import Optional
+
+
+BAUD = 921_600
+COMMAND_HZ = 400
+CONTROL_PERIOD_US = 2_500
+COMMAND_SIZE = 24
+FEEDBACK_SIZE = 13
+DEFAULT_BYTE_BUDGET = 128
+
+
+def xor_checksum(data: bytes) -> int:
+    result = 0
+    for byte in data:
+        result ^= byte
+    return result
+
+
+def make_command(sequence: int) -> bytes:
+    payload = struct.pack(
+        "<Bffhhhhhh",
+        0,
+        float(sequence),
+        float(-sequence),
+        -12000,
+        12000,
+        0,
+        -12000,
+        12000,
+        0,
+    )
+    return b"\xAA\x55" + payload + bytes((xor_checksum(payload),))
+
+
+def make_feedback(sequence: int) -> bytes:
+    payload = struct.pack("<BffB", 0, float(sequence), float(-sequence), 0)
+    return b"\xAA\x55" + payload + bytes((xor_checksum(payload),))
+
+
+@dataclass
+class Metrics:
+    received_packets: int = 0
+    applied_packets: int = 0
+    replies: int = 0
+    checksum_errors: int = 0
+    service_calls: int = 0
+    max_bytes_per_call: int = 0
+    max_packets_per_call: int = 0
+    max_backlog: int = 0
+    total_bytes_processed: int = 0
+
+
+class CommandParserModel:
+    """Reference model of the STM32 command receiver."""
+
+    def __init__(self, bounded: bool, byte_budget: int = DEFAULT_BYTE_BUDGET) -> None:
+        self.bounded = bounded
+        self.byte_budget = byte_budget
+        self.buffer = bytearray()
+        self.metrics = Metrics()
+        self.applied_sequences: list[int] = []
+
+    def feed(self, data: bytes) -> None:
+        self.buffer.extend(data)
+
+    def service(self) -> None:
+        before = len(self.buffer)
+        limit = self.byte_budget if self.bounded else len(self.buffer)
+        consumed = 0
+        packets = 0
+        latest_sequence: Optional[int] = None
+
+        while self.buffer and consumed < limit:
+            if len(self.buffer) < 2:
+                break
+            if self.buffer[:2] != b"\xAA\x55":
+                del self.buffer[0]
+                consumed += 1
+                continue
+            if len(self.buffer) < COMMAND_SIZE or consumed + COMMAND_SIZE > limit:
+                break
+
+            frame = bytes(self.buffer[:COMMAND_SIZE])
+            del self.buffer[:COMMAND_SIZE]
+            consumed += COMMAND_SIZE
+            payload = frame[2:-1]
+            if xor_checksum(payload) != frame[-1]:
+                self.metrics.checksum_errors += 1
+                continue
+
+            sequence = int(struct.unpack("<f", payload[1:5])[0])
+            self.metrics.received_packets += 1
+            packets += 1
+            latest_sequence = sequence
+
+        if latest_sequence is not None:
+            if self.bounded:
+                self.applied_sequences.append(latest_sequence)
+                self.metrics.applied_packets += 1
+                self.metrics.replies += 1
+            else:
+                self.metrics.applied_packets += packets
+                self.metrics.replies += packets
+                self.applied_sequences.extend(
+                    range(latest_sequence - packets + 1, latest_sequence + 1)
+                )
+
+        self.metrics.service_calls += 1
+        self.metrics.total_bytes_processed += consumed
+        self.metrics.max_bytes_per_call = max(self.metrics.max_bytes_per_call, consumed)
+        self.metrics.max_packets_per_call = max(self.metrics.max_packets_per_call, packets)
+        self.metrics.max_backlog = max(self.metrics.max_backlog, len(self.buffer))
+        if before == len(self.buffer) and self.buffer and consumed == 0:
+            raise RuntimeError("parser made no progress on a complete synthetic frame")
+
+
+def run_synthetic(duration: float, burst_packets: int, bounded: bool) -> Metrics:
+    parser = CommandParserModel(bounded=bounded)
+    ticks = int(duration * COMMAND_HZ)
+    sequence = 0
+    for _ in range(ticks):
+        for _ in range(burst_packets):
+            parser.feed(make_command(sequence))
+            sequence += 1
+        parser.service()
+    return parser.metrics
+
+
+def format_metrics(name: str, metrics: Metrics) -> str:
+    return (
+        f"{name}: received={metrics.received_packets} "
+        f"applied={metrics.applied_packets} replies={metrics.replies} "
+        f"max_service_bytes={metrics.max_bytes_per_call} "
+        f"max_service_packets={metrics.max_packets_per_call} "
+        f"max_backlog_bytes={metrics.max_backlog} "
+        f"checksum_errors={metrics.checksum_errors}"
+    )
+
+
+def run_live(port: str, duration: float) -> None:
+    try:
+        import serial  # type: ignore
+    except ImportError as exc:
+        raise SystemExit("Live mode requires pyserial; synthetic mode does not.") from exc
+
+    ser = serial.Serial(port=port, baudrate=BAUD, timeout=0)
+    deadline = time.monotonic() + duration
+    received = 0
+    bytes_read = 0
+    max_backlog = 0
+    while time.monotonic() < deadline:
+        waiting = ser.in_waiting
+        max_backlog = max(max_backlog, waiting)
+        data = ser.read(waiting or 1)
+        bytes_read += len(data)
+        received += data.count(b"\xAA\x55")
+        time.sleep(0.001)
+    ser.close()
+    print(
+        f"live: port={port} duration_s={duration:.2f} bytes={bytes_read} "
+        f"header_candidates={received} max_os_backlog_bytes={max_backlog}"
+    )
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--duration", type=float, default=2.0)
+    parser.add_argument("--scenario", choices=("steady", "burst"), default="burst")
+    parser.add_argument("--live-port", help="Observe a live feedback UART without transmitting.")
+    args = parser.parse_args()
+
+    if args.live_port:
+        run_live(args.live_port, args.duration)
+        return
+
+    burst_packets = 1 if args.scenario == "steady" else 8
+    before = run_synthetic(args.duration, burst_packets, bounded=False)
+    after = run_synthetic(args.duration, burst_packets, bounded=True)
+    print(
+        f"synthetic: duration_s={args.duration:.2f} scenario={args.scenario} "
+        f"burst_packets={burst_packets} byte_budget={DEFAULT_BYTE_BUDGET}"
+    )
+    print(format_metrics("before", before))
+    print(format_metrics("after ", after))
+
+
+if __name__ == "__main__":
+    main()
+
+
+=== FILE: tools/wrong_way_sim_bench.py ===
+#!/usr/bin/env python3
+"""
+================================================================================
+  FAST CLOSED-LOOP 2D WRONG-WAY & RECOVERY SIMULATION BENCH
+================================================================================
+  Exercises the real AutonomousBrain (C++ Costmap + ToF Gap Scout + SL-MPC +
+  AntiWrongWayWatchdog + StuckRecoveryManager) against 2D wall segments and
+  Ackermann bicycle physics with friction-circle saturation at 60 Hz.
+================================================================================
+"""
+
+import math
+import os
+import sys
+import time
+from typing import Dict, List, Optional, Tuple
+
+import numpy as np
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PLANNER_DIR = os.path.join(REPO_ROOT, "5_webots", "simulation", "my_project", "controllers", "tof_path_planner")
+for p in (REPO_ROOT, PLANNER_DIR):
+    if p not in sys.path:
+        sys.path.insert(0, p)
+
+from brain.autonomous_brain import AutonomousBrain
+from brain.pose_tracker import wrap_to_pi
+from brain.stuck_recovery_manager import StuckRecoveryState
+from brain.tof_gap_scout import FRONT_TOF_SENSOR_RIG
+from brain.planner_config import (
+    GRAVITY_G,
+    MAX_STEERING_RAD,
+    SERVO_MAX_SPEED_RAD_S,
+    TIRE_MU,
+    TOF_MAX_RANGE_M,
+    WHEELBASE,
+)
+from progress_tracker import load_track_walls
+
+
+def ray_segment_intersect(
+    ox: float, oy: float, dx: float, dy: float,
+    ax: float, ay: float, bx: float, by: float,
+) -> Optional[float]:
+    """2D ray (o + t*d, t>=0) vs segment (a, b) intersection distance t."""
+    sx = bx - ax
+    sy = by - ay
+    denom = dx * sy - dy * sx
+    if abs(denom) < 1e-9:
+        return None
+    qpx = ax - ox
+    qpy = ay - oy
+    t = (qpx * sy - qpy * sx) / denom
+    u = (qpx * dy - qpy * dx) / denom
+    if t >= 0.0 and 0.0 <= u <= 1.0:
+        return t
+    return None
+
+
+def segments_from_polyline(pts: np.ndarray, closed: bool = True) -> List[Tuple[float, float, float, float]]:
+    segs: List[Tuple[float, float, float, float]] = []
+    n = len(pts)
+    if n < 2:
+        return segs
+    for i in range(n - 1):
+        segs.append((float(pts[i, 0]), float(pts[i, 1]), float(pts[i + 1, 0]), float(pts[i + 1, 1])))
+    if closed:
+        segs.append((float(pts[-1, 0]), float(pts[-1, 1]), float(pts[0, 0]), float(pts[0, 1])))
+    return segs
+
+
+def box_segments(cx: float, cy: float, half_w: float, half_l: float) -> List[Tuple[float, float, float, float]]:
+    pts = np.array([
+        [cx - half_w, cy - half_l],
+        [cx + half_w, cy - half_l],
+        [cx + half_w, cy + half_l],
+        [cx - half_w, cy + half_l],
+    ])
+    return segments_from_polyline(pts, closed=True)
+
+
+def point_to_segments_dist(px: float, py: float, segs: List[Tuple[float, float, float, float]]) -> float:
+    best_sq = 1e9
+    for ax, ay, bx, by in segs:
+        vx, vy = bx - ax, by - ay
+        l2 = vx * vx + vy * vy
+        if l2 < 1e-9:
+            d2 = (px - ax) ** 2 + (py - ay) ** 2
+        else:
+            t = max(0.0, min(1.0, ((px - ax) * vx + (py - ay) * vy) / l2))
+            qx, qy = ax + t * vx, ay + t * vy
+            d2 = (px - qx) ** 2 + (py - qy) ** 2
+        if d2 < best_sq:
+            best_sq = d2
+    return math.sqrt(best_sq)
+
+
+def raycast_16_tofs(
+    x: float,
+    y: float,
+    yaw: float,
+    segs: List[Tuple[float, float, float, float]],
+) -> Dict[str, float]:
+    """Simulates all 16 VL53L8CX beams in world frame (+Y forward, +X right, +yaw CCW)."""
+    cos_y = math.cos(yaw)
+    sin_y = math.sin(yaw)
+    readings: Dict[str, float] = {}
+    for s_name, sx_loc, sy_loc, h_loc, max_r in FRONT_TOF_SENSOR_RIG:
+        # Local sensor origin -> world
+        ox = x + cos_y * sx_loc - sin_y * sy_loc
+        oy = y + sin_y * sx_loc + cos_y * sy_loc
+        # Local sensor ray dir: (cos(h_loc), sin(h_loc)) in (+X right, +Y fwd)
+        dlx = math.cos(h_loc)
+        dly = math.sin(h_loc)
+        dx = cos_y * dlx - sin_y * dly
+        dy = sin_y * dlx + cos_y * dly
+
+        best_t = max_r
+        for ax, ay, bx, by in segs:
+            t = ray_segment_intersect(ox, oy, dx, dy, ax, ay, bx, by)
+            if t is not None and t < best_t:
+                best_t = t
+        readings[s_name] = max(0.030, min(TOF_MAX_RANGE_M, best_t))
+    return readings
+
+
+class SimCar2D:
+    """Simple 60 Hz Ackermann bicycle simulator with tire grip limit & wall contact."""
+
+    def __init__(self, x: float = 0.0, y: float = 0.0, yaw: float = 0.0):
+        self.x = x
+        self.y = y
+        self.yaw = yaw
+        self.v = 0.0
+        self.steer = 0.0
+        self.yaw_rate = 0.0
+        self.wall_hits = 0
+
+    def step(
+        self,
+        v_cmd: float,
+        steer_cmd: float,
+        dt: float,
+        segs: List[Tuple[float, float, float, float]],
+        force_stall: bool = False,
+    ) -> None:
+        max_ds = SERVO_MAX_SPEED_RAD_S * dt
+        self.steer += max(-max_ds, min(max_ds, steer_cmd - self.steer))
+        self.steer = max(-MAX_STEERING_RAD, min(MAX_STEERING_RAD, self.steer))
+
+        max_dv = TIRE_MU * GRAVITY_G * dt
+        self.v += max(-max_dv, min(max_dv, v_cmd - self.v))
+
+        if force_stall:
+            self.v = 0.0
+            self.yaw_rate = 0.0
+            return
+
+        # Kinematic yaw rate with friction-circle understeer cap
+        raw_omega = (self.v / WHEELBASE) * math.tan(self.steer)
+        max_omega = (TIRE_MU * GRAVITY_G) / max(0.5, abs(self.v))
+        self.yaw_rate = max(-max_omega, min(max_omega, raw_omega))
+
+        yaw_mid = self.yaw + 0.5 * self.yaw_rate * dt
+        nx = self.x - self.v * math.sin(yaw_mid) * dt
+        ny = self.y + self.v * math.cos(yaw_mid) * dt
+        nyaw = wrap_to_pi(self.yaw + self.yaw_rate * dt)
+
+        # Wall contact clamp (chassis half-width ~ 0.075 m)
+        d_wall = point_to_segments_dist(nx, ny, segs)
+        if d_wall < 0.070:
+            self.wall_hits += 1
+            self.v *= 0.15
+            self.yaw_rate *= 0.3
+        else:
+            self.x = nx
+            self.y = ny
+            self.yaw = nyaw
+
+
+def make_corridor_walls(width: float = 1.0, length: float = 10.0) -> List[Tuple[float, float, float, float]]:
+    hw = width * 0.5
+    return [
+        (-hw, -2.0, -hw, length),
+        (hw, -2.0, hw, length),
+        (-hw, -2.0, hw, -2.0),
+        (-hw, length, hw, length),
+    ]
+
+
+def make_hairpin_walls() -> List[Tuple[float, float, float, float]]:
+    """Closed oval hairpin: 1.0m left lane [-0.5, +0.5], dividing wall at x=0.50..0.60, 1.0m right lane [0.60, 1.60]."""
+    return [
+        (-0.50, -1.5, -0.50, 5.8),
+        (-0.50, 5.8, 1.60, 5.8),
+        (1.60, 5.8, 1.60, -1.5),
+        (1.60, -1.5, -0.50, -1.5),
+        (0.50, -0.3, 0.50, 4.6),
+        (0.60, -0.3, 0.60, 4.6),
+        (0.50, 4.6, 0.60, 4.6),
+        (0.50, -0.3, 0.60, -0.3),
+    ]
+
+
+def run_step(brain: AutonomousBrain, car: SimCar2D, segs: List[Tuple[float, float, float, float]], sim_t: float, dt: float, force_stall: bool = False):
+    tofs = raycast_16_tofs(car.x, car.y, car.yaw, segs)
+    v_cmd, steer_cmd, telem = brain.step(
+        tof_readings=tofs,
+        v_est=car.v,
+        steer_actual_rad=car.steer,
+        gyro_z_rad_s=car.yaw_rate,
+        dt=dt,
+        sim_time_s=sim_t,
+        ground_truth_pose=None,
+        full_telemetry=True,
+        imu_yaw_rad=car.yaw,
+    )
+    car.step(v_cmd, steer_cmd, dt, segs, force_stall=force_stall)
+    return telem
+
+
+def scenario_s1_straight_180_spin() -> Tuple[bool, str]:
+    brain = AutonomousBrain()
+    brain.reset((0.0, 0.0, -math.pi / 2.0))
+    car = SimCar2D(0.0, 0.0, -math.pi / 2.0)
+    segs = make_corridor_walls(width=1.0, length=40.0)
+    dt = 1.0 / 60.0
+    sim_t = 0.0
+
+    # Drive forward 2.5 s
+    for _ in range(150):
+        sim_t += dt
+        run_step(brain, car, segs, sim_t, dt)
+
+    # Inject 180 deg spinout
+    car.yaw = math.pi
+    car.v = 0.1
+    brain.pose_tracker.yaw = math.pi
+    brain.pose_tracker._imu_yaw_offset = 0.0
+
+    t_spin = sim_t
+    detect_lat = None
+    rec_done = None
+    aligned_at_exit = False
+    retriggers = 0
+    was_in_180 = False
+
+    for _ in range(300):  # 5.0 s max
+        sim_t += dt
+        telem = run_step(brain, car, segs, sim_t, dt)
+        is_ww = bool(telem.get("is_wrong_way"))
+        rec_state = telem.get("recovery_state", "")
+        in_180 = (rec_state == StuckRecoveryState.CORRECTIVE_180)
+
+        if is_ww and detect_lat is None:
+            detect_lat = sim_t - t_spin
+        if rec_done is None and was_in_180 and not in_180:
+            rec_done = sim_t - t_spin
+            aligned_at_exit = abs(wrap_to_pi(car.yaw - 0.0)) <= math.radians(35.0)
+        elif rec_done is not None and is_ww:
+            retriggers += 1
+        was_in_180 = in_180
+
+    aligned = abs(wrap_to_pi(car.yaw - 0.0)) <= math.radians(35.0)
+    ok = (
+        detect_lat is not None and detect_lat <= 0.35
+        and rec_done is not None and rec_done <= 2.5
+        and aligned_at_exit and aligned and retriggers == 0
+    )
+    return ok, f"detect={detect_lat:.3f}s rec={rec_done:.3f}s aligned={aligned} retriggers={retriggers} hits={car.wall_hits}"
+
+
+def scenario_s2_hairpin_no_fp() -> Tuple[bool, str]:
+    brain = AutonomousBrain()
+    brain.reset((0.0, 0.0, -math.pi / 2.0))
+    car = SimCar2D(0.0, 0.0, -math.pi / 2.0)
+    segs = make_hairpin_walls()
+    dt = 1.0 / 60.0
+    sim_t = 0.0
+    ww_triggers = 0
+    entered_return_lane = False
+    for _ in range(240):  # 4.0 s: drive up left lane, round hairpin, drive down right lane
+        sim_t += dt
+        telem = run_step(brain, car, segs, sim_t, dt)
+        if car.x > 0.60 and car.y > 0.0:
+            entered_return_lane = True
+        if telem.get("is_wrong_way"):
+            ww_triggers += 1
+    ok = ww_triggers == 0 and entered_return_lane
+    return ok, f"ww_triggers={ww_triggers} entered_return_lane={entered_return_lane} final=({car.x:.2f},{car.y:.2f}) hits={car.wall_hits}"
+
+
+def scenario_s3_wall_hugging_3pt() -> Tuple[bool, str]:
+    brain = AutonomousBrain()
+    brain.reset((0.0, 0.0, -math.pi / 2.0))
+    car = SimCar2D(0.0, 0.0, -math.pi / 2.0)
+    segs = make_corridor_walls(width=1.0, length=40.0)
+    dt = 1.0 / 60.0
+    sim_t = 0.0
+    for _ in range(150):
+        sim_t += dt
+        run_step(brain, car, segs, sim_t, dt)
+
+    # Spin 170 deg near right wall (x = +0.32, facing toward wall/south)
+    car.x = 0.32
+    car.yaw = math.radians(170.0)
+    car.v = 0.05
+    brain.pose_tracker.x = car.x
+    brain.pose_tracker.yaw = car.yaw
+    brain.pose_tracker._imu_yaw_offset = 0.0
+
+    t_spin = sim_t
+    used_rev = False
+    rec_done = None
+    was_in_180 = False
+    for _ in range(300):
+        sim_t += dt
+        telem = run_step(brain, car, segs, sim_t, dt)
+        if "REVERSE" in str(telem.get("mode", "")):
+            used_rev = True
+        in_180 = (telem.get("recovery_state") == StuckRecoveryState.CORRECTIVE_180)
+        if rec_done is None and was_in_180 and not in_180:
+            rec_done = sim_t - t_spin
+        was_in_180 = in_180
+    aligned = abs(wrap_to_pi(car.yaw - 0.0)) <= math.radians(35.0)
+    ok = aligned and (rec_done is not None)
+    return ok, f"used_rev={used_rev} rec_done={rec_done} final_yaw_deg={math.degrees(car.yaw):.1f}"
+
+
+def scenario_s4_shoved_forward_spin() -> Tuple[bool, str]:
+    brain = AutonomousBrain()
+    brain.reset((0.0, 0.0, -math.pi / 2.0))
+    car = SimCar2D(0.0, 0.0, -math.pi / 2.0)
+    segs = make_corridor_walls(width=1.0, length=40.0)
+    dt = 1.0 / 60.0
+    sim_t = 0.0
+    for _ in range(150):
+        sim_t += dt
+        run_step(brain, car, segs, sim_t, dt)
+
+    # Shove +0.95m forward and spin 180 deg
+    car.y += 0.95
+    car.yaw = math.pi
+    car.v = 0.0
+    brain.pose_tracker.y = car.y
+    brain.pose_tracker.yaw = car.yaw
+    brain.pose_tracker._imu_yaw_offset = 0.0
+
+    detect_lat = None
+    t_spin = sim_t
+    for _ in range(240):
+        sim_t += dt
+        telem = run_step(brain, car, segs, sim_t, dt)
+        if telem.get("is_wrong_way") and detect_lat is None:
+            detect_lat = sim_t - t_spin
+    aligned = abs(wrap_to_pi(car.yaw - 0.0)) <= math.radians(35.0)
+    ok = (detect_lat is not None and detect_lat <= 0.35) and aligned
+    return ok, f"detect={detect_lat} aligned={aligned} final_yaw_deg={math.degrees(car.yaw):.1f}"
+
+
+def scenario_s5_opponent_occlusion_spin() -> Tuple[bool, str]:
+    brain = AutonomousBrain()
+    brain.reset((0.0, 0.0, -math.pi / 2.0))
+    car = SimCar2D(0.0, 0.0, -math.pi / 2.0)
+    base_segs = make_corridor_walls(width=1.0, length=40.0)
+    dt = 1.0 / 60.0
+    sim_t = 0.0
+    for _ in range(150):
+        sim_t += dt
+        run_step(brain, car, base_segs, sim_t, dt)
+
+    # Spin 180 deg and place opponent box 0.80m in front (south of car) for 1.5s
+    car.yaw = math.pi
+    car.v = 0.0
+    brain.pose_tracker.yaw = car.yaw
+    brain.pose_tracker._imu_yaw_offset = 0.0
+    occ_segs = base_segs + box_segments(car.x, car.y - 0.80, half_w=0.22, half_l=0.10)
+
+    detected_during = False
+    for _ in range(90):  # 1.5 s occluded
+        sim_t += dt
+        telem = run_step(brain, car, occ_segs, sim_t, dt)
+        if telem.get("is_wrong_way"):
+            detected_during = True
+
+    # Opponent moves away -> trail must still be intact and trigger recovery if not already aligned
+    detected_after = False
+    for _ in range(210):
+        sim_t += dt
+        telem = run_step(brain, car, base_segs, sim_t, dt)
+        if telem.get("is_wrong_way"):
+            detected_after = True
+
+    aligned = abs(wrap_to_pi(car.yaw - 0.0)) <= math.radians(35.0)
+    ok = (detected_during or detected_after) and aligned
+    return ok, f"det_during={detected_during} det_after={detected_after} aligned={aligned} final_yaw_deg={math.degrees(car.yaw):.1f}"
+
+
+def scenario_s6_corner_catch_stall() -> Tuple[bool, str]:
+    brain = AutonomousBrain()
+    brain.reset((0.0, 0.0, -math.pi / 2.0))
+    car = SimCar2D(0.0, 0.0, -math.pi / 2.0)
+    segs = make_corridor_walls(width=1.0, length=40.0)
+    dt = 1.0 / 60.0
+    sim_t = 0.0
+    for _ in range(150):
+        sim_t += dt
+        run_step(brain, car, segs, sim_t, dt)
+
+    car.yaw = math.pi
+    car.v = 0.0
+    brain.pose_tracker.yaw = car.yaw
+    brain.pose_tracker._imu_yaw_offset = 0.0
+
+    # Wait for CORRECTIVE_180 to engage, then force stall for 0.6 s
+    engaged_rev = False
+    stalled_frames = 0
+    for _ in range(300):
+        sim_t += dt
+        in_180_fwd = (
+            brain.recovery_manager.state == StuckRecoveryState.CORRECTIVE_180
+            and brain.recovery_manager.corrective_substate == "FORWARD"
+        )
+        force = False
+        if in_180_fwd and stalled_frames < 36:
+            force = True
+            stalled_frames += 1
+        telem = run_step(brain, car, segs, sim_t, dt, force_stall=force)
+        if brain.recovery_manager.state == StuckRecoveryState.CORRECTIVE_180 and brain.recovery_manager.corrective_substate == "REVERSE":
+            engaged_rev = True
+
+    aligned = abs(wrap_to_pi(car.yaw - 0.0)) <= math.radians(35.0)
+    ok = engaged_rev and aligned
+    return ok, f"engaged_rev={engaged_rev} aligned={aligned} final_yaw_deg={math.degrees(car.yaw):.1f}"
+
+
+def scenario_s7_midturn_early_exit() -> Tuple[bool, str]:
+    brain = AutonomousBrain()
+    brain.reset((0.0, 0.0, 0.0))
+    for i in range(80):
+        brain.watchdog.update(0.0, i * 0.05, 0.0, v_est=2.0, yaw_rate=0.0, now_s=i * 0.05, dt=0.05)
+
+    # Mid-turn at yaw = +pi/2 (facing -X):
+    # - gap (-1.5, 0.01) points south (-Y) along old trail -> MUST reject
+    # - gap (+1.5, 0.01) points north (+Y) forward -> MUST accept
+    ok_bad, info_bad = brain.watchdog.is_gap_early_exit(0.0, 4.0, math.pi / 2.0, -1.5, 0.01)
+    ok_good, info_good = brain.watchdog.is_gap_early_exit(0.0, 4.0, math.pi / 2.0, 1.5, 0.01)
+    ok = (not ok_bad) and ok_good
+    return ok, f"wrong_way_gap_exit={ok_bad} ({info_bad['reason']}), forward_gap_exit={ok_good} ({info_good['reason']})"
+
+
+def scenario_s8_track_racing_2d_clean_lap() -> Tuple[bool, str]:
+    left_pts, right_pts = load_track_walls()
+    if len(left_pts) == 0 or len(right_pts) == 0:
+        return False, "Failed to load track_racing.wbt walls"
+    segs = segments_from_polyline(left_pts, closed=True) + segments_from_polyline(right_pts, closed=True)
+
+    brain = AutonomousBrain()
+    brain.reset((0.0, 0.0, -math.pi / 2.0))
+    car = SimCar2D(0.0, 0.0, -math.pi / 2.0)
+    dt = 1.0 / 60.0
+    sim_t = 0.0
+    ww_triggers = 0
+    dist_traveled = 0.0
+    px, py = car.x, car.y
+
+    for _ in range(900):  # 15.0 s
+        sim_t += dt
+        telem = run_step(brain, car, segs, sim_t, dt)
+        dist_traveled += math.hypot(car.x - px, car.y - py)
+        px, py = car.x, car.y
+        if telem.get("is_wrong_way"):
+            ww_triggers += 1
+
+    ok = ww_triggers == 0 and dist_traveled >= 15.0
+    return ok, f"ww_triggers={ww_triggers} dist={dist_traveled:.1f}m hits={car.wall_hits}"
+
+
+def main() -> int:
+    scenarios = [
+        ("S1_straight_180_spin", scenario_s1_straight_180_spin),
+        ("S2_hairpin_no_fp", scenario_s2_hairpin_no_fp),
+        ("S3_wall_hugging_3pt", scenario_s3_wall_hugging_3pt),
+        ("S4_shoved_forward_spin", scenario_s4_shoved_forward_spin),
+        ("S5_opponent_occlusion_spin", scenario_s5_opponent_occlusion_spin),
+        ("S6_corner_catch_stall", scenario_s6_corner_catch_stall),
+        ("S7_midturn_early_exit", scenario_s7_midturn_early_exit),
+        ("S8_track_racing_2d_clean_lap", scenario_s8_track_racing_2d_clean_lap),
+    ]
+
+    print("=" * 80)
+    print("  2D CLOSED-LOOP WRONG-WAY & RECOVERY SIMULATION BENCH")
+    print("=" * 80)
+    t0 = time.perf_counter()
+    all_ok = True
+    for name, fn in scenarios:
+        passed, detail = fn()
+        tag = "PASS" if passed else "FAIL"
+        print(f"  [{tag}] {name:30s} | {detail}")
+        if not passed:
+            all_ok = False
+    print(f"Finished in {time.perf_counter() - t0:.2f}s")
+    print("=" * 80)
+    return 0 if all_ok else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
+
+=== FILE: 1_launchers/10_track_studio.py ===
+#!/usr/bin/env python3
+"""
+================================================================================
+  10. LAUNCHER: MODULAR RACE TRACK STUDIO & WEBOTS/MAP EXPORTER
+================================================================================
+  Interactive 1200mm Tile Snapping, Custom Obstacle Drawing & Local Bundle Export.
+  Runs a zero-dependency local web server on port 8088 and opens your browser.
+
+  Usage:
+    python 1_launchers/10_track_studio.py
+================================================================================
+"""
+
+import argparse
+import base64
+import json
+import os
+import sys
+import threading
+import time
+import urllib.parse
+import webbrowser
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+
+DEFAULT_PORT = 8088
+DEFAULT_HOST = "0.0.0.0"
+
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+STATIC_DIR = os.path.join(ROOT_DIR, "5_webots", "assets", "track_builder")
+DEFAULT_OUTPUT_DIR = os.path.join(ROOT_DIR, "data", "maps")
+REQUIRED_ASSETS = ("track_builder.html", "track_builder.css", "track_builder.js")
+
+
+class TrackStudioServer(ThreadingHTTPServer):
+    allow_reuse_address = True
+
+    def __init__(self, server_address, handler_class, output_dir: str):
+        self.output_dir = os.path.abspath(output_dir)
+        super().__init__(server_address, handler_class)
+
+
+class TrackStudioHandler(SimpleHTTPRequestHandler):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, directory=STATIC_DIR, **kwargs)
+
+    def _send_json(self, status_code: int, payload: dict) -> None:
+        raw = json.dumps(payload).encode("utf-8")
+        self.send_response(status_code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def _serve_static_file(self, filename: str, content_type: str) -> None:
+        filepath = os.path.join(STATIC_DIR, filename)
+        with open(filepath, "rb") as f:
+            data = f.read()
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_GET(self):
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path in ("/", "/index.html"):
+            self._serve_static_file("track_builder.html", "text/html; charset=utf-8")
+            return
+        if parsed.path == "/track_builder.css":
+            self._serve_static_file("track_builder.css", "text/css; charset=utf-8")
+            return
+        if parsed.path == "/track_builder.js":
+            self._serve_static_file("track_builder.js", "application/javascript; charset=utf-8")
+            return
+
+        return super().do_GET()
+
+    def do_POST(self):
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path not in ("/api/save_local", "/api/deploy_to_pi"):
+            self._send_json(404, {"status": "error", "message": "Endpoint not found"})
+            return
+
+        try:
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_length)
+            data = json.loads(body.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError) as e:
+            self._send_json(400, {"status": "error", "message": f"Invalid JSON payload: {e}"})
+            return
+
+        try:
+            output_dir = self.server.output_dir
+            os.makedirs(output_dir, exist_ok=True)
+            saved_files = []
+
+            png_b64 = data.get("png_b64", "")
+            if png_b64:
+                try:
+                    png_bytes = base64.b64decode(png_b64, validate=True)
+                except Exception as e:
+                    self._send_json(400, {"status": "error", "message": f"Invalid base64 PNG data: {e}"})
+                    return
+                with open(os.path.join(output_dir, "track_map.png"), "wb") as f:
+                    f.write(png_bytes)
+                saved_files.append("track_map.png")
+
+            yaml_content = data.get("yaml", "")
+            if yaml_content:
+                with open(os.path.join(output_dir, "track_map.yaml"), "w", encoding="utf-8") as f:
+                    f.write(yaml_content)
+                saved_files.append("track_map.yaml")
+
+            track_json = data.get("track_json", "")
+            if track_json:
+                with open(os.path.join(output_dir, "track_layout.json"), "w", encoding="utf-8") as f:
+                    f.write(track_json)
+                saved_files.append("track_layout.json")
+
+            wbt_content = data.get("wbt", "")
+            if wbt_content:
+                with open(os.path.join(output_dir, "track_world.wbt"), "w", encoding="utf-8") as f:
+                    f.write(wbt_content)
+                saved_files.append("track_world.wbt")
+
+            try:
+                display_dir = os.path.relpath(output_dir, ROOT_DIR)
+            except ValueError:
+                display_dir = output_dir
+
+            print(f"[OK] Saved track bundle ({', '.join(saved_files)}) in: {output_dir}")
+            self._send_json(
+                200,
+                {
+                    "status": "ok",
+                    "message": f"Saved track bundle to {display_dir}",
+                    "files": saved_files,
+                },
+            )
+        except Exception as e:
+            self._send_json(500, {"status": "error", "message": str(e)})
+
+
+def validate_static_assets() -> bool:
+    if not os.path.isdir(STATIC_DIR):
+        print(f"[ERROR] Track Studio static directory not found: {STATIC_DIR}", file=sys.stderr)
+        return False
+    missing = [name for name in REQUIRED_ASSETS if not os.path.isfile(os.path.join(STATIC_DIR, name))]
+    if missing:
+        print(
+            f"[ERROR] Missing required Track Studio assets in {STATIC_DIR}: {', '.join(missing)}",
+            file=sys.stderr,
+        )
+        return False
+    return True
+
+
+def run_server(host: str, port: int, output_dir: str, open_browser_tab: bool = True) -> None:
+    if not validate_static_assets():
+        sys.exit(1)
+
+    print("=" * 70)
+    print("  10. MODULAR RACE TRACK STUDIO & WEBOTS/MAP EXPORTER")
+    print(f"  WEB STUDIO READY AT: http://localhost:{port}")
+    print(f"  LOCAL BUNDLE DIR:    {os.path.abspath(output_dir)}")
+    print("=" * 70)
+
+    server = TrackStudioServer((host, port), TrackStudioHandler, output_dir=output_dir)
+
+    if open_browser_tab:
+        def open_browser():
+            time.sleep(0.5)
+            webbrowser.open(f"http://localhost:{port}")
+
+        threading.Thread(target=open_browser, daemon=True).start()
+
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\n[Track Studio Stopped]")
+    finally:
+        server.server_close()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Folkrace Modular Race Track Studio (Launcher 10)")
+    parser.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"HTTP port (default: {DEFAULT_PORT})")
+    parser.add_argument("--host", default=DEFAULT_HOST, help=f"Bind address (default: {DEFAULT_HOST})")
+    parser.add_argument(
+        "--output-dir",
+        default=DEFAULT_OUTPUT_DIR,
+        help=f"Local export bundle directory (default: {DEFAULT_OUTPUT_DIR})",
+    )
+    parser.add_argument("--no-browser", action="store_true", help="Do not open a browser window automatically")
+    args = parser.parse_args()
+
+    run_server(
+        host=args.host,
+        port=args.port,
+        output_dir=args.output_dir,
+        open_browser_tab=not args.no_browser,
+    )
+
+
+if __name__ == "__main__":
+    main()
+
+
+=== FILE: 1_launchers/1_champion_preview.py ===
+"""
+================================================================================
+  LAUNCHER: C++ SL-MPC CHAMPION 3D REPLAY PREVIEW (DYNAMIC OBSTACLES)
+================================================================================
+  Launches Webots real-time mode with track_racing.wbt AND spawns the live
+  PyQt5 2D Telemetry GUI alongside it by default.
+  Loads the champion CMA-ES genome, enables 3 dynamic moving obstacles, and
+  evaluates lap times with full 3D visual preview.
+
+  Usage:
+    python 1_launchers/1_champion_preview.py             (Track 2 default: Webots + Live GUI)
+    python 1_launchers/1_champion_preview.py --track 1   (Track 1: Forward opponents)
+    python 1_launchers/1_champion_preview.py --no-gui    (Webots only)
+================================================================================
+"""
+
+import os
+import sys
+import time
+import json
+import argparse
+import subprocess
+
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+WEBOTS_DIR = os.path.join(ROOT_DIR, "5_webots")
+MY_PROJECT_DIR = os.path.join(WEBOTS_DIR, "simulation", "my_project")
+WORLD_PATH = os.path.join(MY_PROJECT_DIR, "worlds", "track_racing.wbt")
+GA_OPTIMIZER_DIR = os.path.join(WEBOTS_DIR, "optimization", "ga_planner_optimizer")
+PLANNERS_DIR = os.path.join(MY_PROJECT_DIR, "controllers", "tof_path_planner")
+WEBOTS_BIN = r"C:\Program Files\Webots\msys64\mingw64\bin\webots.exe"
+
+BEST_GENOME_PATH = os.path.join(GA_OPTIMIZER_DIR, "best_planner_genome.json")
+ACTIVE_CHAMPION_INFO = {}
+
+
+def activate_champion_config(track: int = 2) -> bool:
+    global ACTIVE_CHAMPION_INFO
+
+    if not os.path.isfile(BEST_GENOME_PATH):
+        print(f"[Error] Champion file does not exist: {BEST_GENOME_PATH}")
+        return False
+
+    try:
+        with open(BEST_GENOME_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        genes = data.get("genes") or data.get("best_genome")
+        if not genes:
+            print(f"[Error] No 'genes' or 'best_genome' found in {BEST_GENOME_PATH}")
+            return False
+
+        fitness = data.get("fitness", data.get("best_fitness", 0.0))
+        metrics = data.get("metrics", data.get("best_metrics", {}))
+        planner = data.get("planner", "OPTION_2_SL_MPC")
+        title = data.get("title", f"{planner} Best Champion (Fitness {fitness})")
+        ACTIVE_CHAMPION_INFO = {"title": title, "fitness": fitness}
+
+        dist = metrics.get("distance_m", "N/A")
+        speed = metrics.get("mean_speed_mps", "N/A")
+        laps = metrics.get("laps_completed", "N/A")
+        track_label = "Track 2 (Reverse Opponents)" if track == 2 else "Track 1 (Forward Opponents)"
+
+        print(f"[Ready] Activated best GA champion genome:")
+        print(f"        Source:   {os.path.basename(BEST_GENOME_PATH)}")
+        print(f"        Title:    {title}")
+        print(f"        Fitness:  {fitness}")
+        print(f"        Stats:    Dist: {dist}m | Speed: {speed}m/s | Laps: {laps}")
+        print(f"        Mode:     {track_label}")
+        return True
+    except Exception as e:
+        print(f"[Error] Failed to activate configuration: {e}")
+        return False
+
+
+def _kill_proc(proc):
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        if sys.platform == "win32":
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=4)
+        else:
+            proc.terminate()
+            proc.wait(timeout=3)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
+def launch_webots(launch_gui: bool = True, telemetry_hz: int = 60, track: int = 2):
+    if not os.path.exists(WEBOTS_BIN):
+        print(f"[Error] Webots executable not found at {WEBOTS_BIN}")
+        return
+
+    if not os.path.exists(WORLD_PATH):
+        print(f"[Error] World file not found at {WORLD_PATH}")
+        return
+
+    env = os.environ.copy()
+    webots_home = r"C:\Program Files\Webots"
+    webots_bin_dir = os.path.dirname(WEBOTS_BIN)
+    py_dir = os.path.dirname(sys.executable)
+    py_scripts = os.path.join(py_dir, "Scripts")
+
+    env["WEBOTS_HOME"] = webots_home
+    env["PATH"] = webots_bin_dir + os.pathsep + py_dir + os.pathsep + py_scripts + os.pathsep + env.get("PATH", "")
+    env["PYTHONPATH"] = os.pathsep.join([
+        PLANNERS_DIR,
+        os.path.join(GA_OPTIMIZER_DIR, "data"),
+        GA_OPTIMIZER_DIR,
+        MY_PROJECT_DIR,
+        ROOT_DIR,
+    ])
+    env["WEBOTS_CONTROLLER_MODE"] = "preview"
+    env["WEBOTS_TELEMETRY_HZ"] = str(telemetry_hz)
+    env["FOLKRACE_OBS_DIRECTION"] = "-1" if track == 2 else "1"
+    env["PYTHONUNBUFFERED"] = "1"
+
+    gui_proc = None
+    if launch_gui:
+        gui_script = os.path.join(PLANNERS_DIR, "planner_gui.py")
+        if os.path.exists(gui_script):
+            print(f"[1/2] Spawning Live Telemetry Map GUI (Port 9876, Stream: {telemetry_hz} Hz)...", flush=True)
+            gui_proc = subprocess.Popen([sys.executable, gui_script, "--telemetry-hz", str(telemetry_hz), "--local-only"], cwd=PLANNERS_DIR, env=env)
+            time.sleep(0.6)
+
+    cmd = [
+        WEBOTS_BIN,
+        "--stdout",
+        "--stderr",
+        "--mode=realtime",
+        WORLD_PATH,
+    ]
+
+    champ_title = ACTIVE_CHAMPION_INFO.get("title", "Best GA Champion")
+    track_label = "Track 2 (Reverse Opponents)" if track == 2 else "Track 1 (Forward Opponents)"
+    print("=" * 80)
+    print(f"  LAUNCHING REAL-TIME 3D WEBOTS CHAMPION PREVIEW + LIVE TELEMETRY GUI ({telemetry_hz} Hz)")
+    print(f"  World:        {WORLD_PATH}")
+    print(f"  Track Mode:   {track_label}")
+    print(f"  Champion:     {champ_title}")
+    print(f"  Telemetry Hz: {telemetry_hz} Hz (Adjustable live via GUI slider 1-60 Hz)")
+    print("=" * 80)
+
+    print(f"[{'2/2' if gui_proc else '1/1'}] Launching Webots simulation...", flush=True)
+    webots_proc = subprocess.Popen(cmd, env=env, cwd=MY_PROJECT_DIR)
+
+    def cleanup():
+        if webots_proc and webots_proc.poll() is None:
+            _kill_proc(webots_proc)
+        if gui_proc and gui_proc.poll() is None:
+            _kill_proc(gui_proc)
+
+    import atexit
+    atexit.register(cleanup)
+
+    try:
+        while True:
+            gui_done = gui_proc is not None and gui_proc.poll() is not None
+            webots_done = webots_proc.poll() is not None
+            if gui_done:
+                print("\n[Launcher] Telemetry GUI closed. Terminating Webots simulation...", flush=True)
+                break
+            if webots_done:
+                print("\n[Launcher] Webots simulation closed. Terminating Telemetry GUI...", flush=True)
+                break
+            time.sleep(0.3)
+    except KeyboardInterrupt:
+        print("\n[Launcher] User interrupted session. Shutting down cleanly...", flush=True)
+    finally:
+        cleanup()
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Launch Webots Real-Time Preview with C++ SL-MPC Champion Config")
+    parser.add_argument("--track", type=int, choices=(1, 2), default=2, help="Track mode: 1 = Forward opponents, 2 = Reverse opponents (default)")
+    parser.add_argument("--reverse", action="store_true", help="Shortcut for --track 2 (reverse opponents)")
+    parser.add_argument("--no-gui", action="store_true", help="Do not launch live 2D telemetry map GUI alongside Webots")
+    parser.add_argument("--no-launch", action="store_true", help="Only set active config without launching Webots")
+    parser.add_argument("--telemetry-hz", "--hz", type=int, default=60, help="Initial streaming frequency for GUI and Webots terminal telemetry (1-60 Hz, default: 60)")
+
+    args = parser.parse_args()
+    track = 2 if args.reverse else args.track
+    telem_hz = max(1, min(60, args.telemetry_hz))
+
+    if not activate_champion_config(track=track):
+        return
+
+    if not args.no_launch:
+        launch_webots(launch_gui=not args.no_gui, telemetry_hz=telem_hz, track=track)
+
+
+if __name__ == "__main__":
+    main()
+
+
+=== FILE: 1_launchers/2_fast_champion_drive.py ===
+"""
+================================================================================
+  LAUNCHER: FAST CHAMPION PURE 3D DRIVE (MAX REAL-TIME PERFORMANCE)
+================================================================================
+  Launches Webots real-time mode with track_racing.wbt for direct 3D visual
+  driving evaluation with dynamic moving obstacles.
+
+  Stripped of all background GUI processes, high-rate UDP broadcast streaming,
+  viewport HUD overlay drawing, and stdout terminal flooding for maximum native
+  physics and real-time driving performance.
+
+  Usage:
+    python 1_launchers/2_fast_champion_drive.py           (Track 2 default: Reverse opponents)
+    python 1_launchers/2_fast_champion_drive.py --track 1 (Track 1: Forward opponents)
+    python 1_launchers/2_fast_champion_drive.py --reverse (Track 2: Reverse opponents)
+================================================================================
+"""
+
+import argparse
+import os
+import sys
+import time
+import json
+import subprocess
+
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+WEBOTS_DIR = os.path.join(ROOT_DIR, "5_webots")
+MY_PROJECT_DIR = os.path.join(WEBOTS_DIR, "simulation", "my_project")
+WORLD_PATH = os.path.join(MY_PROJECT_DIR, "worlds", "track_racing.wbt")
+GA_OPTIMIZER_DIR = os.path.join(WEBOTS_DIR, "optimization", "ga_planner_optimizer")
+BEST_GENOME_PATH = os.path.join(GA_OPTIMIZER_DIR, "best_planner_genome.json")
+WEBOTS_BIN = r"C:\Program Files\Webots\msys64\mingw64\bin\webots.exe"
+
+
+def activate_champion_config(track: int = 2) -> bool:
+    if not os.path.isfile(BEST_GENOME_PATH):
+        print(f"[Error] Champion genome file does not exist: {BEST_GENOME_PATH}")
+        return False
+
+    try:
+        with open(BEST_GENOME_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        genes = data.get("genes") or data.get("best_genome")
+        if not genes:
+            print(f"[Error] No 'genes' or 'best_genome' found in {BEST_GENOME_PATH}")
+            return False
+
+        fitness = data.get("fitness", data.get("best_fitness", 0.0))
+        metrics = data.get("metrics", data.get("best_metrics", {}))
+        planner = data.get("planner", "OPTION_2_SL_MPC")
+        title = data.get("title", f"{planner} Best Champion (Fitness {fitness})")
+
+        dist = metrics.get("distance_m", "N/A")
+        speed = metrics.get("mean_speed_mps", "N/A")
+        laps = metrics.get("laps_completed", "N/A")
+        track_label = "Track 2 (Reverse Opponents)" if track == 2 else "Track 1 (Forward Opponents)"
+
+        print("=" * 80)
+        print("  FAST CHAMPION PURE 3D DRIVE - MAX REAL-TIME PERFORMANCE")
+        print("=" * 80)
+        print(f"[Ready] Activated Champion: {title}")
+        print(f"        Fitness: {fitness} | Dist: {dist}m | Speed: {speed}m/s | Laps: {laps}")
+        print(f"        World:   {os.path.basename(WORLD_PATH)} | {track_label}")
+        print("=" * 80)
+        return True
+    except Exception as e:
+        print(f"[Error] Failed to activate configuration: {e}")
+        return False
+
+
+def _kill_proc(proc):
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        if sys.platform == "win32":
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=4)
+        else:
+            proc.terminate()
+            proc.wait(timeout=3)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Fast Champion Pure 3D Drive Launcher")
+    parser.add_argument(
+        "--track",
+        type=int,
+        choices=(1, 2),
+        default=2,
+        help="Track mode: 1 = Forward opponents, 2 = Reverse opponents (default)",
+    )
+    parser.add_argument(
+        "--reverse",
+        action="store_true",
+        help="Shortcut for --track 2 (reverse opponents)",
+    )
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+    track = 2 if args.reverse else args.track
+
+    if not activate_champion_config(track=track):
+        sys.exit(1)
+
+    webots_cmd = WEBOTS_BIN if os.path.isfile(WEBOTS_BIN) else "webots"
+
+    env = os.environ.copy()
+    webots_home = r"C:\Program Files\Webots"
+    webots_bin_dir = os.path.dirname(webots_cmd) if os.path.isabs(webots_cmd) else os.path.dirname(WEBOTS_BIN)
+    py_dir = os.path.dirname(sys.executable)
+    py_scripts = os.path.join(py_dir, "Scripts")
+    planners_dir = os.path.join(MY_PROJECT_DIR, "controllers", "tof_path_planner")
+
+    env["WEBOTS_HOME"] = webots_home
+    env["PATH"] = webots_bin_dir + os.pathsep + py_dir + os.pathsep + py_scripts + os.pathsep + env.get("PATH", "")
+    env["PYTHONPATH"] = os.pathsep.join([
+        planners_dir,
+        os.path.join(GA_OPTIMIZER_DIR, "data"),
+        GA_OPTIMIZER_DIR,
+        MY_PROJECT_DIR,
+        ROOT_DIR,
+    ])
+    env["PYTHONUNBUFFERED"] = "1"
+    env["WEBOTS_CONTROLLER_MODE"] = "fast_drive"
+    env["FOLKRACE_OBS_DIRECTION"] = "-1" if track == 2 else "1"
+
+    cmd = [
+        webots_cmd,
+        "--stdout",
+        "--stderr",
+        "--mode=realtime",
+        WORLD_PATH,
+    ]
+
+    print(f"[Launcher] Launching Webots in realtime 3D visualization mode...")
+    webots_proc = subprocess.Popen(cmd, env=env, cwd=MY_PROJECT_DIR)
+
+    import atexit
+    atexit.register(_kill_proc, webots_proc)
+
+    try:
+        while True:
+            if webots_proc.poll() is not None:
+                print("\n[Launcher] Webots closed.")
+                break
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        print("\n[Launcher] Interrupt caught. Terminating Webots...")
+    finally:
+        _kill_proc(webots_proc)
+        print("[Launcher] Clean exit.")
+
+
+if __name__ == "__main__":
+    main()
+
+
+=== FILE: 1_launchers/3_ga_dashboard.py ===
+"""
+================================================================================
+  LAUNCHER: REAL-TIME GENETIC ALGORITHM PERFORMANCE DASHBOARD
+================================================================================
+  Launches the real-time PyQt5 GA Dashboard GUI with live Matplotlib plots,
+  pause/resume controls, and multi-generation tracking.
+
+  Usage:
+    python 1_launchers/3_ga_dashboard.py
+================================================================================
+"""
+
+import os
+import sys
+import subprocess
+
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+GA_DIR = os.path.join(ROOT_DIR, "5_webots", "optimization", "ga_planner_optimizer")
+GUI_SCRIPT = os.path.join(GA_DIR, "ga_dashboard_gui.py")
+
+if __name__ == "__main__":
+    cmd = [sys.executable, GUI_SCRIPT] + sys.argv[1:]
+    sys.exit(subprocess.run(cmd, cwd=GA_DIR).returncode)
+
+

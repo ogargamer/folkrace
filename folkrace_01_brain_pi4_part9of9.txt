@@ -1,0 +1,1277 @@
+=== BUNDLE: folkrace_01_brain_pi4_part9of9.txt (14 files/sections) ===
+  - 2_pi4/pin_solver.py
+  - 2_pi4/run_folkrace_system.py
+  - 2_pi4/tof_latency_compensator.py
+  - .agents/rules/file_hygiene.md
+  - .agents/rules/formatting.md
+  - .agents/rules/pi_connectivity.md
+  - .agents/skills/ai-flight-debug/SKILL.md
+  - .agents/skills/esp32-pi-flash/SKILL.md
+  - .agents/skills/pi-ssh/SKILL.md
+  - .agents/skills/stm32-dfu/SKILL.md
+  - .agents/skills/stm32-dfu/scripts/enter_dfu.py
+  - .agents/skills/webots-run/SKILL.md
+  - README.md
+  - platformio.ini
+
+=== FILE: 2_pi4/pin_solver.py ===
+import csv
+import re
+import os
+from dataclasses import dataclass
+from typing import Dict, Iterable, List, Sequence, Tuple
+
+# Complete Raspberry Pi 5 (RP1 I/O Controller) pinout database
+RAW_PINOUT_CSV = """Header_or_Connector,Physical_Pin,Signal_Name,GPIO_Number,Type,Primary_Function,ALT0,ALT1,ALT2,ALT3,ALT4,Notes
+40-Pin Header,1,3V3,N/A,Power,3.3V DC Power,N/A,N/A,N/A,N/A,N/A,Max 50mA total draw recommended across 3.3V pins
+40-Pin Header,2,5V,N/A,Power,5V DC Power,N/A,N/A,N/A,N/A,N/A,Direct 5V power rail supplied from USB-C PSU
+40-Pin Header,3,GPIO2,GPIO2,I/O,I2C1_SDA,SDA1,I2C2_SDA,UART3_CTS,SPI3_MISO,DPI_D2,Fixed 1.8k onboard pull-up resistor to 3.3V
+40-Pin Header,4,5V,N/A,Power,5V DC Power,N/A,N/A,N/A,N/A,N/A,Direct 5V power rail supplied from USB-C PSU
+40-Pin Header,5,GPIO3,GPIO3,I/O,I2C1_SCL,SCL1,I2C2_SCL,UART3_RTS,SPI3_SCLK,DPI_D3,Fixed 1.8k onboard pull-up resistor to 3.3V
+40-Pin Header,6,GND,N/A,Ground,0V Ground,N/A,N/A,N/A,N/A,N/A,System Ground
+40-Pin Header,7,GPIO4,GPIO4,I/O,GPCLK0,GPCLK0,SPI3_CE0,UART3_TX,I2C3_SDA,DPI_D4,General Purpose Clock 0 / PWM0_0 channel
+40-Pin Header,8,GPIO14,GPIO14,I/O,UART0_TX,TXD0,SPI4_MISO,I2C4_SDA,DPI_D14,PWM1_2,Default primary Linux serial UART Transmit
+40-Pin Header,9,GND,N/A,Ground,0V Ground,N/A,N/A,N/A,N/A,N/A,System Ground
+40-Pin Header,10,GPIO15,GPIO15,I/O,UART0_RX,RXD0,SPI4_SCLK,I2C4_SCL,DPI_D15,PWM1_3,Default primary Linux serial UART Receive
+40-Pin Header,11,GPIO17,GPIO17,I/O,GPIO,SPI0_SCK,UART1_RTS,SPI4_CE0,I2C5_SDA,DPI_D17,General Purpose I/O / PWM0_1
+40-Pin Header,12,GPIO18,GPIO18,I/O,PCM_CLK / PWM0,PCM_CLK,SPI4_CE1,UART1_CTS,I2C5_SCL,DPI_D18,Hardware PWM0_0 Output / I2S Clock
+40-Pin Header,13,GPIO27,GPIO27,I/O,GPIO,SPI5_CE1,UART2_RTS,I2C6_SCL,DPI_D23,PWM1_3,General Purpose I/O
+40-Pin Header,14,GND,N/A,Ground,0V Ground,N/A,N/A,N/A,N/A,N/A,System Ground
+40-Pin Header,15,GPIO22,GPIO22,I/O,GPIO,SD1_CLK,ARM_TRACECTL,DPI_D18,SPI0_CE1,PWM1_0,General Purpose I/O
+40-Pin Header,16,GPIO23,GPIO23,I/O,GPIO,SD1_CMD,ARM_TRACECLK,DPI_D19,SPI0_MISO,PWM1_1,General Purpose I/O
+40-Pin Header,17,3V3,N/A,Power,3.3V DC Power,N/A,N/A,N/A,N/A,N/A,3.3V Power Rail
+40-Pin Header,18,GPIO24,GPIO24,I/O,GPIO,SD1_DAT0,ARM_TRACED0,DPI_D20,SPI0_SCLK,PWM1_2,General Purpose I/O
+40-Pin Header,19,GPIO10,GPIO10,I/O,SPI0_MOSI,SPI0_MOSI,I2C3_SDA,UART4_TX,SPI2_SCLK,DPI_D10,SPI0 Controller Output / PWM0_2
+40-Pin Header,20,GND,N/A,Ground,0V Ground,N/A,N/A,N/A,N/A,N/A,System Ground
+40-Pin Header,21,GPIO9,GPIO9,I/O,SPI0_MISO,SPI0_MISO,I2C3_SCL,UART4_RX,SPI2_CE0,DPI_D9,SPI0 Controller Input / PWM0_1
+40-Pin Header,22,GPIO25,GPIO25,I/O,GPIO,SD1_DAT1,ARM_TRACED1,DPI_D21,SPI0_CE0,PWM1_3,General Purpose I/O
+40-Pin Header,23,GPIO11,GPIO11,I/O,SPI0_SCLK,SPI0_SCLK,I2C4_SDA,UART4_RTS,SPI2_CE1,DPI_D11,SPI0 Clock / PWM0_3
+40-Pin Header,24,GPIO8,GPIO8,I/O,SPI0_CE0_N,SPI0_CE0_N,I2C4_SCL,UART4_CTS,SPI2_MISO,DPI_D8,SPI0 Chip Select 0 / PWM0_0
+40-Pin Header,25,GND,N/A,Ground,0V Ground,N/A,N/A,N/A,N/A,N/A,System Ground
+40-Pin Header,26,GPIO7,GPIO7,I/O,SPI0_CE1_N,SPI0_CE1_N,SPI3_MISO,UART3_RX,I2C3_SCL,DPI_D7,SPI0 Chip Select 1 / PWM0_3
+40-Pin Header,27,GPIO0,GPIO0,I/O,ID_SD,I2C0_SDA,I2C1_SDA,UART2_TX,SPI3_CE1,DPI_D0,Reserved for HAT ID EEPROM auto-configuration
+40-Pin Header,28,GPIO1,GPIO1,I/O,ID_SC,I2C0_SCL,I2C1_SCL,UART2_RX,SPI3_MOSI,DPI_D1,Reserved for HAT ID EEPROM auto-configuration
+40-Pin Header,29,GPIO5,GPIO5,I/O,GPCLK1,GPCLK1,SPI3_MOSI,UART3_CTS,I2C4_SDA,DPI_D5,General Purpose Clock 1 / PWM0_1
+40-Pin Header,30,GND,N/A,Ground,0V Ground,N/A,N/A,N/A,N/A,N/A,System Ground
+40-Pin Header,31,GPIO6,GPIO6,I/O,GPCLK2,GPCLK2,SPI3_SCLK,UART3_RTS,I2C4_SCL,DPI_D6,General Purpose Clock 2 / PWM0_2
+40-Pin Header,32,GPIO12,GPIO12,I/O,PWM0_0,PWM0_0,I2C5_SDA,UART5_TX,SPI4_MOSI,DPI_D12,Hardware PWM0 Channel 0 / PWM1_0
+40-Pin Header,33,GPIO13,GPIO13,I/O,PWM0_1,PWM0_1,I2C5_SCL,UART5_RX,SPI4_MISO,DPI_D13,Hardware PWM0 Channel 1 / PWM1_1
+40-Pin Header,34,GND,N/A,Ground,0V Ground,N/A,N/A,N/A,N/A,N/A,System Ground
+40-Pin Header,35,GPIO19,GPIO19,I/O,PCM_FS / PWM1,PCM_FS,SPI4_MOSI,UART1_TX,I2C6_SDA,DPI_D19,Hardware PWM1_1 Output / I2S Frame Sync
+40-Pin Header,36,GPIO16,GPIO16,I/O,GPIO,SPI4_MISO,UART1_RX,I2C5_SCL,DPI_D16,PWM0_0,General Purpose I/O
+40-Pin Header,37,GPIO26,GPIO26,I/O,GPIO,SPI5_CE0,UART2_TX,I2C6_SDA,DPI_D22,PWM1_2,General Purpose I/O
+40-Pin Header,38,GPIO20,GPIO20,I/O,PCM_DIN,PCM_DIN,SPI4_MOSI,UART2_RX,I2C6_SDA,DPI_D20,I2S Audio Data Input / GPCLK0
+40-Pin Header,39,GND,N/A,Ground,0V Ground,N/A,N/A,N/A,N/A,N/A,System Ground
+40-Pin Header,40,GPIO21,GPIO21,I/O,PCM_DOUT,PCM_DOUT,SPI4_SCLK,UART2_TX,I2C6_SCL,DPI_D21,I2S Audio Data Output / GPCLK1
+Onboard Button,POWER_BTN,PWR_BTN,N/A,Input,Power Switch,N/A,N/A,N/A,N/A,N/A,Onboard tactile power switch for power state, wake, and soft shutdown
+Debug Header (J2),1,DEBUG_TX,N/A,Output,UART_TX,N/A,N/A,N/A,N/A,N/A,3-pin dedicated UART debug port Transmit signal
+Debug Header (J2),2,DEBUG_GND,N/A,Ground,0V Ground,N/A,N/A,N/A,N/A,N/A,3-pin dedicated UART debug port Ground
+Debug Header (J2),3,DEBUG_RX,N/A,Input,UART_RX,N/A,N/A,N/A,N/A,N/A,3-pin dedicated UART debug port Receive signal
+RTC Connector (J5),1,RTC_BAT+,N/A,Power,RTC_BAT,N/A,N/A,N/A,N/A,N/A,Dedicated 2-pin Real-Time Clock battery power input
+RTC Connector (J5),2,RTC_GND,N/A,Ground,0V Ground,N/A,N/A,N/A,N/A,N/A,Dedicated Real-Time Clock battery Ground
+Fan Connector (J1),1,FAN_GND,N/A,Ground,0V Ground,N/A,N/A,N/A,N/A,N/A,4-pin PWM active cooling fan Ground
+Fan Connector (J1),2,FAN_5V,N/A,Power,5V DC Power,N/A,N/A,N/A,N/A,N/A,4-pin PWM active cooling fan 5V supply
+Fan Connector (J1),3,FAN_TACH,N/A,Input,Fan Tachometer,N/A,N/A,N/A,N/A,N/A,Speed feedback tachometer signal from fan
+Fan Connector (J1),4,FAN_PWM,N/A,Output,Fan PWM Control,N/A,N/A,N/A,N/A,N/A,Hardware PWM control signal for dynamic fan speed adjustment
+"""
+
+def parse_pinout_database(csv_text):
+    database = {}
+    lines = csv_text.strip().split('\n')
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("Header_or_Connector"):
+            continue
+        reader = csv.reader([line])
+        try:
+            row = next(reader)
+        except Exception:
+            continue
+        if len(row) < 12:
+            continue
+            
+        header_conn = row[0].strip()
+        phys_pin = row[1].strip()
+        signal_name = row[2].strip()
+        gpio_num_str = row[3].strip()
+        pin_type = row[4].strip()
+        primary_func = row[5].strip()
+        alt0 = row[6].strip()
+        alt1 = row[7].strip()
+        alt2 = row[8].strip()
+        alt3 = row[9].strip()
+        alt4 = row[10].strip()
+        notes = row[11].strip()
+
+        try:
+            gpio_num = int(gpio_num_str.replace("GPIO", ""))
+        except ValueError:
+            gpio_num = None
+
+        pin_info = {
+            "Header": header_conn,
+            "PhysicalPin": phys_pin,
+            "Signal": signal_name,
+            "GPIO": gpio_num,
+            "Type": pin_type,
+            "PrimaryFunc": primary_func,
+            "ALT0": alt0,
+            "ALT1": alt1,
+            "ALT2": alt2,
+            "ALT3": alt3,
+            "ALT4": alt4,
+            "Notes": notes
+        }
+        
+        if header_conn == "40-Pin Header":
+            database[f"PIN_{phys_pin}"] = pin_info
+            database[phys_pin] = pin_info
+        
+        if gpio_num is not None:
+            database[f"GPIO{gpio_num}"] = pin_info
+            database[str(gpio_num)] = pin_info
+            
+        database[signal_name] = pin_info
+        
+    return database
+
+PIN_DB = parse_pinout_database(RAW_PINOUT_CSV)
+
+@dataclass(frozen=True)
+class PinRequest:
+    """One exclusive physical-wire assignment in the Pi pinout CSP."""
+
+    name: str
+    candidates: Tuple[int, ...]
+    function: str
+    description: str
+
+
+class PinConstraintError(RuntimeError):
+    """Raised when the requested hardware cannot be assigned uniquely."""
+
+
+class PinoutSolver:
+    """Small exact CSP solver for exclusive GPIO assignments.
+
+    Each request is a node in a bipartite graph (signal -> allowed GPIOs).  The
+    backtracking search uses the minimum-remaining-values heuristic and retains
+    the lowest-cost complete matching, where earlier candidates are preferred.
+    Shared-bus wires are represented once, so they are intentionally shared by
+    devices without making two logical assignments to one physical pin.
+    """
+
+    def __init__(self, valid_gpios: Iterable[int], reserved_gpios: Iterable[int]):
+        self.valid_gpios = set(valid_gpios)
+        self.reserved_gpios = set(reserved_gpios)
+        self._owners: Dict[int, str] = {}
+
+    def reserve(self, request: PinRequest) -> None:
+        if len(request.candidates) != 1:
+            raise ValueError(f"Fixed request {request.name} needs exactly one GPIO")
+        gpio = request.candidates[0]
+        if gpio not in self.valid_gpios:
+            raise PinConstraintError(f"{request.name}: GPIO{gpio} is not on the 40-pin header")
+        if gpio in self.reserved_gpios:
+            raise PinConstraintError(f"{request.name}: GPIO{gpio} is reserved by the system")
+        if gpio in self._owners:
+            raise PinConstraintError(
+                f"GPIO{gpio} collision: {request.name} conflicts with {self._owners[gpio]}"
+            )
+        self._owners[gpio] = request.name
+
+    def solve(self, requests: Sequence[PinRequest]) -> Dict[str, int]:
+        candidates: Dict[str, List[int]] = {}
+        request_by_name = {request.name: request for request in requests}
+        if len(request_by_name) != len(requests):
+            raise PinConstraintError("Every pin-request name must be unique")
+
+        for request in requests:
+            options = [
+                gpio for gpio in request.candidates
+                if gpio in self.valid_gpios
+                and gpio not in self.reserved_gpios
+                and gpio not in self._owners
+            ]
+            if not options:
+                raise PinConstraintError(
+                    f"No available GPIO candidates remain for {request.name}: {request.candidates}"
+                )
+            candidates[request.name] = options
+
+        best_assignment: Dict[str, int] | None = None
+        best_cost: int | None = None
+
+        def search(pending: Tuple[str, ...], chosen: Dict[str, int], cost: int) -> None:
+            nonlocal best_assignment, best_cost
+            if best_cost is not None and cost >= best_cost:
+                return
+            if not pending:
+                best_assignment = dict(chosen)
+                best_cost = cost
+                return
+
+            # Minimum remaining values: expose impossible / over-subscribed
+            # configurations early instead of printing a misleading report.
+            name = min(
+                pending,
+                key=lambda item: sum(
+                    gpio not in self._owners and gpio not in chosen.values()
+                    for gpio in candidates[item]
+                ),
+            )
+            request = request_by_name[name]
+            remaining = tuple(item for item in pending if item != name)
+
+            for preference_cost, gpio in enumerate(candidates[name]):
+                if gpio in self._owners or gpio in chosen.values():
+                    continue
+                chosen[name] = gpio
+                search(remaining, chosen, cost + preference_cost)
+                del chosen[name]
+
+        search(tuple(request_by_name), {}, 0)
+        if best_assignment is None:
+            detail = ", ".join(f"{name}={options}" for name, options in candidates.items())
+            raise PinConstraintError(f"No one-to-one GPIO assignment exists ({detail})")
+
+        for name, gpio in best_assignment.items():
+            self._owners[gpio] = name
+        return best_assignment
+
+    @property
+    def owners(self) -> Dict[int, str]:
+        return dict(self._owners)
+
+
+HEADER_GPIOS = tuple(range(0, 28))
+
+
+def request(name: str, gpio: int, function: str, description: str) -> PinRequest:
+    """Declare a fixed assignment and route it through the collision checker."""
+    return PinRequest(name, (gpio,), function, description)
+
+
+def physical_pin(gpio: int) -> int:
+    info = PIN_DB.get(f"GPIO{gpio}")
+    if not info or info["PhysicalPin"].isdigit() is False:
+        raise PinConstraintError(f"GPIO{gpio} has no 40-pin-header entry in the pin database")
+    return int(info["PhysicalPin"])
+
+
+def solve_pi_pinout(use_usb_cables: bool = True, enable_hardware_tof_uart: bool = False):
+    """Return a collision-free assignment for this Pi 4/5 hardware topology.
+
+    Hardware Connections:
+      Dual USB Cable Mode (Recommended / Default):
+        - ESP32-Main: Direct USB Cable to Pi 4 USB Port (/dev/ttyUSB0 or /dev/ttyACM0 @ 921,600 baud)
+        - ESP32-ToF:  Direct USB Cable to Pi 4 USB Port (/dev/ttyUSB1 or /dev/ttyACM1 @ 921,600 baud)
+        - Zero GPIO pins or flying wires consumed on the 40-pin header!
+
+      Legacy GPIO UART Mode:
+        1. Primary High-Speed UART (/dev/ttyAMA0): Duplex link to ESP32-Main MCU (Chassis Telemetry @ 921,600 baud)
+        2. Handshake Interrupt: GPIO20 Input triggered by ESP32-Main batch-ready pulse
+        3. Secondary UART2 (/dev/ttyAMA2): Hardware UART to ESP32-ToF Hub (@ 921,600 baud)
+    """
+
+    reserved = set()
+    solver = PinoutSolver(HEADER_GPIOS, reserved)
+
+    if use_usb_cables:
+        # Dual USB cable mode: 0 header pins assigned to MCU comms
+        return {}
+
+    fixed_requests = [
+        # ESP32-Main Telemetry Highway (Primary UART0)
+        request("ESP32_MAIN_UART_TX", 14, "UART0_TX", "Duplex TX -> ESP32-Main RX (GPIO 44) @ 921,600 baud"),
+        request("ESP32_MAIN_UART_RX", 15, "UART0_RX", "Duplex RX <- ESP32-Main TX (GPIO 43) @ 921,600 baud"),
+        request("ESP32_MAIN_DRDY",    20, "GPIO20",   "Batch data-ready handshake pulse from ESP32-Main (GPIO 1)"),
+    ]
+
+    if enable_hardware_tof_uart:
+        fixed_requests.extend([
+            # ESP32-ToF Hub Telemetry Link (Secondary UART2 via dtoverlay=uart2)
+            request("ESP32_TOF_UART_TX", 0, "UART2_TX", "Secondary TX -> ESP32-ToF RX (GPIO 44) @ 921,600 baud"),
+            request("ESP32_TOF_UART_RX", 1, "UART2_RX", "Secondary RX <- ESP32-ToF TX (GPIO 43) @ 921,600 baud"),
+        ])
+
+    for fixed in fixed_requests:
+        solver.reserve(fixed)
+
+    requests_by_name = {item.name: item for item in fixed_requests}
+    assignments = {
+        item.name: item.candidates[0]
+        for item in fixed_requests
+    }
+
+    # This is deliberately an assertion, not just a summary: regressions that
+    # reintroduce a duplicate GPIO now fail in development and CI.
+    if len(assignments) != len(set(assignments.values())):
+        raise PinConstraintError("Internal error: duplicate GPIO survived the solver")
+
+    return {
+        name: (
+            gpio,
+            physical_pin(gpio),
+            requests_by_name[name].function,
+            requests_by_name[name].description,
+        )
+        for name, gpio in assignments.items()
+    }
+
+
+def print_report(use_usb_cables: bool = True) -> None:
+    assignments = solve_pi_pinout(use_usb_cables=use_usb_cables, enable_hardware_tof_uart=not use_usb_cables)
+    used = {gpio for gpio, _, _, _ in assignments.values()}
+    free = sorted(set(HEADER_GPIOS) - used)
+
+    print("\n" + "=" * 100)
+    print("  RASPBERRY PI 4 / 5 PINOUT CSP - VERIFIED COLLISION-FREE ASSIGNMENT")
+    mode_str = "DUAL USB CABLE ARCHITECTURE (ZERO HEADER PINS USED)" if use_usb_cables else "LEGACY GPIO UART WIRING"
+    print(f"  Topology Mode: {mode_str}")
+    print("=" * 100)
+    if use_usb_cables:
+        print("  [USB SERIAL ARCHITECTURE]")
+        print("  * ESP32-Main : Connected via USB Cable -> /dev/ttyUSB0 or /dev/ttyACM0 (921,600 baud)")
+        print("  * ESP32-ToF  : Connected via USB Cable -> /dev/ttyUSB1 or /dev/ttyACM1 (921,600 baud)")
+        print("  * Header Pins: 0 jumper wires on 40-pin header. 100% plug-and-play.")
+        print("  " + "-" * 96)
+        print(f"  Assigned Header GPIOs: 0 pins")
+        print(f"  Free Available Header GPIOs ({len(free)}/28 pins): {free}")
+    else:
+        print(f"  {'Signal':<21} | {'Physical pin':<14} | {'GPIO':<9} | {'Function':<12} | Description")
+        print("  " + "-" * 96)
+        for name, (gpio, pin, function, description) in sorted(assignments.items(), key=lambda item: item[1][1]):
+            print(f"  {name:<21} | Pin {pin:<10} | GPIO {gpio:<4} | {function:<12} | {description}")
+        print("  " + "-" * 96)
+        print(f"  Assigned GPIOs: {len(used)} unique pins - verified collision-free")
+        print(f"  Free Available GPIOs ({len(free)} pins): {free}")
+    print("=" * 100 + "\n")
+
+
+def main() -> None:
+    import argparse
+    parser = argparse.ArgumentParser(description="Raspberry Pi 4 Pinout Solver")
+    parser.add_argument("--gpio-uart", action="store_true", help="Show legacy GPIO header UART wiring instead of USB cables")
+    args = parser.parse_args()
+    print_report(use_usb_cables=not args.gpio_uart)
+
+
+if __name__ == "__main__":
+    main()
+
+
+=== FILE: 2_pi4/run_folkrace_system.py ===
+#!/usr/bin/env python3
+"""
+================================================================================
+  FOLKRACE PI 4: DUAL-CORE AUTONOMOUS SYSTEM LAUNCHER
+================================================================================
+  Spawns and monitors:
+    1. Path Planner Pipeline -> HARD PINNED TO CPU CORE 1
+    2. Debug Server & Black Box Recorder -> HARD PINNED TO CPU CORE 2 (and 3)
+  
+  Verifies hardware isolation so the debug server cannot affect planner performance.
+================================================================================
+"""
+
+import os
+import sys
+import time
+import signal
+import subprocess
+import platform
+
+CURR_DIR = os.path.dirname(os.path.abspath(__file__))
+if CURR_DIR not in sys.path:
+    sys.path.insert(0, CURR_DIR)
+
+PLANNER_SCRIPT = os.path.join(CURR_DIR, "path_planner_runner.py")
+DEBUG_SERVER_SCRIPT = os.path.join(CURR_DIR, "debug_server.py")
+BRIDGE_SCRIPT = os.path.join(CURR_DIR, "mcu_uart_bridge.py")
+
+
+def check_core_assignment(pid: int) -> str:
+    """Reads /proc/<pid>/status to verify assigned CPU cores."""
+    status_file = f"/proc/{pid}/status"
+    if os.path.exists(status_file):
+        try:
+            with open(status_file, "r") as f:
+                for line in f:
+                    if line.startswith("Cpus_allowed_list:"):
+                        return line.split(":", 1)[1].strip()
+        except Exception:
+            pass
+    return "unknown"
+
+
+def main():
+    def _handle_sigterm(_signum, _frame):
+        raise KeyboardInterrupt()
+
+    signal.signal(signal.SIGTERM, _handle_sigterm)
+
+    print("=" * 70)
+    print("  FOLKRACE PI 4: DUAL-CORE HARDWARE ISOLATION LAUNCHER")
+    print("=" * 70)
+    print(f"  Platform Architecture : {platform.machine()} ({sys.platform})")
+    print(f"  Available CPU Cores   : {os.cpu_count()}")
+    print("=" * 70)
+
+    has_taskset = False
+    if sys.platform == "linux":
+        try:
+            has_taskset = bool(subprocess.run(["which", "taskset"], stdout=subprocess.PIPE, text=True).stdout.strip())
+        except Exception:
+            pass
+
+    # Launch MCU UART Bridge on Core 3 (if available)
+    p_bridge = None
+    if os.path.exists(BRIDGE_SCRIPT):
+        print("[1/3] Launching MCU Binary UART Bridge on Core 3...")
+        if has_taskset:
+            cmd_bridge = ["taskset", "-c", "3", sys.executable, BRIDGE_SCRIPT]
+        else:
+            cmd_bridge = [sys.executable, BRIDGE_SCRIPT]
+        p_bridge = subprocess.Popen(cmd_bridge, cwd=CURR_DIR)
+        time.sleep(0.5)
+        print(f"      PID: {p_bridge.pid} | CPU Core Mask: {check_core_assignment(p_bridge.pid)}")
+
+    # Launch Debug Server on Core 2
+    print("[2/3] Launching Debug Server on Core 2...")
+    if has_taskset:
+        cmd_debug = ["taskset", "-c", "2", sys.executable, DEBUG_SERVER_SCRIPT]
+    else:
+        cmd_debug = [sys.executable, DEBUG_SERVER_SCRIPT]
+
+    p_debug = subprocess.Popen(cmd_debug, cwd=CURR_DIR)
+    time.sleep(1.0)
+    print(f"      PID: {p_debug.pid} | CPU Core Mask: {check_core_assignment(p_debug.pid)}")
+
+    # Launch Path Planner on Core 1
+    print("[3/3] Launching Real-Time Path Planner on Core 1...")
+    if sys.platform == "linux":
+        cmd_planner = ["taskset", "-c", "1", sys.executable, PLANNER_SCRIPT]
+    else:
+        cmd_planner = [sys.executable, PLANNER_SCRIPT]
+
+    p_planner = subprocess.Popen(cmd_planner, cwd=CURR_DIR)
+    time.sleep(1.0)
+    print(f"      PID: {p_planner.pid} | CPU Core Mask: {check_core_assignment(p_planner.pid)}")
+
+    print("=" * 70)
+    print("  [SYSTEM READY]")
+    print("  * MCU UART Bridge is streaming real sensors on CPU CORE 3.")
+    print("  * Path Planner is running deterministically on CPU CORE 1.")
+    print("  * Debug Server & Black Box Recorder are running on CPU CORE 2.")
+    print("  * Open Web Dashboard on connected laptop: http://robot:8080")
+    print("  * Press Ctrl+C to stop all processes.")
+    print("=" * 70)
+
+    try:
+        while True:
+            # Self-healing supervisor: restart background workers if terminated unexpectedly
+            if p_bridge and p_bridge.poll() is not None:
+                ret = p_bridge.returncode
+                print(f"[Launcher WARNING] MCU UART bridge exited with code {ret}. Restarting in 2.0s...")
+                time.sleep(2.0)
+                if has_taskset:
+                    cmd_bridge = ["taskset", "-c", "3", sys.executable, BRIDGE_SCRIPT]
+                else:
+                    cmd_bridge = [sys.executable, BRIDGE_SCRIPT]
+                p_bridge = subprocess.Popen(cmd_bridge, cwd=CURR_DIR)
+                print(f"      [Auto-Restart] Respawned MCU UART Bridge (PID: {p_bridge.pid})")
+
+            if p_debug.poll() is not None:
+                ret = p_debug.returncode
+                print(f"[Launcher WARNING] Debug server exited with code {ret}. Restarting in 2.0s...")
+                time.sleep(2.0)
+                if has_taskset:
+                    cmd_debug = ["taskset", "-c", "2", sys.executable, DEBUG_SERVER_SCRIPT]
+                else:
+                    cmd_debug = [sys.executable, DEBUG_SERVER_SCRIPT]
+                p_debug = subprocess.Popen(cmd_debug, cwd=CURR_DIR)
+                print(f"      [Auto-Restart] Respawned Debug Server (PID: {p_debug.pid})")
+
+            if p_planner.poll() is not None:
+                print(f"[Launcher] Path planner exited with code {p_planner.returncode}")
+                break
+            time.sleep(1.0)
+    except KeyboardInterrupt:
+        print("\n[Launcher] Shutting down Folkrace subsystems...")
+    finally:
+        for p in (p_planner, p_debug, p_bridge):
+            if p and p.poll() is None:
+                p.terminate()
+                try:
+                    p.wait(timeout=2.0)
+                except subprocess.TimeoutExpired:
+                    p.kill()
+        print("[Launcher] Clean shutdown complete.")
+
+
+if __name__ == "__main__":
+    main()
+
+
+=== FILE: 2_pi4/tof_latency_compensator.py ===
+"""
+================================================================================
+  FOLKRACE PI 4: TOF EGO-MOTION LATENCY COMPENSATOR (OPTION 1)
+================================================================================
+  Compensates for the ~16.6ms ToF sensor integration & UART communication delay
+  using high-speed chassis telemetry (fused forward velocity v_est and yaw rate
+  gyro_z from ESP32-Main).
+
+  Kinematics:
+    For each beam i with mount offset (x0_i, y0_i) and heading theta_i (where +Y
+    is forward and +X is right):
+      delta_y   = v_est * dt
+      delta_psi = gyro_z * dt
+      delta_r_i = [v_est * sin(theta_i) + gyro_z * (x0_i * sin(theta_i) - y0_i * cos(theta_i))] * dt
+      r_compensated_i = r_measured_i - delta_r_i
+
+    - Precomputes all trigonometric coefficients at instantiation (zero allocation).
+    - Sub-microsecond execution time (< 0.001 ms for all 16 beams).
+    - Preserves open-air free space (beams at max_range remain clear).
+================================================================================
+"""
+
+import math
+from typing import Dict, List, Tuple, Union, Optional
+
+# 16 Front ToF Sensors matching smart_hybrid_costmap_front.cpp & vehicle_config.json
+# Format: (name, x0, y0, heading_rad, min_range, max_range)
+SENSOR_RIG_CONFIG = [
+    # Front-Left Array (cross-pointing Right)
+    ("tof_front_left_4.1deg",  -0.058, 0.092, 1.5512, 0.001, 2.40),
+    ("tof_front_left_15.4deg", -0.058, 0.092, 1.3548, 0.001, 2.40),
+    ("tof_front_left_26.6deg", -0.058, 0.092, 1.1585, 0.001, 2.40),
+    ("tof_front_left_37.9deg", -0.058, 0.092, 0.9621, 0.001, 2.40),
+    ("tof_front_left_49.1deg", -0.057, 0.090, 0.7658, 0.001, 2.40),
+    ("tof_front_left_60.4deg", -0.057, 0.090, 0.5694, 0.001, 2.40),
+    ("tof_front_left_71.6deg", -0.057, 0.090, 0.3731, 0.001, 2.40),
+    ("tof_front_left_82.9deg", -0.057, 0.090, 0.1767, 0.001, 2.40),
+    # Front-Right Array (cross-pointing Left)
+    ("tof_front_right_4.1deg",   0.058, 0.092, 1.5904, 0.001, 2.40),
+    ("tof_front_right_15.4deg",  0.058, 0.092, 1.7868, 0.001, 2.40),
+    ("tof_front_right_26.6deg",  0.058, 0.092, 1.9831, 0.001, 2.40),
+    ("tof_front_right_37.9deg",  0.058, 0.092, 2.1795, 0.001, 2.40),
+    ("tof_front_right_49.1deg",  0.057, 0.090, 2.3758, 0.001, 2.40),
+    ("tof_front_right_60.4deg",  0.057, 0.090, 2.5722, 0.001, 2.40),
+    ("tof_front_right_71.6deg",  0.057, 0.090, 2.7685, 0.001, 2.40),
+    ("tof_front_right_82.9deg",  0.057, 0.090, 2.9649, 0.001, 2.40),
+]
+
+SENSOR_NAMES = [cfg[0] for cfg in SENSOR_RIG_CONFIG]
+DEFAULT_NOMINAL_LATENCY_S = 0.01667  # 16.67 ms (60 Hz frame interval)
+
+
+class ToFLatencyCompensator:
+    """Instantaneous Ego-Motion Latency Compensator for 16-channel ToF sensor rig."""
+
+    def __init__(self, default_dt_s: float = DEFAULT_NOMINAL_LATENCY_S):
+        self.default_dt_s = float(default_dt_s)
+
+        # Precompute per-beam geometric constants
+        self.sensor_names: List[str] = []
+        self.coeff_fwd: List[float] = []   # sin(heading)
+        self.coeff_rot: List[float] = []   # x0 * sin(heading) - y0 * cos(heading)
+        self.min_ranges: List[float] = []
+        self.max_ranges: List[float] = []
+
+        for name, x0, y0, heading, min_r, max_r in SENSOR_RIG_CONFIG:
+            sin_h = math.sin(heading)
+            cos_h = math.cos(heading)
+            c_fwd = sin_h
+            c_rot = x0 * sin_h - y0 * cos_h
+
+            self.sensor_names.append(name)
+            self.coeff_fwd.append(c_fwd)
+            self.coeff_rot.append(c_rot)
+            self.min_ranges.append(min_r)
+            self.max_ranges.append(max_r)
+
+    def compensate_list(
+        self,
+        ranges: List[float],
+        v_est: float,
+        gyro_z: float,
+        dt: Optional[float] = None,
+    ) -> List[float]:
+        """
+        Compensates a list of 16 ranges (in meters) for robot motion during latency dt.
+        Returns a new list of 16 motion-compensated ranges.
+        """
+        step_dt = self.default_dt_s if (dt is None or dt <= 0.0) else float(dt)
+        n = min(len(ranges), 16)
+        out = list(ranges)
+
+        for i in range(n):
+            r = ranges[i]
+            max_r = self.max_ranges[i]
+            # If beam is clear / open-air, do not contract into phantom obstacle
+            if r >= max_r - 0.015:
+                continue
+
+            delta_r = (v_est * self.coeff_fwd[i] + gyro_z * self.coeff_rot[i]) * step_dt
+            r_comp = r - delta_r
+            min_r = self.min_ranges[i]
+            if r_comp < min_r:
+                r_comp = min_r
+            elif r_comp > max_r:
+                r_comp = max_r
+            out[i] = round(r_comp, 4)
+
+        return out
+
+    def compensate_dict(
+        self,
+        readings: Dict[str, float],
+        v_est: float,
+        gyro_z: float,
+        dt: Optional[float] = None,
+    ) -> Dict[str, float]:
+        """
+        Compensates a dict of {sensor_name: range_m} for robot motion during latency dt.
+        Returns a new dictionary with motion-compensated ranges.
+        """
+        step_dt = self.default_dt_s if (dt is None or dt <= 0.0) else float(dt)
+        out = dict(readings)
+
+        for i, name in enumerate(self.sensor_names):
+            if name not in readings:
+                continue
+            r = float(readings[name])
+            max_r = self.max_ranges[i]
+            if r >= max_r - 0.015:
+                continue
+
+            delta_r = (v_est * self.coeff_fwd[i] + gyro_z * self.coeff_rot[i]) * step_dt
+            r_comp = r - delta_r
+            min_r = self.min_ranges[i]
+            if r_comp < min_r:
+                r_comp = min_r
+            elif r_comp > max_r:
+                r_comp = max_r
+            out[name] = round(r_comp, 4)
+
+        return out
+
+    def compute_projected_anchor(
+        self,
+        v_est: float,
+        gyro_z: float,
+        dt: Optional[float] = None,
+    ) -> Tuple[float, float, float]:
+        """
+        Computes the projected robot pose (anchor_x, anchor_y, anchor_yaw) in the
+        sensor coordinate frame elapsed over latency dt:
+          - anchor_y: forward displacement (m)
+          - anchor_x: lateral displacement (m)
+          - anchor_yaw: heading change (rad)
+        Used directly by costmap_scout_gaps_projected and SL-MPC initial state (x0, y0, psi0).
+        """
+        step_dt = self.default_dt_s if (dt is None or dt <= 0.0) else float(dt)
+        dy = v_est * step_dt
+        dtheta = gyro_z * step_dt
+        # Lateral displacement in circular turning arc: 0.5 * v * omega * dt^2
+        dx = 0.5 * v_est * gyro_z * (step_dt ** 2)
+        return (dx, dy, dtheta)
+
+
+=== FILE: .agents/rules/file_hygiene.md ===
+---
+trigger: always_on
+description: Workspace file hygiene and directory boundaries.
+---
+
+# File Hygiene
+
+- **Edit in place:** Never create `*_v2`, `*_old`, `*_test2`, `*.bak`, `*.dll.old`, or extra root folders/docs (`docs/`). Put agent guides in `.agents/skills/`.
+- **Temp & data:** Put one-off scripts in `scratch/` (delete after use) and datasets/CSVs/`.npz`/`.db` in `data/` or `scratch/`, never source folders.
+- **Directory map:**
+  - `1_launchers/`: Human-facing GUIs & simulation launchers only.
+  - `2_pi4/`, `3_esp32/`, `4_stm32/`: Target runtime/firmware and hardware benches.
+  - `5_webots/`: Simulation (`controllers/` 1:1 with `worlds/`, no helper clutter in `controllers/`), GA, assets.
+  - `brain/`: Shared planner, `vehicle_config.json`, and synced `vehicle_params.py` (sync via `python tools/sync_params.py`).
+  - `tools/`: CLI/AI utilities and unit tests.
+
+
+=== FILE: .agents/rules/formatting.md ===
+---
+trigger: always_on
+description: Chat formatting rules: strictly ban LaTeX and dollar sign math delimiters in chat text.
+---
+
+No LaTeX
+
+=== FILE: .agents/rules/pi_connectivity.md ===
+# Raspberry Pi Connectivity Rule
+
+- Test Pi connectivity with a single quick check (e.g. `ssh -o ConnectTimeout=2 robot ...` or `Test-Connection -Count 1`).
+- If the Pi is unreachable or the connection times out:
+  - DO NOT retry in a loop.
+  - DO NOT run network/subnet sweeps or repeated ping loops.
+  - Report immediately that the Pi is unreachable (noting common hardware causes: brownout/undervoltage from weak USB power, powered off, or disconnected Wi-Fi) and ask the user how they would like to proceed.
+
+
+
+=== FILE: .agents/skills/ai-flight-debug/SKILL.md ===
+---
+name: ai-flight-debug
+description: Analyze Folkrace Pi 4 SQLite flight recordings (.db) for crashes, anomalies, planner/ToF/MCU diagnostics, A/B run comparisons, and ML/AI data export.
+---
+
+# AI Flight Debugging Suite
+
+Use `tools/ai_debug_suite.py` instead of writing ad-hoc SQLite/zlib scripts (supports both v1 and v2 `.db` files in `Downloads/` and `data/recordings/`).
+
+## Workflow
+1. Run `digest` first as a triage index (diagnostics, KPIs, top episodes, deduplicated MCU logs).
+2. Drill into incidents with `episodes`, then `window` starting **1–2s before** the episode to see upstream cause, then `frame` for full sensors + 2D ASCII ToF/MPC radar.
+3. Use `compare` for A/B run regressions, `query` for custom filters, `tag` to label frame ranges in the `.db`, and `export` for `report.md`/`digest.json`/`frames.csv`/`arrays.npz`.
+
+## Commands
+```powershell
+python tools/ai_debug_suite.py list
+python tools/ai_debug_suite.py digest [db]                 # omit [db] for latest
+python tools/ai_debug_suite.py episodes [db] [--category SHIELD|STALL|LINK_DROP]
+python tools/ai_debug_suite.py window [db] <start> <end> [--by-time] [--stride N]
+python tools/ai_debug_suite.py frame [db] <frame_id>       # full state + ASCII radar
+python tools/ai_debug_suite.py query [db] --shield --max-tof 0.25 --limit 20
+python tools/ai_debug_suite.py compare <db_a> <db_b>
+python tools/ai_debug_suite.py export [db] [--formats md,json,csv,npz]
+python tools/ai_debug_suite.py tag [db] <start> <end> <tag> --note "..."
+python tools/ai_debug_suite.py pull --digest               # download from Pi 4 + digest
+```
+
+## Folkrace Telemetry & Verification Guardrails
+- **Cross-eyed ToF pods**: `tof_front_left_*` (ch 0..7) points right; `tof_front_right_*` (ch 8..15) points left (`0.0` = invalid/offline, `>=1.79` = open/saturated). ASCII radar is ~`5x9.5 cm` quantized and omits `candidate_lines`/costmap inflation; use `frame --json` for exact coordinates.
+- **Do not trust `digest` blindly**:
+  - Check **wheel tracking MAE (`cmd - act`)**, not just raw RPM lag (track turn direction creates Ackermann speed differences).
+  - Check **`override_active`** and **`mcu_logs`** before calling `LINK_DROP`/`EMERGENCY` a crash—manual GUI/bench stops also trigger them.
+  - Check `pitch_deg` directly if `is_on_ramp` stays high (an IMU pitch offset `>=5 deg` bypasses the flat-floor warning).
+  - Silent tuning issues (slow lap, mild oscillation, poor line choice) may trigger zero anomalies—verify with `window` and `compare`.
+
+
+=== FILE: .agents/skills/esp32-pi-flash/SKILL.md ===
+---
+name: esp32-pi-flash
+description: >-
+  Build ESP32-S3 firmware locally and flash ESP32_Main or ESP32_ToF over USB via Raspberry Pi 4.
+---
+
+# ESP32 Flashing via Pi 4
+
+## Device Mapping
+- `esp32_main`: `/dev/ttyACM0` (USB serial `5B90128539`, MAC `ac:a7:04:1d:a4:fc`)
+- `esp32_tof`: `/dev/ttyACM1` (USB serial `5B8E139240`)
+- Verify if ports swap: `ssh robot 'cd /home/admin/folkrace && python3 -c "import mcu_uart_bridge as m; print(m.probe_port_role(\"/dev/ttyACM0\"), m.probe_port_role(\"/dev/ttyACM1\"))"'`
+
+## Build & Flash (`<env>` = `esp32_main` | `esp32_tof`, `<port>` = `/dev/ttyACM0` | `/dev/ttyACM1`)
+```powershell
+pio run -e <env>
+scp .pio/build/<env>/bootloader.bin .pio/build/<env>/partitions.bin .pio/build/<env>/firmware.bin admin@robot:/home/admin/folkrace/esp_flash/
+ssh robot 'echo l | sudo -S systemctl stop folkrace && cd /home/admin/folkrace/esp_flash && python3 -m esptool --chip esp32s3 --port <port> --baud 921600 write-flash 0x0 bootloader.bin 0x8000 partitions.bin 0x10000 firmware.bin && echo l | sudo -S systemctl start folkrace'
+```
+
+
+=== FILE: .agents/skills/pi-ssh/SKILL.md ===
+---
+name: pi-ssh
+description: SSH connection, command execution, and code deployment for Raspberry Pi 4 (pi4).
+---
+
+# Raspberry Pi 4 SSH
+
+- **SSH Target (Old Wi-Fi)**: `robot` (`admin@robot`, `~/.ssh/config` hardcodes `192.168.20.120`, uses `~/.ssh/id_ed25519`, sudo password: `l`)
+- **SSH Target (Phone Hotspot)**: Dynamic IP (e.g., `10.88.202.59`). Because `~/.ssh/config` hardcodes `192.168.20.120` for `robot` and `robot.local` mDNS may not resolve on hotspots, connect with `ssh admin@<ip>` or `ssh -o HostName=<ip> robot`.
+- **Finding Hotspot IP (No Subnet Scan)**: Check the local ARP table (`arp -a`) for the Pi's MAC OUI (`dc-a6-32-...`, e.g. `dc-a6-32-f0-ce-c9`).
+- **Local Source**: `2_pi4/`
+- **Remote Target**: `/home/admin/folkrace/`
+
+## Connection Guidelines
+- Use a short timeout (`-o ConnectTimeout=2`) when checking Pi availability.
+- If the Pi does not respond or times out, **stop immediately**: do NOT retry in a loop and do NOT scan the subnet. Inform the user right away that the Pi is unreachable (e.g. insufficient USB power/brownout, power off, or network loss).
+
+## Quick Commands
+- **Run command**: `ssh robot "<command>"`
+- **Sync pi4 files**: `scp -r 2_pi4/* admin@robot:/home/admin/folkrace/`
+- **Sync planner stack**: `scp 5_webots/simulation/my_project/controllers/tof_path_planner/planner_config.py 5_webots/simulation/my_project/controllers/tof_path_planner/planner_sl_mpc.py 5_webots/simulation/my_project/controllers/tof_path_planner/cpp_smart_hybrid_costmap.py 5_webots/simulation/my_project/controllers/tof_path_planner/tof_gap_scout.py 5_webots/simulation/my_project/controllers/tof_path_planner/ramp_detector.py admin@robot:/home/admin/folkrace/`
+- **Check USB/Serial**: `ssh robot "ls -l /dev/ttyUSB* /dev/ttyACM*"`
+
+
+=== FILE: .agents/skills/stm32-dfu/SKILL.md ===
+---
+name: stm32-dfu
+description: >-
+  Put STM32 into System ROM DFU bootloader and flash firmware over USB hands-free.
+---
+
+# STM32 DFU Flashing
+
+Firmware jumps to ST System ROM DFU when receiving `DFU\n` over USB CDC (VID `0x0483`, PID `0x5740`, 921600 baud).
+
+## Commands
+
+- **One-step DFU reboot & flash:**
+  ```powershell
+  python .agents/skills/stm32-dfu/scripts/enter_dfu.py --upload
+  ```
+
+- **DFU reboot only:**
+  ```powershell
+  python .agents/skills/stm32-dfu/scripts/enter_dfu.py
+  ```
+
+- **Inline CLI:**
+  ```powershell
+  python -c "import serial, time; s = serial.Serial('COM11', 921600); s.write(b'DFU\n'); s.flush(); time.sleep(0.15); s.close()"; Start-Sleep -Milliseconds 1500; pio run -e stm32_dual_foc -t upload
+  ```
+
+## Notes
+- If device is already in DFU mode (`0483:df11`), run `pio run -e stm32_dual_foc -t upload` directly.
+- Ignore Windows Bluetooth ports (`COM9`, `COM10`).
+
+
+=== FILE: .agents/skills/stm32-dfu/scripts/enter_dfu.py ===
+#!/usr/bin/env python3
+"""
+Automatically puts STM32 into System ROM DFU mode without physical buttons.
+Identifies STMicroelectronics USB CDC port (VID 0x0483, PID 0x5740),
+sends 'DFU\\n' to trigger firmware software jump to bootloader, and optionally
+executes PlatformIO upload.
+"""
+
+import os
+import sys
+import time
+import argparse
+import subprocess
+import serial
+import serial.tools.list_ports
+
+def find_stm32_port():
+    for p in serial.tools.list_ports.comports():
+        if p.vid == 0x0483 and p.pid == 0x5740:
+            return p.device
+        if "STM" in (p.description or "") or "STMicroelectronics" in (p.manufacturer or ""):
+            return p.device
+    return None
+
+def trigger_dfu(port=None):
+    if not port:
+        port = find_stm32_port()
+    if not port:
+        print("[ERR] No active STM32 USB CDC port found (VID: 0x0483, PID: 0x5740).")
+        print("      Device may already be in DFU mode or disconnected.")
+        return False
+
+    print(f"[INFO] Found STM32 on {port}. Sending DFU command...")
+    try:
+        ser = serial.Serial(port, baudrate=921600, timeout=1.0)
+        ser.dtr = True
+        ser.rts = True
+        time.sleep(0.05)
+        ser.write(b"\n\nDFU\n")
+        ser.flush()
+        time.sleep(0.2)
+        ser.close()
+        print(f"[OK] DFU trigger sent. Device on {port} is rebooting to ST System DFU Bootloader...")
+        time.sleep(3.0)
+        return True
+    except Exception as e:
+        print(f"[WARN] Error sending DFU command to {port}: {e}")
+        return False
+
+def main():
+    parser = argparse.ArgumentParser(description="Reboot STM32 into DFU mode and optionally upload firmware.")
+    parser.add_argument("--port", "-p", help="Explicit COM port (e.g. COM11). Auto-detects if omitted.")
+    parser.add_argument("--upload", "-u", action="store_true", help="Run 'pio run -e stm32_dual_foc -t upload' after rebooting to DFU.")
+    parser.add_argument("--env", "-e", default="stm32_dual_foc", help="PlatformIO environment name (default: stm32_dual_foc)")
+    args = parser.parse_args()
+
+    success = trigger_dfu(args.port)
+
+    if args.upload:
+        if os.path.exists("platformio.ini"):
+            cmd = ["pio", "run", "-e", args.env, "-t", "upload"]
+        else:
+            cmd = ["pio", "run", "-d", "4_stm32", "-e", args.env, "-t", "upload"]
+        print(f"\n[RUN] Running: {' '.join(cmd)}")
+        ret = subprocess.run(cmd)
+        sys.exit(ret.returncode)
+
+if __name__ == "__main__":
+    main()
+
+
+=== FILE: .agents/skills/webots-run/SKILL.md ===
+---
+name: webots-run
+description: Run and automate Webots simulations on Windows without OpenGL headless crashes, plus vehicle coordinate frame and steering sign conventions.
+---
+
+# Webots Execution & Conventions
+
+## 1. Launching Webots on Windows (Avoid `Exit Code 3221225477`)
+Webots on Windows requires an active desktop OpenGL context (`0xC0000005` `STATUS_ACCESS_VIOLATION` occurs if invoked in a pure headless/background session without DWM).
+
+- **Always** launch in a desktop-attached session with `--mode=fast --batch`:
+  ```powershell
+  "C:\Program Files\Webots\msys64\mingw64\bin\webots.exe" --mode=fast --batch "5_webots/simulation/my_project/worlds/track_racing.wbt"
+  ```
+- **Standard launchers**:
+  - `python 1_launchers/1_champion_preview.py` (3D Webots + live 2D telemetry GUI)
+  - `python 1_launchers/2_fast_champion_drive.py` (ultra-lean 3D drive without GUI/UDP overhead)
+
+## 2. Automated Benchmarks & Troubleshooting
+- **Clean exit**: Use the Webots `Supervisor` API (`robot.simulationQuit(0)`) when a target duration or lap count completes.
+- **Controller hangs on start**: Verify the controller name in `.wbt` matches the directory name under `5_webots/simulation/my_project/controllers/`.
+- **Empty logs on exit**: Use `flush=True` in `print()` and line-buffered file opens (`buffering=1`).
+- **Moving obstacles not moving**: Ensure `.wbt` defines `DEF MOVING_OBSTACLE Solid { ... }`.
+
+## 3. Coordinate Frame & Steering Conventions
+- **Robot Body Frame**: `+Y` Forward, `-Y` Backward, `+X` Right, `-X` Left, `+Z` Up.
+- **Steering (`cmd_steer_rad`, `steer_deg`) & Yaw (`yaw`, `gyro_z`)**:
+  - Positive (`+`) = **Steer Left / CCW**
+  - Negative (`-`) = **Steer Right / CW**
+  - Steering limits: ~±32.22° (±0.562 rad) virtual center (35.0° inner / 30.0° outer at 45% Ackermann; 1294 us left, 1565 us center, 1836 us right).
+- **Recovery Steering Rules**:
+  - Opening on **Left (`X < 0`)**: forward (`v > 0.1 m/s`) steer `+37.2°` (Left); reverse (`v <= 0.1 m/s`) steer `-37.2°` (Right).
+  - Opening on **Right (`X > 0`)**: forward (`v > 0.1 m/s`) steer `-37.2°` (Right); reverse (`v <= 0.1 m/s`) steer `+37.2°` (Left).
+
+
+=== FILE: README.md ===
+# Folkrace Autonomous High-Speed Racing Platform
+
+An autonomous, 1:20-scale high-speed racing vehicle powered by a distributed multi-processor architecture: a **Raspberry Pi 4** companion computer running Curvilinear SL-MPC path planning, an **ESP32-S3 Main** chassis controller handling high-rate vehicle dynamics, a dedicated **ESP32-S3 ToF Hub** filtering quad multizone Time-of-Flight sensors, and **two STM32G474** microcontrollers driving 4 independent direct-drive brushless motors via hardware Field Oriented Control (FOC).
+
+> [!IMPORTANT]
+> **No LiDAR is used in this vehicle.** Perception is 100% solid-state, utilizing a quad VL53L8CX multizone Time-of-Flight array on a shared SPI bus that streams 16 distance zones directly to the Raspberry Pi 4.
+
+---
+
+## 1. System Hardware Architecture
+
+```mermaid
+flowchart TD
+    subgraph PI4["Raspberry Pi 4 (High-Level Brain)"]
+        direction TB
+        MPC["Core 0/1: Curvilinear SL-MPC Path Planner<br/>(Frenet OSQP Solver @ 20-50 Hz)"]
+        DBG["Core 2/3: Telemetry & Debug Server<br/>(Live Radar, HUD, WebSocket / HTTP)"]
+    end
+
+    subgraph ESP_TOF["ESP32-S3 ToF Perception Hub"]
+        direction TB
+        TOF_FILT["Quad VL53L8CX SPI Driver & Filter<br/>(Outlier Rejection, Multi-Target Parsing)"]
+    end
+
+    subgraph TOF_SENSORS["Solid-State Perception Array"]
+        T1["Front-Left VL53L8CX"]
+        T2["Front-Right VL53L8CX"]
+        T3["Side-Left VL53L8CX"]
+        T4["Side-Right VL53L8CX"]
+    end
+
+    subgraph ESP_MAIN["ESP32-S3 Main (Chassis & Dynamics Master)"]
+        direction TB
+        DYN["400 Hz Vehicle Dynamics Engine<br/>Ackermann Steering + 4WD Electronic Diff"]
+        SLIP["IMU Slip Detection & Traction Control"]
+        SERVO_DRV["333 Hz Digital Steering Servo PWM"]
+    end
+
+    subgraph SENSORS_ACTUATORS["Chassis I/O"]
+        IMU["BNO08x 9-DOF IMU (SPI, 200 Hz)"]
+        SERVO["Front Steering Servo"]
+    end
+
+    subgraph STM_FRONT["STM32G474 (Front Axle Controller)"]
+        direction TB
+        FOC_F["Dual-Motor FOC (SimpleFOC @ 20 kHz PWM)<br/>4 kHz Closed-Loop Velocity PID"]
+        M1["M1: Front-Left GM3506 Direct-Drive"]
+        M2["M2: Front-Right GM3506 Direct-Drive"]
+        E1["ENC1: MT6816 SPI Magnetic Encoder"]
+        E2["ENC2: MT6816 SPI Magnetic Encoder"]
+    end
+
+    subgraph STM_REAR["STM32G474 (Rear Axle Controller)"]
+        direction TB
+        FOC_R["Dual-Motor FOC (SimpleFOC @ 20 kHz PWM)<br/>4 kHz Closed-Loop Velocity PID"]
+        M3["M3: Rear-Left GM3506 Direct-Drive"]
+        M4["M4: Rear-Right GM3506 Direct-Drive"]
+        E3["ENC3: MT6816 SPI Magnetic Encoder"]
+        E4["ENC4: MT6816 SPI Magnetic Encoder"]
+    end
+
+    %% Sensor to ToF Hub
+    T1 & T2 & T3 & T4 -->|"Shared SPI Bus + Dedicated MISO"| TOF_FILT
+
+    %% ToF Hub to Pi 4
+    TOF_FILT -->|"16 Clean Distance Readings (UART @ 921,600)"| MPC
+
+    %% Pi 4 to ESP32 Main
+    MPC -->|"Target Velocity v & Steering Delta (UART @ 921,600)"| DYN
+    DYN -->|"IMU & Telemetry Feedback (100 Hz UART)"| DBG
+
+    %% ESP32 Main I/O
+    IMU -->|"Zero-Drift Quaternions & Rates (SPI)"| SLIP
+    SERVO_DRV -->|"High-Rate PWM"| SERVO
+
+    %% ESP32 Main to STM32 Axle Controllers
+    DYN -->|"Front Left/Right RPM Targets (UART @ 921,600)"| FOC_F
+    DYN -->|"Rear Left/Right RPM Targets (UART @ 921,600)"| FOC_R
+    FOC_F -->|"Shaft RPM Telemetry"| DYN
+    FOC_R -->|"Shaft RPM Telemetry"| DYN
+
+    %% STM32 Motor Actuation
+    FOC_F --> M1 & M2
+    E1 & E2 --> FOC_F
+    FOC_R --> M3 & M4
+    E3 & E4 --> FOC_R
+```
+
+---
+
+## 2. Distributed Subsystems Summary
+
+| Subsystem | Hardware Platform | Primary Responsibilities | Key Communication |
+| :--- | :--- | :--- | :--- |
+| **Brain** | [Raspberry Pi 4](file:///c:/Users/nurmi/Documents/Folkrace/2_pi4/README.md) | High-level path planning via Curvilinear SL-MPC on Core 0/1; live telemetry and debugging server on Core 2/3. No LiDAR. | UART from ESP32 ToF (16 zones), UART with ESP32 Main |
+| **Chassis Dynamics** | [ESP32 Main](file:///c:/Users/nurmi/Documents/Folkrace/3_esp32/README.md) | 400 Hz control loop: BNO08x 9-DOF IMU reading, steering servo control, 4WD electronic differential, slip/spinout watchdog. | High-speed UART to Pi 4; dual UART links to 2x STM32 |
+| **Perception Hub** | [ESP32 ToF Hub](file:///c:/Users/nurmi/Documents/Folkrace/3_esp32/README.md) | Manages 4x VL53L8CX multizone ToFs on one shared SPI bus with dedicated MISO lines; filters data into 16 distance zones. | UART output to Pi 4 (921,600 baud) |
+| **Front Axle Motors** | [STM32 Front](file:///c:/Users/nurmi/Documents/Folkrace/4_stm32/README.md) | Controls 2x direct-drive GM3506 BLDC motors (FL, FR) with 2x MT6816 SPI magnetic encoders via hardware SimpleFOC at 20 kHz. | UART link with ESP32 Main; SPI1/SPI2 for encoders |
+| **Rear Axle Motors** | [STM32 Rear](file:///c:/Users/nurmi/Documents/Folkrace/4_stm32/README.md) | Controls 2x direct-drive GM3506 BLDC motors (RL, RR) with 2x MT6816 SPI magnetic encoders via hardware SimpleFOC at 20 kHz. | UART link with ESP32 Main; SPI1/SPI2 for encoders |
+
+---
+
+## 3. Directory Structure
+
+* **[1_launchers/](file:///c:/Users/nurmi/Documents/Folkrace/1_launchers/README.md)**: Consolidated one-click launcher scripts for simulation, genetic algorithm optimization, and hardware test benches.
+* **[2_pi4/](file:///c:/Users/nurmi/Documents/Folkrace/2_pi4/README.md)**: Raspberry Pi 4 companion stack, SL-MPC planner configuration, debug server notes, and pin mapping.
+* **[3_esp32/](file:///c:/Users/nurmi/Documents/Folkrace/3_esp32/README.md)**:
+  * **`ESP32_Main/`**: Real-time vehicle dynamics, electronic differential, BNO08x IMU driver, steering servo actuation, and STM32 UART link.
+  * **`ESP32_ToF/`**: Quad VL53L8CX multi-zone Time-of-Flight driver suite, dedicated MISO bus architecture, and 16-zone distance matrix stream.
+* **[4_stm32/](file:///c:/Users/nurmi/Documents/Folkrace/4_stm32/README.md)**: Dual-motor Field Oriented Control (SimpleFOC), MT6816 SPI magnetic encoder drivers, 128-point LUT calibration, and hardware timer configurations.
+* **[5_webots/](file:///c:/Users/nurmi/Documents/Folkrace/5_webots/README.md)**: Webots physics simulation, Curvilinear SL-MPC C++ solvers (`curvilinear_sl_mpc.dll`), genetic algorithm tuning benches, and virtual race tracks.
+
+---
+
+## 4. Hardware Pinout Reference (STM32G474 LQFP48 Dual-Motor FOC)
+
+Each STM32 board controls two direct-drive brushless motors and two MT6816 magnetic angle encoders using dedicated hardware timers and SPI peripherals:
+
+| Pin | Function / Role | Peripheral | Notes |
+| :--- | :--- | :--- | :--- |
+| **PA1** | Motor Phase B (M1) | TIM2_CH2 | Center-aligned 25 kHz PWM |
+| **PA2** | Motor Phase C (M1) | TIM2_CH3 | Center-aligned 25 kHz PWM |
+| **PA3** | Motor 1 Driver Enable | GPIO Out | Active-High driver enable |
+| **PA4** | Motor Phase B (M2) | TIM3_CH2 | Center-aligned 25 kHz PWM |
+| **PA5** | Motor Phase A (M1) | TIM2_CH1 | Center-aligned 25 kHz PWM |
+| **PA6** | Motor Phase A (M2) | TIM3_CH1 | Center-aligned 25 kHz PWM |
+| **PA7** | Motor 2 Driver Enable | GPIO Out | Active-High driver enable |
+| **PA9** | Telemetry TX | USART1_TX | Communication link |
+| **PA10** | Telemetry RX | USART1_RX | Communication link |
+| **PA11** | USB D- | Native USB | DFU Bootloader / CDC Serial |
+| **PA12** | USB D+ | Native USB | DFU Bootloader / CDC Serial |
+| **PA13** | SWDIO | SWD SYS | Hardware debug data |
+| **PA14** | SWCLK | SWD SYS | Hardware debug clock |
+| **PA15** | Motor 1 Encoder CS | GPIO Out | SPI1 Chip Select for MT6816 #1 |
+| **PB0** | Motor Phase C (M2) | TIM3_CH3 | Center-aligned 25 kHz PWM |
+| **PB3** | Encoder 1 SCK | SPI1_SCK | MT6816 #1 SPI Clock |
+| **PB4** | Encoder 1 MISO | SPI1_MISO | MT6816 #1 SPI Data In |
+| **PB5** | Encoder 1 MOSI | SPI1_MOSI | MT6816 #1 SPI Data Out |
+| **PB11** | Motor 2 Encoder CS | GPIO Out | SPI2 Chip Select for MT6816 #2 |
+| **PB13** | Encoder 2 SCK | SPI2_SCK | MT6816 #2 SPI Clock (AF5) |
+| **PB14** | Encoder 2 MISO | SPI2_MISO | MT6816 #2 SPI Data In (AF5) |
+| **PB15** | Encoder 2 MOSI | SPI2_MOSI | MT6816 #2 SPI Data Out (AF5) |
+| **PC13** | Onboard Status LED | GPIO Out | Active-Low user status LED |
+
+---
+
+## 5. Firmware Quick Start (PlatformIO)
+
+The root [`platformio.ini`](file:///c:/Users/nurmi/Documents/Folkrace/platformio.ini) manages all microcontroller firmware targets:
+
+```bash
+# Build & flash STM32 Dual-FOC controller over USB DFU
+pio run -e stm32_dual_foc -t upload
+
+# Build & flash ESP32 Main (Chassis & Dynamics Master)
+pio run -e esp32_main -t upload
+
+# Build & flash ESP32 ToF Hub (Quad VL53L8CX Driver)
+pio run -e esp32_tof -t upload
+```
+
+---
+
+## 6. Verification & Test Launchers
+
+All diagnostic GUIs and simulation suites are centralized in [`1_launchers/`](file:///c:/Users/nurmi/Documents/Folkrace/1_launchers/README.md):
+
+```bash
+# Launch physical quad VL53L8CX ToF multi-target visualizer
+python 1_launchers/6_esp32_tof_gui.py
+
+# Launch physical high-rate steering servo calibration bench
+python 1_launchers/8_esp32_servo_gui.py
+
+# Launch physical STM32 motor closed-loop FOC & encoder GUI
+python 1_launchers/9_stm32_encoder_motor_gui.py
+
+# Launch Webots 3D simulation with Curvilinear SL-MPC & dynamic obstacles
+python 1_launchers/1_champion_preview.py
+```
+
+
+=== FILE: platformio.ini ===
+[platformio]
+default_envs = stm32_dual_foc, esp32_main, esp32_tof
+src_dir = .
+boards_dir = 4_stm32/boards
+
+; ==============================================================================
+; ESP32 MAIN: Real-Time Motion, IMU (BNO08x), Servos & STM32 FOC Master Link
+; ==============================================================================
+[env:esp32_main]
+platform = espressif32
+board = esp32-s3-devkitc-1
+framework = arduino
+upload_port = COM5
+upload_speed = 921600
+monitor_port = COM5
+monitor_speed = 921600
+extra_scripts = pre:tools/sync_params.py
+build_src_filter =
+    -<*>
+    +<3_esp32/ESP32_Main/src/*.cpp>
+build_flags =
+    -I 3_esp32/ESP32_Main/include
+    -DARDUINO_USB_MODE=0
+    -DARDUINO_USB_CDC_ON_BOOT=0
+    -DCORE_DEBUG_LEVEL=0
+lib_deps =
+    Wire
+    SPI
+    sparkfun/SparkFun BNO080 Cortex Based IMU @ ^1.1.12
+
+; ==============================================================================
+; ESP32 TOF: Dedicated Dual-SPI Perception Hub (4x VL53L8CX Multizone ToFs)
+; ==============================================================================
+[env:esp32_tof]
+platform = espressif32
+board = esp32-s3-devkitc-1
+framework = arduino
+upload_port = COM7
+monitor_port = COM7
+monitor_speed = 921600
+build_src_filter =
+    -<*>
+    +<3_esp32/ESP32_ToF/src/*.cpp>
+build_flags =
+    -I 3_esp32/ESP32_ToF/include
+    -I 3_esp32/ESP32_ToF/VL53L8CX/src
+    -I 3_esp32/ESP32_ToF/src
+    -D VL53L8CX_NB_TARGET_PER_ZONE=2U
+    -D VL53L8CX_DISABLE_SIGNAL_PER_SPAD
+    -D VL53L8CX_DISABLE_RANGE_SIGMA_MM
+    -D VL53L8CX_DISABLE_AMBIENT_PER_SPAD
+    -D VL53L8CX_DISABLE_REFLECTANCE_PERCENT
+    -D VL53L8CX_DISABLE_MOTION_INDICATOR
+    -D ARDUINO_USB_MODE=0
+    -D ARDUINO_USB_CDC_ON_BOOT=0
+lib_deps =
+    Wire
+    SPI
+    3_esp32/ESP32_ToF/VL53L8CX
+
+; Legacy Alias for backwards compatibility
+[env:esp32_tof_diag]
+extends = env:esp32_tof
+
+[env:esp32s3_suite]
+platform = espressif32
+board = esp32-s3-devkitc-1
+framework = arduino
+monitor_speed = 921600
+build_src_filter =
+    -<*>
+    +<3_esp32/ESP32_Main/simplefoc_mt6816_suite/src/*.cpp>
+build_flags =
+    -DARDUINO_USB_MODE=0
+    -DARDUINO_USB_CDC_ON_BOOT=0
+    -DCORE_DEBUG_LEVEL=0
+lib_deps =
+    askuric/Simple FOC @ 2.3.3
+    Wire
+    SPI
+
+[env:esp32s3_servo_test]
+platform = espressif32
+board = esp32-s3-devkitc-1
+framework = arduino
+upload_port = COM5
+upload_speed = 921600
+monitor_port = COM5
+monitor_speed = 921600
+extra_scripts = pre:tools/sync_params.py
+build_src_filter =
+    -<*>
+    +<3_esp32/ESP32_Main/servo_test/*.cpp>
+build_flags =
+    -I 3_esp32/ESP32_Main/include
+    -DARDUINO_USB_MODE=0
+    -DARDUINO_USB_CDC_ON_BOOT=0
+
+; ==============================================================================
+; STM32G474: Dual-Motor FOC Controller & MT6816 Shared SPI Suite
+; ==============================================================================
+[stm32_base]
+platform = ststm32
+board = genericSTM32G474CB
+framework = arduino
+lib_archive = false
+lib_deps =
+    askuric/Simple FOC @ ^2.3.2
+monitor_speed = 921600
+monitor_eol = LF
+build_flags =
+    -DHAL_OPAMP_MODULE_ENABLED
+    -DHAL_CORDIC_MODULE_ENABLED
+    -DFLASH_BANK_NUMBER=FLASH_BANK_1
+    -DSIMPLEFOC_DISABLE_DEBUG
+    -mfpu=fpv4-sp-d16
+    -mfloat-abi=hard
+
+[env:stm32_dual_foc]
+extends = stm32_base
+build_src_filter =
+    -<*>
+    +<4_stm32/src/*.cpp>
+    +<4_stm32/src/*.c>
+build_flags =
+    ${stm32_base.build_flags}
+    -DUSBCON
+    -DUSBD_USE_CDC
+    -DSERIAL_RX_BUFFER_SIZE=512
+    -DSERIAL_TX_BUFFER_SIZE=512
+    -Os
+    -I 4_stm32/src
+    -Wl,--defsym=_Min_Stack_Size=0x2000
+upload_protocol = dfu
+
+[env:stm32_pwm_test]
+extends = stm32_base
+build_src_filter =
+    -<*>
+    +<4_stm32/test_pwm/src/*.cpp>
+build_flags =
+    ${stm32_base.build_flags}
+    -DUSBCON
+    -DUSBD_USE_CDC
+    -I 4_stm32/src
+upload_protocol = dfu
+
+

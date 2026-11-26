@@ -1,0 +1,1916 @@
+=== BUNDLE: folkrace_03_stm32_part1of4.txt (10 files/sections) ===
+  - 4_stm32/README.md
+  - 4_stm32/auto_symmetry_tuner.py
+  - 4_stm32/boards/genericSTM32G474CB.json
+  - 4_stm32/motor_config_gm3506.json
+  - 4_stm32/motor_config_gm3506_0.078.json
+  - 4_stm32/motor_config_m1.json
+  - 4_stm32/motor_config_m2.json
+  - 4_stm32/pin_solver.py
+  - 4_stm32/platformio.ini
+  - 4_stm32/src/config_pins.h
+
+=== FILE: 4_stm32/README.md ===
+# STM32 Dual-Motor FOC Architecture
+
+The Folkrace drivetrain is driven by **two independent STM32G474CBT6 microcontrollers**, each controlling a single axle with two direct-drive brushless motors running hardware-accelerated Field Oriented Control (FOC):
+
+1. **Front Axle Controller**: Drives Front-Left (M1) and Front-Right (M2) direct-drive motors.
+2. **Rear Axle Controller**: Drives Rear-Left (M3) and Rear-Right (M4) direct-drive motors.
+
+Both microcontrollers run identical high-performance firmware, receiving individual velocity setpoints from the **ESP32 Main** chassis master over high-speed UART and executing closed-loop velocity FOC at 20 kHz.
+
+---
+
+## 1. System Specifications & Features
+
+* **MCU**: STM32G474CBT6 (Arm Cortex-M4F @ 170 MHz with hardware CORDIC and trig accelerators).
+* **Motors**: GM3506 Brushless Gimbal Motors (24N22P, 11 pole pairs, 12V supply, zero-backlash direct-drive).
+* **Encoders**: 2x MT6816 14-bit magnetic angle encoders connected via **two independent hardware SPI peripherals** (SPI1 and SPI2) for deterministic, low-latency position acquisition.
+* **Control Frequencies**:
+  * **20.0 kHz Hard Real-Time Commutation**: Center-aligned PWM generation on TIM2 and TIM3.
+  * **4.0 kHz Velocity PID Loop**: Downsampled velocity tracking with back-EMF feedforward (`Kv = 130 RPM/V`).
+  * **25 Hz Telemetry Stream**: Reports actual shaft RPM and diagnostic metrics.
+* **Calibration & Non-Linearity Compensation**:
+  * 128-point Stepped Harmonic Linearization Look-Up Table (LUT) to eliminate magnet non-linearity and cogging torque.
+  * Automatic electrical zero alignment and phase symmetry tuning.
+
+---
+
+## 2. Hardware Architecture & Interfaces
+
+```mermaid
+flowchart TD
+    subgraph ESP_MASTER["ESP32-S3 Main (Chassis Master)"]
+        DIFF["4WD Electronic Differential"]
+    end
+
+    subgraph STM32_BOARD["STM32G474 Axle Controller"]
+        direction TB
+        UART_IF["USART1 Protocol Engine<br/>(921,600 Baud Packet Link)"]
+        FOC_CORE["SimpleFOC Engine (@ 20 kHz PWM)<br/>Hardware CORDIC Sine/Cosine"]
+        LUT["128-Point Stepped Calibration LUT"]
+        TIM2_PWM["TIM2 (M1 PWM: PA5, PA1, PA2)"]
+        TIM3_PWM["TIM3 (M2 PWM: PA6, PA4, PB0)"]
+        SPI1_DRV["SPI1 Master (PB3, PB4, PB5, PA15)"]
+        SPI2_DRV["SPI2 Master (PB13, PB14, PB15, PB11)"]
+
+        UART_IF --> FOC_CORE
+        FOC_CORE --> TIM2_PWM & TIM3_PWM
+        SPI1_DRV --> LUT --> FOC_CORE
+        SPI2_DRV --> LUT --> FOC_CORE
+    end
+
+    subgraph AXLE_HARDWARE["Physical Axle Hardware"]
+        M1_MOTOR["Left Motor (Direct-Drive GM3506)"]
+        M2_MOTOR["Right Motor (Direct-Drive GM3506)"]
+        ENC1["MT6816 14-Bit Magnetic Encoder 1"]
+        ENC2["MT6816 14-Bit Magnetic Encoder 2"]
+    end
+
+    ESP_MASTER -->|"Target Left/Right RPM (UART)"| UART_IF
+    UART_IF -->|"Shaft RPM Telemetry (UART)"| ESP_MASTER
+    TIM2_PWM --> M1_MOTOR
+    TIM3_PWM --> M2_MOTOR
+    ENC1 --> SPI1_DRV
+    ENC2 --> SPI2_DRV
+```
+
+---
+
+## 3. Pin Mapping & Hardware Peripherals (STM32G474 LQFP48)
+
+| Pin | Function / Role | Peripheral | Description |
+| :--- | :--- | :--- | :--- |
+| **PA1** | M1 PWM Phase B | TIM2_CH2 | Center-aligned 25 kHz PWM |
+| **PA2** | M1 PWM Phase C | TIM2_CH3 | Center-aligned 25 kHz PWM |
+| **PA3** | M1 Driver Enable | GPIO Out | Active-High inverter gate enable |
+| **PA4** | M2 PWM Phase B | TIM3_CH2 | Center-aligned 25 kHz PWM |
+| **PA5** | M1 PWM Phase A | TIM2_CH1 | Center-aligned 25 kHz PWM |
+| **PA6** | M2 PWM Phase A | TIM3_CH1 | Center-aligned 25 kHz PWM |
+| **PA7** | M2 Driver Enable | GPIO Out | Active-High inverter gate enable |
+| **PA9** | Telemetry TX | USART1_TX | Binary telemetry packet stream to ESP32 |
+| **PA10** | Telemetry RX | USART1_RX | Binary command packet stream from ESP32 |
+| **PA11** | Native USB D- | USB | STM32 System ROM DFU Bootloader / CDC |
+| **PA12** | Native USB D+ | USB | STM32 System ROM DFU Bootloader / CDC |
+| **PA13** | SWDIO | SWD SYS | Hardware debug data |
+| **PA14** | SWCLK | SWD SYS | Hardware debug clock |
+| **PA15** | Motor 1 Encoder CS | GPIO Out | Chip Select for MT6816 #1 (SPI1) |
+| **PB0** | M2 PWM Phase C | TIM3_CH3 | Center-aligned 25 kHz PWM |
+| **PB3** | Encoder 1 SCK | SPI1_SCK | MT6816 #1 SPI Clock |
+| **PB4** | Encoder 1 MISO | SPI1_MISO | MT6816 #1 SPI Data In |
+| **PB5** | Encoder 1 MOSI | SPI1_MOSI | MT6816 #1 SPI Data Out |
+| **PB11** | Motor 2 Encoder CS | GPIO Out | Chip Select for MT6816 #2 (SPI2) |
+| **PB13** | Encoder 2 SCK | SPI2_SCK | MT6816 #2 SPI Clock (AF5) |
+| **PB14** | Encoder 2 MISO | SPI2_MISO | MT6816 #2 SPI Data In (AF5) |
+| **PB15** | Encoder 2 MOSI | SPI2_MOSI | MT6816 #2 SPI Data Out (AF5) |
+| **PA8** | User LED | GPIO Out | Active-Low onboard status indicator |
+| **PC13** | User Button | GPIO In | Onboard user push button (KEY) |
+
+---
+
+## 4. Communication Protocol with ESP32 Main
+
+Communication occurs over USART1 at **921,600 baud, 8N1** with structured binary packets:
+
+### Downlink (ESP32 Main -> STM32):
+* **Format**: 17-byte packet containing 0xAA sync byte, target Left RPM (float32), target Right RPM (float32), reserve fields, and an XOR checksum.
+* **Rate**: 400 Hz synchronous loop.
+
+### Uplink (STM32 -> ESP32 Main):
+* **Format**: 18-byte packet containing 0x55 sync byte, actual Left shaft RPM (float32), actual Right shaft RPM (float32), voltage/health flags, and an XOR checksum.
+* **Rate**: 25 to 100 Hz.
+
+---
+
+## 5. Firmware Build & USB DFU Flashing
+
+The firmware is built using PlatformIO and uploaded over native USB via DFU:
+
+```bash
+# Build firmware
+pio run -e stm32_dual_foc
+
+# Flash over USB DFU bootloader
+pio run -e stm32_dual_foc -t upload
+```
+
+> [!TIP]
+> If flashing over USB DFU, ensure the board is in bootloader mode (BOOT0 pulled High on reset, or using the hands-free DFU jump routine).
+
+---
+
+## 6. Calibration & Bench Testing
+
+* **Closed-Loop Bench Calibration GUI**:
+  ```bash
+  python 1_launchers/9_stm32_encoder_motor_gui.py
+  ```
+  Provides a real-time oscilloscope, target RPM sliders, 128-point LUT calibration routines, and harmonic distortion analysis.
+
+* **Automatic Symmetry Tuner**:
+  ```bash
+  python 4_stm32/auto_symmetry_tuner.py
+  ```
+  Tunes phase-to-phase PWM symmetry and verifies encoder linearity across full 360-degree mechanical rotations.
+
+
+=== FILE: 4_stm32/auto_symmetry_tuner.py ===
+#!/usr/bin/env python3
+"""
+FOLKRACE — Automated Closed-Loop Phase Angle Equalizer & Symmetry Tuner (GM3506 @ 12V)
+======================================================================================
+Protocol:
+  1. Sets gentle alignment voltage (2.5V @ ~0.35A).
+  2. Runs baseline 11-Pole Hysteresis-Compensated Calibration ('c').
+  3. Establishes baseline zero angle (theta_0) and safety bounds (+/- 0.10 rad / +/- 5.7 deg elec).
+  4. Runs iterative closed-loop voltage tests (+/- 4.0V) to find directional asymmetry.
+  5. Dynamically nudges motor.zero_electric_angle within safe bounds to maximize symmetry (>98%).
+  6. Computes balanced True Motor KV and applies optimal settings to SimpleFOC controller.
+"""
+
+import sys
+import time
+import math
+import re
+import argparse
+import serial
+import serial.tools.list_ports
+
+
+def find_stm32_port():
+    ports = list(serial.tools.list_ports.comports())
+    for p in ports:
+        desc = (p.description or "").lower()
+        if "stm" in desc or "ch340" in desc or "cp210" in desc or "usb" in desc:
+            return p.device
+    return ports[0].device if ports else None
+
+
+class AutoSymmetryTuner:
+    def __init__(self, port, baud=921600, test_voltage=4.0, max_nudge_rad=0.10):
+        self.port = port
+        self.baud = baud
+        self.test_voltage = float(test_voltage)
+        self.max_nudge_rad = float(max_nudge_rad) # Safety bound: +/- 0.10 rad (~ +/- 5.7 deg elec)
+        self.ser = None
+        self.base_zero_angle = None
+        self.optimal_zero_angle = None
+
+    def connect(self):
+        print(f"\n[+] Connecting to STM32 on {self.port} @ {self.baud} baud...")
+        self.ser = serial.Serial(self.port, self.baud, timeout=0.05)
+        time.sleep(0.5)
+        self.ser.reset_input_buffer()
+        print("[+] Connected successfully.\n")
+
+    def disconnect(self):
+        if self.ser and self.ser.is_open:
+            try:
+                self.ser.write(b"u0.0\nx\n")
+                self.ser.flush()
+                self.ser.close()
+            except Exception:
+                pass
+
+    def send_cmd(self, cmd_str):
+        if self.ser and self.ser.is_open:
+            self.ser.write(f"{cmd_str}\n".encode("utf-8"))
+            self.ser.flush()
+
+    def read_telemetry_sample(self, duration_s=0.6, settle_s=0.4):
+        time.sleep(settle_s)
+        t_end = time.time() + duration_s
+        rpm_samples = []
+        angle_samples = []
+
+        while time.time() < t_end:
+            line = self.ser.readline().decode("utf-8", errors="ignore").strip()
+            if not line:
+                continue
+
+            # Check for stall
+            if "SAFETY SHUTDOWN" in line:
+                print("\n[!] EMERGENCY STALL DETECTED! Aborting test.")
+                self.send_cmd("x")
+                return 0.0, 0.0
+
+            # Telemetry format: Ctrl: ... | Target: ... | Actual: +120.4 RPM | Angle: 45.2 deg | ...
+            m_rpm = re.search(r'Actual:\s*([+-]?\d+\.?\d*)\s*RPM', line)
+            m_ang = re.search(r'Angle:\s*([+-]?\d+\.?\d*)\s*deg', line)
+
+            if m_rpm:
+                try:
+                    rpm_samples.append(float(m_rpm.group(1)))
+                except ValueError:
+                    pass
+            if m_ang:
+                try:
+                    angle_samples.append(float(m_ang.group(1)))
+                except ValueError:
+                    pass
+
+        mean_rpm = sum(rpm_samples) / max(1, len(rpm_samples))
+        std_rpm = math.sqrt(sum((x - mean_rpm)**2 for x in rpm_samples) / max(1, len(rpm_samples)))
+        return mean_rpm, std_rpm
+
+    def run_baseline_calibration(self):
+        print("================================================================================")
+        print(" PHASE 1: 11-POLE BASELINE ELECTRICAL ZERO CALIBRATION")
+        print("================================================================================")
+        print("[*] Setting optimal alignment voltage: 3.70V (Current ~ 0.55A)")
+        self.send_cmd("y3.7")
+        time.sleep(0.1)
+
+        print("[*] Triggering 11-Pole Multi-Point Calibration ('c')...")
+        self.send_cmd("c")
+
+        t_start = time.time()
+        mean_zero_found = None
+
+        while time.time() - t_start < 20.0:
+            line = self.ser.readline().decode("utf-8", errors="ignore").strip()
+            if not line:
+                continue
+
+            if "Pole #" in line or "GRADE" in line or "Alignment" in line or "SimpleFOC" in line:
+                print(f"    {line}")
+
+            if "motor.zero_electric_angle =" in line:
+                m = re.search(r'motor\.zero_electric_angle\s*=\s*([0-9]+\.[0-9]+)', line)
+                if m:
+                    mean_zero_found = float(m.group(1))
+
+            if "CALIBRATION REJECTED" in line:
+                print("\n[!] Calibration rejected by firmware. Please check wiring / sensor.")
+                return False
+
+            if "SimpleFOC Static Code Parameters" in line:
+                break
+
+        if mean_zero_found is None:
+            # Fallback default
+            mean_zero_found = 0.97555
+            print(f"[!] Warning: Using default base zero: {mean_zero_found:.5f} rad")
+
+        self.base_zero_angle = mean_zero_found
+        self.optimal_zero_angle = mean_zero_found
+
+        print(f"\n[+] Baseline Electrical Zero Angle established: {self.base_zero_angle:.5f} rad ({self.base_zero_angle * 180.0 / math.pi:.2f} deg)")
+        print(f"[+] Safety Nudge Range: [{self.base_zero_angle - self.max_nudge_rad:.5f} rad to {self.base_zero_angle + self.max_nudge_rad:.5f} rad] (±{self.max_nudge_rad * 180.0 / math.pi:.2f}°)")
+        print("--------------------------------------------------------------------------------\n")
+        return True
+
+    def test_bidirectional_speed(self, test_voltage):
+        # 1. Forward Spin (+V): 1.5s acceleration + 1.0s sampling
+        self.send_cmd(f"u{test_voltage:.2f}")
+        fwd_rpm, fwd_std = self.read_telemetry_sample(duration_s=1.0, settle_s=1.5)
+
+        # Coast to zero
+        self.send_cmd("u0.0")
+        time.sleep(1.0)
+
+        # 2. Reverse Spin (-V): 1.5s acceleration + 1.0s sampling
+        self.send_cmd(f"u-{test_voltage:.2f}")
+        rev_rpm, rev_std = self.read_telemetry_sample(duration_s=1.0, settle_s=1.5)
+
+        # 3. Stop
+        self.send_cmd("u0.0")
+        time.sleep(0.8)
+
+        fwd_mag = abs(fwd_rpm)
+        rev_mag = abs(rev_rpm)
+        delta_rpm = fwd_mag - rev_mag
+        max_mag = max(fwd_mag, rev_mag, 1.0)
+        symmetry_pct = (min(fwd_mag, rev_mag) / max_mag) * 100.0
+
+        return {
+            "fwd_rpm": fwd_mag,
+            "rev_rpm": rev_mag,
+            "delta_rpm": delta_rpm,
+            "symmetry_pct": symmetry_pct,
+            "fwd_std": fwd_std,
+            "rev_std": rev_std
+        }
+
+    def optimize_symmetry(self, max_iterations=7):
+        print("================================================================================")
+        print(" PHASE 2: AUTOMATED CLOSED-LOOP PHASE ANGLE NUDGING & OPTIMIZATION")
+        print(f" Target Test Voltage : ±{self.test_voltage:.2f} V")
+        print(f" Target Symmetry     : > 98.0 % (|Δ RPM| < 12.0 RPM)")
+        print(f" Maximum Bounds      : ±{self.max_nudge_rad:.4f} rad (±{self.max_nudge_rad * 180.0 / math.pi:.2f}° elec)")
+        print("================================================================================")
+        print("Iter | Zero Angle (rad) | Nudge (rad) | Forward RPM | Reverse RPM | Delta RPM | Symmetry | Status")
+        print("-----+------------------+-------------+-------------+-------------+-----------+----------+-------")
+
+        current_angle = self.base_zero_angle
+        best_symmetry = 0.0
+        best_angle = current_angle
+        best_data = None
+
+        history = []
+        for it in range(1, max_iterations + 1):
+            # Apply candidate zero electric angle
+            self.send_cmd(f"j{current_angle:.5f}")
+            time.sleep(0.05)
+
+            data = self.test_bidirectional_speed(self.test_voltage)
+            nudge_from_base = current_angle - self.base_zero_angle
+
+            is_valid = (data["fwd_rpm"] > 100.0 and data["rev_rpm"] > 100.0)
+            if is_valid:
+                history.append({
+                    "angle": current_angle,
+                    "delta": data["delta_rpm"],
+                    "fwd": data["fwd_rpm"],
+                    "rev": data["rev_rpm"],
+                    "sym": data["symmetry_pct"]
+                })
+
+            if is_valid and data["symmetry_pct"] > best_symmetry:
+                best_symmetry = data["symmetry_pct"]
+                best_angle = current_angle
+                best_data = data
+
+            status = "BALANCED" if (is_valid and (data["symmetry_pct"] >= 98.0 or abs(data["delta_rpm"]) < 10.0)) else "TUNING"
+
+            print(f" #{it:02d} | {current_angle:16.5f} | {nudge_from_base:+11.5f} | {data['fwd_rpm']:10.1f}  | {data['rev_rpm']:10.1f}  | {data['delta_rpm']:+9.1f} | {data['symmetry_pct']:7.1f}% | [{status}]")
+
+            if is_valid and (data["symmetry_pct"] >= 98.0 or abs(data["delta_rpm"]) < 10.0) and it >= 2:
+                print("\n[+] Perfect 1:1 Directional Symmetry achieved!")
+                break
+
+            # Secant root finding interpolation
+            pos_pts = [p for p in history if p["delta"] > 0]
+            neg_pts = [p for p in history if p["delta"] < 0]
+
+            if pos_pts and neg_pts:
+                best_pos = min(pos_pts, key=lambda p: abs(p["delta"]))
+                best_neg = min(neg_pts, key=lambda p: abs(p["delta"]))
+                d_diff = best_pos["delta"] - best_neg["delta"]
+                if abs(d_diff) > 2.0:
+                    next_angle = best_neg["angle"] - best_neg["delta"] * (best_pos["angle"] - best_neg["angle"]) / d_diff
+                else:
+                    next_angle = (best_pos["angle"] + best_neg["angle"]) * 0.5
+            else:
+                probe_step = - data["delta_rpm"] * 0.000015
+                probe_step = max(-0.0020, min(0.0020, probe_step))
+                next_angle = current_angle + probe_step
+
+            # Enforce safety bounds relative to base_zero_angle
+            min_bound = self.base_zero_angle - self.max_nudge_rad
+            max_bound = self.base_zero_angle + self.max_nudge_rad
+
+            if next_angle < min_bound:
+                next_angle = min_bound
+                print(f"    [!] Reached lower safety bound ({min_bound:.5f} rad). Clamping.")
+            elif next_angle > max_bound:
+                next_angle = max_bound
+                print(f"    [!] Reached upper safety bound ({max_bound:.5f} rad). Clamping.")
+
+            current_angle = next_angle
+            time.sleep(0.2)
+
+        self.optimal_zero_angle = best_angle
+        # Apply optimal angle
+        self.send_cmd(f"j{self.optimal_zero_angle:.5f}")
+        time.sleep(0.05)
+
+        # Final Verification
+        print("--------------------------------------------------------------------------------")
+        print("\n================================================================================")
+        print(" PHASE 3: FINAL VERIFICATION & BALANCED KV EXTRACTION")
+        print("================================================================================")
+
+        mean_speed = (best_data['fwd_rpm'] + best_data['rev_rpm']) * 0.5
+        true_kv = mean_speed / self.test_voltage
+        ke = 1.0 / (true_kv * (2.0 * math.pi / 60.0))
+        kt = ke
+
+        print(f" Baseline Zero Electric Angle : {self.base_zero_angle:.5f} rad ({self.base_zero_angle * 180.0 / math.pi:.2f}°)")
+        print(f" Optimal Neutral Zero Angle   : {self.optimal_zero_angle:.5f} rad ({self.optimal_zero_angle * 180.0 / math.pi:.2f}°)")
+        print(f" Optimal Applied Phase Nudge  : {self.optimal_zero_angle - self.base_zero_angle:+.5f} rad ({(self.optimal_zero_angle - self.base_zero_angle) * 180.0 / math.pi:+.2f}° elec)")
+        print(f" Forward Speed @ ±{self.test_voltage:.1f}V       : {best_data['fwd_rpm']:.1f} RPM")
+        print(f" Reverse Speed @ ±{self.test_voltage:.1f}V       : {best_data['rev_rpm']:.1f} RPM")
+        print(f" Final Directional Symmetry   : {best_data['symmetry_pct']:.1f} % (Δ = {best_data['delta_rpm']:+.1f} RPM)")
+        print(f" Balanced True Motor KV       : {true_kv:.1f} RPM/V")
+        print(f" Back-EMF Constant (Ke)       : {ke:.5f} V*s/rad")
+        print(f" Torque Constant (Kt)         : {kt:.5f} N*m/A")
+        print("================================================================================")
+
+        # Apply KV to SimpleFOC
+        self.send_cmd(f"q{true_kv:.1f}")
+        print(f"[+] Applied KV ({true_kv:.1f} RPM/V) and Neutral Zero Angle to STM32 controller.\n")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Automated Closed-Loop Phase Angle Equalizer & Symmetry Tuner")
+    parser.add_argument("--port", type=str, default=None, help="Serial COM port (default: auto-detect)")
+    parser.add_argument("--baud", type=int, default=921600, help="Serial baud rate (default: 921600)")
+    parser.add_argument("--volt", type=float, default=4.0, help="Test voltage in V (default: 4.0V)")
+    parser.add_argument("--max-nudge", type=float, default=0.05, help="Max safe nudge in rad (default: 0.05 rad / ~2.86 deg)")
+    args = parser.parse_args()
+
+    port = args.port or find_stm32_port()
+    if not port:
+        print("[-] Error: No serial port found. Please connect STM32 and try again.")
+        sys.exit(1)
+
+    tuner = AutoSymmetryTuner(port=port, baud=args.baud, test_voltage=args.volt, max_nudge_rad=args.max_nudge)
+    try:
+        tuner.connect()
+        if tuner.run_baseline_calibration():
+            tuner.optimize_symmetry()
+    except KeyboardInterrupt:
+        print("\n[!] Tuner interrupted by user.")
+    finally:
+        tuner.disconnect()
+        print("[+] Done.")
+
+
+if __name__ == "__main__":
+    main()
+
+
+=== FILE: 4_stm32/boards/genericSTM32G474CB.json ===
+{
+  "build": {
+    "arduino": {
+      "variant_h": "variant_generic.h"
+    },
+    "core": "stm32",
+    "cpu": "cortex-m4",
+    "extra_flags": "-DSTM32G4xx -DSTM32G474xx",
+    "f_cpu": "170000000L",
+    "mcu": "stm32g474cbt6",
+    "product_line": "STM32G474xx",
+    "variant": "STM32G4xx/G473C(B-C-E)T_G474C(B-C-E)T_G483CET_G484CET"
+  },
+  "connectivity": [
+    "can"
+  ],
+  "debug": {
+    "default_tools": [
+      "stlink"
+    ],
+    "jlink_device": "STM32G474CB",
+    "onboard_tools": [
+      "stlink"
+    ],
+    "openocd_target": "stm32g4x",
+    "svd_path": "STM32G474xx.svd"
+  },
+  "frameworks": [
+    "arduino",
+    "stm32cube",
+    "cmsis"
+  ],
+  "name": "Generic STM32G474CB",
+  "url": "https://www.st.com/en/microcontrollers-microprocessors/stm32g474cb.html",
+  "vendor": "STMicroelectronics",
+  "upload": {
+    "maximum_ram_size": 131072,
+    "maximum_size": 131072,
+    "protocol": "stlink",
+    "protocols": [
+      "stlink",
+      "jlink",
+      "cmsis-dap",
+      "blackmagic",
+      "dfu"
+    ]
+  }
+}
+
+
+=== FILE: 4_stm32/motor_config_gm3506.json ===
+{
+  "motor_id": 2,
+  "zero_electric_angle": 5.42048,
+  "sensor_direction": 1,
+  "sensor_lag_comp_us": 20.0,
+  "motor_kv_rating": 130.0,
+  "is_lut_calibrated": true,
+  "pid_p": 0.08,
+  "pid_i": 2.0,
+  "pid_d": 0.0,
+  "lpf_tf": 0.001,
+  "dwt_window_ms": 5.0,
+  "lut_128": [
+    0.001001,
+    0.000987,
+    0.000967,
+    0.000943,
+    0.000921,
+    0.000903,
+    0.000895,
+    0.000899,
+    0.000918,
+    0.000954,
+    0.001009,
+    0.001083,
+    0.001176,
+    0.001285,
+    0.00141,
+    0.001546,
+    0.00169,
+    0.001837,
+    0.001984,
+    0.002123,
+    0.002251,
+    0.002362,
+    0.002451,
+    0.002514,
+    0.002548,
+    0.00255,
+    0.002517,
+    0.00245,
+    0.002347,
+    0.00221,
+    0.002041,
+    0.001843,
+    0.001621,
+    0.001379,
+    0.001121,
+    0.000854,
+    0.000584,
+    0.000316,
+    5.6e-05,
+    -0.000192,
+    -0.000421,
+    -0.000629,
+    -0.000813,
+    -0.000969,
+    -0.001098,
+    -0.001198,
+    -0.001271,
+    -0.001317,
+    -0.001341,
+    -0.001344,
+    -0.00133,
+    -0.001305,
+    -0.001271,
+    -0.001234,
+    -0.001198,
+    -0.001166,
+    -0.001143,
+    -0.00113,
+    -0.001131,
+    -0.001147,
+    -0.001177,
+    -0.001222,
+    -0.00128,
+    -0.001349,
+    -0.001427,
+    -0.001509,
+    -0.001592,
+    -0.001672,
+    -0.001745,
+    -0.001806,
+    -0.001851,
+    -0.001878,
+    -0.001882,
+    -0.001863,
+    -0.001818,
+    -0.001748,
+    -0.001652,
+    -0.001532,
+    -0.00139,
+    -0.001231,
+    -0.001056,
+    -0.000872,
+    -0.000682,
+    -0.000492,
+    -0.000308,
+    -0.000135,
+    2.3e-05,
+    0.00016,
+    0.000274,
+    0.000361,
+    0.00042,
+    0.000447,
+    0.000445,
+    0.000413,
+    0.000354,
+    0.00027,
+    0.000165,
+    4.4e-05,
+    -9e-05,
+    -0.000229,
+    -0.00037,
+    -0.000506,
+    -0.000633,
+    -0.000745,
+    -0.000837,
+    -0.000908,
+    -0.000952,
+    -0.00097,
+    -0.00096,
+    -0.000921,
+    -0.000856,
+    -0.000766,
+    -0.000653,
+    -0.000523,
+    -0.000377,
+    -0.000222,
+    -6.1e-05,
+    0.0001,
+    0.000257,
+    0.000406,
+    0.000543,
+    0.000665,
+    0.000769,
+    0.000854,
+    0.00092,
+    0.000966,
+    0.000993,
+    0.001004
+  ]
+}
+
+=== FILE: 4_stm32/motor_config_gm3506_0.078.json ===
+{
+  "zero_electric_angle": 3.678322,
+  "sensor_direction": 1,
+  "sensor_lag_comp_us": 35.0,
+  "motor_kv_rating": 130.0,
+  "is_lut_calibrated": true,
+  "pid_p": 0.15,
+  "pid_i": 1.5,
+  "pid_d": 0.0,
+  "lpf_tf": 0.0005,
+  "dwt_window_ms": 2.0,
+  "m2_zero_electric_angle": -12345.0,
+  "m2_sensor_direction": -1,
+  "lut_128": [
+    0.003353,
+    -0.001803,
+    0.000368,
+    7.8e-05,
+    -0.000673,
+    0.003626,
+    0.002138,
+    -0.001403,
+    -0.000113,
+    0.002568,
+    -0.000308,
+    0.004218,
+    -0.000114,
+    0.002588,
+    0.00013,
+    0.003628,
+    -0.000276,
+    0.004549,
+    -0.00094,
+    0.002369,
+    -0.000357,
+    0.003596,
+    0.000285,
+    0.005271,
+    0.00157,
+    0.006742,
+    0.003859,
+    0.005688,
+    0.003668,
+    0.008032,
+    0.00209,
+    0.00458,
+    0.001843,
+    0.000471,
+    0.001575,
+    0.002206,
+    0.000189,
+    0.002301,
+    0.002129,
+    -0.000976,
+    0.005315,
+    0.003121,
+    0.003613,
+    0.00131,
+    0.003811,
+    0.001136,
+    0.007495,
+    0.002879,
+    0.004879,
+    5e-06,
+    0.002626,
+    -0.000352,
+    0.005374,
+    -0.000474,
+    0.002075,
+    -0.002154,
+    0.002648,
+    0.001592,
+    0.006848,
+    0.000914,
+    0.003818,
+    0.001754,
+    0.002315,
+    0.002719,
+    0.00378,
+    -0.002127,
+    -0.00086,
+    -3.3e-05,
+    -3.4e-05,
+    0.003619,
+    0.001462,
+    -0.001296,
+    0.000739,
+    0.002762,
+    -0.000448,
+    0.004391,
+    0.000233,
+    0.00278,
+    -2.2e-05,
+    0.00376,
+    -2.8e-05,
+    0.004884,
+    -0.000566,
+    0.002976,
+    -0.000165,
+    0.004012,
+    0.000647,
+    0.005631,
+    0.002094,
+    0.007105,
+    0.004218,
+    0.00659,
+    0.004219,
+    0.008758,
+    0.003069,
+    0.006182,
+    0.002822,
+    0.001093,
+    0.003103,
+    0.004563,
+    0.000112,
+    0.001387,
+    0.00196,
+    -0.000537,
+    0.005132,
+    0.002939,
+    0.003617,
+    0.001664,
+    0.004013,
+    0.00098,
+    0.007334,
+    0.002869,
+    0.005134,
+    0.000742,
+    0.003183,
+    -7.6e-05,
+    0.005885,
+    0.000494,
+    0.003137,
+    -0.001633,
+    0.003277,
+    0.001978,
+    0.007016,
+    0.001084,
+    0.004019,
+    0.002141,
+    0.002881,
+    0.003077
+  ]
+}
+
+=== FILE: 4_stm32/motor_config_m1.json ===
+{
+  "motor_id": 1,
+  "zero_electric_angle": 3.138524,
+  "sensor_direction": 1,
+  "sensor_lag_comp_us": 20.0,
+  "motor_kv_rating": 130.0,
+  "is_lut_calibrated": true,
+  "pid_p": 0.08,
+  "pid_i": 2.0,
+  "pid_d": 0.0,
+  "lpf_tf": 0.001,
+  "dwt_window_ms": 5.0,
+  "lut_128": [
+    -0.001593,
+    -0.001779,
+    -0.001941,
+    -0.002069,
+    -0.00216,
+    -0.002206,
+    -0.002204,
+    -0.00215,
+    -0.002042,
+    -0.001881,
+    -0.001667,
+    -0.001403,
+    -0.001092,
+    -0.000739,
+    -0.000352,
+    6.3e-05,
+    0.000498,
+    0.000945,
+    0.001396,
+    0.001842,
+    0.002274,
+    0.002686,
+    0.003071,
+    0.003423,
+    0.003737,
+    0.00401,
+    0.004239,
+    0.004425,
+    0.004567,
+    0.004667,
+    0.004727,
+    0.00475,
+    0.004742,
+    0.004705,
+    0.004646,
+    0.004569,
+    0.004479,
+    0.004379,
+    0.004274,
+    0.004167,
+    0.00406,
+    0.003953,
+    0.003847,
+    0.003742,
+    0.003636,
+    0.003525,
+    0.003408,
+    0.00328,
+    0.003138,
+    0.002978,
+    0.002795,
+    0.002586,
+    0.002349,
+    0.00208,
+    0.001779,
+    0.001444,
+    0.001078,
+    0.000681,
+    0.000257,
+    -0.000189,
+    -0.000652,
+    -0.001127,
+    -0.001605,
+    -0.002079,
+    -0.002541,
+    -0.002983,
+    -0.003396,
+    -0.003774,
+    -0.004109,
+    -0.004396,
+    -0.004628,
+    -0.004804,
+    -0.004919,
+    -0.004973,
+    -0.004968,
+    -0.004904,
+    -0.004785,
+    -0.004615,
+    -0.004402,
+    -0.004151,
+    -0.003869,
+    -0.003565,
+    -0.003247,
+    -0.002923,
+    -0.0026,
+    -0.002286,
+    -0.001987,
+    -0.001709,
+    -0.001457,
+    -0.001233,
+    -0.001039,
+    -0.000877,
+    -0.000746,
+    -0.000644,
+    -0.00057,
+    -0.000519,
+    -0.000487,
+    -0.000471,
+    -0.000464,
+    -0.000464,
+    -0.000465,
+    -0.000462,
+    -0.000454,
+    -0.000437,
+    -0.000408,
+    -0.000368,
+    -0.000317,
+    -0.000255,
+    -0.000185,
+    -0.00011,
+    -3.2e-05,
+    4.3e-05,
+    0.000111,
+    0.000169,
+    0.000211,
+    0.000233,
+    0.000232,
+    0.000205,
+    0.00015,
+    6.5e-05,
+    -4.8e-05,
+    -0.000188,
+    -0.000353,
+    -0.00054,
+    -0.000743,
+    -0.000956,
+    -0.001174,
+    -0.001389
+  ]
+}
+
+=== FILE: 4_stm32/motor_config_m2.json ===
+{
+  "motor_id": 2,
+  "zero_electric_angle": 5.42048,
+  "sensor_direction": 1,
+  "sensor_lag_comp_us": 20.0,
+  "motor_kv_rating": 130.0,
+  "is_lut_calibrated": true,
+  "pid_p": 0.08,
+  "pid_i": 2.0,
+  "pid_d": 0.0,
+  "lpf_tf": 0.001,
+  "dwt_window_ms": 5.0,
+  "lut_128": [
+    0.001001,
+    0.000987,
+    0.000967,
+    0.000943,
+    0.000921,
+    0.000903,
+    0.000895,
+    0.000899,
+    0.000918,
+    0.000954,
+    0.001009,
+    0.001083,
+    0.001176,
+    0.001285,
+    0.00141,
+    0.001546,
+    0.00169,
+    0.001837,
+    0.001984,
+    0.002123,
+    0.002251,
+    0.002362,
+    0.002451,
+    0.002514,
+    0.002548,
+    0.00255,
+    0.002517,
+    0.00245,
+    0.002347,
+    0.00221,
+    0.002041,
+    0.001843,
+    0.001621,
+    0.001379,
+    0.001121,
+    0.000854,
+    0.000584,
+    0.000316,
+    5.6e-05,
+    -0.000192,
+    -0.000421,
+    -0.000629,
+    -0.000813,
+    -0.000969,
+    -0.001098,
+    -0.001198,
+    -0.001271,
+    -0.001317,
+    -0.001341,
+    -0.001344,
+    -0.00133,
+    -0.001305,
+    -0.001271,
+    -0.001234,
+    -0.001198,
+    -0.001166,
+    -0.001143,
+    -0.00113,
+    -0.001131,
+    -0.001147,
+    -0.001177,
+    -0.001222,
+    -0.00128,
+    -0.001349,
+    -0.001427,
+    -0.001509,
+    -0.001592,
+    -0.001672,
+    -0.001745,
+    -0.001806,
+    -0.001851,
+    -0.001878,
+    -0.001882,
+    -0.001863,
+    -0.001818,
+    -0.001748,
+    -0.001652,
+    -0.001532,
+    -0.00139,
+    -0.001231,
+    -0.001056,
+    -0.000872,
+    -0.000682,
+    -0.000492,
+    -0.000308,
+    -0.000135,
+    2.3e-05,
+    0.00016,
+    0.000274,
+    0.000361,
+    0.00042,
+    0.000447,
+    0.000445,
+    0.000413,
+    0.000354,
+    0.00027,
+    0.000165,
+    4.4e-05,
+    -9e-05,
+    -0.000229,
+    -0.00037,
+    -0.000506,
+    -0.000633,
+    -0.000745,
+    -0.000837,
+    -0.000908,
+    -0.000952,
+    -0.00097,
+    -0.00096,
+    -0.000921,
+    -0.000856,
+    -0.000766,
+    -0.000653,
+    -0.000523,
+    -0.000377,
+    -0.000222,
+    -6.1e-05,
+    0.0001,
+    0.000257,
+    0.000406,
+    0.000543,
+    0.000665,
+    0.000769,
+    0.000854,
+    0.00092,
+    0.000966,
+    0.000993,
+    0.001004
+  ]
+}
+
+=== FILE: 4_stm32/pin_solver.py ===
+#!/usr/bin/env python3
+"""
+pin_solver.py
+=============
+STM32G474 Mathematical Pinout Solver & Hardware Peripheral Verifier
+Target: WeAct Studio STM32G474CBT6 Core Board (LQFP48 Footprint, Dual 2x12 Headers)
+
+Priorities:
+  1st Priority: Hardware peripheral correctness (working timers, SPI, UART, zero pin collisions).
+  2nd Priority: Physical spacing & wiring clustering (motor wiring on Header P2, comms on Header P1).
+"""
+
+import sys
+import math
+from itertools import product
+
+# ==============================================================================
+# 1. HARDWARE REGISTER & ALTERNATE FUNCTION (AF) DATABASE (STM32G474 LQFP48)
+# Source: STMicroelectronics Datasheet DS12288
+# ==============================================================================
+STM32_AF_REGISTERS = {
+    # TIM2 (32-bit General Purpose Timer, Complementary/Standard PWM)
+    "TIM2_CH1": ["PA0", "PA5", "PA15"],
+    "TIM2_CH2": ["PA1", "PB3"],
+    "TIM2_CH3": ["PA2", "PB10"],
+    "TIM2_CH4": ["PA3", "PB11"],
+
+    # TIM3 (16-bit General Purpose Timer, Standard PWM)
+    "TIM3_CH1": ["PA6", "PB4"],
+    "TIM3_CH2": ["PA4", "PB5"],
+    "TIM3_CH3": ["PB0"],
+    "TIM3_CH4": ["PB1"],
+
+    # SPI1 (High-speed hardware SPI, up to 42.5 MHz)
+    "SPI1_SCK":  ["PA5", "PB3"],
+    "SPI1_MISO": ["PA6", "PB4"],
+    "SPI1_MOSI": ["PA7", "PB5"],
+    "SPI1_NSS":  ["PA4", "PA15"],
+
+    # SPI2 (Independent high-speed hardware SPI, up to 42.5 MHz)
+    "SPI2_SCK":  ["PB13"],
+    "SPI2_MISO": ["PB14", "PA10"],
+    "SPI2_MOSI": ["PB15", "PA11"],
+    "SPI2_NSS":  ["PB12"],
+
+    # USART1 (Telemetry communication highway)
+    "USART1_TX": ["PA9", "PB6"],
+    "USART1_RX": ["PA10", "PB7"],
+}
+
+# Protected silicon pins that MUST NOT be used for general IO:
+FORBIDDEN_PINS = {
+    "PA11": "USB_DM (Native USB CDC Serial)",
+    "PA12": "USB_DP (Native USB CDC Serial)",
+    "PA13": "SWDIO (Hardware Debug Interface)",
+    "PA14": "SWCLK (Hardware Debug Interface)",
+    "PB8":  "BOOT0 (Hardware Boot Pin & Button)",
+}
+
+# ==============================================================================
+# 2. PHYSICAL 2D PIN COORDINATES (WeAct STM32G474 4-Row Board: P1 & P2 Dual Rows)
+# Grid: (col, row) in 2.54 mm pitch units.
+# Col 0: P1 Outer, Col 1: P1 Inner, Col 4: P2 Inner, Col 5: P2 Outer.
+# ==============================================================================
+PIN_COORDS = {
+    # Header P1 (Left Side - Digital Communications & Sensors)
+    "PB12": (0, 3), "PB14": (0, 4), "PA9": (0, 5), "PA11": (0, 6),
+    "PA15": (0, 7), "PB4": (0, 9), "PB6": (0, 10), "PB8": (0, 11),
+    "PB13": (1, 2), "PB15": (1, 3), "PA8": (1, 4), "PA10": (1, 5),
+    "PA12": (1, 6), "PB3": (1, 7), "PB5": (1, 8), "PB7": (1, 9), "PB9": (1, 10),
+
+    # Header P2 (Right Side - Power Inverter & Motor PWM)
+    "PB2": (4, 3), "PB0": (4, 4), "PA7": (4, 5), "PA5": (4, 6),
+    "PA3": (4, 7), "PA1": (4, 8), "PC14": (4, 10),
+    "PB11": (5, 3), "PB1": (5, 5), "PA6": (5, 6), "PA4": (5, 7),
+    "PA2": (5, 8), "PA0": (5, 9), "PC15": (5, 10), "PC13": (5, 11),
+}
+
+
+def calc_distance(pin1, pin2):
+    if pin1 not in PIN_COORDS or pin2 not in PIN_COORDS:
+        return 0.0
+    c1 = PIN_COORDS[pin1]
+    c2 = PIN_COORDS[pin2]
+    return math.sqrt((c1[0] - c2[0]) ** 2 + (c1[1] - c2[1]) ** 2)
+
+
+# ==============================================================================
+# 3. MATHEMATICAL CONSTRAINT SATISFACTION & OPTIMIZATION SOLVER
+# ==============================================================================
+def solve_stm32_pinout():
+    """
+    Solves the pin allocation via exhaustive constraint evaluation:
+      - Enforces strict hardware alternate function validity from the datasheet.
+      - Enforces injectivity (zero pin collisions).
+      - Excludes reserved system pins (USB, SWD, BOOT0).
+      - Optimizes for hardware clustering: all motor signals on Header P2,
+        all digital sensors & comms on Header P1.
+    """
+    search_space = {
+        "M1_PWM_A": [("PA5", "TIM2_CH1 (AF1)"), ("PA0", "TIM2_CH1 (AF1)")],
+        "M1_PWM_B": [("PA1", "TIM2_CH2 (AF1)")],
+        "M1_PWM_C": [("PA2", "TIM2_CH3 (AF1)")],
+        "M1_EN":    [("PA3", "GPIO Output")],
+
+        "M2_PWM_A": [("PA6", "TIM3_CH1 (AF2)")],
+        "M2_PWM_B": [("PA4", "TIM3_CH2 (AF2)")],
+        "M2_PWM_C": [("PB0", "TIM3_CH3 (AF2)")],
+        "M2_EN":    [("PA7", "GPIO Output")],
+
+        "ENC1_SCK":  [("PB3", "SPI1_SCK (AF5)"), ("PA5", "SPI1_SCK (AF5)")],
+        "ENC1_MISO": [("PB4", "SPI1_MISO (AF5)"), ("PA6", "SPI1_MISO (AF5)")],
+        "ENC1_MOSI": [("PB5", "SPI1_MOSI (AF5)"), ("PA7", "SPI1_MOSI (AF5)")],
+        "ENC1_CS":   [("PA15", "SPI1_NSS (AF5)"), ("PA4", "SPI1_NSS (AF5)")],
+
+        "ENC2_SCK":  [("PB13", "SPI2_SCK (AF5)")],
+        "ENC2_MISO": [("PB14", "SPI2_MISO (AF5)"), ("PA10", "SPI2_MISO (AF5)")],
+        "ENC2_MOSI": [("PB15", "SPI2_MOSI (AF5)"), ("PA11", "SPI2_MOSI (AF5)")],
+        "ENC2_CS":   [("PB12", "SPI2_NSS (AF5)")],
+
+        "UART_TX":   [("PA9", "USART1_TX (AF7)"), ("PB6", "USART1_TX (AF7)")],
+        "UART_RX":   [("PA10", "USART1_RX (AF7)"), ("PB7", "USART1_RX (AF7)")],
+    }
+
+    signals = list(search_space.keys())
+    candidate_options = [search_space[s] for s in signals]
+
+    total_permutations = 1
+    for opt in candidate_options:
+        total_permutations *= len(opt)
+
+    valid_solutions = []
+
+    for combo in product(*candidate_options):
+        assignment = {signals[i]: combo[i][0] for i in range(len(signals))}
+        af_names = {signals[i]: combo[i][1] for i in range(len(signals))}
+        pins = list(assignment.values())
+
+        # Mathematical Proof 1: Strict Injectivity (no pin collisions)
+        if len(set(pins)) != len(pins):
+            continue
+
+        # Mathematical Proof 2: Reserved/Forbidden Pins check
+        if any(p in FORBIDDEN_PINS for p in pins):
+            continue
+
+        # Physical spacing metrics:
+        # Distance from high dv/dt PWM switching pins to sensitive SPI MISO data lines
+        pwm_pins = [assignment[f"M{m}_PWM_{ph}"] for m in (1, 2) for ph in ("A", "B", "C")]
+        miso_pins = [assignment["ENC1_MISO"], assignment["ENC2_MISO"]]
+        min_pwm_to_miso = min(calc_distance(pwm, miso) for pwm in pwm_pins for miso in miso_pins)
+
+        # Distance between SPI clock and SPI MISO
+        spi1_dist = calc_distance(assignment["ENC1_SCK"], assignment["ENC1_MISO"])
+        spi2_dist = calc_distance(assignment["ENC2_SCK"], assignment["ENC2_MISO"])
+
+        # Header clustering score: prefer placing all motor lines on Header P2 (col >= 4)
+        # and all comms on Header P1 (col <= 1)
+        motor_pins = pwm_pins + [assignment["M1_EN"], assignment["M2_EN"]]
+        comms_pins = [assignment[s] for s in signals if s not in motor_pins]
+        motor_on_p2 = sum(1 for p in motor_pins if PIN_COORDS.get(p, (0, 0))[0] >= 4)
+        comms_on_p1 = sum(1 for p in comms_pins if PIN_COORDS.get(p, (5, 5))[0] <= 1)
+
+        # Score function: Priority 1 is valid hardware (satisfied above).
+        # Priority 2 is clean separation & spreading.
+        score = (motor_on_p2 * 100) + (comms_on_p1 * 50) + (min_pwm_to_miso * 5.0) + spi1_dist + spi2_dist
+
+        valid_solutions.append({
+            "score": score,
+            "min_pwm_miso_pitch": min_pwm_to_miso,
+            "min_pwm_miso_mm": min_pwm_to_miso * 2.54,
+            "spi1_dist_pitch": spi1_dist,
+            "spi1_dist_mm": spi1_dist * 2.54,
+            "spi2_dist_pitch": spi2_dist,
+            "spi2_dist_mm": spi2_dist * 2.54,
+            "assignment": assignment,
+            "af_names": af_names,
+        })
+
+    valid_solutions.sort(key=lambda x: x["score"], reverse=True)
+    return total_permutations, valid_solutions
+
+
+# ==============================================================================
+# 4. STRUCTURED, COMPACT OUTPUT REPORT
+# ==============================================================================
+def display_results():
+    total_checked, solutions = solve_stm32_pinout()
+    if not solutions:
+        print("ERROR: No valid conflict-free hardware solutions found!")
+        sys.exit(1)
+
+    best = solutions[0]
+    assign = best["assignment"]
+    af = best["af_names"]
+
+    print("=" * 80)
+    print("  STM32G474 DUAL-MOTOR & DUAL-ENCODER PIN SOLVER REPORT")
+    print("  Target: WeAct Studio STM32G474CBT6 Core Board (LQFP48 Footprint)")
+    print("=" * 80)
+
+    print("\n[MATHEMATICAL PROOF & HARDWARE VALIDATION]")
+    print(f"  * Total AF Combinations Evaluated: {total_checked}")
+    print(f"  * Conflict-Free Solutions Found   : {len(solutions)}")
+    print(f"  * Pin Collision Check             : PASSED (0 overlaps, strict 1:1 mapping)")
+    print(f"  * Hardware AF Verification        : 100% compliant with STM32G474 datasheet")
+    print(f"  * Native USB CDC (PA11/PA12)      : PRESERVED (unassigned to IO)")
+    print(f"  * SWD Hardware Debug (PA13/PA14)  : PRESERVED (unassigned to IO)")
+    print(f"  * Hardware BOOT0 (PB8)            : PRESERVED (unassigned to IO)")
+    print(f"  * Motor PWM <-> SPI Isolation     : {best['min_pwm_miso_pitch']:.2f} pin pitches ({best['min_pwm_miso_mm']:.2f} mm)")
+
+    def get_header_loc(pin):
+        if pin in PIN_COORDS:
+            col, row = PIN_COORDS[pin]
+            if col == 0:
+                return f"P1 Outer Row {row}"
+            elif col == 1:
+                return f"P1 Inner Row {row}"
+            elif col == 4:
+                return f"P2 Inner Row {row}"
+            elif col == 5:
+                return f"P2 Outer Row {row}"
+        return "Onboard"
+
+    # Structured, compact table with exactly ONE pin per line
+    print("\n" + "-" * 95)
+    print(f"  {'SIGNAL':<16} | {'PIN':<6} | {'HEADER LOCATION':<16} | {'HARDWARE MODE':<18} | {'FUNCTION / ROLE':<32}")
+    print("-" * 95)
+
+    # Motor 1
+    print("  [MOTOR 1 INVERTER -- TIM2 HARDWARE PWM]")
+    for sig, role in [("M1_PWM_A", "Phase A Center-Aligned PWM"),
+                      ("M1_PWM_B", "Phase B Center-Aligned PWM"),
+                      ("M1_PWM_C", "Phase C Center-Aligned PWM"),
+                      ("M1_EN", "Motor 1 Gate Driver Enable")]:
+        p = assign[sig]
+        print(f"  {sig:<16} | {p:<6} | {get_header_loc(p):<16} | {af[sig]:<18} | {role:<32}")
+
+    # Motor 2
+    print("\n  [MOTOR 2 INVERTER -- TIM3 HARDWARE PWM]")
+    for sig, role in [("M2_PWM_A", "Phase A Center-Aligned PWM"),
+                      ("M2_PWM_B", "Phase B Center-Aligned PWM"),
+                      ("M2_PWM_C", "Phase C Center-Aligned PWM"),
+                      ("M2_EN", "Motor 2 Gate Driver Enable")]:
+        p = assign[sig]
+        print(f"  {sig:<16} | {p:<6} | {get_header_loc(p):<16} | {af[sig]:<18} | {role:<32}")
+
+    # Encoder 1
+    print("\n  [ENCODER 1 -- MT6816 SPI1 HARDWARE BUS]")
+    for sig, role in [("ENC1_SCK", "SPI1 Clock (PB3)"),
+                      ("ENC1_MISO", "SPI1 Master In Data (PB4)"),
+                      ("ENC1_MOSI", "SPI1 Master Out Data (PB5)"),
+                      ("ENC1_CS", "SPI1 Chip Select (PA15)")]:
+        p = assign[sig]
+        print(f"  {sig:<16} | {p:<6} | {get_header_loc(p):<16} | {af[sig]:<18} | {role:<32}")
+
+    # Encoder 2
+    print("\n  [ENCODER 2 -- MT6816 SPI2 HARDWARE BUS]")
+    for sig, role in [("ENC2_SCK", "SPI2 Clock (PB13)"),
+                      ("ENC2_CS", "SPI2 Chip Select (PB12 Guard)"),
+                      ("ENC2_MISO", "SPI2 Master In Data (PB14)"),
+                      ("ENC2_MOSI", "SPI2 Master Out Data (PB15)")]:
+        p = assign[sig]
+        print(f"  {sig:<16} | {p:<6} | {get_header_loc(p):<16} | {af[sig]:<18} | {role:<32}")
+
+    # Telemetry
+    print("\n  [TELEMETRY HIGHWAY -- USART1 HARDWARE SERIAL]")
+    print(f"  {'UART_TX':<16} | {assign['UART_TX']:<6} | {get_header_loc(assign['UART_TX']):<16} | {af['UART_TX']:<18} | {'TX -> ESP32 RX (J1 Pin 11/9)':<32}")
+    print(f"  {'UART_RX':<16} | {assign['UART_RX']:<6} | {get_header_loc(assign['UART_RX']):<16} | {af['UART_RX']:<18} | {'RX <- ESP32 TX (J1 Pin 10/8)':<32}")
+
+    # Diagnostics & Reserved System
+    print("\n  [DIAGNOSTICS & RESERVED SYSTEM FUNCTIONS]")
+    sys_pins = [
+        ("USER_BTN", "PC13", "GPIO Input", "Onboard User Key Button"),
+        ("STATUS_LED", "PA8", "GPIO Output", "Onboard User Status LED"),
+        ("DIAG_PWM", "PA0", "TIM2_CH1 (AF1)", "Ground Truth Verification"),
+        ("USB_DM", "PA11", "Native USB", "Preserved for USB CDC Serial"),
+        ("USB_DP", "PA12", "Native USB", "Preserved for USB CDC Serial"),
+        ("SWDIO", "PA13", "SWD Debug", "Hardware Debug Data"),
+        ("SWCLK", "PA14", "SWD Debug", "Hardware Debug Clock"),
+        ("BOOT0", "PB8", "Boot Control", "Hardware Bootloader Select"),
+    ]
+    for sig, p, mode, role in sys_pins:
+        print(f"  {sig:<16} | {p:<6} | {get_header_loc(p):<16} | {mode:<18} | {role:<32}")
+    print("-" * 95)
+    print("  NOTE: STM32 firmware routes hardware USART1 via HardwareSerial Serial1(PA10, PA9).")
+    print("        Onboard USB-C CDC is mapped to Serial for interactive debugging/tuning.")
+    print("-" * 95 + "\n")
+
+
+if __name__ == "__main__":
+    display_results()
+
+
+=== FILE: 4_stm32/platformio.ini ===
+[platformio]
+default_envs = stm32_dual_foc, stm32_bldc_main, stm32_bldc_usb_test, stm32_i2c_test, STM32_Motor_24_08, stm32_kv_finder, stm32_pwm_test, stm32_lut_test, esp32_motor_test
+src_dir = .
+boards_dir = boards
+
+; ---------------------------------------------------------------------------
+; Base: STM32G474 BLDC Controller (SimpleFOC, 921600 Baud Console)
+; ---------------------------------------------------------------------------
+[env:generic_stm32]
+platform = ststm32
+board = genericSTM32G474CB
+framework = arduino
+lib_archive = false
+lib_deps =
+    askuric/Simple FOC @ ^2.3.2
+monitor_speed = 921600
+monitor_eol = LF
+build_flags =
+    -DHAL_OPAMP_MODULE_ENABLED
+    -DHAL_CORDIC_MODULE_ENABLED
+    -mfpu=fpv4-sp-d16
+    -mfloat-abi=hard
+
+; ---------------------------------------------------------------------------
+; STM32G474 — 20 kHz Dual-Motor FOC & MT6816 Shared SPI Suite
+; ---------------------------------------------------------------------------
+[env:stm32_dual_foc]
+extends = env:generic_stm32
+build_src_filter = -<*> +<src/>
+build_flags =
+    ${env:generic_stm32.build_flags}
+    -DUSBCON
+    -DUSBD_USE_CDC
+    -DSERIAL_RX_BUFFER_SIZE=512
+    -DSERIAL_TX_BUFFER_SIZE=512
+    -Os
+    -I src
+    -Wl,--defsym=_Min_Stack_Size=0x2000
+    -Wl,--wrap=_micros
+    -Wl,--wrap=sinf
+    -Wl,--wrap=cosf
+    -Wl,--wrap=sincosf
+upload_protocol = dfu
+
+
+; ---------------------------------------------------------------------------
+; STM32 — Production Firmware (Quad-BLDC + Encoder + ESP32 UART Link)
+; ---------------------------------------------------------------------------
+[env:stm32_bldc_main]
+extends = env:generic_stm32
+build_src_filter = -<*> +<STM32_Main/src/>
+build_flags =
+    ${env:generic_stm32.build_flags}
+    -I STM32_Main/include
+
+; ---------------------------------------------------------------------------
+; STM32 — General USB-CDC Test Bench (DFU upload, SoftWire I2C)
+; ---------------------------------------------------------------------------
+[env:stm32_bldc_usb_test]
+extends = env:generic_stm32
+build_src_filter = -<*> +<STM32_Test/src/>
+build_flags =
+    ${env:generic_stm32.build_flags}
+    -DUSBCON
+    -DUSBD_USE_CDC
+    -I STM32_Test/include
+lib_deps =
+    ${env:generic_stm32.lib_deps}
+    stevemarple/SoftWire
+upload_protocol = dfu
+
+; ---------------------------------------------------------------------------
+; STM32 — Motor Test Bench (Magnetic Encoder Calibration & SPI Readout)
+; ---------------------------------------------------------------------------
+[env:STM32_Motor_24_08]
+extends = env:generic_stm32
+build_src_filter = -<*> +<encoder_test/>
+build_flags =
+    ${env:generic_stm32.build_flags}
+    -DUSBCON
+    -DUSBD_USE_CDC
+    -I STM32_Test/include
+lib_deps =
+    ${env:generic_stm32.lib_deps}
+    stevemarple/SoftWire
+upload_protocol = dfu
+
+[env:stm32_encoder_test]
+extends = env:STM32_Motor_24_08
+
+; ---------------------------------------------------------------------------
+; STM32 — KV (RPM/Voltage) Constant Finder for BLDC Tuning
+; ---------------------------------------------------------------------------
+[env:stm32_kv_finder]
+extends = env:generic_stm32
+build_src_filter = -<*> +<kv_finder/src/>
+build_flags =
+    ${env:generic_stm32.build_flags}
+    -DUSBCON
+    -DUSBD_USE_CDC
+    -I STM32_Test/include
+lib_deps =
+    ${env:generic_stm32.lib_deps}
+    stevemarple/SoftWire
+upload_protocol = dfu
+
+; ---------------------------------------------------------------------------
+; STM32 — PWM Phase Output Verification Test
+; ---------------------------------------------------------------------------
+[env:stm32_pwm_test]
+extends = env:generic_stm32
+build_src_filter = -<*> +<pwm_test/src/>
+build_flags =
+    ${env:generic_stm32.build_flags}
+    -DUSBCON
+    -DUSBD_USE_CDC
+    -I STM32_Test/include
+lib_deps =
+    ${env:generic_stm32.lib_deps}
+upload_protocol = dfu
+
+; ---------------------------------------------------------------------------
+; STM32 — I2C Bus Scan & Peripheral Detection Test
+; ---------------------------------------------------------------------------
+[env:stm32_i2c_test]
+extends = env:generic_stm32
+build_src_filter = -<*> +<test_i2c/src/>
+build_flags =
+    ${env:generic_stm32.build_flags}
+    -DUSBCON
+    -DUSBD_USE_CDC
+    -I test_i2c/include
+lib_deps =
+    ${env:generic_stm32.lib_deps}
+    stevemarple/SoftWire
+upload_protocol = dfu
+
+; ---------------------------------------------------------------------------
+; STM32 — Phase Current Look-Up Table (LUT) Validation
+; ---------------------------------------------------------------------------
+[env:stm32_lut_test]
+extends = env:generic_stm32
+build_src_filter = -<*> +<test_lut/src/> +<STM32_Test/src/> -<STM32_Test/src/main.cpp>
+build_flags =
+    ${env:generic_stm32.build_flags}
+    -DUSBCON
+    -DUSBD_USE_CDC
+    -I STM32_Test/include
+lib_deps =
+    ${env:generic_stm32.lib_deps}
+    stevemarple/SoftWire
+upload_protocol = dfu
+
+; ---------------------------------------------------------------------------
+; STM32 — Encoder Flash / OTP Burn Utility
+; ---------------------------------------------------------------------------
+[env:stm32_encoder_flash]
+extends = env:generic_stm32
+build_src_filter = -<*> +<encoder_flash/>
+build_flags =
+    ${env:generic_stm32.build_flags}
+    -DUSBCON
+    -DUSBD_USE_CDC
+lib_deps =
+    ${env:generic_stm32.lib_deps}
+    stevemarple/SoftWire
+upload_protocol = dfu
+
+; ===========================================================================
+; ESP32-S3 DevKitC-1 (SimpleFOC Motor Controller & Sensor Hub)
+; ===========================================================================
+
+; ---------------------------------------------------------------------------
+; ESP32-S3 — Motor 1 Test Bench & SimpleFOC Suite (GM3506 + MT6816 SPI)
+; ---------------------------------------------------------------------------
+[env:esp32_motor_test]
+platform = espressif32
+board = esp32-s3-devkitc-1
+framework = arduino
+monitor_speed = 921600
+build_src_filter = -<*> +<../3_esp32/motor_test/>
+build_flags =
+    -I ../3_esp32/include
+    -I ../3_esp32/motor_test
+lib_deps =
+    askuric/Simple FOC @ 2.3.2
+    SPI
+
+; ---------------------------------------------------------------------------
+; ESP32 — Production Firmware (IMU + STM32 Link + Pi5 Telemetry)
+; ---------------------------------------------------------------------------
+[env:esp32_sensor_hub]
+platform = espressif32
+board = esp32-s3-devkitc-1
+framework = arduino
+upload_port = COM5
+monitor_port = COM5
+monitor_speed = 921600
+build_src_filter = -<*> +<../3_esp32/src/>
+build_flags =
+    -I ../3_esp32/include
+lib_deps =
+    sparkfun/SparkFun BNO080 Cortex Based IMU @ ^1.1.12
+    adafruit/Adafruit BNO08x @ ^1.0.5
+    adafruit/Adafruit BusIO @ ^1.16.1
+    madhephaestus/ESP32Servo @ ^3.0.5
+
+; ---------------------------------------------------------------------------
+; ESP32 — BNO08x IMU Backup / Known-Good Snapshot
+; ---------------------------------------------------------------------------
+[env:esp32_imu_backup]
+platform = espressif32
+board = esp32-s3-devkitc-1
+framework = arduino
+upload_port = COM5
+monitor_port = COM5
+monitor_speed = 921600
+build_src_filter = -<*> +<../3_esp32/backup_bno08x_working/main.cpp> +<../3_esp32/backup_bno08x_working/imu_bno08x.cpp> +<../3_esp32/src/stm32_link.cpp>
+build_flags =
+    -I ../3_esp32/include
+    -I ../3_esp32/backup_bno08x_working
+lib_deps =
+    sparkfun/SparkFun BNO080 Cortex Based IMU @ ^1.1.12
+
+; ---------------------------------------------------------------------------
+; ESP32 — Steering Servo PWM Tuning & Calibration
+; ---------------------------------------------------------------------------
+[env:esp32_servo_test]
+platform = espressif32
+board = esp32-s3-devkitc-1
+framework = arduino
+upload_port = COM5
+monitor_port = COM5
+monitor_speed = 921600
+build_src_filter = -<*> +<../3_esp32/servo_test/> +<../3_esp32/src/servo_driver.cpp>
+build_flags =
+    -I ../3_esp32/include
+lib_deps =
+    madhephaestus/ESP32Servo @ ^3.0.5
+
+; ---------------------------------------------------------------------------
+; ESP32 — Native Unit Test Runner (x86, no hardware)
+; ---------------------------------------------------------------------------
+[env:esp32_native_unit_test]
+platform = native
+build_src_filter = -<*> +<../3_esp32/src/> +<../5_webots/validation/test/>
+build_flags =
+    -std=c++17
+    -I ../3_esp32/include
+
+; ---------------------------------------------------------------------------
+; ESP32 — VL53L8CX ToF Sensor Integration Test (SPI, 4x4 @ 60Hz)
+; ---------------------------------------------------------------------------
+[env:esp32_tof_test]
+platform = espressif32
+board = esp32-s3-devkitc-1
+framework = arduino
+upload_port = COM7
+monitor_port = COM7
+monitor_speed = 921600
+build_src_filter = -<*> +<../3_esp32/tof_test/> +<../3_esp32/VL53L8CX/src/> -<../3_esp32/VL53L8CX/src/vl53l8cx_platform.c> -<../3_esp32/VL53L8CX/src/vl53l8cx.cpp>
+build_flags =
+    -I ../3_esp32/include
+    -I ../3_esp32/VL53L8CX/src
+    -D VL53L8CX_NB_TARGET_PER_ZONE=4U
+lib_deps =
+    Wire
+    SPI
+
+; ---------------------------------------------------------------------------
+; ESP32 — ToF Backup / Known-Good Snapshot
+; ---------------------------------------------------------------------------
+[env:esp32_tof_backup]
+platform = espressif32
+board = esp32-s3-devkitc-1
+framework = arduino
+upload_port = COM5
+monitor_port = COM5
+monitor_speed = 921600
+build_src_filter = -<*> +<../3_esp32/backup_tof_working/> +<../3_esp32/VL53L8CX/src/> -<../3_esp32/VL53L8CX/src/vl53l8cx_platform.c> -<../3_esp32/VL53L8CX/src/vl53l8cx.cpp>
+build_flags =
+    -I ../3_esp32/include
+    -I ../3_esp32/VL53L8CX/src
+    -D VL53L8CX_NB_TARGET_PER_ZONE=4U
+lib_deps =
+    Wire
+    SPI
+
+
+=== FILE: 4_stm32/src/config_pins.h ===
+#ifndef CONFIG_PINS_H
+#define CONFIG_PINS_H
+
+#include <Arduino.h>
+
+// ============================================================================
+// FOLKRACE — HARDWARE PINOUT & SYSTEM CONFIGURATION (STM32G474 LQFP48)
+// ============================================================================
+// Hardware Pinout matching exact pin solver / hardware assignments:
+// M1: TIM2 (PA5, PA1, PA2), M1_EN: PA3
+// M2: TIM3 (PA6, PA4, PB0), M2_EN: PA7
+// Enc1: SPI1 (PB3 SCK, PB4 MISO, PB5 MOSI), CS: PA15
+// Enc2: SPI2 (PB13 SCK, PB14 MISO, PB15 MOSI), CS: PB11
+// Telemetry: USART1 (PA9 TX, PA10 RX)
+// Native USB: PA11 (DM), PA12 (DP)
+// ============================================================================
+
+// ----------------------------------------------------------------------------
+// ESP32 High-Speed 400 Hz UART Link (USART1)
+// ----------------------------------------------------------------------------
+#ifndef PIN_ESP_UART_TX
+#define PIN_ESP_UART_TX PA9   // STM32 TX -> ESP32 RX
+#endif
+
+#ifndef PIN_ESP_UART_RX
+#define PIN_ESP_UART_RX PA10  // STM32 RX <- ESP32 TX
+#endif
+
+#ifndef ESP_UART_BAUD
+#define ESP_UART_BAUD 921600
+#endif
+
+// ----------------------------------------------------------------------------
+// SPI1 Bus (MT6816 Encoder 1)
+// ----------------------------------------------------------------------------
+#ifndef PIN_SPI1_SCK
+#define PIN_SPI1_SCK PB3 // ENC1_SCK (SPI1 Clock)
+#endif
+
+#ifndef PIN_SPI1_MISO
+#define PIN_SPI1_MISO PB4 // ENC1_MISO (SPI1 MISO)
+#endif
+
+#ifndef PIN_SPI1_MOSI
+#define PIN_SPI1_MOSI PB5 // ENC1_MOSI (SPI1 MOSI)
+#endif
+
+#ifndef PIN_M1_CS
+#define PIN_M1_CS PA15 // ENC1_CS (SPI1 Chip Select)
+#endif
+
+// ----------------------------------------------------------------------------
+// SPI2 Bus (MT6816 Encoder 2 - Independent Hardware SPI2 on AF5)
+// ----------------------------------------------------------------------------
+// CRITICAL PIN MAPPING (STM32G474 AF5):
+//   PB13 = SPI2_SCK  (Clock Output to MT6816 CLK)
+//   PB14 = SPI2_MISO (Data Input from MT6816 DO)
+//   PB15 = SPI2_MOSI (Data Output to MT6816 DI)
+//   PB11 = Software Chip Select (CSN)
+// STM32duino constructor argument order is: SPIClass(MOSI, MISO, SCK)
+//   SPIClass SPI_2(PIN_SPI2_MOSI, PIN_SPI2_MISO, PIN_SPI2_SCK);
+// ----------------------------------------------------------------------------
+#ifndef PIN_SPI2_SCK
+#define PIN_SPI2_SCK PB13 // ENC2_SCK (SPI2 Clock, AF5)
+#endif
+
+#ifndef PIN_SPI2_MISO
+#define PIN_SPI2_MISO PB14 // ENC2_MISO (SPI2 MISO, AF5)
+#endif
+
+#ifndef PIN_SPI2_MOSI
+#define PIN_SPI2_MOSI PB15 // ENC2_MOSI (SPI2 MOSI, AF5)
+#endif
+
+#ifndef PIN_M2_CS
+#define PIN_M2_CS PB11 // ENC2_CS (SPI2 Chip Select)
+#endif
+
+// ----------------------------------------------------------------------------
+// Motor 1 / TIM2 @ 25 kHz Center-Aligned PWM
+// ----------------------------------------------------------------------------
+#ifndef M1_PWM_A
+#define M1_PWM_A PA5 // M1_PWM1 (TIM2 Phase A)
+#endif
+
+#ifndef M1_PWM_B
+#define M1_PWM_B PA1 // M1_PWM2 (TIM2 Phase B)
+#endif
+
+#ifndef M1_PWM_C
+#define M1_PWM_C PA2 // M1_PWM3 (TIM2 Phase C)
+#endif
+
+#ifndef M1_EN
+#define M1_EN PA3 // M1_EN (Motor 1 Driver Enable)
+#endif
+
+// ----------------------------------------------------------------------------
+// Motor 2 / TIM3 @ 25 kHz Center-Aligned PWM
+// ----------------------------------------------------------------------------
+#ifndef M2_PWM_A
+#define M2_PWM_A PB0 // M2_PWM1 (TIM3 Phase A / CH1)
+#endif
+
+#ifndef M2_PWM_B
+#define M2_PWM_B PA4 // M2_PWM2 (TIM3 Phase B / CH2)
+#endif
+
+#ifndef M2_PWM_C
+#define M2_PWM_C PA6 // M2_PWM3 (TIM3 Phase C / CH3)
+#endif
+
+#ifndef M2_EN
+#define M2_EN PA7 // M2_EN (Motor 2 Driver Enable)
+#endif
+
+// ----------------------------------------------------------------------------
+// Onboard Status LED & Diagnostics
+// ----------------------------------------------------------------------------
+#ifndef STATUS_LED
+#define STATUS_LED PA8 // Onboard User LED
+#endif
+
+#ifndef USER_BUTTON
+#define USER_BUTTON PC13 // Onboard User Button (KEY)
+#endif
+
+// Ground Truth MT6816 PWM Diagnostics
+#ifndef PIN_PWM_DIAG
+#define PIN_PWM_DIAG PA0 // Optional diagnostic PWM pin
+#endif
+
+// ----------------------------------------------------------------------------
+// Motor & Control Engineering Parameters (GM3506 Optimized @ 12V)
+// ----------------------------------------------------------------------------
+#define MOTOR_POLE_PAIRS 11        // 24N22P Gimbal Motor
+#define MOTOR_SUPPLY_VOLTAGE 12.0f // 12V DC Supply
+#define MOTOR_VOLTAGE_LIMIT 12.00f // 12.00V Full Inverter Headroom
+#define MOTOR_ALIGN_VOLTAGE 3.0f   // FOC Electrical Alignment Voltage
+#define MOTOR_KV_RATING 130.0f     // GM3506 Back-EMF Feed-Forward
+#define MOTOR_VELOCITY_LIMIT                                                   \
+  (2000.0f * 0.104719755f) // 2000 RPM = 209.44 rad/s headroom for 1800 RPM
+
+// Default Motion Control & Sensor Parameters
+#define DEFAULT_PID_P 0.10f
+#define DEFAULT_PID_I 1.50f
+#define DEFAULT_PID_D 0.00000f
+#define DEFAULT_PID_RAMP 250.0f
+#define DEFAULT_PID_I_CLAMP_V 1.25f
+#define DEFAULT_VTRQ_MAX_V 6.93f
+#define BEMF_KE_SAFETY_SCALE 0.94f
+#define CMD_INTERP_TICKS 12.5f
+#define FF_OVERSPEED_TAPER_RAD_S 2.0f
+#define DEFAULT_LPF_TF 0.0005f
+#define DEFAULT_LAG_COMP_US 35.0f
+#define DEFAULT_DWT_WINDOW_MS 5.0f
+
+// Direction Convention Configuration
+// Set to 1 to invert raw encoder counting direction globally in firmware so
+// physical clockwise rotation increases angle & velocity (CW = positive)
+#ifndef INVERT_ENCODER_DIRECTION
+#define INVERT_ENCODER_DIRECTION 0
+#endif
+
+// Stepped 128-Point Calibration Constants (Matching ESP32 Suite)
+#define CALIB_ALIGN_VOLTAGE 4.00f // Stepped calibration movement voltage (V)
+#define CALIB_HOLD_VOLTAGE                                                     \
+  3.20f // Adequate holding voltage during sample to overcome cogging (V)
+#define CALIB_BOOST_VOLTAGE                                                    \
+  4.50f // Automatic torque boost voltage on stall/stiction (V)
+#define CALIB_TOTAL_STEPS 128           // 128-point LUT resolution
+#define CALIB_SWEEP_DAMP_SETTLE_MS 65   // Settle before oversampling (ms)
+#define CALIB_SWEEP_OVERSAMPLE_COUNT 96 // Samples per step for noise rejection
+#define CALIB_ALIGN_OVERSAMPLE_COUNT 96 // Samples per pole for electrical zero
+#define CALIB_COOLDOWN_PAUSE_SEC                                               \
+  5 // Dedicated thermal cooldown duration (seconds)
+#define LUT_ANOMALY_THRESHOLD_RAD                                              \
+  0.035f // > 2.0 deg mech (~22 deg elec) = pole slip / stall
+#define LUT_PKPK_LIMIT_RAD                                                     \
+  0.060f // > 3.44 deg mech = bad sweep / binding / severe runout
+
+// ----------------------------------------------------------------------------
+// Industry-Grade Stall & Thermal Protection Parameters
+// ----------------------------------------------------------------------------
+#define STALL_MIN_EFFORT_VOLTS                                                 \
+  2.50f // Minimum |Uq| required to qualify as stall (V)
+#define STALL_SATURATION_VOLTS 10.50f // Near-saturation voltage threshold (V)
+#define STALL_VELOCITY_FLOOR_RPM                                               \
+  3.0f // Speed below which rotor is considered stationary (RPM)
+#define STALL_VELOCITY_LAG_RPM                                                 \
+  30.0f // Speed error threshold under saturation (RPM)
+#define STALL_I2T_CONT_VOLTS 3.50f // Continuous thermal voltage threshold (V)
+#define STALL_I2T_TRIP_ENERGY                                                  \
+  60.0f // Integrated energy capacity (V^2 * s) [~450ms at 12V dead stall]
+#define STALL_I2T_LEAK_RATE                                                    \
+  25.0f // Energy dissipation rate when effort drops (V^2 / s)
+#define STALL_FOLDBACK_VOLTS                                                   \
+  2.00f // Safe continuous holding voltage during foldback (V)
+#define STALL_MAX_RECOVERY_TRIES                                               \
+  3                              // Dither unwedge attempts before hard shutdown
+#define STALL_DITHER_PULSE_MS 80 // Duration of reverse recovery pulse (ms)
+
+// Real-Time Control Loop Frequencies
+#define FOC_COMMUTATION_HZ                                                     \
+  20000 // 20.0 kHz Hard Real-Time Commutation (50.0 us)
+#define MOTION_DOWNSAMPLE_RATIO                                                \
+  4 // 5.0 kHz Staggered Velocity PID (every 200.0 us per motor)
+#define TELEMETRY_RATE_HZ 25 // 25 Hz Binary Telemetry Stream (40 ms)
+#define SPI_SPEED_HZ                                                           \
+  10625000 // 10.625 MHz (170 MHz / 16 prescaler) for high-speed low-latency
+           // reads
+
+// Pre-Loaded Zero Electrical Angles (Standalone Autonomous Startup Jerk Free)
+#ifndef M1_DEFAULT_ZERO_ELECTRIC_ANGLE
+#define M1_DEFAULT_ZERO_ELECTRIC_ANGLE 0.0f
+#endif
+
+#ifndef M2_DEFAULT_ZERO_ELECTRIC_ANGLE
+#define M2_DEFAULT_ZERO_ELECTRIC_ANGLE 0.0f
+#endif
+
+#endif // CONFIG_PINS_H
+
+

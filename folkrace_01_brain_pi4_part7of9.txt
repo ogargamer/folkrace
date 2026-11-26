@@ -1,0 +1,1804 @@
+=== BUNDLE: folkrace_01_brain_pi4_part7of9.txt (3 files/sections) ===
+  - 2_pi4/debug_server.py
+  - 2_pi4/fan_control.py
+  - 2_pi4/mcu_telemetry_protocol.py
+
+=== FILE: 2_pi4/debug_server.py ===
+#!/usr/bin/env python3
+"""
+================================================================================
+  FOLKRACE PI 4: REAL-TIME TACTICAL DEBUG SERVER & FLIGHT RECORDER
+================================================================================
+  Hardware Isolation:
+    - Strictly pinned to dedicated CPU Core 2 (leaving Core 1 100% to Path Planner).
+    - Asynchronous, zero-stall telemetry ingestion.
+    - Zero interference with the 60 Hz real-time SL-MPC planning pipeline.
+
+  Capabilities:
+    - UDP Telemetry Listener on Port 9876 (accepts planner & sensor packets).
+    - SQLite WAL Black Box Flight Recorder (persists to 64GB SD card).
+    - Embedded Mission Control Web Server on Port 8080 (HTML5 tactical dashboard).
+    - Frame-by-frame time travel API: allows scrubbing back to any exact moment.
+    - Anomaly index: instant jump to unexpected slip, contact, or latency events.
+================================================================================
+"""
+
+import os
+import sys
+import time
+import signal
+import json
+import zlib
+import base64
+import hashlib
+import socket
+import struct
+import shutil
+import sqlite3
+import tempfile
+import threading
+import queue
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlparse, parse_qs
+from typing import Dict, List, Optional, Any, Set, Tuple
+
+# Ensure pi4 folder and repo root are in sys.path
+CURR_DIR = os.path.dirname(os.path.abspath(__file__))
+ROOT_DIR = os.path.dirname(CURR_DIR)
+if CURR_DIR not in sys.path:
+    sys.path.insert(0, CURR_DIR)
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
+
+try:
+    from brain.vehicle_params import SERVO_PULSE_NEUTRAL_US as _CFG_SERVO_NEUTRAL_US
+except Exception:
+    _CFG_SERVO_NEUTRAL_US = 1510.0
+
+from core_manager import set_core_affinity, get_core_affinity, get_system_cpu_stats
+from debug_recorder import TelemetryFlightRecorder, TelemetryLogReader
+from auto_servo_center import AutoServoCenterCalibrator
+
+PORT_HTTP = 8080
+PORT_UDP_RECV = 9876
+UDP_CMD_PORT = 9877
+PLANNER_CMD_UDP_PORT = int(os.environ.get("PLANNER_CMD_UDP_PORT", 9878))
+HOST_BIND = "0.0.0.0"
+
+HTML_PATH = os.path.join(CURR_DIR, "web_debug_gui.html")
+SERVO_TRIM_CFG_PATH = os.path.join(CURR_DIR, "servo_trim.json")
+BASE_SERVO_NEUTRAL_US = float(_CFG_SERVO_NEUTRAL_US)
+SERVO_PULSE_MIN_US = 500.0
+SERVO_PULSE_MAX_US = 2500.0
+
+
+def send_mcu_cmd(cmd_bytes: bytes) -> bool:
+    """Dispatches command bytes to MCU UART Bridge on UDP 127.0.0.1:9877."""
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.sendto(cmd_bytes, ("127.0.0.1", UDP_CMD_PORT))
+        sock.close()
+        return True
+    except Exception as e:
+        print(f"[DebugServer] Failed dispatching MCU command: {e}")
+        return False
+
+
+def send_planner_cmd(cmd_bytes: bytes) -> bool:
+    """Dispatches Start/Stop command bytes to Core 1 Path Planner on UDP 127.0.0.1:9878."""
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.sendto(cmd_bytes, ("127.0.0.1", PLANNER_CMD_UDP_PORT))
+        sock.close()
+        return True
+    except Exception as e:
+        print(f"[DebugServer] Failed dispatching planner command: {e}")
+        return False
+
+
+class DebugServerState:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.fake_data_active: bool = False
+        self.planner_running: bool = False
+        self._bench_t0: float = time.time()
+        self._has_saved_trim_file: bool = os.path.exists(SERVO_TRIM_CFG_PATH)
+        self.servo_center_us: float = self._load_servo_center()
+        self.esp_servo_center_us: Optional[float] = None
+        self.latest_pkt: Dict[str, Any] = {
+            "time_step": 0,
+            "timestamp": time.time(),
+            "sim_time": 0.0,
+            "mode": "STOPPED",
+            "recovery_state": "STANDBY",
+            "escape_state": "NORMAL",
+            "status": "STOPPED",
+            "planner_running": False,
+            "v_cmd": 0.0,
+            "v_real": 0.0,
+            "v_est": 0.0,
+            "steer_cmd_deg": 0.0,
+            "steer_actual_deg": 0.0,
+            "rpms_cmd": [0.0, 0.0, 0.0, 0.0],
+            "rpms_act": [0.0, 0.0, 0.0, 0.0],
+            "yaw_deg": 0.0,
+            "pitch_deg": 0.0,
+            "roll_deg": 0.0,
+            "gyro_z": 0.0,
+            "accel_fwd": 0.0,
+            "accel_lat": 0.0,
+            "slip_state": "OFFLINE",
+            "slip_ratio": 0.0,
+            "flags": {
+                "fake_data": False,
+                "stm32_front": False,
+                "stm32_rear": False,
+                "imu": False,
+            },
+            "tof_ranges": [0.0] * 16,
+            "tof_ranges_raw": [0.0] * 16,
+            "f_tof": 0.0,
+            "gap": [0.0, 0.0, 0.0],
+            "targets": [],
+            "best_line": [],
+            "grid_bounds": [-1.25, 1.25, 0.0, 2.60],
+            "grid_shape": [0, 0],
+        }
+        self.total_frames_received = 0
+        self.last_pkt_time = 0.0
+        self.last_planner_pkt_time = 0.0
+        self.loop_hz = 0.0
+        self._hz_counter = 0
+        self._last_hz_calc = time.time()
+        self.recorder: Optional[TelemetryFlightRecorder] = None
+        # Forward targets registered dynamically by connecting client IPs
+        self.forward_targets: Set[Tuple[str, int]] = set()
+        # Fast cached binary & JSON representations (zero redundant work across requests)
+        self._cached_bin: Optional[bytes] = None
+        self._cached_json: Optional[bytes] = None
+        # Persistent WebSocket streaming clients
+        self.ws_clients: Set[socket.socket] = set()
+        self.ws_lock = threading.Lock()
+        self.ws_queue: queue.Queue = queue.Queue(maxsize=15)
+        # Dedicated WebSocket broadcast thread offloads all TCP client I/O from UDP telemetry ingestion
+        self._ws_thread = threading.Thread(target=self._ws_broadcast_worker, daemon=True, name="WSBroadcaster")
+        self._ws_thread.start()
+        # Disk stats cache (avoid blocking on SD card stat every 2s)
+        self._last_disk_check: float = 0.0
+        self._cached_disk_free: float = 0.0
+        self._cached_db_size: float = 0.0
+        self.auto_servo_center = AutoServoCenterCalibrator(
+            get_telemetry=self._get_telemetry_snapshot,
+            send_cmd=send_mcu_cmd,
+            get_center_us=self.get_servo_center_us,
+            save_center_us=self.save_servo_center,
+        )
+
+    def _get_telemetry_snapshot(self) -> Dict[str, Any]:
+        with self.lock:
+            snap = dict(self.latest_pkt)
+            snap["planner_running"] = self.planner_running
+            snap["_pkt_age_s"] = round(time.time() - self.last_pkt_time, 3) if self.last_pkt_time > 0 else 999.0
+            return snap
+
+    def get_servo_center_us(self) -> float:
+        with self.lock:
+            return self.servo_center_us
+
+    def _load_servo_center(self) -> float:
+        """Load persisted servo neutral pulse (µs) from disk."""
+        try:
+            if os.path.exists(SERVO_TRIM_CFG_PATH):
+                with open(SERVO_TRIM_CFG_PATH, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                val = float(data.get("servo_center_us", BASE_SERVO_NEUTRAL_US))
+                return max(SERVO_PULSE_MIN_US, min(SERVO_PULSE_MAX_US, val))
+        except Exception:
+            pass
+        return BASE_SERVO_NEUTRAL_US
+
+    def save_servo_center(self, center_us: float) -> float:
+        """Clamp, store, and persist servo neutral pulse (µs) to disk."""
+        clamped = round(max(SERVO_PULSE_MIN_US, min(SERVO_PULSE_MAX_US, float(center_us))), 1)
+        with self.lock:
+            self.servo_center_us = clamped
+            self._has_saved_trim_file = True
+        try:
+            with open(SERVO_TRIM_CFG_PATH, "w", encoding="utf-8") as f:
+                json.dump({"servo_center_us": clamped}, f, indent=2)
+        except Exception as e:
+            print(f"[DebugServer] Failed saving servo center: {e}")
+        return clamped
+
+    def _generate_synthetic_benchmark_packet(self, now: float) -> Dict[str, Any]:
+        """Generates dynamic synthetic sweep telemetry when benchmark mode is explicitly enabled."""
+        t_sec = now - getattr(self, "_bench_t0", now)
+        v_sim = 1.5 + 1.5 * math.sin(t_sec * 0.8)
+        steer_sim = 20.0 * math.sin(t_sec * 1.2)
+        wheel_r = 0.0275
+        rpm_sim = (v_sim / wheel_r) * (60.0 / (2.0 * math.pi))
+        sim_tof = [round(max(0.05, 1.2 + 0.5 * math.sin(t_sec + i * 0.3)), 3) for i in range(16)]
+        return {
+            "time_step": int(t_sec * 60),
+            "timestamp": now,
+            "sim_time": round(t_sec, 3),
+            "mode": "DRIVE",
+            "recovery_state": "DRIVE",
+            "escape_state": "NORMAL",
+            "status": "BENCHMARK",
+            "v_cmd": round(v_sim, 2),
+            "v_real": round(v_sim * 0.98, 2),
+            "v_est": round(v_sim * 0.98, 2),
+            "steer_cmd_deg": round(steer_sim, 1),
+            "steer_actual_deg": round(steer_sim * 0.95, 1),
+            "rpms_cmd": [round(rpm_sim, 1)] * 4,
+            "rpms_act": [round(rpm_sim * 0.99, 1), round(rpm_sim * 1.01, 1), round(rpm_sim * 0.98, 1), round(rpm_sim * 1.00, 1)],
+            "yaw_deg": round(math.degrees(t_sec * 0.5) % 360.0, 1),
+            "pitch_deg": 0.0,
+            "roll_deg": 0.0,
+            "gyro_z": round(0.45 * math.sin(t_sec * 1.2), 3),
+            "accel_fwd": round(1.2 * math.cos(t_sec * 0.8), 2),
+            "accel_lat": round(0.5 * math.sin(t_sec * 1.0), 2),
+            "slip_state": "NORMAL",
+            "slip_ratio": 0.02,
+            "flags": {
+                "fake_data": True,
+                "stm32_front": True,
+                "stm32_rear": True,
+                "imu": True,
+            },
+            "tof_ranges": sim_tof,
+            "tof_ranges_raw": sim_tof,
+            "f_tof": min(sim_tof),
+            "gap": [0.0, 1.2, 0.45],
+            "targets": [[0.0, 1.2, 0.45]],
+            "best_line": [[0.0, 0.0], [0.0, 0.6], [round(0.2 * math.sin(t_sec), 2), 1.2]],
+            "grid_bounds": [-1.25, 1.25, 0.0, 2.60],
+            "grid_shape": [174, 168],
+        }
+
+    def _ws_broadcast_worker(self):
+        while True:
+            try:
+                payload = self.ws_queue.get()
+                if payload is None:
+                    break
+                self._send_ws_payload(payload)
+            except Exception:
+                pass
+
+    def register_client_target(self, target: Tuple[str, int]):
+        with self.lock:
+            self.forward_targets.add(target)
+
+    def register_ws_client(self, sock: socket.socket):
+        with self.ws_lock:
+            self.ws_clients.add(sock)
+
+    def unregister_ws_client(self, sock: socket.socket):
+        with self.ws_lock:
+            self.ws_clients.discard(sock)
+
+    def broadcast_ws_binary(self, payload: bytes):
+        """Asynchronously dispatches live binary frame without stalling UDP listener."""
+        try:
+            if self.ws_queue.full():
+                _ = self.ws_queue.get_nowait()
+            self.ws_queue.put_nowait(payload)
+        except Exception:
+            pass
+
+    def _send_ws_payload(self, payload: bytes):
+        with self.ws_lock:
+            if not self.ws_clients:
+                return
+            clients = list(self.ws_clients)
+
+        length = len(payload)
+        if length < 126:
+            hdr = struct.pack("!BB", 0x82, length)
+        elif length <= 0xFFFF:
+            hdr = struct.pack("!BBH", 0x82, 126, length)
+        else:
+            hdr = struct.pack("!BBQ", 0x82, 127, length)
+        frame = hdr + payload
+
+        dead = []
+        for s in clients:
+            try:
+                s.settimeout(0.20)  # 200ms ceiling tolerates temporary Wi-Fi retries
+                s.sendall(frame)
+            except (socket.timeout, TimeoutError):
+                # Temporary Wi-Fi lag; don't disconnect the client
+                pass
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
+                dead.append(s)
+
+        if dead:
+            with self.ws_lock:
+                for s in dead:
+                    self.ws_clients.discard(s)
+                    try:
+                        s.close()
+                    except Exception:
+                        pass
+
+    def invalidate_caches(self):
+        self._cached_bin = None
+        self._cached_json = None
+
+    def _get_current_effective_packet(self) -> Dict[str, Any]:
+        now = time.time()
+        if self.fake_data_active and (now - self.last_pkt_time > 1.0):
+            return self._generate_synthetic_benchmark_packet(now)
+        elif (not self.fake_data_active) and (self.last_pkt_time > 0 and now - self.last_pkt_time > 1.0):
+            # Hardware disconnected or timed out: strictly 0 fake data
+            pkt = dict(self.latest_pkt)
+            pkt["v_cmd"] = 0.0
+            pkt["v_real"] = 0.0
+            pkt["v_est"] = 0.0
+            pkt["steer_cmd_deg"] = 0.0
+            pkt["steer_actual_deg"] = 0.0
+            pkt["rpms_cmd"] = [0.0, 0.0, 0.0, 0.0]
+            pkt["rpms_act"] = [0.0, 0.0, 0.0, 0.0]
+            pkt["tof_ranges"] = [0.0] * 16
+            pkt["tof_ranges_raw"] = [0.0] * 16
+            pkt["f_tof"] = 0.0
+            pkt["gyro_z"] = 0.0
+            pkt["accel_fwd"] = 0.0
+            pkt["accel_lat"] = 0.0
+            pkt["yaw_deg"] = 0.0
+            pkt["pitch_deg"] = 0.0
+            pkt["roll_deg"] = 0.0
+            pkt["status"] = "OFFLINE"
+            pkt["mode"] = "STANDBY"
+            pkt["slip_state"] = "OFFLINE"
+            pkt["flags"] = {"fake_data": False, "stm32_front": False, "stm32_rear": False, "imu": False}
+            return pkt
+        else:
+            return self.latest_pkt
+
+    def _get_total_recorded_frames(self) -> int:
+        return self.recorder.total_frames_recorded if self.recorder else self.total_frames_received
+
+    def get_cached_bin(self) -> bytes:
+        if self._cached_bin is None:
+            pkt = dict(self._get_current_effective_packet())
+            pkt["_total_frames"] = self._get_total_recorded_frames()
+            self._cached_bin = build_live_binary_packet(pkt)
+        return self._cached_bin
+
+    def get_cached_json(self) -> bytes:
+        if self._cached_json is None:
+            pkt = dict(self._get_current_effective_packet())
+            pkt["_total_frames"] = self._get_total_recorded_frames()
+            self._cached_json = json.dumps(pkt).encode("utf-8")
+        return self._cached_json
+
+
+STATE = DebugServerState()
+
+
+def build_live_binary_packet(pkt: Dict[str, Any]) -> bytes:
+    """
+    Constructs a high-speed compact binary telemetry packet for laptop workstations.
+    Packs 232-byte header, compressed costmap binary bytes (~1.8 KB), and meta JSON.
+    Total transfer size: ~8-12 KB. Packing time on Pi 4: ~0.02 ms.
+    """
+    prob_comp_bytes = b""
+    haz_comp_bytes = b""
+    grid_shape = pkt.get("grid_shape") or [0, 0]
+    rows = int(grid_shape[0]) if len(grid_shape) >= 1 and grid_shape[0] is not None else 0
+    cols = int(grid_shape[1]) if len(grid_shape) >= 2 and grid_shape[1] is not None else 0
+    raw_costmap_len = rows * cols
+
+    if pkt.get("grid_data"):
+        try:
+            prob_comp_bytes = base64.b64decode(pkt["grid_data"])
+        except Exception:
+            prob_comp_bytes = b""
+    if pkt.get("hazard_data"):
+        try:
+            haz_comp_bytes = base64.b64decode(pkt["hazard_data"])
+        except Exception:
+            haz_comp_bytes = b""
+
+    flags = pkt.get("flags") or {}
+    if not isinstance(flags, dict):
+        flags = {}
+
+    meta = {
+        "status": pkt.get("status") or "OK",
+        "mode": pkt.get("mode") or "DRIVE",
+        "slip_state": pkt.get("slip_state") or "NORMAL",
+        "recovery_state": pkt.get("escape_state") or pkt.get("recovery_state") or "DRIVE",
+        "best_line": pkt.get("best_line") or [],
+        "candidate_lines": pkt.get("candidate_lines") or [],
+        "guide_line": pkt.get("guide_line") or [],
+        "corridor_left": pkt.get("corridor_left") or [],
+        "corridor_right": pkt.get("corridor_right") or [],
+        "shield": pkt.get("shield") or {},
+        "targets": pkt.get("targets") or [],
+        "pose": pkt.get("pose") or [0.0, 0.0, 0.0],
+        "trail": pkt.get("trail") or [],
+        "sightlines": pkt.get("sightlines") or [],
+        "is_wrong_way": bool(pkt.get("is_wrong_way", False)),
+        "target_yaw": pkt.get("target_yaw") if pkt.get("target_yaw") is not None else 0.0,
+        "total_frames": pkt.get("_total_frames") or 0,
+        "flags": flags,
+        "planner_running": bool(pkt.get("planner_running") if pkt.get("planner_running") is not None else flags.get("planner_running", False)),
+        "servo_pulse_us": pkt.get("servo_pulse_us") if pkt.get("servo_pulse_us") is not None else int(round(BASE_SERVO_NEUTRAL_US)),
+        "mcu_msg": pkt.get("mcu_msg") or "",
+        "mcu_log": pkt.get("mcu_log") or [],
+        "mcu_main_connected": bool(pkt.get("mcu_main_connected", False)),
+        "mcu_tof_connected": bool(pkt.get("mcu_tof_connected", False)),
+        "mcu_main_port": pkt.get("mcu_main_port") or "",
+        "mcu_tof_port": pkt.get("mcu_tof_port") or "",
+        "step_ms": pkt.get("step_ms") if pkt.get("step_ms") is not None else 0.0,
+        "last_action": pkt.get("last_action") or "",
+        "last_cmd_sent": pkt.get("last_cmd_sent") or "",
+    }
+    for tk in ("tof_target0_mm", "tof_target1_mm", "tof_target0_status", "tof_target1_status"):
+        if tk in pkt:
+            meta[tk] = pkt[tk]
+    meta_bytes = json.dumps(meta).encode("utf-8")
+
+    def _f(val: Any, default: float = 0.0) -> float:
+        return float(default if val is None else val)
+
+    def _i(val: Any, default: int = 0) -> int:
+        return int(default if val is None else val)
+
+    rpms_cmd = pkt.get("rpms_cmd") or [0.0, 0.0, 0.0, 0.0]
+    rpms_act = pkt.get("rpms_act") or [0.0, 0.0, 0.0, 0.0]
+    tof_ranges = pkt.get("tof_ranges") or pkt.get("tof_ranges_raw") or [0.0] * 16
+    if len(tof_ranges) < 16:
+        tof_ranges = list(tof_ranges) + [0.0] * (16 - len(tof_ranges))
+    gap = pkt.get("gap") or [0.0, 0.0, 0.0]
+    bounds = pkt.get("grid_bounds") or [-1.25, 1.25, 0.0, 2.60]
+    if len(bounds) < 4:
+        bounds = [-1.25, 1.25, 0.0, 2.60]
+
+    header_fmt = "<4s I I d 16f 4f 4f 16f 3f 2H 4f 5I"
+    header_size = struct.calcsize(header_fmt)
+    total_len = header_size + len(prob_comp_bytes) + len(haz_comp_bytes) + len(meta_bytes)
+
+    v_real_val = pkt.get("v_real")
+    if v_real_val is None:
+        v_real_val = pkt.get("v_est")
+    steer_cmd_val = pkt.get("steer_cmd_deg")
+    if steer_cmd_val is None:
+        steer_cmd_val = pkt.get("steer_deg")
+    steer_act_val = pkt.get("steer_actual_deg")
+    if steer_act_val is None:
+        steer_act_val = pkt.get("steer_deg")
+
+    header = struct.pack(
+        header_fmt,
+        b"FOLK",
+        total_len,
+        _i(pkt.get("time_step"), 0),
+        _f(pkt.get("timestamp"), time.time()),
+        _f(pkt.get("sim_time"), 0.0),
+        _f(pkt.get("v_cmd"), 0.0),
+        _f(v_real_val, 0.0),
+        _f(steer_cmd_val, 0.0),
+        _f(steer_act_val, 0.0),
+        _f(pkt.get("yaw_deg"), 0.0),
+        _f(pkt.get("pitch_deg"), 0.0),
+        _f(pkt.get("roll_deg"), 0.0),
+        _f(pkt.get("gyro_z"), 0.0),
+        _f(pkt.get("accel_fwd"), 0.0),
+        _f(pkt.get("accel_lat"), 0.0),
+        _f(pkt.get("slip_ratio"), 0.0),
+        _f(pkt.get("f_tof"), 0.0),
+        _f(pkt.get("plan_ms"), 0.0),
+        _f(pkt.get("map_ms"), 0.0),
+        _f(pkt.get("scout_ms"), 0.0),
+        _f(rpms_cmd[0] if len(rpms_cmd) > 0 else 0.0),
+        _f(rpms_cmd[1] if len(rpms_cmd) > 1 else 0.0),
+        _f(rpms_cmd[2] if len(rpms_cmd) > 2 else 0.0),
+        _f(rpms_cmd[3] if len(rpms_cmd) > 3 else 0.0),
+        _f(rpms_act[0] if len(rpms_act) > 0 else 0.0),
+        _f(rpms_act[1] if len(rpms_act) > 1 else 0.0),
+        _f(rpms_act[2] if len(rpms_act) > 2 else 0.0),
+        _f(rpms_act[3] if len(rpms_act) > 3 else 0.0),
+        *[_f(tof_ranges[i], 0.0) for i in range(16)],
+        _f(gap[0] if len(gap) > 0 else 0.0),
+        _f(gap[1] if len(gap) > 1 else 0.0),
+        _f(gap[2] if len(gap) > 2 else 0.0),
+        int(rows),
+        int(cols),
+        _f(bounds[0], -1.25), _f(bounds[1], 1.25), _f(bounds[2], 0.0), _f(bounds[3], 2.60),
+        len(prob_comp_bytes),
+        raw_costmap_len,
+        len(haz_comp_bytes),
+        raw_costmap_len,
+        len(meta_bytes)
+    )
+
+    return header + prob_comp_bytes + haz_comp_bytes + meta_bytes
+
+
+class DebugHTTPRequestHandler(BaseHTTPRequestHandler):
+    """Handles HTTP requests for Mission Control UI and REST endpoints."""
+    protocol_version = "HTTP/1.1"
+
+    def setup(self):
+        super().setup()
+        try:
+            self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except Exception:
+            pass
+
+    def log_message(self, format, *args):
+        # Silence routine request logging to prevent terminal spam
+        pass
+
+    def do_GET(self):
+        # Auto-register external client IP for direct high-speed UDP streaming
+        client_ip = self.client_address[0]
+        if client_ip not in ("127.0.0.1", "localhost", "::1"):
+            STATE.register_client_target((client_ip, PORT_UDP_RECV))
+
+        parsed = urlparse(self.path)
+        path = parsed.path
+
+        if path == "/ws_live":
+            upgrade = self.headers.get("Upgrade", "").lower()
+            ws_key = self.headers.get("Sec-WebSocket-Key", "")
+            if "websocket" in upgrade and ws_key:
+                self._handle_websocket_upgrade(ws_key)
+                return
+
+        if path in ("/", "/index.html"):
+            self._serve_file(HTML_PATH, "text/html")
+
+        elif path == "/api/status":
+            self._serve_status()
+
+        elif path == "/api/auto_servo_center":
+            self._send_json(STATE.auto_servo_center.get_status())
+
+        elif path == "/api/live":
+            self._serve_live()
+
+        elif path == "/api/live_bin":
+            self._serve_live_bin()
+
+        elif path.startswith("/api/register_client"):
+            qs = parse_qs(parsed.query)
+            target_ip = qs.get("ip", [client_ip])[0]
+            port = PORT_UDP_RECV
+            if "port" in qs:
+                try:
+                    port = int(qs["port"][0])
+                except ValueError:
+                    pass
+            STATE.register_client_target((target_ip, port))
+            self._send_json({"status": "registered", "target": [target_ip, port]})
+
+        elif path.startswith("/api/frame_bin/"):
+            try:
+                frame_id = int(path.split("/")[-1])
+                self._serve_frame_bin(frame_id)
+            except ValueError:
+                self.send_error(400, "Invalid frame ID")
+
+        elif path.startswith("/api/frame/"):
+            try:
+                frame_id = int(path.split("/")[-1])
+                self._serve_frame(frame_id)
+            except ValueError:
+                self._send_json({"error": "Invalid frame ID"}, 400)
+
+        elif path == "/api/anomalies":
+            self._serve_anomalies()
+
+        elif path == "/api/sessions":
+            self._serve_sessions()
+
+        elif path == "/api/download":
+            self._serve_download(parse_qs(parsed.query))
+
+        else:
+            self._send_json({"error": "Not Found"}, 404)
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
+
+    def do_POST(self):
+        parsed = urlparse(self.path)
+        path = parsed.path
+        if path in ("/api/mcu/command", "/api/motor/command"):
+            content_len = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_len) if content_len > 0 else b"{}"
+            try:
+                data = json.loads(body.decode("utf-8"))
+            except Exception:
+                self._send_json({"error": "Invalid JSON"}, 400)
+                return
+
+            action = data.get("action", "").lower()
+            cmd_str = ""
+
+            if action == "motors":
+                enable = data.get("enable", True)
+                cmd_str = "MOTORS\n" if enable else "DISABLE\n"
+            elif action == "estop":
+                cmd_str = "ESTOP\n"
+            elif action == "pid":
+                kp = float(data.get("kp", 0.1))
+                ki = float(data.get("ki", 1.5))
+                cmd_str = f"PID {kp:.3f} {ki:.3f}\n"
+            elif action == "calib":
+                axle = int(data.get("axle", 0))
+                motor = int(data.get("motor", 1))
+                voltage = float(data.get("voltage", 4.0))
+                cmd_str = f"CALIB {axle} {motor} {voltage:.1f}\n"
+            elif action == "save":
+                cmd_str = "SAVE\n"
+            elif action == "dfu":
+                cmd_str = "DFU\n"
+            elif action == "speed":
+                v = float(data.get("v", 0.0))
+                cmd_str = f"V {v:.2f}\n"
+            elif action == "steer":
+                deg = float(data.get("deg", 0.0))
+                # Convert steering angle (-32.2..+32.2 deg) to servo dial angle (0..180 deg, 90=Center, 0=Left, 180=Right)
+                dial_deg = max(0.0, min(180.0, 90.0 - (deg / 32.2166) * 90.0))
+                cmd_str = f"A {dial_deg:.1f}\n"
+            elif action == "trim":
+                slider_trim = max(-60.0, min(60.0, float(data.get("trim_us", 0.0))))
+                with STATE.lock:
+                    center_us = STATE.servo_center_us
+                total_trim_us = max(-500.0, min(500.0, (center_us - BASE_SERVO_NEUTRAL_US) + slider_trim))
+                cmd_str = f"TRIM {total_trim_us:.1f}\n"
+            elif action == "save_trim_center":
+                slider_trim = max(-60.0, min(60.0, float(data.get("trim_us", 0.0))))
+                new_center = STATE.save_servo_center(STATE.servo_center_us + slider_trim)
+                total_trim_us = max(-500.0, min(500.0, new_center - BASE_SERVO_NEUTRAL_US))
+                cmd_str = f"TRIM {total_trim_us:.1f}\n"
+            elif action == "pulse":
+                pulse = float(data.get("pulse", BASE_SERVO_NEUTRAL_US))
+                cmd_str = f"P {pulse:.0f}\n"
+            elif action == "bench":
+                if "enabled" in data:
+                    STATE.fake_data_active = bool(data["enabled"])
+                else:
+                    STATE.fake_data_active = not STATE.fake_data_active
+                cmd_str = "BENCH\n"
+            elif action == "reset":
+                cmd_str = "RESET\n"
+            elif action in ("reconnect", "reset_ports"):
+                cmd_str = "RECONNECT\n"
+            elif action == "status":
+                cmd_str = "STATUS\n"
+            elif action == "planner":
+                enable = bool(data.get("enable", False))
+                cmd_str = "START\n" if enable else "STOP\n"
+            elif action == "auto_servo_center":
+                enable = bool(data.get("enable", True))
+                if enable:
+                    res = STATE.auto_servo_center.start(
+                        max_iterations=data.get("max_iterations"),
+                        cruise_speed=data.get("cruise_speed"),
+                        drive_distance_m=data.get("drive_distance_m"),
+                        tolerance_deg_per_m=data.get("tolerance_deg_per_m"),
+                        trim_offset_us=data.get("trim_offset_us"),
+                    )
+                    self._send_json({
+                        "status": "started" if res.get("started") else "error",
+                        "error": res.get("error"),
+                        "action": action,
+                        "servo_center_us": STATE.servo_center_us,
+                        "auto_servo_center": STATE.auto_servo_center.get_status(),
+                    }, 200 if res.get("started") else 409)
+                else:
+                    STATE.auto_servo_center.stop()
+                    self._send_json({
+                        "status": "stopped",
+                        "action": action,
+                        "servo_center_us": STATE.servo_center_us,
+                        "auto_servo_center": STATE.auto_servo_center.get_status(),
+                    })
+                return
+            elif action == "auto_servo_center_stop":
+                STATE.auto_servo_center.stop()
+                self._send_json({
+                    "status": "stopped",
+                    "action": action,
+                    "servo_center_us": STATE.servo_center_us,
+                    "auto_servo_center": STATE.auto_servo_center.get_status(),
+                })
+                return
+            elif action == "keepalive":
+                cmd_str = "CLI_KEEPALIVE\n"
+            elif action == "raw":
+                cmd_str = f"{data.get('cmd', '').strip()}\n"
+            else:
+                self._send_json({"error": f"Unknown action: {action}"}, 400)
+                return
+
+            if action in ("estop", "reset", "speed", "steer", "pulse", "bench") or (action == "motors" and not data.get("enable", True)) or (action == "planner" and data.get("enable", False)):
+                if STATE.auto_servo_center.is_running():
+                    STATE.auto_servo_center.stop(f"Aborted due to {action}")
+
+            planner_active = False
+            if action == "planner":
+                enable = bool(data.get("enable", False))
+                with STATE.lock:
+                    planner_active = (time.time() - STATE.last_planner_pkt_time <= 1.0)
+                ok_planner = send_planner_cmd(cmd_str.encode("utf-8"))
+                if enable:
+                    ok_mcu = send_mcu_cmd(b"E\n") and send_mcu_cmd(b"MOTORS\n")
+                elif not planner_active:
+                    ok_mcu = send_mcu_cmd(b"ESTOP\n") and send_mcu_cmd(b"RESET\n")
+                else:
+                    # Path planner handles 2.0s active braking before disabling motor drivers
+                    ok_mcu = True
+                ok = ok_planner and ok_mcu
+            elif action == "save_trim_center":
+                ok = send_mcu_cmd(cmd_str.encode("utf-8")) and send_mcu_cmd(b"TRIM_SAVE\n") and send_mcu_cmd(b"TRIM_GET\n")
+            else:
+                ok = send_mcu_cmd(cmd_str.encode("utf-8"))
+
+            # Update cached state
+            with STATE.lock:
+                if action == "speed":
+                    STATE.latest_pkt["v_cmd"] = float(data.get("v", 0.0))
+                elif action == "steer":
+                    STATE.latest_pkt["steer_cmd_deg"] = float(data.get("deg", 0.0))
+                elif action == "estop":
+                    STATE.latest_pkt["v_cmd"] = 0.0
+                    STATE.latest_pkt["mode"] = "ESTOP"
+                elif action == "motors":
+                    STATE.latest_pkt["mode"] = "DRIVE" if data.get("enable", True) else "IDLE"
+                elif action == "planner":
+                    enable = bool(data.get("enable", False))
+                    STATE.planner_running = enable
+                    STATE.latest_pkt["planner_running"] = enable
+                    if "flags" not in STATE.latest_pkt or not isinstance(STATE.latest_pkt["flags"], dict):
+                        STATE.latest_pkt["flags"] = {}
+                    STATE.latest_pkt["flags"]["planner_running"] = enable
+                    STATE.latest_pkt["mode"] = "DRIVE" if enable else ("BRAKING" if planner_active else "STOPPED")
+                    if not enable:
+                        STATE.latest_pkt["v_cmd"] = 0.0
+                        STATE.latest_pkt["steer_cmd_deg"] = 0.0
+                        STATE.latest_pkt["best_line"] = []
+                        STATE.latest_pkt["candidate_lines"] = []
+                        STATE.latest_pkt["guide_line"] = []
+                    STATE.invalidate_caches()
+                elif action == "bench":
+                    if "flags" not in STATE.latest_pkt:
+                        STATE.latest_pkt["flags"] = {}
+                    STATE.latest_pkt["flags"]["fake_data"] = STATE.fake_data_active
+                    STATE.invalidate_caches()
+                if action != "keepalive":
+                    STATE.latest_pkt["last_action"] = action
+                    STATE.latest_pkt["last_cmd_sent"] = cmd_str.strip()
+
+            self._send_json({
+                "status": "dispatched" if ok else "failed",
+                "action": action,
+                "cmd": cmd_str.strip(),
+                "fake_data": STATE.fake_data_active,
+                "planner_running": STATE.planner_running,
+                "servo_center_us": STATE.servo_center_us,
+                "pipe": "pi4 -> esp32 -> stm32"
+            })
+        else:
+            self._send_json({"error": "Endpoint not found"}, 404)
+
+    def _handle_websocket_upgrade(self, ws_key: str):
+        guid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+        accept = base64.b64encode(hashlib.sha1((ws_key.strip() + guid).encode("utf-8")).digest()).decode("utf-8")
+        handshake = (
+            "HTTP/1.1 101 Switching Protocols\r\n"
+            "Upgrade: websocket\r\n"
+            "Connection: Upgrade\r\n"
+            f"Sec-WebSocket-Accept: {accept}\r\n\r\n"
+        )
+        sock = self.connection
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        sock.settimeout(0.2)
+        sock.sendall(handshake.encode("utf-8"))
+
+        STATE.register_ws_client(sock)
+        # Push latest frame immediately on connect
+        with STATE.lock:
+            cur_bin = STATE.get_cached_bin()
+        if cur_bin:
+            STATE.broadcast_ws_binary(cur_bin)
+
+        try:
+            while True:
+                try:
+                    data = sock.recv(1024)
+                    if not data:
+                        break
+                    # Close frame
+                    if (data[0] & 0x0F) == 0x08:
+                        break
+                    # Ping frame -> reply pong
+                    elif (data[0] & 0x0F) == 0x09:
+                        pong = bytearray(data)
+                        pong[0] = (pong[0] & 0xF0) | 0x0A
+                        sock.sendall(pong)
+                except (socket.timeout, TimeoutError):
+                    # Telemetry clients stream downlink; lack of uplink frames is normal
+                    continue
+        except Exception:
+            pass
+        finally:
+            STATE.unregister_ws_client(sock)
+            try:
+                sock.close()
+            except Exception:
+                pass
+
+    def _serve_file(self, filepath: str, content_type: str):
+        if not os.path.exists(filepath):
+            self.send_error(404, "File not found")
+            return
+        try:
+            with open(filepath, "rb") as f:
+                content = f.read()
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(content)))
+            self.send_header("Connection", "keep-alive")
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            self.wfile.write(content)
+        except Exception as e:
+            self.send_error(500, f"Error reading file: {e}")
+
+    def _send_json(self, data: Any, code: int = 200):
+        body = json.dumps(data).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "keep-alive")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _serve_status(self):
+        stats = get_system_cpu_stats()
+        now = time.time()
+        if (now - STATE._last_disk_check) >= 5.0:
+            STATE._last_disk_check = now
+            try:
+                disk_total, disk_used, disk_free = shutil.disk_usage(STATE.recorder.output_dir if STATE.recorder else CURR_DIR)
+                STATE._cached_disk_free = round(disk_free / (1024**3), 2)
+            except Exception:
+                pass
+            if STATE.recorder and os.path.exists(STATE.recorder.db_path):
+                try:
+                    STATE._cached_db_size = round(os.path.getsize(STATE.recorder.db_path) / (1024 * 1024), 2)
+                except Exception:
+                    pass
+
+        data = {
+            "session_id": STATE.recorder.session_id if STATE.recorder else "none",
+            "min_frame_id": getattr(STATE.recorder, "min_frame_id", 1) if STATE.recorder else 1,
+            "total_recorded": STATE.recorder.total_frames_recorded if STATE.recorder else 0,
+            "dropped_frames": STATE.recorder.dropped_frames if STATE.recorder else 0,
+            "pruned_frames": STATE.recorder.pruned_frames_count if STATE.recorder else 0,
+            "driving_seconds": round(STATE.recorder.total_driving_seconds, 1) if STATE.recorder else 0.0,
+            "driving_minutes": round(STATE.recorder.total_driving_seconds / 60.0, 1) if STATE.recorder else 0.0,
+            "max_buffer_minutes": round((STATE.recorder.max_driving_seconds / 60.0), 1) if STATE.recorder else 30.0,
+            "file_size_mb": STATE._cached_db_size,
+            "disk_free_gb": STATE._cached_disk_free,
+            "temp_c": stats.get("temp_c", 0.0),
+            "loop_hz": round(STATE.loop_hz, 1),
+            "cpu_affinity": list(get_core_affinity()),
+            "servo_center_us": STATE.servo_center_us,
+            "esp_servo_center_us": STATE.esp_servo_center_us,
+            "auto_servo_center": STATE.auto_servo_center.get_status(),
+        }
+        self._send_json(data)
+
+    def _serve_live(self):
+        with STATE.lock:
+            body = STATE.get_cached_json()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "keep-alive")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _serve_live_bin(self):
+        with STATE.lock:
+            body = STATE.get_cached_bin()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "keep-alive")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _serve_frame(self, frame_id: int):
+        if not STATE.recorder:
+            self._send_json({"error": "No active recorder"}, 500)
+            return
+
+        reader = TelemetryLogReader(STATE.recorder.db_path)
+        frame_data = reader.get_frame(frame_id)
+        if frame_data:
+            self._send_json(frame_data)
+        else:
+            self._send_json({"error": f"Frame {frame_id} not found"}, 404)
+
+    def _serve_frame_bin(self, frame_id: int):
+        if not STATE.recorder:
+            self.send_error(500, "No active recorder")
+            return
+
+        reader = TelemetryLogReader(STATE.recorder.db_path)
+        frame_data = reader.get_frame(frame_id)
+        if frame_data:
+            try:
+                body = build_live_binary_packet(frame_data)
+            except Exception as e:
+                self.send_error(500, f"Failed to pack frame {frame_id}: {e}")
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(body)
+        else:
+            self.send_error(404, f"Frame {frame_id} not found")
+
+    def _serve_anomalies(self):
+        if not STATE.recorder:
+            self._send_json([])
+            return
+        reader = TelemetryLogReader(STATE.recorder.db_path)
+        anoms = reader.get_anomalies()
+        self._send_json(anoms)
+
+    def _serve_sessions(self):
+        if not STATE.recorder or not os.path.isdir(STATE.recorder.output_dir):
+            self._send_json([])
+            return
+        cur_name = os.path.basename(STATE.recorder.db_path)
+        candidates = []
+        for fname in os.listdir(STATE.recorder.output_dir):
+            if not fname.endswith(".db"):
+                continue
+            fpath = os.path.join(STATE.recorder.output_dir, fname)
+            if not os.path.isfile(fpath):
+                continue
+            try:
+                st = os.stat(fpath)
+                wal_path = fpath + "-wal"
+                wal_size = os.path.getsize(wal_path) if os.path.exists(wal_path) else 0
+                candidates.append((st.st_mtime, st.st_size + wal_size, fname, fpath))
+            except Exception:
+                pass
+        candidates.sort(key=lambda item: item[0], reverse=True)
+
+        sessions = []
+        for mtime, total_size, fname, fpath in candidates[:12]:
+            frames = 0
+            try:
+                reader = TelemetryLogReader(fpath)
+                _, _, frames = reader.get_frame_bounds()
+                reader.close()
+            except Exception:
+                pass
+            sessions.append({
+                "filename": fname,
+                "size_bytes": total_size,
+                "mtime": mtime,
+                "frames": int(frames or 0),
+                "is_current": fname == cur_name,
+            })
+        self._send_json(sessions)
+
+    def _serve_download(self, query: Optional[Dict[str, List[str]]] = None):
+        if not STATE.recorder:
+            self.send_error(404, "Recorder not initialized")
+            return
+
+        target_path = STATE.recorder.db_path
+        if query and "file" in query and query["file"]:
+            req_name = os.path.basename(query["file"][0])
+            if not req_name.endswith(".db"):
+                self.send_error(400, "Invalid session filename")
+                return
+            target_path = os.path.join(STATE.recorder.output_dir, req_name)
+
+        if not os.path.exists(target_path):
+            self.send_error(404, "Recording not found")
+            return
+
+        filename = os.path.basename(target_path)
+        tmp_path = None
+        try:
+            # Use sqlite3.backup() so frames still buffered in the WAL (-wal)
+            # are merged into a consistent, self-contained .db snapshot.
+            fd, tmp_path = tempfile.mkstemp(suffix=".db", prefix="dl_")
+            os.close(fd)
+            src_conn = sqlite3.connect(target_path, timeout=10.0)
+            dst_conn = sqlite3.connect(tmp_path)
+            try:
+                src_conn.backup(dst_conn)
+            finally:
+                dst_conn.close()
+                src_conn.close()
+
+            with open(tmp_path, "rb") as f:
+                content = f.read()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+            self.send_header("Content-Length", str(len(content)))
+            self.end_headers()
+            self.wfile.write(content)
+        except Exception as e:
+            self.send_error(500, f"Error sending file: {e}")
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+
+
+def udp_listener_worker():
+    """
+    Dedicated UDP telemetry ingestion and high-speed laptop forwarder on Core 2.
+    Receives packets from Core 1 Planner, records to SQLite WAL flight recorder,
+    and forwards full-fidelity 1cm telemetry directly to laptop workstation.
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    # 2 MB socket receive buffer prevents kernel drops during peak burst traffic
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 2097152)
+    except Exception:
+        pass
+
+    try:
+        sock.bind((HOST_BIND, PORT_UDP_RECV))
+        print(f"[DebugServer] UDP Telemetry Listener active on {HOST_BIND}:{PORT_UDP_RECV}")
+    except Exception as e:
+        print(f"[DebugServer FATAL] Failed to bind UDP {HOST_BIND}:{PORT_UDP_RECV}: {e}")
+        return
+
+    sock.settimeout(1.0)
+
+    # UDP Forwarder socket to laptop (broadcast + direct unicast)
+    fwd_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        fwd_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    except Exception:
+        pass
+    fwd_sock.setblocking(False)
+
+    while True:
+        try:
+            data, _ = sock.recvfrom(65535)
+
+            # Direct binary UDP forward to laptop (zero re-encoding or serialization overhead)
+            with STATE.lock:
+                targets = list(STATE.forward_targets)
+            for target in targets:
+                try:
+                    fwd_sock.sendto(data, target)
+                except Exception:
+                    pass
+
+            pkt = json.loads(data.decode("utf-8"))
+
+            now = time.time()
+            STATE.total_frames_received += 1
+            STATE._hz_counter += 1
+
+            if now - STATE._last_hz_calc >= 1.0:
+                STATE.loop_hz = STATE._hz_counter / (now - STATE._last_hz_calc)
+                STATE._hz_counter = 0
+                STATE._last_hz_calc = now
+
+            is_planner = ("best_line" in pkt) or ("plan_ms" in pkt) or ("corridor_left" in pkt)
+            tof_diag_keys = (
+                "tof_target0_mm",
+                "tof_target1_mm",
+                "tof_target0_status",
+                "tof_target1_status",
+            )
+            planner_merge_keys = (
+                "seq",
+                "mcu_timestamp_us",
+                "v_est",
+                "rpms_cmd",
+                "rpms_act",
+                "flags",
+                "mcu_msg",
+                "mcu_log",
+                "slip_state",
+                "slip_ratio",
+                "servo_pulse_us",
+                "mcu_main_connected",
+                "mcu_tof_connected",
+                "mcu_main_port",
+                "mcu_tof_port",
+                "esp_servo_center_us",
+                "esp_servo_trim_us",
+            )
+            has_attached_tof_diag = False
+
+            with STATE.lock:
+                if pkt.get("esp_servo_center_us") is not None:
+                    try:
+                        esp_c = float(pkt["esp_servo_center_us"])
+                        if SERVO_PULSE_MIN_US <= esp_c <= SERVO_PULSE_MAX_US:
+                            STATE.esp_servo_center_us = round(esp_c, 1)
+                            if not STATE._has_saved_trim_file and not STATE.auto_servo_center.is_running():
+                                STATE.servo_center_us = STATE.esp_servo_center_us
+                    except Exception:
+                        pass
+                tof_diag_cache = getattr(STATE, "_latest_tof_diag", None)
+                if tof_diag_cache is None:
+                    tof_diag_cache = {}
+                    STATE._latest_tof_diag = tof_diag_cache
+
+                for tk in tof_diag_keys:
+                    if tk in pkt:
+                        tof_diag_cache[tk] = pkt[tk]
+
+                planner_active = (now - STATE.last_planner_pkt_time <= 1.0)
+                if is_planner:
+                    if tof_diag_cache:
+                        for tk, tv in tof_diag_cache.items():
+                            if tk not in pkt:
+                                pkt[tk] = tv
+                                has_attached_tof_diag = True
+                    STATE.latest_pkt = dict(pkt)
+                    STATE.last_planner_pkt_time = now
+                    planner_active = True
+                elif not planner_active:
+                    # Planner is offline: show direct MCU / bridge telemetry
+                    STATE.latest_pkt = dict(pkt)
+                else:
+                    # Planner is active: copy before merging non-ToF live chassis/link status fields
+                    # so queued recorder dicts are never mutated in-place.
+                    updated = dict(STATE.latest_pkt)
+                    for k in planner_merge_keys:
+                        if k in pkt:
+                            updated[k] = pkt[k]
+                    STATE.latest_pkt = updated
+
+                STATE.last_pkt_time = now
+                STATE.invalidate_caches()
+                bin_data = STATE.get_cached_bin() if is_planner else None
+
+            # Push live binary frame to connected WebSockets (throttled to ~20 Hz to save Wi-Fi bandwidth;
+            # full 60 Hz telemetry is still recorded locally on SD card for offline review)
+            if bin_data and (now - getattr(STATE, "_last_ws_push", 0.0) >= 0.05):
+                STATE._last_ws_push = now
+                STATE.broadcast_ws_binary(bin_data)
+
+            # Non-blocking write to Flight Recorder (skip idle STOPPED/STANDBY/OFFLINE frames when stationary)
+            if STATE.recorder:
+                eff_mode = str(pkt.get("mode") or STATE.latest_pkt.get("mode") or "").upper()
+                v_cmd_val = abs(float(pkt.get("v_cmd", STATE.latest_pkt.get("v_cmd", 0.0))))
+                v_real_val = abs(float(pkt.get("v_real", pkt.get("v_est", 0.0))))
+                is_idle_stopped = (eff_mode in ("STOPPED", "STANDBY", "OFFLINE")) and v_cmd_val < 0.01 and v_real_val < 0.05
+                if not is_idle_stopped and (is_planner or (not planner_active and (now - getattr(STATE, "_last_db_record", 0.0) >= 0.05))):
+                    STATE._last_db_record = now
+                    STATE.recorder.record_frame(pkt, raw_bytes=None if has_attached_tof_diag else data)
+
+        except socket.timeout:
+            continue
+        except Exception as e:
+            # Drop bad packets without crashing
+            continue
+
+
+def run_debug_server():
+    """Main launcher for Debug Server & Flight Recorder on Core 2."""
+    def _handle_sigterm(_signum, _frame):
+        raise KeyboardInterrupt()
+
+    signal.signal(signal.SIGTERM, _handle_sigterm)
+
+    print("=" * 70)
+    print("  FOLKRACE PI 4: REAL-TIME DEBUG SERVER & FLIGHT RECORDER")
+    print("=" * 70)
+
+    # 1. HARD HARDWARE ISOLATION: Pin strictly to Core 2 (or 2+3 for I/O)
+    set_core_affinity({2, 3}, "DebugServer")
+
+    # 2. Initialize Flight Recorder
+    recordings_dir = os.path.join(CURR_DIR, "data", "recordings")
+    STATE.recorder = TelemetryFlightRecorder(output_dir=recordings_dir)
+    STATE.recorder.start()
+
+    # 3. Start UDP Listener Thread on Core 2
+    udp_thread = threading.Thread(target=udp_listener_worker, name="UDPListener", daemon=True)
+    udp_thread.start()
+
+    # 4. Start High-Performance Threading HTTP & WebSocket Server on Core 2
+    server_address = (HOST_BIND, PORT_HTTP)
+    httpd = ThreadingHTTPServer(server_address, DebugHTTPRequestHandler)
+    print(f"[DebugServer] Web Mission Control GUI: http://localhost:{PORT_HTTP} or http://robot:{PORT_HTTP}")
+    print(f"[DebugServer] Real-time Flight Black Box saving to: {STATE.recorder.db_path}")
+    print("=" * 70)
+
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        print("\n[DebugServer] Shutting down...")
+    finally:
+        if STATE.auto_servo_center.is_running():
+            STATE.auto_servo_center.stop("DebugServer shutting down")
+        send_mcu_cmd(b"ESTOP\n")
+        httpd.server_close()
+        if STATE.recorder:
+            STATE.recorder.stop()
+
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="Folkrace Debug Server")
+    parser.add_argument("--port", type=int, default=PORT_HTTP, help="HTTP port")
+    args = parser.parse_args()
+    PORT_HTTP = args.port
+    run_debug_server()
+
+
+
+=== FILE: 2_pi4/fan_control.py ===
+#!/usr/bin/env python3
+"""
+fan_control.py
+Hardware PWM Fan Controller for Raspberry Pi 4 (BCM2711 PWM0 on GPIO 12 / Pin 32).
+Designed for 4-wire PWM coolers (e.g. Raspberry Pi 5 Active Cooler / THRML 30-AC).
+
+Features:
+- Exact 25 kHz hardware PWM (40,000 ns period via BCM2711 PWM0).
+- Silent base speed: fan always spins at silent minimum (30% PWM) when cool (<= 45°C).
+- Temperature filtering & deadband: filters sensor noise, prevents RPM hunting.
+- Asymmetric slew-rate limiting:
+    * Rapid ramp-up (up to +8%/sec normally, instant if >= 78°C) to prevent overheating.
+    * Ultra-gentle ramp-down (max -1.5%/sec) to respect heatsink thermal inertia and
+      eliminate annoying acoustic rev-up / rev-down cycles.
+- Thermal throttle protection: reaches 100% full speed at >= 80°C.
+"""
+
+import os
+import signal
+import sys
+import time
+from pathlib import Path
+
+# Hardware PWM Configuration (GPIO 12, PWM0)
+PWM_CHIP_DIR = Path("/sys/class/pwm/pwmchip0")
+PWM0_DIR = PWM_CHIP_DIR / "pwm0"
+PERIOD_NS = 40000      # 40,000 ns = 25 kHz (standard 4-wire fan frequency)
+
+# Temperature Range (°C)
+TEMP_MIN = 45.0        # Temp below which fan stays at MIN_SPEED
+TEMP_THROTTLE = 81.0   # Thermal throttle threshold where fan reaches 100%
+TEMP_EMERGENCY = 81.0  # At or above 81°C, switch to emergency ramp-up rate
+
+# Speed Limits (Duty Fraction 0.0 - 1.0)
+MIN_SPEED = 0.40       # Minimum duty cycle (40% baseline airflow)
+MAX_SPEED = 1.00       # Maximum duty cycle (100% cooling)
+
+# Hysteresis & Slew Rate Controls
+POLL_INTERVAL = 1.0                # Seconds between control loop iterations
+TEMP_FILTER_ALPHA = 0.10           # Heavy low-pass filter weight (10s time constant)
+TEMP_DEADBAND = 1.0                # 1.0°C deadband: ignore tiny temp oscillations
+
+RAMP_UP_RATE_PER_SEC = 0.04        # 4% duty cycle per second (regular ramp-up)
+RAMP_UP_EMERGENCY_RATE = 0.08      # 8% duty cycle per second (emergency ramp-up at >= 81°C)
+RAMP_DOWN_RATE_PER_SEC = 0.010     # 1% duty cycle per second (ramp-down)
+DUTY_STEP_RESOLUTION = 0.005       # 0.5% duty cycle step quantization
+
+THERMAL_ZONE = "/sys/class/thermal/thermal_zone0/temp"
+
+def init_hardware_pwm() -> bool:
+    # Wait for PWM chip directory to exist (up to 15s during early boot)
+    for _ in range(30):
+        if (PWM_CHIP_DIR / "export").exists():
+            break
+        time.sleep(0.5)
+
+    if not (PWM_CHIP_DIR / "export").exists():
+        print(f"[fan_control] Error: {PWM_CHIP_DIR}/export not found!")
+        return False
+
+    # Export pwm0 if not yet exported
+    if not PWM0_DIR.exists():
+        try:
+            with open(PWM_CHIP_DIR / "export", "w") as f:
+                f.write("0\n")
+        except Exception:
+            pass
+
+    # Wait for sysfs files to appear after export
+    for _ in range(20):
+        if (PWM0_DIR / "period").exists() and (PWM0_DIR / "duty_cycle").exists():
+            break
+        time.sleep(0.2)
+
+    # Configure period and enable with retries
+    for attempt in range(5):
+        try:
+            # Disable first so period changes cleanly
+            if (PWM0_DIR / "enable").exists():
+                with open(PWM0_DIR / "enable", "w") as f:
+                    f.write("0\n")
+            # Duty cycle must be <= period, reset to 0 first
+            with open(PWM0_DIR / "duty_cycle", "w") as f:
+                f.write("0\n")
+            with open(PWM0_DIR / "period", "w") as f:
+                f.write(f"{PERIOD_NS}\n")
+            with open(PWM0_DIR / "enable", "w") as f:
+                f.write("1\n")
+
+            # Verify period was set correctly
+            read_period = int((PWM0_DIR / "period").read_text().strip())
+            if read_period == PERIOD_NS:
+                print(f"[fan_control] PWM0 initialized successfully ({PERIOD_NS} ns period)")
+                return True
+        except Exception as e:
+            print(f"[fan_control] Retrying PWM0 setup (attempt {attempt+1}/5): {e}")
+            time.sleep(0.5)
+
+    print("[fan_control] Failed to configure PWM0 period after 5 attempts")
+    return False
+
+def set_fan_duty(duty_fraction: float):
+    duty_fraction = max(MIN_SPEED, min(MAX_SPEED, duty_fraction))
+    duty_ns = int(round(duty_fraction * PERIOD_NS))
+    try:
+        with open(PWM0_DIR / "duty_cycle", "w") as f:
+            f.write(f"{duty_ns}\n")
+    except Exception as e:
+        print(f"[fan_control] Error updating duty_cycle: {e}, reinitializing PWM...")
+        if init_hardware_pwm():
+            try:
+                with open(PWM0_DIR / "duty_cycle", "w") as f:
+                    f.write(f"{duty_ns}\n")
+            except Exception:
+                pass
+
+def get_raw_cpu_temp() -> float:
+    try:
+        with open(THERMAL_ZONE, "r") as f:
+            return float(f.read().strip()) / 1000.0
+    except Exception:
+        return 80.0  # Fallback to high temp for safety if read fails
+
+def calculate_target_duty(temp: float) -> float:
+    if temp <= TEMP_MIN:
+        return MIN_SPEED
+    if temp >= TEMP_THROTTLE:
+        return MAX_SPEED
+
+    # Progressive curve (power 1.35 keeps fan extra quiet in 45-65°C range)
+    fraction = (temp - TEMP_MIN) / (TEMP_THROTTLE - TEMP_MIN)
+    speed = MIN_SPEED + (MAX_SPEED - MIN_SPEED) * (fraction ** 1.35)
+    return max(MIN_SPEED, min(MAX_SPEED, speed))
+
+def main():
+    print(f"[fan_control] Starting 25 kHz Hardware PWM0 Controller on GPIO 12 (Pin 32)")
+    print(f"[fan_control] Baseline: {int(MIN_SPEED*100)}% (<= {TEMP_MIN}°C) -> 100% (>= {TEMP_THROTTLE}°C)")
+    print(f"[fan_control] Hysteresis: deadband {TEMP_DEADBAND}°C (LPF alpha: {TEMP_FILTER_ALPHA}) | ramp-up +{int(RAMP_UP_RATE_PER_SEC*100)}%/s (emergency: +{int(RAMP_UP_EMERGENCY_RATE*100)}%/s @ >={TEMP_EMERGENCY}°C) | ramp-down -{RAMP_DOWN_RATE_PER_SEC*100:.1f}%/s")
+
+    init_hardware_pwm()
+
+    def handle_exit(signum, frame):
+        print("[fan_control] Shutting down, leaving fan at safe 50%...")
+        set_fan_duty(0.50)
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, handle_exit)
+    signal.signal(signal.SIGTERM, handle_exit)
+
+    # Initial start spin-up kick (0.5s at 100% to overcome static friction)
+    set_fan_duty(1.0)
+    time.sleep(0.5)
+
+    raw_temp = get_raw_cpu_temp()
+    filtered_temp = raw_temp
+    last_eval_temp = filtered_temp
+    current_duty = calculate_target_duty(filtered_temp)
+    set_fan_duty(current_duty)
+
+    last_loop_time = time.time()
+    last_logged_time = 0.0
+    last_logged_duty = current_duty
+
+    print(f"[fan_control] Running. Initial CPU temp: {filtered_temp:.1f}°C, Duty: {int(current_duty*100)}%")
+
+    while True:
+        time.sleep(POLL_INTERVAL)
+        now = time.time()
+        dt = max(0.1, min(2.0, now - last_loop_time))
+        last_loop_time = now
+
+        raw_temp = get_raw_cpu_temp()
+        filtered_temp = (TEMP_FILTER_ALPHA * raw_temp) + ((1.0 - TEMP_FILTER_ALPHA) * filtered_temp)
+
+        # Apply temperature deadband: only update target temperature if change exceeds deadband
+        if abs(filtered_temp - last_eval_temp) >= TEMP_DEADBAND:
+            last_eval_temp = filtered_temp
+
+        target_duty = calculate_target_duty(last_eval_temp)
+
+        # Asymmetric Slew-Rate Limiting (Ramp Up vs Ramp Down)
+        if target_duty > current_duty:
+            if filtered_temp >= TEMP_EMERGENCY:
+                # Emergency ramp-up at >= 80°C (10%/s)
+                max_rise = RAMP_UP_EMERGENCY_RATE * dt
+            else:
+                # Regular ramp-up (5%/s)
+                max_rise = RAMP_UP_RATE_PER_SEC * dt
+            current_duty = min(target_duty, current_duty + max_rise)
+        elif target_duty < current_duty:
+            # Gentle, silent ramp-down respecting heatsink thermal storage
+            max_fall = RAMP_DOWN_RATE_PER_SEC * dt
+            current_duty = max(target_duty, current_duty - max_fall)
+
+        # Quantize step to prevent micro-fluctuations in sound pitch
+        quantized_duty = round(current_duty / DUTY_STEP_RESOLUTION) * DUTY_STEP_RESOLUTION
+        quantized_duty = max(MIN_SPEED, min(MAX_SPEED, quantized_duty))
+        set_fan_duty(quantized_duty)
+
+        # Periodic or event-driven logging
+        if abs(quantized_duty - last_logged_duty) >= 0.04 or (now - last_logged_time) >= 60.0:
+            print(f"[fan_control] CPU: {raw_temp:.1f}°C (filt: {filtered_temp:.1f}°C) | Fan: {int(quantized_duty*100)}% ({int(quantized_duty * PERIOD_NS)} ns)")
+            last_logged_duty = quantized_duty
+            last_logged_time = now
+
+if __name__ == "__main__":
+    main()
+
+
+=== FILE: 2_pi4/mcu_telemetry_protocol.py ===
+"""
+================================================================================
+  FOLKRACE PI 4: MCU BINARY TELEMETRY PROTOCOL DECODER & ENCODER
+================================================================================
+  High-speed zero-copy Python bridge matching brain/mcu_telemetry_protocol.h:
+    - Chassis Dynamics Packet (ESP32 Main -> Pi 4): 54 Bytes
+    - ToF Perception Packet (ESP32 ToF Hub -> Pi 4): 74 Bytes
+    - Motion Command Packet (Pi 4 -> ESP32 Main): 13 Bytes
+
+  Decodes in < 1 microsecond per packet using native C Python struct unpack.
+================================================================================
+"""
+
+import struct
+from typing import Dict, Any, Optional, Tuple
+
+# Sync Bytes
+MCU_SYNC = b"\xAA\x55"
+PI_SYNC = b"\x55\xAA"
+
+MSG_ID_CHASSIS_TELEM = 0x01
+MSG_ID_TOF_TELEM = 0x02
+MSG_ID_TOF_SUB_TELEM = 0x05
+MSG_ID_MOTION_CMD = 0x10
+
+# Struct formats (little-endian '<', packed)
+# Chassis: sync(2), msg_type(B), len(B), seq(I), ts(I),
+#          IMU & Steer (8h: yaw, pitch, roll, gyro_z, ax, ay, steer_cmd, steer_act),
+#          servo_us(H),
+#          Speeds & RPMs (10h: v_cmd, v_est, fl_cmd, fr_cmd, rl_cmd, rr_cmd, fl_act, fr_act, rl_act, rr_act),
+#          slip_state(B), slip_ratio(b), flags(B), chk(B)
+CHASSIS_FORMAT = "<2sBBII8hH10hBbBB"
+CHASSIS_SIZE = struct.calcsize(CHASSIS_FORMAT)  # 54 bytes
+
+# ToF 16-zone full frame: sync(2), msg_type(B), sensor_id(B), seq(I), ts(I),
+#      dist_mm(16H), status(16B), spad(16B), temp(b), chk(B)
+TOF_FORMAT = "<2sBBII16H16B16BbB"
+TOF_SIZE = struct.calcsize(TOF_FORMAT)  # 78 bytes
+
+# ToF 4-zone per-sensor frame (ESP32_ToF/src/main.cpp ToF_Binary_Packet):
+#      sync(2), sensor_id(B), seq(I), ts_ms(I), dist_mm(4H), chk(B)
+TOF_SUB_FORMAT = "<2sBII4HB"
+TOF_SUB_SIZE = struct.calcsize(TOF_SUB_FORMAT)  # 20 bytes
+
+# ToF 44-byte multi-target 4-zone frame (ESP32_ToF/src/main.cpp ToF_Binary_Packet_44, no SPAD):
+#      sync(2), sensor_id(B), seq(I), ts_ms(I), dist_mm(4H), target0_mm(4H), target1_mm(4H),
+#      target0_status(4B), target1_status(4B), chk(B)
+TOF_SUB44_FORMAT = "<2sBII4H4H4H4B4BB"
+TOF_SUB44_SIZE = struct.calcsize(TOF_SUB44_FORMAT)  # 44 bytes
+
+# ToF 52-byte multi-target 4-zone frame (ESP32_ToF/src/main.cpp ToF_Binary_Packet_52):
+#      sync(2), sensor_id(B), seq(I), ts_ms(I), dist_mm(4H), target0_mm(4H), target1_mm(4H),
+#      target0_status(4B), target1_status(4B), spad_count(4H), chk(B)
+TOF_SUB52_FORMAT = "<2sBII4H4H4H4B4B4HB"
+TOF_SUB52_SIZE = struct.calcsize(TOF_SUB52_FORMAT)  # 52 bytes
+
+# ToF 60-byte per-sensor frame (ESP32_ToF/src/main.cpp multi-target ToF_Binary_Packet):
+#      sync(2), sensor_id(B), seq(I), ts_ms(I), dist_mm(16H), status(16B), chk(B)
+TOF_SUB60_FORMAT = "<2sBII16H16BB"
+TOF_SUB60_SIZE = struct.calcsize(TOF_SUB60_FORMAT)  # 60 bytes
+
+# Motion Command: sync(2), msg_type(B), seq(I), v_cmd(h), steer_mrad(h), mode(B), chk(B)
+CMD_FORMAT = "<2sBIhhBB"
+CMD_SIZE = struct.calcsize(CMD_FORMAT)  # 13 bytes
+
+
+def calc_checksum(data: bytes) -> int:
+    """Computes XOR checksum over bytes."""
+    chk = 0
+    for b in data:
+        chk ^= b
+    return chk
+
+
+def decode_chassis_packet(data: bytes) -> Optional[Dict[str, Any]]:
+    """Decodes 54-byte binary Chassis telemetry frame into a clean Python dictionary."""
+    if len(data) < CHASSIS_SIZE:
+        return None
+
+    unpacked = struct.unpack_from(CHASSIS_FORMAT, data)
+    sync, msg_type, payload_len, seq, ts_us = unpacked[0:5]
+
+    if sync != MCU_SYNC or msg_type != MSG_ID_CHASSIS_TELEM or payload_len != (CHASSIS_SIZE - 5):
+        return None
+
+    expected_chk = unpacked[-1]
+    actual_chk = calc_checksum(data[: CHASSIS_SIZE - 1])
+    if actual_chk != expected_chk:
+        return None  # Checksum mismatch
+
+    (
+        yaw_x10, pitch_x10, roll_x10, gyro_z_mrad, ax_cm, ay_cm,
+        steer_cmd_x10, steer_act_x10, servo_us, v_cmd_mm, v_est_mm,
+        fl_cmd, fr_cmd, rl_cmd, rr_cmd,
+        fl_act, fr_act, rl_act, rr_act,
+        slip_state_code, slip_ratio_pct, flags
+    ) = unpacked[5:27]
+
+    slip_map = {0: "NORMAL", 1: "UNDERSTEER", 2: "OVERSTEER", 3: "SPIN"}
+
+    return {
+        "seq": seq,
+        "mcu_timestamp_us": ts_us,
+        "yaw_deg": round(yaw_x10 / 10.0, 1),
+        "pitch_deg": round(pitch_x10 / 10.0, 1),
+        "roll_deg": round(roll_x10 / 10.0, 1),
+        "gyro_z": round(gyro_z_mrad / 1000.0, 3),
+        "accel_fwd": round(ax_cm / 100.0, 2),
+        "accel_lat": round(ay_cm / 100.0, 2),
+        "steer_cmd_deg": round(steer_cmd_x10 / 10.0, 1),
+        "steer_actual_deg": round(steer_act_x10 / 10.0, 1),
+        "servo_pulse_us": servo_us,
+        "v_cmd": round(v_cmd_mm / 1000.0, 3),
+        "v_real": round(v_est_mm / 1000.0, 3),
+        "v_est": round(v_est_mm / 1000.0, 3),
+        "rpms_cmd": [float(fl_cmd), float(fr_cmd), float(rl_cmd), float(rr_cmd)],
+        "rpms_act": [float(fl_act), float(fr_act), float(rl_act), float(rr_act)],
+        "slip_state": slip_map.get(slip_state_code, "NORMAL"),
+        "slip_ratio": round(slip_ratio_pct / 100.0, 2),
+        "flags": {
+            "override_active": bool(flags & 0x01),
+            "fake_data": bool(flags & 0x02),
+            "imu_online": bool(flags & 0x04),
+            "stm32_front": bool(flags & 0x08),
+            "stm32_rear": bool(flags & 0x10),
+        },
+    }
+
+
+def decode_tof_packet(data: bytes) -> Optional[Dict[str, Any]]:
+    """Decodes 74-byte binary ToF telemetry frame."""
+    if len(data) < TOF_SIZE:
+        return None
+
+    unpacked = struct.unpack_from(TOF_FORMAT, data)
+    sync, msg_type, sensor_id, seq, ts_us = unpacked[0:5]
+
+    if sync != MCU_SYNC or msg_type != MSG_ID_TOF_TELEM:
+        return None
+
+    expected_chk = unpacked[-1]
+    actual_chk = calc_checksum(data[: TOF_SIZE - 1])
+    if actual_chk != expected_chk:
+        return None
+
+    dist_mm = list(unpacked[5:21])
+    status = list(unpacked[21:37])
+    spad = list(unpacked[37:53])
+    silicon_temp = unpacked[53]
+
+    # Convert mm to meters (clamp every reading below 30mm to 30mm for Pi reporting)
+    dist_mm = [max(30, d) if d < 30 else d for d in dist_mm]
+    ranges_m = [round(d / 1000.0, 3) for d in dist_mm]
+
+    return {
+        "sensor_id": sensor_id,
+        "seq": seq,
+        "mcu_timestamp_us": ts_us,
+        "silicon_temp_c": silicon_temp,
+        "distances_m": ranges_m,
+        "status": status,
+        "spad": spad,
+    }
+
+
+VALID_TOF_STATUSES = {5, 6, 9}  # ST Table 4 valid statuses (Status 10 is treated as an error/invalid)
+
+
+def _unpack_tof_sub_multi_target(data: bytes, fmt: str, has_spad: bool) -> Optional[Dict[str, Any]]:
+    """Shared decoder for 44-byte and 52-byte multi-target 4-zone ToF packets."""
+    size = len(data)
+    unpacked = struct.unpack_from(fmt, data)
+    sync, sensor_id, seq, ts_ms = unpacked[0:4]
+    if sync != MCU_SYNC or not (1 <= sensor_id <= 4):
+        return None
+
+    if calc_checksum(data[: size - 1]) != unpacked[-1]:
+        return None
+
+    clamped_mm = [max(30, d) if d < 30 else d for d in unpacked[4:8]]
+    result = {
+        "sensor_id": sensor_id,
+        "seq": seq,
+        "ts_ms": ts_ms,
+        "mcu_timestamp_us": ts_ms * 1000,
+        "distances_m": [round(d / 1000.0, 3) for d in clamped_mm],
+        "dist_mm": list(clamped_mm),
+        "target0_mm": list(unpacked[8:12]),
+        "target1_mm": list(unpacked[12:16]),
+        "target0_status": list(unpacked[16:20]),
+        "target1_status": list(unpacked[20:24]),
+    }
+    if has_spad:
+        result["spad_count"] = list(unpacked[24:28])
+    return result
+
+
+def decode_tof_sub_packet(data: bytes) -> Optional[Dict[str, Any]]:
+    """Decodes per-sensor binary ToF packet (20B lean, 44B multi-target, or 52B debug frame)."""
+    # 1. Check exact 20-byte lean frame
+    if len(data) == TOF_SUB_SIZE:
+        unpacked = struct.unpack_from(TOF_SUB_FORMAT, data)
+        sync, sensor_id, seq, ts_ms = unpacked[0:4]
+        dist_mm = unpacked[4:8]
+
+        if sync != MCU_SYNC or not (1 <= sensor_id <= 4):
+            return None
+
+        expected_chk = unpacked[8]
+        actual_chk = calc_checksum(data[: TOF_SUB_SIZE - 1])
+        if actual_chk != expected_chk:
+            return None
+
+        clamped_mm = [max(30, d) if d < 30 else d for d in dist_mm]
+        return {
+            "sensor_id": sensor_id,
+            "seq": seq,
+            "ts_ms": ts_ms,
+            "mcu_timestamp_us": ts_ms * 1000,
+            "distances_m": [round(d / 1000.0, 3) for d in clamped_mm],
+            "dist_mm": list(clamped_mm),
+        }
+
+    # 2. Check exact 44-byte multi-target frame (Pi mode, no SPAD)
+    if len(data) == TOF_SUB44_SIZE:
+        return _unpack_tof_sub_multi_target(data, TOF_SUB44_FORMAT, has_spad=False)
+
+    # 3. Check exact 52-byte multi-target frame (debug mode, with SPAD)
+    if len(data) == TOF_SUB52_SIZE:
+        return _unpack_tof_sub_multi_target(data, TOF_SUB52_FORMAT, has_spad=True)
+
+    # 3. Check exact 60-byte legacy frame
+    if len(data) == TOF_SUB60_SIZE:
+        unpacked = struct.unpack_from(TOF_SUB60_FORMAT, data)
+        sync, sensor_id, seq, ts_ms = unpacked[0:4]
+        if sync != MCU_SYNC or not (1 <= sensor_id <= 4):
+            return None
+        expected_chk = unpacked[-1]
+        actual_chk = calc_checksum(data[: TOF_SUB60_SIZE - 1])
+        if actual_chk != expected_chk:
+            return None
+
+        dist_raw = unpacked[4:20]
+        status_raw = unpacked[20:36]
+        valid_statuses = VALID_TOF_STATUSES
+
+        primary_distances_m = []
+        for i in range(4):
+            d0, d1 = dist_raw[2 * i], dist_raw[2 * i + 1]
+            s0, s1 = status_raw[2 * i], status_raw[2 * i + 1]
+            v0 = (s0 in valid_statuses and d0 > 0)
+            v1 = (s1 in valid_statuses and d1 > 0)
+            near0 = (s0 != 0 and s0 != 255 and 1 <= d0 <= 30)
+            near1 = (s1 != 0 and s1 != 255 and 1 <= d1 <= 30)
+
+            if v0 and v1:
+                chosen = min(d0, d1)
+            elif v0:
+                chosen = d0
+            elif v1:
+                chosen = d1
+            elif near0 and near1:
+                chosen = min(d0, d1)
+            elif near0:
+                chosen = d0
+            elif near1:
+                chosen = d1
+            else:
+                chosen = 3000
+
+            if chosen < 30:
+                chosen = 30
+            primary_distances_m.append(round(chosen / 1000.0, 3))
+
+        return {
+            "sensor_id": sensor_id,
+            "seq": seq,
+            "ts_ms": ts_ms,
+            "mcu_timestamp_us": ts_ms * 1000,
+            "distances_m": primary_distances_m,
+            "distances_raw_mm": list(dist_raw),
+            "status_raw": list(status_raw),
+        }
+
+    return None
+
+
+def encode_motion_command(target_v_mps: float, target_steer_rad: float, run_mode: int = 1, seq: int = 0) -> bytes:
+    """Encodes a 13-byte binary motion command packet for ESP32 Main."""
+    v_mm_s = int(round(target_v_mps * 1000.0))
+    steer_mrad = int(round(target_steer_rad * 1000.0))
+    
+    # Pack without checksum first
+    header_payload = struct.pack("<2sBIhhB", PI_SYNC, MSG_ID_MOTION_CMD, seq, v_mm_s, steer_mrad, run_mode)
+    chk = calc_checksum(header_payload)
+    return header_payload + bytes([chk])
+
+
+if __name__ == "__main__":
+    import time
+    print("Testing MCU Telemetry Protocol...")
+    cmd = encode_motion_command(2.5, -0.35, 1, 42)
+    assert len(cmd) == 13, f"Expected 13 bytes, got {len(cmd)}"
+    assert calc_checksum(cmd[:-1]) == cmd[-1], "Checksum mismatch"
+    print(f"Motion Command encoded: {len(cmd)} bytes -> OK")
+
+    # Synthetic chassis packet
+    payload = struct.pack(
+        "<2sBBI" "I" "8h" "H" "10h" "BbBB",
+        MCU_SYNC, MSG_ID_CHASSIS_TELEM, 49, 101,
+        12345678,
+        150, -20, 5, 250, 120, -15, 180, 175,
+        1620,
+        2500, 2480, 1200, 1220, 1200, 1220, 1195, 1215, 1202, 1225,
+        0, 3, 0x1C, 0
+    )
+    chk = calc_checksum(payload[:-1])
+    pkt = payload[:-1] + bytes([chk])
+    
+    t0 = time.perf_counter()
+    res = decode_chassis_packet(pkt)
+    dt_us = (time.perf_counter() - t0) * 1e6
+    assert res is not None, "Failed to decode chassis packet"
+    assert res["v_cmd"] == 2.5
+    assert res["yaw_deg"] == 15.0
+    print(f"Chassis Packet decoded in {dt_us:.2f} us -> OK: {res}")
+    print("All MCU telemetry protocol tests passed!")
+
+
+

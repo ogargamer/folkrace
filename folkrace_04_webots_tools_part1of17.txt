@@ -1,0 +1,1673 @@
+=== BUNDLE: folkrace_04_webots_tools_part1of17.txt (5 files/sections) ===
+  - 5_webots/README.md
+  - 5_webots/optimization/ga_planner_optimizer/README.md
+  - 5_webots/optimization/ga_planner_optimizer/best_planner_genome.json
+  - 5_webots/optimization/ga_planner_optimizer/ga_evaluator.py
+  - 5_webots/optimization/ga_planner_optimizer/ga_optimizer.py
+
+=== FILE: 5_webots/README.md ===
+# Webots Simulation & Control Architecture
+
+This directory contains the Webots physics simulation environments, robot models, autonomous controllers, C++ Curvilinear SL-MPC trajectory optimizers, genetic algorithm optimization pipelines, and validation test benches for the Folkrace vehicle.
+
+---
+
+## 1. Coordinate Systems & Sign Conventions
+
+All Webots controllers, MPC algorithms, sensor fusion models, and recovery managers adhere strictly to the following conventions:
+
+### A. Robot Body Frame (Vehicle Local Frame)
+* **+Y Axis**: **Forward** (Longitudinal vehicle motion)
+* **-Y Axis**: **Backward** (Reverse motion)
+* **+X Axis**: **Right** (Lateral displacement to the right of the vehicle)
+* **-X Axis**: **Left** (Lateral displacement to the left of the vehicle)
+* **+Z Axis**: **Up** (Normal to track surface)
+
+### B. Steering Angle Convention (`cmd_steer_rad`, `steer_deg`)
+* **Positive (+)**: **Steer LEFT** (Counter-Clockwise / CCW yaw turn)
+* **Negative (-)**: **Steer RIGHT** (Clockwise / CW yaw turn)
+
+### C. Yaw & Angular Rates (`yaw`, `gyro_z`, `theta_g`)
+* **Positive (+)**: **Turning Left** (CCW)
+* **Negative (-)**: **Turning Right** (CW)
+
+---
+
+## 2. Simulation Architecture & Controller Suite
+
+The Webots simulation stack models the distributed physical architecture (Raspberry Pi 4 brain, ESP32 dynamics, and quad ToF perception hub):
+
+* **`simulation/my_project/controllers/tof_path_planner/`**:
+  * **Curvilinear SL-MPC (`planner_sl_mpc.py` & `cpp/curvilinear_sl_mpc.cpp`)**: High-performance Frenet-frame trajectory planner formulated as a Quadratic Program (QP) and solved via OSQP in compiled C++ (`curvilinear_sl_mpc.dll`). Matches the deployment on the Raspberry Pi 4.
+  * **Quad ToF Perception Model (`cpp_smart_hybrid_costmap.py`)**: Simulates the 4x VL53L8CX multizone ToF array (16 distance readings), performing closest-obstacle extraction and dynamic costmap updates.
+  * **4WD Electronic Differential (`electronic_diff_4wd.py`)**: Replicates the ESP32 Main dynamics engine, computing individual wheel velocities for all 4 direct-drive motors under true Ackermann geometry.
+  * **Anti-Wrong-Way Watchdog (`anti_wrong_way_watchdog.py`)**: Monitors track heading progress and commands immediate 180-degree recovery spins if inverted.
+  * **Stuck Recovery Manager (`stuck_recovery_manager.py`)**: Multi-stage escape state machine executing reverse maneuvers and clearance scans if the vehicle stalls.
+* **`optimization/ga_planner_optimizer/`**:
+  * Multi-core headless Genetic Algorithm tuning pipeline optimizing MPC weights, lookahead horizons, and speed profiles.
+* **`worlds/`**:
+  * Active Webots simulation worlds (e.g. `track_racing.wbt` with modular 1200mm track walls and dynamic obstacles).
+
+---
+
+## 3. Directory Layout
+
+```
+5_webots/
+├── simulation/
+│   └── my_project/
+│       ├── controllers/
+│       │   └── tof_path_planner/     # Main autonomous driving controller suite
+│       │       ├── cpp/              # C++ SL-MPC & OSQP solver source code
+│       │       └── data/             # Track reference curves and champion genomes
+│       ├── worlds/                   # Active simulation worlds (track_racing.wbt)
+│       └── protos/                   # Robot model and dynamic obstacle protos
+├── optimization/
+│   └── ga_planner_optimizer/         # Multi-core genetic algorithm parameter optimizer
+├── robotics/
+│   └── ros2_cartographer/            # Legacy / experimental mapping reference (Note: Physical car uses ToF, no LiDAR)
+└── assets/                           # CAD models, 3D meshes, and track geometries
+```
+
+---
+
+## 4. Quick Usage
+
+Launch the full simulation stack with live telemetry from the repository root:
+
+```bash
+# Launch champion drive with 3 dynamic obstacles and live telemetry GUI
+python 1_launchers/1_champion_preview.py
+
+# Launch ultra-lean champion drive without GUI overhead
+python 1_launchers/2_fast_champion_drive.py
+
+# Launch headless Genetic Algorithm optimizer dashboard
+python 1_launchers/3_ga_dashboard.py
+```
+
+
+=== FILE: 5_webots/optimization/ga_planner_optimizer/README.md ===
+# Headless Genetic Algorithm (GA) Optimizer for Autonomous ToF Racing
+
+A dedicated high-throughput multi-core Genetic Algorithm framework designed specifically for optimizing autonomous ToF path planners in Webots without MPPI.
+
+---
+
+## 1. Quick Start
+
+### Launch GA Optimization (1-Click)
+```bash
+# Optimize Option 1 (BVP Dynamic State Lattice)
+python launch_ga_optimization.py --planner option1
+
+# Optimize Option 2 (Curvilinear Frenet SL-MPC)
+python launch_ga_optimization.py --planner option2
+
+# Optimize Option 3 (7th-Order Septic Spline) with custom cores and generations
+python launch_ga_optimization.py --planner option3 --cores 6 --generations 40 --pop-size 24
+```
+
+### Resume an Interrupted Run
+```bash
+python launch_ga_optimization.py --planner option1 --resume
+```
+
+### Plot Convergence Progress
+```bash
+python plot_ga_results.py
+```
+
+---
+
+## 2. Configuration & Parameter Tuning: `ga_planner_config.py`
+
+All GA hyperparameters, worker allocations, evaluation horizons, and path planner gene tables are centralized in [ga_planner_config.py](file:///c:/Users/nurmi/Documents/Folkrace/5_5_webots/optimization/ga_planner_optimizer/ga_planner_config.py).
+
+### Core GA Hyperparameters
+- `NUM_CPU_CORES`: Number of parallel Webots instances running across CPU cores (default: auto-detect physical/logical cores).
+- `POPULATION_SIZE`: Number of candidate chromosomes evaluated per generation (default: 24).
+- `NUM_GENERATIONS`: Maximum optimization generations (default: 30).
+- `EVALUATION_DURATION_S`: Simulation evaluation duration per candidate (strictly 20.0 seconds).
+- `ACTIVE_PLANNER`: `"OPTION_1_BVP"`, `"OPTION_2_SL_MPC"`, or `"OPTION_3_SEPTIC"`.
+- `CROSSOVER_RATE`: Arithmetic blend crossover probability (default: 0.80).
+- `MUTATION_RATE`: Gene mutation probability (default: 0.18).
+- `ELITISM_COUNT`: Number of top elite candidates preserved untouched (default: 2).
+
+### Moving Obstacle Reverse Motion
+- `ENABLE_MOVING_OBSTACLES = True`
+- `MOVING_OBSTACLE_SPEED_MPS = 0.50`
+- Obstacles travel **against the robot heading** along the track racing line (`cyan_champion_trajectory.csv`) at 0.50 m/s. The racing line is used solely for moving obstacles, not for path planners.
+
+### 20-Second Distance Fitness Function
+- Fitness = `(distance_m * 100.0) + (mean_speed_mps * 25.0) + (laps_completed * 1500.0)`
+- Hard Penalty on Crash: `-5000.0`
+- Hard Penalty on Stall (`v < 0.15 m/s` for `> 1.5 s`): `-3000.0`
+
+---
+
+## 3. Directory Layout
+
+```
+5_webots/optimization/ga_planner_optimizer/
+├── ga_planner_config.py         # All exposed GA parameters and gene bounds
+├── ga_optimizer.py              # Parallel GA engine (tournament selection, elitism, checkpointing)
+├── ga_evaluator.py              # Headless Webots worker pool manager
+├── test_ga_optimizer_offline.py # Offline verification tests
+└── data/
+    └── cyan_champion_trajectory.csv # Racing line for moving obstacles
+```
+
+---
+
+## 4. Output Artifacts & Checkpoints
+- `best_planner_genome.json`: JSON file containing the highest-fitness champion chromosome and metrics.
+- `ga_checkpoint.json`: Checkpoint saved after each generation to allow resuming anytime.
+- `ga_history.csv`: Generational progression table (Best Fitness, Distance, Velocity, Crashes).
+- `ga_convergence_summary.png`: Visual plots generated by `plot_ga_results.py`.
+
+
+=== FILE: 5_webots/optimization/ga_planner_optimizer/best_planner_genome.json ===
+{
+  "planner": "OPTION_2_SL_MPC",
+  "fitness": 10045.33,
+  "metrics": {
+    "distance_m": 62.725,
+    "mean_speed_mps": 2.41,
+    "laps_completed": 4,
+    "duration_s": 50.02,
+    "eval_duration_s": 25.0,
+    "crashed": false,
+    "crash_reason": "none",
+    "stalled": false,
+    "compute_multiplier": 1.0,
+    "fitness": 10081.05,
+    "robust_fitness_2x": 10045.33,
+    "validation_96_trials": {
+      "25s_24runs_comp_mean": 7011.6,
+      "25s_24runs_p25": 6209.5,
+      "25s_24runs_survival_pct": 83.3,
+      "35s_24runs_comp_mean": 5946.8,
+      "35s_24runs_p25": 3799.8,
+      "35s_24runs_max": 10312.7,
+      "35s_24runs_survival_pct": 77.1
+    },
+    "track1_metrics": {
+      "distance_m": 68.117,
+      "mean_speed_mps": 2.599,
+      "laps_completed": 4,
+      "duration_s": 25.01,
+      "eval_duration_s": 25.0,
+      "crashed": false,
+      "crash_reason": "none",
+      "stalled": false,
+      "opponent_contacts": 0,
+      "obstacle_speed_mps": 1.0,
+      "compute_multiplier": 1.0,
+      "fitness": 10895.52
+    },
+    "track2_metrics": {
+      "distance_m": 62.725,
+      "mean_speed_mps": 2.41,
+      "laps_completed": 4,
+      "duration_s": 25.01,
+      "eval_duration_s": 25.0,
+      "crashed": false,
+      "crash_reason": "none",
+      "stalled": false,
+      "opponent_contacts": 9,
+      "obstacle_speed_mps": -1.0,
+      "compute_multiplier": 1.0,
+      "fitness": 10081.05
+    }
+  },
+  "genes": {
+    "v_cruise_max": 3.84,
+    "v_cruise_min": 1.223,
+    "horizon_N": 30,
+    "dt": 0.016667,
+    "mu_friction": 0.8,
+    "r_inflation_m": 0.075,
+    "q_progress": 35.231,
+    "q_cte": 59.652,
+    "q_heading": 14.378,
+    "r_steer": 1.003,
+    "r_accel": 3.784,
+    "r_steer_rate": 2.57,
+    "v_corner_factor": 0.747,
+    "center_bias": 0.07,
+    "target_lookahead_m": 2.3,
+    "w_gap_distance": 5.163,
+    "w_gap_width": 0.362,
+    "w_gap_steer": 1.799,
+    "w_gap_straight": 0.215,
+    "w_side_clearance": 4.892,
+    "gap_dist_exp_k": 0.278,
+    "gap_dist_thresh_m": 1.148,
+    "scout_obs_width_m": 0.286,
+    "scout_straight_pen_k": 2.483,
+    "scout_straight_exp_k": 0.983,
+    "gap_latch_hysteresis": 1.547,
+    "gap_latch_dist_m": 0.415,
+    "alt_min_separation_m": 0.079,
+    "alt_aperture_bias": 2.675,
+    "alt_switch_hysteresis": 34.935,
+    "w_gap_clear": 30.552,
+    "aggr_dist_far_m": 2.3,
+    "aggr_dist_close_m": 0.972,
+    "aggr_min_scale": 0.715,
+    "steer_deadband_rad": 0.001,
+    "recovery_clearance_exit_m": 0.25,
+    "recovery_steer_angle_rad": 0.5623,
+    "recovery_arc_lookahead_m": 0.117,
+    "use_corridor_flow": 0,
+    "track_width_cap_m": 1.139,
+    "corner_outer_bias": 0.51,
+    "inner_corner_margin_m": 0.021,
+    "blind_turn_kappa": 0.714,
+    "brake_decel_scale": 1.053,
+    "narrow_corridor_v_gain": 0.038,
+    "w_gap_center": 0.832
+  },
+  "timestamp": "2026-11-25 11:40:00"
+}
+
+
+=== FILE: 5_webots/optimization/ga_planner_optimizer/ga_evaluator.py ===
+"""
+================================================================================
+  HEADLESS WEBOTS EVALUATOR & PARALLEL WORKER POOL
+================================================================================
+  Spawns and manages long-lived headless Webots processes across CPU cores.
+  Communicates with supervisor workers via local TCP sockets for sub-second trial
+  dispatch, collecting 20-second distance metrics and scalar fitness.
+================================================================================
+"""
+
+import os
+import sys
+import json
+import time
+import socket
+import subprocess
+import queue
+from typing import Dict, List, Optional, Tuple, Any
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import numpy as np
+
+CURR_DIR = os.path.dirname(os.path.abspath(__file__))
+
+def _find_world_path(start_dir: str) -> str:
+    p = start_dir
+    for _ in range(6):
+        cand = os.path.join(p, "5_webots", "simulation", "my_project", "worlds", "track_racing.wbt")
+        if os.path.exists(cand):
+            return cand
+        cand2 = os.path.join(p, "simulation", "my_project", "worlds", "track_racing.wbt")
+        if os.path.exists(cand2):
+            return cand2
+        parent = os.path.dirname(p)
+        if parent == p:
+            break
+        p = parent
+    return os.path.join(start_dir, "track_racing.wbt")
+
+DEFAULT_WORLD_PATH = _find_world_path(CURR_DIR)
+OPTIMIZER_PROJECT_DIR = os.path.dirname(os.path.dirname(DEFAULT_WORLD_PATH)) if os.path.exists(DEFAULT_WORLD_PATH) else CURR_DIR
+MY_PROJECT_DIR = OPTIMIZER_PROJECT_DIR
+WEBOTS_DIR = os.path.dirname(os.path.dirname(MY_PROJECT_DIR))
+WORKSPACE_ROOT = os.path.dirname(WEBOTS_DIR)
+
+for p in [OPTIMIZER_PROJECT_DIR, CURR_DIR]:
+    if p not in sys.path and os.path.exists(p):
+        sys.path.insert(0, p)
+
+from ga_planner_config import (
+    NUM_CPU_CORES,
+    WEBOTS_BINARY,
+    BASE_WORKER_PORT,
+    POPULATION_SIZE,
+    NUM_GENERATIONS,
+    EVALUATION_DURATION_S,
+    TIMEOUT_PER_TRIAL_WALL_S,
+    ACTIVE_PLANNER,
+    compute_scalar_fitness,
+    get_genome_class,
+    BasePlannerGenome,
+    USE_TRACK2,
+)
+
+
+class HeadlessWebotsWorker:
+    """Manages a single long-lived headless Webots process on a dedicated port."""
+
+    def __init__(
+        self,
+        worker_id: int,
+        base_port: int = BASE_WORKER_PORT,
+        webots_bin: str = WEBOTS_BINARY,
+        world_path: str = DEFAULT_WORLD_PATH,
+        rendered: bool = False,
+        controller: Optional[any] = None,
+    ):
+        self.worker_id = worker_id
+        self.port = base_port + worker_id
+        self.webots_bin = webots_bin
+        self.world_path = world_path
+        self.rendered = rendered
+        self.controller = controller
+        self.proc: Optional[subprocess.Popen] = None
+        self.log_file = None
+        self._is_stopped = False
+        self.start_process()
+
+    def _kill_proc(self):
+        """Kills active process tree and closes log file without marking worker permanently stopped."""
+        if self.proc is not None:
+            pid = self.proc.pid
+            # Try graceful TCP shutdown first
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.settimeout(0.5)
+                s.connect(("127.0.0.1", self.port))
+                s.sendall((json.dumps({"cmd": "SHUTDOWN"}) + "\n").encode("utf-8"))
+                s.close()
+            except Exception:
+                pass
+
+            # Force-kill the entire process tree
+            if sys.platform == "win32":
+                try:
+                    subprocess.run(
+                        ["taskkill", "/F", "/T", "/PID", str(pid)],
+                        capture_output=True,
+                        timeout=5,
+                    )
+                except Exception:
+                    pass
+            else:
+                try:
+                    import signal as _signal
+                    os.killpg(os.getpgid(pid), _signal.SIGKILL)
+                except Exception:
+                    pass
+
+            try:
+                self.proc.wait(timeout=2.0)
+            except Exception:
+                try:
+                    self.proc.kill()
+                except Exception:
+                    pass
+            self.proc = None
+
+        if self.log_file is not None and not self.log_file.closed:
+            try:
+                self.log_file.close()
+            except Exception:
+                pass
+            self.log_file = None
+
+    def start_process(self):
+        """Launches Webots in fast headless batch mode or rendered real-time preview mode."""
+        if self._is_stopped:
+            return
+        if self.controller and (getattr(self.controller, "abort_requested", False) or getattr(self.controller, "stop_requested", False)):
+            self._is_stopped = True
+            return
+
+        self._kill_proc()
+
+        env = os.environ.copy()
+        webots_bin_dir = os.path.dirname(self.webots_bin)
+        webots_home = r"C:\Program Files\Webots"
+        py_dir = os.path.dirname(sys.executable)
+        py_scripts = os.path.join(py_dir, "Scripts")
+        env["WEBOTS_HOME"] = webots_home
+        env["PATH"] = webots_bin_dir + os.pathsep + py_dir + os.pathsep + py_scripts + os.pathsep + env.get("PATH", "")
+        env["PYTHONPATH"] = os.pathsep.join([
+            CURR_DIR,
+            OPTIMIZER_PROJECT_DIR,
+            os.path.join(OPTIMIZER_PROJECT_DIR, "controllers", "tof_path_planner"),
+            os.path.join(CURR_DIR, "data"),
+            WORKSPACE_ROOT,
+        ])
+        env["GA_WORKER_PORT"] = str(self.port)
+        env["GA_WORKER_ID"] = str(self.worker_id)
+        env["WEBOTS_CONTROLLER_MODE"] = "ga_eval"
+        env["PYTHONUNBUFFERED"] = "1"
+
+        if self.rendered:
+            # Rendered real-time visual mode for human inspection
+            cmd = [
+                self.webots_bin,
+                f"--port={self.port}",
+                "--mode=realtime",
+                "--batch",
+                self.world_path,
+            ]
+            startupinfo = None
+            creationflags = 0
+        else:
+            # Headless multi-core fast batch mode
+            cmd = [
+                self.webots_bin,
+                f"--port={self.port}",
+                "--mode=fast",
+                "--no-rendering",
+                "--batch",
+                "--minimize",
+                "--stdout",
+                "--stderr",
+                self.world_path,
+            ]
+            startupinfo = None
+            creationflags = 0
+            if sys.platform == "win32":
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startupinfo.wShowWindow = 0  # SW_HIDE
+                creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+
+        if self._is_stopped or (self.controller and getattr(self.controller, "abort_requested", False)):
+            return
+
+        try:
+            log_dir = os.path.join(CURR_DIR, "logs")
+            os.makedirs(log_dir, exist_ok=True)
+            self.log_path = os.path.join(log_dir, f"worker_{self.worker_id}.log")
+            self.log_file = open(self.log_path, "w", encoding="utf-8")
+
+            self.proc = subprocess.Popen(
+                cmd,
+                env=env,
+                cwd=OPTIMIZER_PROJECT_DIR,
+                startupinfo=startupinfo,
+                creationflags=creationflags,
+                stdout=self.log_file,
+                stderr=subprocess.STDOUT,
+            )
+        except Exception as e:
+            print(f"[Worker {self.worker_id}] Error launching Webots executable: {e}", flush=True)
+            return
+
+        # Poll socket until worker is up (up to 45 seconds)
+        t0 = time.time()
+        connected = False
+        while time.time() - t0 < 45.0:
+            if self._is_stopped or (self.controller and getattr(self.controller, "abort_requested", False)):
+                self.stop_process()
+                return
+            if self.ping():
+                connected = True
+                break
+            time.sleep(0.3)
+
+        if not connected and not self._is_stopped:
+            print(f"[Worker {self.worker_id}] Warning: Timed out connecting to port {self.port}.", flush=True)
+        elif connected:
+            print(f"  [Worker {self.worker_id}] Connected and ready on Port {self.port}.", flush=True)
+
+    def ping(self) -> bool:
+        """Checks if Webots supervisor worker server is listening."""
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(1.0)
+            s.connect(("127.0.0.1", self.port))
+            req = json.dumps({"cmd": "PING"}) + "\n"
+            s.sendall(req.encode("utf-8"))
+            data = s.recv(1024)
+            s.close()
+            return b"PONG" in data
+        except Exception:
+            return False
+
+    def evaluate(
+        self,
+        planner_name: str,
+        gene_dict: Dict[str, Any],
+        duration_s: float = EVALUATION_DURATION_S,
+        use_track2: bool = USE_TRACK2,
+    ) -> Tuple[float, Dict[str, Any]]:
+        """Sends candidate genome to Webots supervisor and receives 20s run metrics."""
+        fallback_metrics = {
+            "distance_m": 0.0,
+            "mean_speed_mps": 0.0,
+            "laps_completed": 0,
+            "crashed": True,
+            "stalled": False,
+            "aborted": True,
+            "fitness": -5000.0,
+        }
+
+        if self._is_stopped or (self.controller and getattr(self.controller, "abort_requested", False)):
+            return -5000.0, fallback_metrics
+
+        for attempt in range(2):
+            if self._is_stopped or (self.controller and getattr(self.controller, "abort_requested", False)):
+                return -5000.0, fallback_metrics
+
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.settimeout(TIMEOUT_PER_TRIAL_WALL_S)
+                s.connect(("127.0.0.1", self.port))
+
+                req = json.dumps({
+                    "cmd": "EVAL",
+                    "planner": planner_name,
+                    "genes": gene_dict,
+                    "duration_s": duration_s,
+                    "use_track2": use_track2,
+                }) + "\n"
+
+                s.sendall(req.encode("utf-8"))
+
+                # Read response until newline
+                buf = ""
+                while "\n" not in buf:
+                    if self._is_stopped or (self.controller and getattr(self.controller, "abort_requested", False)):
+                        try:
+                            s.close()
+                        except Exception:
+                            pass
+                        return -5000.0, fallback_metrics
+                    chunk = s.recv(4096).decode("utf-8", errors="ignore")
+                    if not chunk:
+                        break
+                    buf += chunk
+                s.close()
+
+                resp = json.loads(buf.strip())
+                if resp.get("status") == "OK":
+                    metrics = resp.get("metrics", {})
+                    # Worker computes composite fitness (min across Track 1 and Track 2)
+                    if "fitness" in metrics:
+                        fitness = float(metrics["fitness"])
+                    else:
+                        fitness = compute_scalar_fitness(metrics, gene_dict=gene_dict, eval_duration_s=duration_s)
+                        metrics["fitness"] = fitness
+                    return fitness, metrics
+                else:
+                    err_msg = resp.get("error", "Unknown error from Webots worker")
+                    print(f"[Worker {self.worker_id}] Webots server error response: {err_msg}", flush=True)
+                    time.sleep(0.5)
+                    if not self._is_stopped and not (self.controller and getattr(self.controller, "abort_requested", False)):
+                        self.start_process()
+            except Exception as e:
+                if self._is_stopped or (self.controller and getattr(self.controller, "abort_requested", False)):
+                    break
+                print(f"[Worker {self.worker_id}] Attempt {attempt + 1} communication failure: {e}", flush=True)
+                time.sleep(1.0)
+                if not self._is_stopped and not (self.controller and getattr(self.controller, "abort_requested", False)):
+                    self.start_process()
+
+        return -5000.0, fallback_metrics
+
+    def stop_process(self):
+        """Terminates Webots process, kills child processes, and permanently marks as stopped."""
+        self._is_stopped = True
+        self._kill_proc()
+
+
+class ParallelWorkerPool:
+    """Manages pool of headless Webots workers for multi-core parallel GA evaluations."""
+
+    def __init__(
+        self,
+        num_workers: int = NUM_CPU_CORES,
+        base_port: int = BASE_WORKER_PORT,
+        webots_bin: str = WEBOTS_BINARY,
+        world_path: str = DEFAULT_WORLD_PATH,
+        controller: Optional[any] = None,
+    ):
+        self.num_workers = num_workers
+        self.controller = controller
+        self.workers: List[HeadlessWebotsWorker] = []
+        self._shutdown_called = False
+
+        # Wire pool into controller immediately so abort() can shut down workers even during init
+        if self.controller is not None:
+            self.controller._pool = self
+
+        if self.controller and getattr(self.controller, "abort_requested", False):
+            self._shutdown_called = True
+            return
+
+        print("=" * 80, flush=True)
+        print(f"  INITIALIZING PARALLEL GA WORKER POOL ({num_workers} Webots Instances in Parallel)", flush=True)
+        print("=" * 80, flush=True)
+
+        def _init_worker(w_idx: int) -> Optional[HeadlessWebotsWorker]:
+            if self._shutdown_called or (self.controller and getattr(self.controller, "abort_requested", False)):
+                return None
+            w = HeadlessWebotsWorker(
+                worker_id=w_idx,
+                base_port=base_port,
+                webots_bin=webots_bin,
+                world_path=world_path,
+                controller=self.controller,
+            )
+            if self._shutdown_called or (self.controller and getattr(self.controller, "abort_requested", False)):
+                w.stop_process()
+                return None
+            return w
+
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            futures = [executor.submit(_init_worker, i) for i in range(num_workers)]
+            for f in futures:
+                if self._shutdown_called or (self.controller and getattr(self.controller, "abort_requested", False)):
+                    break
+                try:
+                    w = f.result()
+                    if w is not None:
+                        self.workers.append(w)
+                except Exception as e:
+                    print(f"[WorkerPool Init Error] {e}", flush=True)
+
+        if self._shutdown_called or (self.controller and getattr(self.controller, "abort_requested", False)):
+            self.shutdown()
+
+    def evaluate_population(
+        self,
+        planner_name: str,
+        population_genomes: List[BasePlannerGenome],
+        duration_s: float = EVALUATION_DURATION_S,
+        controller: Optional[any] = None,
+        use_track2: bool = USE_TRACK2,
+    ) -> List[Tuple[float, Dict[str, Any]]]:
+        """Evaluates an entire generation of candidate genomes in parallel."""
+        ctrl = controller or self.controller
+        if ctrl and getattr(ctrl, "abort_requested", False):
+            return []
+        if self._shutdown_called or not self.workers:
+            return []
+
+        results: List[Optional[Tuple[float, Dict[str, Any]]]] = [None] * len(population_genomes)
+
+        worker_q = queue.Queue()
+        for w in self.workers:
+            worker_q.put(w)
+
+        def eval_task(cand_idx: int, genome: BasePlannerGenome):
+            if ctrl and getattr(ctrl, "abort_requested", False):
+                return cand_idx, -5000.0, {"crashed": True, "aborted": True}
+            if self._shutdown_called or not self.workers:
+                return cand_idx, -5000.0, {"crashed": True, "aborted": True}
+            worker = worker_q.get()
+            try:
+                fitness, metrics = worker.evaluate(planner_name, genome.to_dict(), duration_s, use_track2=use_track2)
+                return cand_idx, fitness, metrics
+            finally:
+                worker_q.put(worker)
+
+        with ThreadPoolExecutor(max_workers=len(self.workers)) as executor:
+            futures = []
+            for idx, genome in enumerate(population_genomes):
+                if ctrl and getattr(ctrl, "abort_requested", False):
+                    break
+                futures.append(executor.submit(eval_task, idx, genome))
+
+            for future in as_completed(futures):
+                if ctrl and getattr(ctrl, "abort_requested", False):
+                    for f in futures:
+                        f.cancel()
+                    break
+                try:
+                    cand_idx, fitness, metrics = future.result()
+                    results[cand_idx] = (fitness, metrics)
+                except Exception:
+                    pass
+
+        return [r for r in results if r is not None]
+
+    def health_check(self) -> int:
+        """Pings all workers in the pool; restarts any unresponsive workers. Returns healthy worker count."""
+        if self._shutdown_called or not self.workers:
+            return 0
+        healthy = 0
+        for w in self.workers:
+            if w and w.ping():
+                healthy += 1
+            elif w and not self._shutdown_called:
+                print(f"[WorkerPool HealthCheck] Worker {w.worker_id} (Port {w.port}) unresponsive. Auto-restarting...", flush=True)
+                try:
+                    w.start_process()
+                    if w.ping():
+                        healthy += 1
+                except Exception as e:
+                    print(f"[WorkerPool HealthCheck] Failed to restart Worker {w.worker_id}: {e}", flush=True)
+        return healthy
+
+    def shutdown(self):
+        """Stops all Webots worker processes."""
+        self._shutdown_called = True
+        print("[ParallelWorkerPool] Shutting down all Webots instances...", flush=True)
+        for w in list(self.workers):
+            if w is not None:
+                try:
+                    w.stop_process()
+                except Exception:
+                    pass
+        self.workers.clear()
+
+
+def run_rendered_preview(
+    planner_name: str,
+    gene_dict: Optional[Dict[str, Any]] = None,
+    duration_s: float = 20.0,
+    port: int = 10299,
+    controller: Optional[any] = None,
+    use_track2: bool = False,
+) -> Tuple[float, Dict[str, Any]]:
+    """
+    Executes a single rendered, real-time 20-second run of the specified planner in Webots GUI.
+    Allows user to observe vehicle behavior and abort if anything is wrong.
+    """
+    if gene_dict is None:
+        genome_cls = get_genome_class(planner_name)
+        gene_dict = genome_cls().to_dict()
+
+    if controller and (getattr(controller, "abort_requested", False) or getattr(controller, "stop_requested", False)):
+        return -5000.0, {"crashed": True, "aborted": True}
+
+    print(f"\n[Preview] Starting 20s Rendered Real-Time Preview for {planner_name} on Port {port}...", flush=True)
+    worker = HeadlessWebotsWorker(
+        worker_id=99,
+        base_port=port,
+        rendered=True,
+        controller=controller,
+    )
+
+    if controller is not None:
+        controller._preview_worker = worker
+
+    try:
+        if controller and (getattr(controller, "abort_requested", False) or getattr(controller, "stop_requested", False)):
+            return -5000.0, {"crashed": True, "aborted": True}
+
+        fitness, metrics = worker.evaluate(
+            planner_name=planner_name,
+            gene_dict=gene_dict,
+            duration_s=duration_s,
+            use_track2=use_track2,
+        )
+        return fitness, metrics
+    finally:
+        if controller is not None:
+            controller._preview_worker = None
+        worker.stop_process()
+
+
+
+=== FILE: 5_webots/optimization/ga_planner_optimizer/ga_optimizer.py ===
+"""
+================================================================================
+  HIGH-THROUGHPUT PARALLEL GENETIC ALGORITHM (GA) OPTIMIZER
+================================================================================
+  Optimizes autonomous ToF path planner parameters in headless Webots.
+  Features:
+    - Multi-core parallel simulation across CPU cores (20s duration)
+    - Moving obstacles traveling against robot heading at 0.50 m/s
+    - Tournament selection, arithmetic crossover, Gaussian mutation, elitism
+    - Real-time checkpointing (ga_checkpoint.json, ga_history.csv, best_genome.json)
+================================================================================
+"""
+
+import os
+import sys
+import time
+import json
+import csv
+import signal
+import pickle
+import argparse
+from typing import Dict, List, Tuple, Optional, Any
+import numpy as np
+
+try:
+    import cma
+except ImportError:
+    cma = None
+
+CURR_DIR = os.path.dirname(os.path.abspath(__file__))
+
+def _find_optimizer_dir(start_dir: str) -> str:
+    if os.path.exists(os.path.join(start_dir, "worlds", "Cyan_Champion_GA.wbt")):
+        return start_dir
+    p = start_dir
+    for _ in range(6):
+        cand = os.path.join(p, "5_webots", "optimization", "ga_planner_optimizer")
+        if os.path.exists(os.path.join(cand, "worlds", "Cyan_Champion_GA.wbt")):
+            return cand
+        cand2 = os.path.join(p, "optimization", "ga_planner_optimizer")
+        if os.path.exists(os.path.join(cand2, "worlds", "Cyan_Champion_GA.wbt")):
+            return cand2
+        parent = os.path.dirname(p)
+        if parent == p:
+            break
+        p = parent
+    return start_dir
+
+OPTIMIZER_PROJECT_DIR = CURR_DIR
+GA_OPTIMIZER_DIR = OPTIMIZER_PROJECT_DIR
+WEBOTS_DIR = os.path.dirname(os.path.dirname(GA_OPTIMIZER_DIR))
+MY_PROJECT_DIR = os.path.join(WEBOTS_DIR, "simulation", "my_project")
+WORKSPACE_ROOT = os.path.dirname(WEBOTS_DIR)
+
+for p in [
+    CURR_DIR,
+    OPTIMIZER_PROJECT_DIR,
+    os.path.join(MY_PROJECT_DIR, "controllers", "tof_path_planner"),
+    os.path.join(OPTIMIZER_PROJECT_DIR, "data"),
+    WORKSPACE_ROOT,
+]:
+    if p not in sys.path and os.path.exists(p):
+        sys.path.insert(0, p)
+
+from ga_planner_config import (
+    NUM_CPU_CORES,
+    POPULATION_SIZE,
+    NUM_GENERATIONS,
+    EVALUATION_DURATION_S,
+    AUTO_SCALE_EVAL_DURATION,
+    EVAL_DURATION_HOURLY_GROWTH_S,
+    EVAL_DURATION_MAX_S,
+    CROSSOVER_RATE,
+    MUTATION_RATE,
+    MUTATION_SCALE,
+    ELITISM_COUNT,
+    TOURNAMENT_SIZE,
+    ACTIVE_PLANNER,
+    ALGORITHM,
+    CMA_SIGMA0,
+    CMA_RESTART_ON_CONVERGENCE,
+    SEED_FROM_BEST_GENOME_DEFAULT,
+    BEST_GENOME_PATH,
+    get_genome_class,
+    generate_logical_initial_population,
+    load_best_planner_genome,
+    BasePlannerGenome,
+    USE_TRACK2,
+)
+from ga_evaluator import ParallelWorkerPool, run_rendered_preview, BASE_WORKER_PORT
+
+CHECKPOINT_FILE = os.path.join(CURR_DIR, "ga_checkpoint.json")
+HISTORY_CSV_FILE = os.path.join(CURR_DIR, "ga_history.csv")
+BEST_GENOME_FILE = os.path.join(CURR_DIR, "best_planner_genome.json")
+
+
+class CMAESOptimizerAdapter:
+    """
+    Adapter bridging Covariance Matrix Adaptation Evolution Strategy (CMA-ES)
+    with bounded, mixed-type path planner genome parameter vectors.
+
+    - Maps bounded real/int genes into normalized hypercube [0, 1]^D
+    - Samples population of candidates via es.ask()
+    - Quantizes, rounds integers, and clamps back to physical gene ranges
+    - Translates maximized Webots scalar fitness into minimization loss for es.tell()
+    - Supports full serialization (covariance matrix, mean vector, step size) via pickle
+    - Handles automatic re-centering / restart if covariance matrix degenerates
+    """
+
+    def __init__(
+        self,
+        genome_cls,
+        pop_size: int,
+        sigma0: float = CMA_SIGMA0,
+        initial_genome: Optional[BasePlannerGenome] = None,
+    ):
+        if cma is None:
+            raise ImportError("The 'cma' package is required for CMA-ES optimization. Install via: pip install cma")
+
+        self.genome_cls = genome_cls
+        self.pop_size = pop_size
+        self.sigma0 = float(sigma0)
+
+        sample = genome_cls()
+        self.lower, self.upper = sample.get_bounds()
+        self.span = self.upper - self.lower
+        # Guard against zero span
+        self.span[self.span <= 1e-9] = 1.0
+        self.D = len(sample.specs)
+
+        self.initial_genome = initial_genome
+
+        # Baseline mean: start from provided genome or expert baseline archetype
+        if initial_genome is not None:
+            x0 = initial_genome.to_array()
+        else:
+            seeds = generate_logical_initial_population(genome_cls, 1)
+            x0 = seeds[0].to_array() if seeds else sample.to_array()
+
+        u0 = np.clip((x0 - self.lower) / self.span, 0.0, 1.0)
+        u0[self.span <= 1e-9] = 0.0
+
+        self.opts = {
+            "bounds": [[0.0] * self.D, [1.0] * self.D],
+            "popsize": self.pop_size,
+            "verbose": -9,
+        }
+        self.es = cma.CMAEvolutionStrategy(u0.tolist(), self.sigma0, self.opts)
+        self.last_candidates_u: Optional[List[List[float]]] = None
+
+    def ask(self, inject_baseline: bool = False) -> List[BasePlannerGenome]:
+        """Samples next population of candidate genomes from CMA-ES distribution."""
+        self.last_candidates_u = self.es.ask()
+        if inject_baseline and len(self.last_candidates_u) > 0:
+            # Candidate 0 is GUARANTEED to be the active all-time champion (Elitism guarantee)
+            if self.initial_genome is not None:
+                x0 = self.initial_genome.to_array()
+                u0 = np.clip((x0 - self.lower) / self.span, 0.0, 1.0)
+                u0[self.span <= 1e-9] = 0.0
+                self.last_candidates_u[0] = u0.tolist()
+            else:
+                seeds = generate_logical_initial_population(self.genome_cls, 1)
+                if seeds:
+                    x0 = seeds[0].to_array()
+                    u0 = np.clip((x0 - self.lower) / self.span, 0.0, 1.0)
+                    u0[self.span <= 1e-9] = 0.0
+                    self.last_candidates_u[0] = u0.tolist()
+
+        pop: List[BasePlannerGenome] = []
+        for u in self.last_candidates_u:
+            x = self.lower + np.array(u) * self.span
+            g = self.genome_cls()
+            g.from_array(x)
+            pop.append(g)
+        return pop
+
+    def tell(self, fitnesses: List[float]):
+        """Feeds scalar fitness scores back to CMA-ES (minimizing negative fitness)."""
+        if self.last_candidates_u is None or len(self.last_candidates_u) != len(fitnesses):
+            return
+
+        losses = [-float(f) for f in fitnesses]
+        try:
+            self.es.tell(self.last_candidates_u, losses)
+        except RuntimeError as e:
+            if "tell can currently only be called once" in str(e):
+                print(f"[CMA-ES] Warning: {e}. Re-synchronizing iteration cycle...", flush=True)
+                _ = self.es.ask()
+                self.es.tell(self.last_candidates_u, losses)
+            else:
+                raise
+
+        if CMA_RESTART_ON_CONVERGENCE and bool(self.es.stop()):
+            print(
+                f"[CMA-ES] Stopping criteria triggered: {self.es.stop()}. "
+                f"Auto-restarting search distribution around top solution with sigma0={self.sigma0:.2f}...",
+                flush=True,
+            )
+            # Re-center around champion genome if available, otherwise xbest or xmean
+            if self.initial_genome is not None:
+                x_anchor = self.initial_genome.to_array()
+                anchor_u = np.clip((x_anchor - self.lower) / self.span, 0.0, 1.0)
+                anchor_u[self.span <= 1e-9] = 0.0
+                anchor_u = anchor_u.tolist()
+            elif self.es.result.xbest is not None:
+                anchor_u = self.es.result.xbest
+            else:
+                anchor_u = self.es.mean
+            self.es = cma.CMAEvolutionStrategy(anchor_u, self.sigma0, self.opts)
+            self.last_candidates_u = None
+
+    def restart_around_champion(self, champion_genome: BasePlannerGenome, sigma_scale: float = 0.2):
+        """Forces immediate re-centering of CMA-ES around the known best champion with a tight neighborhood."""
+        self.initial_genome = champion_genome
+        x0 = champion_genome.to_array()
+        u0 = np.clip((x0 - self.lower) / self.span, 0.0, 1.0)
+        u0[self.span <= 1e-9] = 0.0
+        new_sigma = max(0.02, float(self.sigma0 * sigma_scale))
+        print(f"[CMA-ES] Forcing distribution re-seed around champion with tight sigma={new_sigma:.3f}...", flush=True)
+        self.es = cma.CMAEvolutionStrategy(u0.tolist(), new_sigma, self.opts)
+        self.last_candidates_u = None
+
+    def set_current_population(self, pop: List[BasePlannerGenome]):
+        """Projects an existing population into normalized space for resume operations."""
+        self.last_candidates_u = [
+            np.clip((g.to_array() - self.lower) / self.span, 0.0, 1.0).tolist()
+            for g in pop
+        ]
+
+    def save_state(self, filepath: str):
+        """Pickles the full covariance matrix adaptation state."""
+        try:
+            with open(filepath, "wb") as f:
+                pickle.dump({
+                    "es": self.es,
+                    "last_candidates_u": self.last_candidates_u,
+                }, f)
+        except Exception as e:
+            print(f"[CMA-ES] Failed to save state to {filepath}: {e}", flush=True)
+
+    def load_state(self, filepath: str) -> bool:
+        """Restores covariance matrix adaptation state from pickle."""
+        if not os.path.exists(filepath):
+            return False
+        try:
+            with open(filepath, "rb") as f:
+                data = pickle.load(f)
+                loaded_es = data["es"]
+                if hasattr(loaded_es, "N") and loaded_es.N != self.D:
+                    print(
+                        f"[CMA-ES] Pickled state dimension ({loaded_es.N}) does not match current genome specs ({self.D}). "
+                        f"Re-initializing fresh CMA-ES search from champion...",
+                        flush=True,
+                    )
+                    return False
+                self.es = loaded_es
+                self.last_candidates_u = data.get("last_candidates_u", None)
+            return True
+        except Exception as e:
+            print(f"[CMA-ES] Failed to load state from {filepath}: {e}", flush=True)
+            return False
+
+
+class GAController:
+    """Thread-safe controller to pause, resume, stop-and-save, or abort GA execution with callbacks."""
+
+    def __init__(self):
+        import threading
+        self.pause_event = threading.Event()
+        self.pause_event.set()  # Unpaused by default
+        self.stop_requested = False
+        self.abort_requested = False
+        self._pool = None  # Active ParallelWorkerPool
+        self._preview_worker = None  # Active rendered preview worker
+        self.on_generation_done = None  # callback(gen, planner, metrics, genome, fitnesses, elapsed_s)
+        self.on_status_change = None    # callback(status_str)
+
+    def pause(self):
+        self.pause_event.clear()
+        if self.on_status_change:
+            self.on_status_change("PAUSED")
+
+    def resume(self):
+        self.pause_event.set()
+        if self.on_status_change:
+            self.on_status_change("RUNNING")
+
+    def stop_and_save(self):
+        """Finishes current generation/evaluations smoothly, saves checkpoints & champions, and stops."""
+        self.stop_requested = True
+        self.pause_event.set()  # Unblock if paused to allow smooth completion
+        if self.on_status_change:
+            self.on_status_change("STOPPING (Finishing Run)...")
+
+    def stop(self):
+        """Alias for stop_and_save."""
+        self.stop_and_save()
+
+    def abort(self):
+        """Immediately halts everything, kills all Webots processes, does NOT save, and exits."""
+        self.abort_requested = True
+        self.stop_requested = True
+        self.pause_event.set()  # Unblock if paused
+        if self._preview_worker is not None:
+            try:
+                self._preview_worker.stop_process()
+            except Exception as e:
+                print(f"[GAController] Error stopping preview worker on abort: {e}", flush=True)
+            self._preview_worker = None
+        if self._pool is not None:
+            try:
+                self._pool.shutdown()
+            except Exception as e:
+                print(f"[GAController] Error shutting down pool on abort: {e}", flush=True)
+            self._pool = None
+        if self.on_status_change:
+            self.on_status_change("ABORTED")
+
+    @property
+    def is_paused(self) -> bool:
+        return not self.pause_event.is_set()
+
+
+def initialize_population(genome_cls, pop_size: int, seed_genome: Optional[Any] = None) -> List[BasePlannerGenome]:
+    """Generates initial population using physically logical archetypes and stratified sampling."""
+    return generate_logical_initial_population(genome_cls, pop_size, seed_genome=seed_genome)
+
+
+def tournament_select(pop: List[BasePlannerGenome], fitnesses: List[float], k: int = TOURNAMENT_SIZE) -> BasePlannerGenome:
+    """Selects best parent from k randomly chosen candidates."""
+    idxs = np.random.choice(len(pop), size=k, replace=False)
+    best_idx = idxs[0]
+    best_fit = fitnesses[best_idx]
+    for idx in idxs[1:]:
+        if fitnesses[idx] > best_fit:
+            best_fit = fitnesses[idx]
+            best_idx = idx
+
+    selected = pop[best_idx].__class__()
+    selected.from_array(pop[best_idx].to_array())
+    return selected
+
+
+def crossover_arithmetic(p1: BasePlannerGenome, p2: BasePlannerGenome, cr: float = CROSSOVER_RATE) -> Tuple[BasePlannerGenome, BasePlannerGenome]:
+    """Arithmetic blend crossover between two parent chromosomes."""
+    a1 = p1.to_array()
+    a2 = p2.to_array()
+
+    if np.random.random() < cr:
+        alpha = np.random.uniform(0.1, 0.9, size=a1.shape)
+        c1_arr = alpha * a1 + (1.0 - alpha) * a2
+        c2_arr = (1.0 - alpha) * a1 + alpha * a2
+    else:
+        c1_arr = np.copy(a1)
+        c2_arr = np.copy(a2)
+
+    c1 = p1.__class__()
+    c1.from_array(c1_arr)
+    c2 = p2.__class__()
+    c2.from_array(c2_arr)
+    return c1, c2
+
+
+def mutate_gaussian(genome: BasePlannerGenome, mr: float = MUTATION_RATE, scale: float = MUTATION_SCALE) -> BasePlannerGenome:
+    """Applies Gaussian mutation within gene boundary spans."""
+    arr = genome.to_array()
+    lower, upper = genome.get_bounds()
+    span = upper - lower
+
+    for i in range(len(arr)):
+        if np.random.random() < mr:
+            delta = np.random.normal(0.0, scale) * span[i]
+            arr[i] = np.clip(arr[i] + delta, lower[i], upper[i])
+
+    genome.from_array(arr)
+    return genome
+
+
+def run_genetic_algorithm(
+    planner_name: str = ACTIVE_PLANNER,
+    num_cores: int = NUM_CPU_CORES,
+    pop_size: int = POPULATION_SIZE,
+    num_generations: int = NUM_GENERATIONS,
+    eval_duration_s: float = EVALUATION_DURATION_S,
+    resume: bool = False,
+    preview_rendered: bool = False,
+    controller: Optional[GAController] = None,
+    algorithm: str = ALGORITHM,
+    use_best_genome: bool = SEED_FROM_BEST_GENOME_DEFAULT,
+    seed_genome_file: Optional[str] = None,
+    use_track2: bool = USE_TRACK2,
+):
+    """
+    Executes the optimization pipeline (Single Planner or All Planners Interleaved).
+    Supports either CMA-ES (Covariance Matrix Adaptation Evolution Strategy) or Standard GA.
+    """
+    planners_to_run = ["OPTION_2_SL_MPC"]
+    is_cma = str(algorithm).upper().startswith("CMA")
+    is_multi = False
+    track_mode_str = "Track 1 (1.00 m/s Forward) + Track 2 (1.00 m/s Reverse)" if use_track2 else "Track 1 (1.00 m/s Forward only)"
+    print(f"  Track Evaluation Mode: {track_mode_str}", flush=True)
+
+    # --------------------------------------------------------------------------
+    # Optional 20-Second Rendered Visual Preview (Real-Time Webots Window)
+    # --------------------------------------------------------------------------
+    if preview_rendered:
+        print("=" * 80, flush=True)
+        print("  LAUNCHING 20.0s RENDERED VISUAL PREVIEW RUNS (Real-Time Webots Window)", flush=True)
+        print("=" * 80, flush=True)
+        for p in planners_to_run:
+            if controller and (controller.abort_requested or controller.stop_requested):
+                print("[GA Optimizer] Abort/Stop requested during preview. Exiting.", flush=True)
+                return
+            if controller and controller.on_status_change:
+                controller.on_status_change(f"PREVIEW: {p} (20s Rendered)")
+
+            # Use best available champion genome from checkpoint or best genome file, else Candidate 0
+            genome_cls = get_genome_class(p)
+            preview_genes = None
+            ckpt_path = os.path.join(GA_OPTIMIZER_DIR, f"ga_checkpoint_{p.lower()}.json") if is_multi else CHECKPOINT_FILE
+            if os.path.exists(ckpt_path):
+                try:
+                    with open(ckpt_path, "r", encoding="utf-8") as f:
+                        preview_genes = json.load(f).get("best_genome")
+                except Exception:
+                    pass
+
+            if preview_genes is None:
+                target_bg = seed_genome_file or (os.path.join(GA_OPTIMIZER_DIR, f"best_genome_{p.lower()}.json") if is_multi else BEST_GENOME_FILE)
+                if os.path.exists(target_bg):
+                    try:
+                        with open(target_bg, "r", encoding="utf-8") as f:
+                            d = json.load(f)
+                            preview_genes = d.get("genes") or d.get("best_genome")
+                    except Exception:
+                        pass
+
+            if preview_genes is None:
+                seeds = generate_logical_initial_population(genome_cls, 1)
+                preview_genes = seeds[0].to_dict()
+
+            fit_prev, metrics_prev = run_rendered_preview(
+                planner_name=p,
+                gene_dict=preview_genes,
+                duration_s=20.0,
+                port=BASE_WORKER_PORT + 99,
+                controller=controller,
+            )
+            print(f"[Preview Complete: {p}] Fitness: {fit_prev:.1f} | Dist: {metrics_prev.get('distance_m', 0.0):.2f}m | Speed: {metrics_prev.get('mean_speed_mps', 0.0):.2f}m/s | Crashed: {metrics_prev.get('crashed', False)}", flush=True)
+
+        if controller and (controller.abort_requested or controller.stop_requested):
+            print("[GA Optimizer] Abort/Stop requested after preview. Exiting.", flush=True)
+            return
+
+    if controller and (controller.abort_requested or controller.stop_requested):
+        print("[GA Optimizer] Abort/Stop requested before worker pool initialization. Exiting.", flush=True)
+        return
+
+    if controller and controller.on_status_change:
+        controller.on_status_change("RUNNING")
+
+    pool = ParallelWorkerPool(num_workers=num_cores, controller=controller)
+
+    # Wire pool into controller
+    if controller is not None:
+        controller._pool = pool
+
+    # Clean shutdown on Ctrl+C (only if in main thread)
+    try:
+        import threading
+        if threading.current_thread() is threading.main_thread():
+            def sig_handler(sig, frame):
+                print("\n[Optimizer] Interrupted by user. Shutting down worker pool...", flush=True)
+                pool.shutdown()
+                sys.exit(0)
+
+            signal.signal(signal.SIGINT, sig_handler)
+            signal.signal(signal.SIGTERM, sig_handler)
+    except Exception:
+        pass
+
+    # State per planner
+    populations: Dict[str, List[BasePlannerGenome]] = {}
+    best_fitnesses: Dict[str, float] = {}
+    best_genomes: Dict[str, Optional[BasePlannerGenome]] = {}
+    best_metrics_map: Dict[str, Dict[str, Any]] = {}
+    start_gens: Dict[str, int] = {}
+    cma_adapters: Dict[str, Optional[CMAESOptimizerAdapter]] = {}
+    consecutive_crashes: Dict[str, int] = {}
+
+    # Wall-clock tracking for adaptive duration scaling (+5s every 2h)
+    opt_start_wall_time = time.time()
+    prior_elapsed_wall_s = 0.0
+
+    for p in planners_to_run:
+        genome_cls = get_genome_class(p)
+        populations[p] = []
+        best_fitnesses[p] = -1e9
+        best_genomes[p] = None
+        best_metrics_map[p] = {}
+        start_gens[p] = 0
+        cma_adapters[p] = None
+        consecutive_crashes[p] = 0
+
+        # Checkpoint file specific to planner
+        planner_ckpt = os.path.join(CURR_DIR, f"ga_checkpoint_{p.lower()}.json")
+        ckpt_path = planner_ckpt if (is_multi or os.path.exists(planner_ckpt)) else CHECKPOINT_FILE
+        planner_cma = os.path.join(CURR_DIR, f"cma_state_{p.lower()}.pkl")
+        cma_path = planner_cma if (is_multi or os.path.exists(planner_cma)) else os.path.join(CURR_DIR, "cma_state.pkl")
+
+        if resume and os.path.exists(ckpt_path):
+            try:
+                with open(ckpt_path, "r", encoding="utf-8") as f:
+                    ckpt = json.load(f)
+                    ckpt_p = ckpt.get("planner", "")
+                    if ckpt_p and ckpt_p != p:
+                        print(f"[Optimizer] Checkpoint in {ckpt_path} is for {ckpt_p}, not {p}. Starting fresh for {p}.", flush=True)
+                        populations[p] = []
+                    else:
+                        start_gens[p] = ckpt.get("generation", 0) + 1
+                        pop_dicts = ckpt.get("population", [])
+                        populations[p] = [genome_cls(d) for d in pop_dicts]
+                        best_fitnesses[p] = float(ckpt.get("best_fitness", -1e9))
+                        best_genomes[p] = genome_cls(ckpt.get("best_genome", {}))
+                        best_metrics_map[p] = ckpt.get("best_metrics", {})
+                        prior_elapsed_wall_s = float(ckpt.get("total_elapsed_s", 0.0))
+                        print(f"[Optimizer] Resuming {p} from Generation {start_gens[p]} (Best Fitness: {best_fitnesses[p]:.1f}, Prior Run Time: {prior_elapsed_wall_s/3600.0:.2f}h).", flush=True)
+            except Exception as e:
+                print(f"[Optimizer] Checkpoint load failed for {p} ({e}), starting fresh.", flush=True)
+                populations[p] = []
+
+        if not populations[p] and (use_best_genome or seed_genome_file):
+            target_seed_path = seed_genome_file or (os.path.join(CURR_DIR, f"best_genome_{p.lower()}.json") if is_multi else BEST_GENOME_FILE)
+            loaded_g, loaded_fit, loaded_met = load_best_planner_genome(target_seed_path, genome_cls)
+            if loaded_g is not None:
+                best_genomes[p] = loaded_g
+                best_fitnesses[p] = loaded_fit
+                best_metrics_map[p] = loaded_met
+                print(f"[Optimizer] Seeding {p} from best genome in {os.path.basename(target_seed_path)} (Fitness: {loaded_fit:.1f}) instead of defaults.", flush=True)
+
+        if is_cma:
+            init_g = best_genomes[p]
+            if init_g is None:
+                seeds = generate_logical_initial_population(genome_cls, 1)
+                init_g = seeds[0] if seeds else genome_cls()
+
+            adapter = CMAESOptimizerAdapter(
+                genome_cls=genome_cls,
+                pop_size=pop_size,
+                sigma0=CMA_SIGMA0,
+                initial_genome=init_g,
+            )
+            cma_loaded = False
+            if resume and os.path.exists(cma_path):
+                cma_loaded = adapter.load_state(cma_path)
+                if cma_loaded:
+                    print(f"[CMA-ES] Loaded covariance matrix state from {cma_path}", flush=True)
+
+            if not populations[p] or not cma_loaded:
+                populations[p] = adapter.ask(inject_baseline=True)
+            elif cma_loaded and not populations[p]:
+                populations[p] = adapter.ask(inject_baseline=True)
+            elif cma_loaded and adapter.last_candidates_u is None and populations[p]:
+                adapter.set_current_population(populations[p])
+
+            cma_adapters[p] = adapter
+        else:
+            if not populations[p]:
+                populations[p] = initialize_population(genome_cls, pop_size, seed_genome=best_genomes[p])
+
+    # Initialize CSV Log
+    if not resume or not os.path.exists(HISTORY_CSV_FILE):
+        with open(HISTORY_CSV_FILE, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                "Generation",
+                "Planner",
+                "Best_Fitness",
+                "Mean_Fitness",
+                "Best_Distance_m",
+                "Best_Speed_mps",
+                "Best_Laps",
+                "Crash_Count",
+                "Gen_Time_s",
+            ])
+
+    algo_name = "CMA-ES (Covariance Matrix Adaptation)" if is_cma else "GENETIC ALGORITHM"
+    print("=" * 80, flush=True)
+    print(f"  STARTING {algo_name} OPTIMIZATION", flush=True)
+    print(f"  - Planners: {', '.join(planners_to_run)}")
+    print(f"  - Population: {pop_size} candidates per planner | Generations: {num_generations}")
+    print(f"  - Workers: {num_cores} CPU Cores | Eval Timeframe: {eval_duration_s:.1f} s")
+    seed_str = f"Best Genome ({os.path.basename(seed_genome_file or BEST_GENOME_FILE)})" if (use_best_genome or seed_genome_file) else "Planner Config Defaults"
+    print(f"  - Seed Baseline: {seed_str}")
+    if is_cma:
+        print(f"  - CMA-ES Sigma0: {CMA_SIGMA0:.2f} | Restart on Convergence: {CMA_RESTART_ON_CONVERGENCE}")
+    else:
+        print(f"  - Elitism: {ELITISM_COUNT} | Crossover: {CROSSOVER_RATE} | Mutation: {MUTATION_RATE}")
+    print("=" * 80, flush=True)
+
+    min_start_gen = min(start_gens.values())
+
+    try:
+        for gen in range(min_start_gen, num_generations):
+            if controller and controller.abort_requested:
+                print("[Optimizer] Abort requested. Skipping saving and exiting immediately.", flush=True)
+                break
+            if controller and controller.stop_requested:
+                print("[Optimizer] Stop requested. Previous generation saved. Closing smoothly...", flush=True)
+                break
+
+            print(f"\n================================================================================", flush=True)
+            print(f"  GENERATION {gen + 1} / {num_generations}  [{algo_name}]", flush=True)
+            print(f"================================================================================", flush=True)
+
+            for p in planners_to_run:
+                if controller and controller.abort_requested:
+                    print("[Optimizer] Abort requested. Exiting without save.", flush=True)
+                    break
+                if controller and controller.stop_requested:
+                    print("[Optimizer] Stop requested before starting next planner.", flush=True)
+                    break
+
+                # Handle Pause Event
+                if controller:
+                    controller.pause_event.wait()
+
+                if gen < start_gens[p]:
+                    continue
+
+                genome_cls = get_genome_class(p)
+                t_p_start = time.time()
+
+                # Dynamic Wall-Clock Linear Duration Auto-Scaling (+2.5s/h = +5s every 2h smoothly)
+                total_elapsed_s = prior_elapsed_wall_s + (time.time() - opt_start_wall_time)
+                total_elapsed_h = total_elapsed_s / 3600.0
+                if AUTO_SCALE_EVAL_DURATION:
+                    current_eval_duration_s = min(
+                        EVAL_DURATION_MAX_S,
+                        round(eval_duration_s + (total_elapsed_h * EVAL_DURATION_HOURLY_GROWTH_S), 2),
+                    )
+                else:
+                    current_eval_duration_s = eval_duration_s
+
+                print(
+                    f"\n--- [{p}] Evaluating {pop_size} Candidates on {num_cores} Workers | "
+                    f"Duration: {current_eval_duration_s:.2f}s (Elapsed: {total_elapsed_h:.2f}h) ---",
+                    flush=True,
+                )
+
+                # 1. Parallel Evaluation of Generation
+                results = pool.evaluate_population(
+                    planner_name=p,
+                    population_genomes=populations[p],
+                    duration_s=current_eval_duration_s,
+                    controller=controller,
+                    use_track2=use_track2,
+                )
+
+                if controller and controller.abort_requested:
+                    print("[Optimizer] Abort requested during evaluation. Skipping save.", flush=True)
+                    break
+
+                fitnesses = [r[0] for r in results]
+                metrics_list = [r[1] for r in results]
+
+                # 2. Analyze Generation Performance
+                best_idx = int(np.argmax(fitnesses))
+                gen_best_fit = float(fitnesses[best_idx])
+                gen_mean_fit = float(np.mean(fitnesses))
+                gen_best_metrics = metrics_list[best_idx]
+                gen_crashes = sum(1 for m in metrics_list if m.get("crashed", False))
+                t_p_elapsed = time.time() - t_p_start
+
+                print(
+                    f"[{p} Gen {gen + 1:02d}] Best Fit: {gen_best_fit:7.1f} | Mean Fit: {gen_mean_fit:7.1f} | "
+                    f"Dist: {gen_best_metrics.get('distance_m', 0.0):5.2f}m | "
+                    f"Speed: {gen_best_metrics.get('mean_speed_mps', 0.0):4.2f}m/s | "
+                    f"Laps: {gen_best_metrics.get('laps_completed', 0)} | "
+                    f"Crashes: {gen_crashes:2d}/{pop_size} | Time: {t_p_elapsed:4.1f}s",
+                    flush=True,
+                )
+
+                # Update Planner Champion
+                if gen_best_fit > best_fitnesses[p]:
+                    best_fitnesses[p] = gen_best_fit
+                    best_genomes[p] = populations[p][best_idx]
+                    best_metrics_map[p] = gen_best_metrics
+                    # Keep CMA-ES adapter locked to the active all-time champion
+                    if is_cma and cma_adapters[p] is not None:
+                        cma_adapters[p].initial_genome = best_genomes[p]
+                    print(f"  *** NEW CHAMPION FOR {p}! Dist: {best_metrics_map[p].get('distance_m', 0.0):.2f}m, Fit: {gen_best_fit:.1f} ***", flush=True)
+
+                    # Save Planner Champion JSON
+                    champion_file = os.path.join(CURR_DIR, f"best_genome_{p.lower()}.json") if is_multi else BEST_GENOME_FILE
+                    with open(champion_file, "w", encoding="utf-8") as f:
+                        json.dump({
+                            "planner": p,
+                            "fitness": round(best_fitnesses[p], 2),
+                            "metrics": best_metrics_map[p],
+                            "genes": best_genomes[p].to_dict(),
+                            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                        }, f, indent=2)
+
+                # Append to History CSV
+                with open(HISTORY_CSV_FILE, "a", newline="", encoding="utf-8") as f:
+                    writer = csv.writer(f)
+                    writer.writerow([
+                        gen + 1,
+                        p,
+                        round(gen_best_fit, 2),
+                        round(gen_mean_fit, 2),
+                        gen_best_metrics.get("distance_m", 0.0),
+                        gen_best_metrics.get("mean_speed_mps", 0.0),
+                        gen_best_metrics.get("laps_completed", 0),
+                        gen_crashes,
+                        round(t_p_elapsed, 2),
+                    ])
+
+                # Trigger GUI / Listener Callback
+                if controller and controller.on_generation_done:
+                    try:
+                        controller.on_generation_done(
+                            gen + 1,
+                            p,
+                            gen_best_metrics,
+                            best_genomes[p].to_dict() if best_genomes[p] else {},
+                            fitnesses,
+                            t_p_elapsed,
+                            gen_crashes,
+                        )
+                    except Exception as cb_err:
+                        print(f"[Optimizer] Callback error: {cb_err}", flush=True)
+
+                # 3. Form Next Generation
+                if is_cma and cma_adapters[p] is not None:
+                    adapter = cma_adapters[p]
+                    adapter.tell(fitnesses)
+
+                    # Watchdog: detect true generation collapse (all candidates failed to drive >1m or negative fitness)
+                    is_collapse = (gen_best_fit <= 0.0) or (gen_best_metrics.get("distance_m", 0.0) < 1.0)
+                    if is_collapse:
+                        consecutive_crashes[p] = consecutive_crashes.get(p, 0) + 1
+                    else:
+                        consecutive_crashes[p] = 0
+
+                    if consecutive_crashes.get(p, 0) >= 5:
+                        print(
+                            f"\n[Optimizer Watchdog] Detected {consecutive_crashes[p]} consecutive generation collapses for {p}!\n"
+                            f"  -> Verifying parallel worker pool responsiveness...",
+                            flush=True,
+                        )
+                        healthy_workers = pool.health_check()
+                        print(f"  -> Worker pool health check: {healthy_workers}/{pool.num_workers} responsive.", flush=True)
+
+                        champ_to_restore = best_genomes[p]
+                        if champ_to_restore is None:
+                            loaded_champ, loaded_fit, loaded_met = load_best_planner_genome(BEST_GENOME_FILE, genome_cls)
+                            if loaded_champ is not None:
+                                best_genomes[p] = loaded_champ
+                                best_fitnesses[p] = loaded_fit
+                                best_metrics_map[p] = loaded_met
+                                champ_to_restore = loaded_champ
+
+                        if champ_to_restore is not None:
+                            print(
+                                f"  -> Rescuing CMA distribution: force-restarting around top champion (Best Fit: {best_fitnesses[p]:.1f}) with tight sigma.",
+                                flush=True,
+                            )
+                            adapter.restart_around_champion(champ_to_restore, sigma_scale=0.2)
+                        consecutive_crashes[p] = 0
+
+                    if gen < num_generations - 1:
+                        populations[p] = adapter.ask(inject_baseline=False)
+                    # Save CMA-ES state (after ask so that iteration counter and candidates are aligned)
+                    cma_file = os.path.join(CURR_DIR, f"cma_state_{p.lower()}.pkl") if is_multi else os.path.join(CURR_DIR, "cma_state.pkl")
+                    adapter.save_state(cma_file)
+                else:
+                    if gen < num_generations - 1:
+                        sorted_indices = np.argsort(fitnesses)[::-1]
+                        next_population: List[BasePlannerGenome] = []
+
+                        # Elitism: retain top N candidates
+                        for e in range(min(ELITISM_COUNT, pop_size)):
+                            elite_idx = sorted_indices[e]
+                            elite_copy = genome_cls()
+                            if gen_crashes >= pop_size and best_genomes[p] is not None and e == 0:
+                                # When whole generation crashed, inject known champion as elite 0
+                                elite_copy.from_array(best_genomes[p].to_array())
+                            else:
+                                elite_copy.from_array(populations[p][elite_idx].to_array())
+                            next_population.append(elite_copy)
+
+                        # Fill remainder via Tournament Selection + Crossover + Mutation
+                        while len(next_population) < pop_size:
+                            p1 = tournament_select(populations[p], fitnesses)
+                            p2 = tournament_select(populations[p], fitnesses)
+                            c1, c2 = crossover_arithmetic(p1, p2)
+                            c1 = mutate_gaussian(c1)
+                            c2 = mutate_gaussian(c2)
+
+                            next_population.append(c1)
+                            if len(next_population) < pop_size:
+                                next_population.append(c2)
+
+                        populations[p] = next_population
+
+                # 4. Save Planner Checkpoint for Next Generation
+                ckpt_file = os.path.join(CURR_DIR, f"ga_checkpoint_{p.lower()}.json") if is_multi else CHECKPOINT_FILE
+                with open(ckpt_file, "w", encoding="utf-8") as f:
+                    json.dump({
+                        "generation": gen,
+                        "planner": p,
+                        "algorithm": "CMA_ES" if is_cma else "GA",
+                        "best_fitness": round(best_fitnesses[p], 2),
+                        "best_metrics": best_metrics_map[p],
+                        "best_genome": best_genomes[p].to_dict() if best_genomes[p] else {},
+                        "population": [g.to_dict() for g in populations[p]],
+                        "total_elapsed_s": round(total_elapsed_s, 1),
+                        "eval_duration_s": round(current_eval_duration_s, 1),
+                    }, f, indent=2)
+
+    finally:
+        # Shut down pool unconditionally
+        if pool is not None:
+            pool.shutdown()
+        if controller is not None:
+            controller._pool = None
+
+    if controller and controller.abort_requested:
+        print("\n[Optimizer] Optimization aborted by user. Nothing saved.", flush=True)
+    else:
+        print("\n" + "=" * 80, flush=True)
+        print(f"  ALL OPTIMIZATIONS COMPLETE / FINISHED! [{algo_name}]", flush=True)
+        for p in planners_to_run:
+            print(f"  [{p}] Best Fit: {best_fitnesses[p]:.1f} | Dist: {best_metrics_map[p].get('distance_m', 0.0):.2f} m | Speed: {best_metrics_map[p].get('mean_speed_mps', 0.0):.2f} m/s", flush=True)
+        print("=" * 80, flush=True)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Headless Optimizer for ToF Path Planners")
+    parser.add_argument("--planner", type=str, default=ACTIVE_PLANNER, help="Target planner (default: OPTION_2_SL_MPC)")
+    parser.add_argument("--algorithm", type=str, default=ALGORITHM, choices=["CMA_ES", "cma_es", "cma", "GA", "ga", "genetic_algorithm"], help="Optimization algorithm: CMA_ES or GA")
+    parser.add_argument("--cores", type=int, default=NUM_CPU_CORES, help="Number of parallel Webots worker processes")
+    parser.add_argument("--pop-size", type=int, default=POPULATION_SIZE, help="Population size per generation")
+    parser.add_argument("--generations", type=int, default=NUM_GENERATIONS, help="Total number of generations")
+    parser.add_argument("--duration", type=float, default=EVALUATION_DURATION_S, help="Simulation evaluation duration (s)")
+    parser.add_argument("--resume", action="store_true", help="Resume from last checkpoint if available")
+    parser.add_argument("--preview", action="store_true", help="Run 1 rendered 20s preview per planner in real-time Webots GUI before optimization")
+    parser.add_argument("--use-best-genome", "--use-best", "--seed-from-best", dest="use_best_genome", action="store_true", help="Seed optimizer using 5_webots/optimization/ga_planner_optimizer/best_planner_genome.json instead of planner defaults")
+    parser.add_argument("--seed-file", "--genome-file", dest="seed_file", type=str, default=None, help="Custom path to best genome JSON file to seed from")
+    parser.add_argument("--no-track2", dest="use_track2", action="store_false", default=USE_TRACK2, help="Disable 2nd track (opposite 1.0 m/s obstacles) evaluations, evaluating only Track 1 (1.0 m/s)")
+    parser.add_argument("--use-track2", dest="use_track2", action="store_true", help="Enable 2nd track (opposite 1.0 m/s obstacles) evaluations alongside Track 1 (1.0 m/s)")
+
+    args = parser.parse_args()
+
+    run_genetic_algorithm(
+        planner_name=args.planner,
+        num_cores=args.cores,
+        pop_size=args.pop_size,
+        num_generations=args.generations,
+        eval_duration_s=args.duration,
+        resume=args.resume,
+        preview_rendered=args.preview,
+        algorithm=args.algorithm,
+        use_best_genome=args.use_best_genome,
+        seed_genome_file=args.seed_file,
+        use_track2=args.use_track2,
+    )
+
+

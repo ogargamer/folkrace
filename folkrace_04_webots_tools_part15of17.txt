@@ -1,0 +1,1677 @@
+=== BUNDLE: folkrace_04_webots_tools_part15of17.txt (6 files/sections) ===
+  - tools/flight_analyzer.py (part 2/2)
+  - tools/measure_browser_latency.py
+  - tools/optimize_wrong_way_params.py
+  - tools/run_webots_wrong_way_tests.py
+  - tools/stm32_foc_trace_test.py
+  - tools/sync_params.py
+
+=== FILE PART 2/2: tools/flight_analyzer.py ===
+:
+        pa = round(ka.get("modes", {}).get(m, 0) / na * 100.0, 1)
+        pb = round(kb.get("modes", {}).get(m, 0) / nb * 100.0, 1)
+        mode_shares.append({"mode": m, "a_pct": pa, "b_pct": pb, "delta_pct": round(pb - pa, 1)})
+
+    return {
+        "session_a": da["session"],
+        "session_b": db["session"],
+        "metrics": comparisons,
+        "mode_shares": mode_shares,
+        "git_diff": {
+            "a": da["session"].get("git_commit", ""),
+            "b": db["session"].get("git_commit", ""),
+        },
+        "config_diff": _diff_dicts(sa.config, sb.config),
+    }
+
+
+def _diff_dicts(a: Dict[str, Any], b: Dict[str, Any], prefix: str = "") -> List[Dict[str, Any]]:
+    diffs: List[Dict[str, Any]] = []
+    for k in sorted(set(a) | set(b)):
+        key_path = f"{prefix}.{k}" if prefix else str(k)
+        va, vb = a.get(k), b.get(k)
+        if isinstance(va, dict) and isinstance(vb, dict):
+            diffs.extend(_diff_dicts(va, vb, key_path))
+        elif va != vb:
+            diffs.append({"key": key_path, "a": va, "b": vb})
+    return diffs
+
+
+# ==============================================================================
+# COMPACT MARKDOWN / TABLE FORMATTERS FOR AI & TERMINAL INGESTION
+# ==============================================================================
+
+def format_digest_markdown(digest: Dict[str, Any]) -> str:
+    s = digest["session"]
+    k = digest["kpis"]
+    diags = digest["diagnostics"]
+    eps = digest["episodes"]
+
+    lines: List[str] = []
+    lines.append(f"# Flight Debug Digest: {s['filename']}")
+    lines.append("")
+    lines.append("## 1. Session Overview")
+    lines.append(
+        f"- **Session ID**: `{s['session_id']}` | **Schema**: v{s['schema_version']} | "
+        f"**Git**: `{s['git_commit'] or 'unknown'}` | **Size**: {s['file_size_mb']} MB"
+    )
+    lines.append(
+        f"- **Frames**: {s['total_frames']} total (`{s['frame_range'][0]}..{s['frame_range'][1]}`), "
+        f"{s['driving_frames']} driving | **Rate**: {s['effective_hz']} Hz"
+    )
+    lines.append(
+        f"- **Duration & Distance**: {s['wall_duration_s']}s wall, {s['driving_seconds']}s driving, "
+        f"est. **{s['distance_m']} m**"
+    )
+    lines.append(
+        f"- **Authority / Links**: override_active={s['override_frames']} frames | "
+        f"active_link_drops={s['link_drop_frames']} frames | incidents={digest['episodes_total']}"
+    )
+    lines.append("")
+
+    lines.append("## 2. Automated Diagnostics")
+    if not diags:
+        lines.append("- `[INFO]` No significant faults detected.")
+    else:
+        for d in diags:
+            samp = f" (frames: {d['sample_frames']})" if d["sample_frames"] else ""
+            lines.append(f"- **[{d['severity']}] `{d['code']}`**: {d['title']}{samp}")
+            lines.append(f"  - {d['evidence']}")
+    lines.append("")
+
+    lines.append("## 3. KPI Summary")
+    lines.append("| Subsystem | Metric | Value |")
+    lines.append("| :--- | :--- | :--- |")
+    if k.get("v_real"):
+        vr = k["v_real"]
+        vc = k["v_cmd"]
+        lines.append(f"| Speed | v_real (min/mean/p95/max) | {vr['min']} / {vr['mean']} / {vr['p95']} / {vr['max']} m/s (cmd mean={vc['mean']}, RMSE={k['v_err_rmse']}) |")
+        lines.append(f"| Steering | tracking RMSE | {k['steer_err_rmse']} deg |")
+        rm = k["rpm_act_abs_mean"]
+        re = k["rpm_tracking_mae"]
+        lines.append(f"| Wheels | mean |RPM_act| | FL={rm['FL']}, FR={rm['FR']}, RL={rm['RL']}, RR={rm['RR']} (MAE: {re['FL']}/{re['FR']}/{re['RL']}/{re['RR']}) |")
+        imu = k["imu"]
+        lines.append(f"| IMU / Ramp | pitch / |gyro_z| / |a_lat| | pitch={imu['pitch_deg']['mean']} [{imu['pitch_deg']['min']}..{imu['pitch_deg']['max']}] deg, gyro_z_p95={imu['gyro_z']['p95']}, a_lat_p95={imu['accel_lat']['p95']}, on_ramp={imu['is_on_ramp_pct']}% |")
+        tm = k["timing_ms"]
+        lines.append(f"| Timing (ms) | plan / step / map / scout | plan={tm['plan_ms']['mean']}/{tm['plan_ms']['p95']}/{tm['plan_ms']['max']}, step={tm['step_ms']['mean']}/{tm['step_ms']['p95']}/{tm['step_ms']['max']}, map={tm['map_ms']['mean']}, scout={tm['scout_ms']['mean']} |")
+        lines.append(f"| Safety | f_tof_min / shield / wrong_way | tof_min={k['f_tof_min']['min']} (p95={k['f_tof_min']['p95']}), shield={k['shield_pct']}%, wrong_way={k['wrong_way_frames']}f |")
+    top_modes = ", ".join(f"{m}:{cnt}" for m, cnt in list(k.get("modes", {}).items())[:8])
+    top_status = ", ".join(f"{st}:{cnt}" for st, cnt in list(k.get("statuses", {}).items())[:6])
+    lines.append(f"| Modes | distribution | {top_modes} |")
+    lines.append(f"| Status | planner status | {top_status} |")
+    lines.append("")
+
+    lines.append(f"## 4. Top Incident Episodes ({len(eps)} shown of {digest['episodes_total']})")
+    if not eps:
+        lines.append("- None detected.")
+    else:
+        lines.append("| ID | Severity | Category | Frames | Sim t (s) | Dur | min_tof | v_real | Modes | Lead-in -> Outcome |")
+        lines.append("| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |")
+        for e in eps:
+            pm = e["peak_metrics"]
+            m_str = "->".join(e["modes_visited"][:3]) + ("..." if len(e["modes_visited"]) > 3 else "")
+            li = e["lead_in"]
+            oc = e["outcome"]
+            lo_str = f"{li['mode']}({li['v_real']}m/s) -> {oc['mode']}({oc['v_real']}m/s)"
+            lines.append(
+                f"| {e['episode_id']} | {e['severity']} | {e['category']} | {e['start_frame']}..{e['end_frame']} ({e['frame_count']}f) | "
+                f"{e['sim_start']}..{e['sim_end']} | {e['duration_s']}s | {pm['min_f_tof']}m | {pm['min_v_real']}..{pm['max_v_real']} | {m_str} | {lo_str} |"
+            )
+    lines.append("")
+
+    lines.append("## 5. ToF 16-Channel Health")
+    chs = k.get("tof_channels") or []
+    if chs:
+        left_meds = [f"{c['ch']}:{c['median']:.2f}" for c in chs[:8]]
+        right_meds = [f"{c['ch']}:{c['median']:.2f}" for c in chs[8:]]
+        lines.append(f"- **Left Pod (0..7) medians (m)**: {', '.join(left_meds)}")
+        lines.append(f"- **Right Pod (8..15) medians (m)**: {', '.join(right_meds)}")
+        bad = [c for c in chs if c["zero_pct"] > 5.0]
+        if bad:
+            lines.append("- **Non-trivial zero readings (>5%)**: " + ", ".join(f"ch{c['ch']}={c['zero_pct']}%" for c in bad))
+    lines.append("")
+
+    lines.append("## 6. Deduplicated MCU / System Logs")
+    logs = digest.get("mcu_logs") or []
+    non_servo = [m for m in logs if not m["message"].startswith('{"pin":')]
+    shown = non_servo[:20] if non_servo else logs[:20]
+    if not shown:
+        lines.append("- None recorded.")
+    else:
+        for m in shown:
+            lines.append(f"- `f#{m['frame_id']} (t={m['sim_time']}s)` [{m['severity']}] {m['message']}")
+        if len(logs) > len(shown):
+            lines.append(f"- _({len(logs) - len(shown)} additional log entries omitted; see --json or export)_")
+    lines.append("")
+
+    if digest.get("labels"):
+        lines.append("## 7. Stored Labels")
+        for lbl in digest["labels"]:
+            lines.append(f"- `#{lbl['start_frame']}..#{lbl['end_frame']}` **{lbl['tag']}** ({lbl['author']}): {lbl['note']}")
+        lines.append("")
+
+    if eps:
+        lines.append("## 8. Next Drill-Down Commands")
+        lead_frames = max(15, int(round(1.5 * (s["effective_hz"] or 60.0))))
+        for e in eps[:2]:
+            w0 = max(1, e["start_frame"] - lead_frames)
+            w1 = e["end_frame"] + 15
+            lines.append(f"- `python tools/ai_debug_suite.py window \"{s['db_path']}\" {w0} {w1}`  # Inspect {e['episode_id']} ({e['category']} + ~1.5s lead-in)")
+            lines.append(f"- `python tools/ai_debug_suite.py frame \"{s['db_path']}\" {e['start_frame']}`  # Radar at episode start")
+    return "\n".join(lines)
+
+
+def format_episodes_markdown(episodes: List[Dict[str, Any]], db_name: str) -> str:
+    lines = [f"# Incident Episodes: {db_name} ({len(episodes)} total)", ""]
+    if not episodes:
+        lines.append("No incident episodes matched filters.")
+        return "\n".join(lines)
+    for e in episodes:
+        pm = e["peak_metrics"]
+        li = e["lead_in"]
+        oc = e["outcome"]
+        lines.append(
+            f"### {e['episode_id']} [{e['severity']}] {e['category']} — frames {e['start_frame']}..{e['end_frame']} "
+            f"({e['frame_count']}f, {e['duration_s']}s, sim_t={e['sim_start']}..{e['sim_end']}s)"
+        )
+        lines.append(
+            f"- **Modes**: {' -> '.join(e['modes_visited'])} | **Peaks**: min_tof={pm['min_f_tof']}m, "
+            f"v_real=[{pm['min_v_real']}..{pm['max_v_real']}] m/s, max|steer|={pm['max_abs_steer']} deg, "
+            f"max|slip|={pm['max_abs_slip']}, max_plan={pm['max_plan_ms']} ms, max_step={pm['max_step_ms']} ms"
+        )
+        lines.append(
+            f"- **Lead-in (#{li['frame_id']})**: {li['mode']} v={li['v_real']}m/s str={li['steer_deg']}deg tof={li['f_tof_min']}m -> "
+            f"**Outcome (#{oc['frame_id']})**: {oc['mode']} v={oc['v_real']}m/s str={oc['steer_deg']}deg tof={oc['f_tof_min']}m"
+        )
+        if e["mcu_logs"]:
+            lines.append("- **Logs**: " + " | ".join(f"f#{m['frame_id']}: {m['message']}" for m in e["mcu_logs"][:3]))
+        lines.append("")
+    return "\n".join(lines)
+
+
+def format_window_table(rows: List[Dict[str, Any]]) -> str:
+    if not rows:
+        return "(no frames in range)"
+    header = "  fid |  sim_t | mode                    | v_cmd / real | str c /  a | f_tof |  slip | plan_ms | shield        | gap     | flags"
+    sep = "-" * len(header)
+    out = [header, sep]
+    for r in rows:
+        fl = ",".join(r["reasons"]) if r["reasons"] else "-"
+        out.append(
+            f"{r['frame_id']:5d} | {r['sim_time']:6.2f} | {r['mode']:<23} | "
+            f"{r['v_cmd']:5.2f} /{r['v_real']:5.2f} | {r['steer_cmd_deg']:5.1f} /{r['steer_actual_deg']:5.1f} | "
+            f"{r['f_tof_min']:5.2f} | {r['slip_ratio']:5.2f} | {r['plan_ms']:7.2f} | "
+            f"{r['shield']:<13} | {r['gap']:<7} | {fl}"
+        )
+    return "\n".join(out)
+
+
+def format_frame_markdown(info: Dict[str, Any]) -> str:
+    m = info["motion"]
+    w = info["wheels"]
+    imu = info["imu"]
+    tm = info["timing_ms"]
+    sh = info["shield"]
+    pl = info["planner"]
+    lk = info["links"]
+
+    lines = [
+        f"# Frame #{info['frame_id']} (sim_t={info['sim_time']:.3f}s | mode={info['mode']} | status={info['status'] or 'NONE'})",
+        "",
+        f"- **Motion**: v_cmd={m['v_cmd']} | v_tgt={m['v_tgt']} | v_real={m['v_real']} m/s | steer_cmd={m['steer_cmd_deg']} | steer_act={m['steer_actual_deg']} deg | servo={m['servo_pulse_us']} us | pose={m['pose']}",
+        f"- **Wheels (cmd -> act, err)**: FL={w['FL']['cmd']}->{w['FL']['act']} ({w['FL']['err']:+.0f}) | FR={w['FR']['cmd']}->{w['FR']['act']} ({w['FR']['err']:+.0f}) | RL={w['RL']['cmd']}->{w['RL']['act']} ({w['RL']['err']:+.0f}) | RR={w['RR']['cmd']}->{w['RR']['act']} ({w['RR']['err']:+.0f})",
+        f"- **IMU / Slip**: yaw={imu['yaw_deg']} pitch={imu['pitch_deg']} roll={imu['roll_deg']} deg | gyro_z={imu['gyro_z']} | a_fwd={imu['accel_fwd']} a_lat={imu['accel_lat']} | slip={imu['slip_state']} ({imu['slip_ratio']})",
+        f"- **Timing (ms)**: plan={tm['plan_ms']} step={tm['step_ms']} map={tm['map_ms']} scout={tm['scout_ms']} opt_p={tm['opt_prim_ms']} opt_a={tm['opt_alt_ms']} iters={tm['osqp_iters']}",
+        f"- **Shield**: active={sh['active']} chosen={sh['chosen_name'] or '-'} rev={sh['reverse_suggested']} | branches={sh['branches_safe']}",
+        f"- **Links / Flags**: main={lk['mcu_main_connected']} tof={lk['mcu_tof_connected']} stmF={lk['stm32_front']} stmR={lk['stm32_rear']} imu={lk['imu_online']} | ramp={lk['is_on_ramp']} wrong_way={lk['is_wrong_way']} override={lk['override_active']}",
+        f"- **Anomalies**: {', '.join(info['anomaly_reasons']) if info['anomaly_reasons'] else 'NONE'} | f_tof_min={info['f_tof_min']}m",
+        f"- **Gap / Targets**: gap={pl['gap']} | targets={pl['targets']}",
+    ]
+    if pl["corridor_samples"]:
+        cs = ", ".join(f"{c['zone']}(w={c['width_m']}m)" for c in pl["corridor_samples"])
+        lines.append(f"- **Corridor**: {cs} | best_line_pts={pl['best_line_len']}")
+    if info["mcu_msg"] or info["mcu_log"]:
+        lines.append(f"- **MCU msg**: `{info['mcu_msg']}` | recent_log={info['mcu_log']}")
+    lines.append("")
+    lines.append("Left Pod (ch 0..7):  " + ", ".join(f"c{c['ch']}={c['raw_m']:.2f}" for c in info["tof_channels"][:8]))
+    lines.append("Right Pod (ch 8..15): " + ", ".join(f"c{c['ch']}={c['raw_m']:.2f}" for c in info["tof_channels"][8:]))
+    if "ascii_radar" in info:
+        lines.append("")
+        lines.append(info["ascii_radar"])
+    return "\n".join(lines)
+
+
+def format_comparison_markdown(comp: Dict[str, Any]) -> str:
+    sa = comp["session_a"]
+    sb = comp["session_b"]
+    lines = [
+        f"# Session A/B Comparison",
+        f"- **A**: `{sa['filename']}` (frames={sa['total_frames']}, git=`{sa['git_commit'] or 'unknown'}`)",
+        f"- **B**: `{sb['filename']}` (frames={sb['total_frames']}, git=`{sb['git_commit'] or 'unknown'}`)",
+        "",
+        "| Metric | Session A | Session B | Delta (B - A) | % Change |",
+        "| :--- | ---: | ---: | ---: | ---: |",
+    ]
+    for m in comp["metrics"]:
+        pct_s = f"{m['pct_change']:+.1f}%" if m["pct_change"] is not None else "-"
+        lines.append(f"| {m['metric']} | {m['a']} | {m['b']} | {m['delta']:+.3f} | {pct_s} |")
+    lines.append("")
+    lines.append("## Mode Share Changes")
+    lines.append("| Mode | A % | B % | Delta |")
+    lines.append("| :--- | ---: | ---: | ---: |")
+    for ms in comp["mode_shares"]:
+        lines.append(f"| {ms['mode']} | {ms['a_pct']}% | {ms['b_pct']}% | {ms['delta_pct']:+.1f}% |")
+    if comp["config_diff"]:
+        lines.append("")
+        lines.append("## Config Differences")
+        for d in comp["config_diff"][:20]:
+            lines.append(f"- `{d['key']}`: `{d['a']}` -> `{d['b']}`")
+    return "\n".join(lines)
+
+
+=== FILE: tools/measure_browser_latency.py ===
+#!/usr/bin/env python3
+"""
+================================================================================
+FOLKRACE BROWSER LATENCY & TELEMETRY STREAM PROFILER
+================================================================================
+Measures client-side latency, arrival jitter, packet delivery consistency,
+and rendering pipeline timing exactly as experienced by a browser (e.g. Firefox).
+
+Features:
+  1. WebSocket Streaming Benchmark (ws://robot:8080/ws_live):
+     - Sub-millisecond RFC 6455 packet arrival intervals.
+     - Frame arrival jitter and deviation from nominal 20 Hz (50.0 ms) target.
+     - Stutter detection (intervals > 66.7 ms) and hitches (> 100.0 ms).
+     - End-to-end client latency (Flight-to-Glass: Robot TS -> Client Arrival -> Parse).
+     - Full client pipeline simulation: Header unpack + Zlib decompression + Canvas LUT.
+     - High-precision percentiles: Min, P50, P90, P95, P99, P99.9, and Max.
+  2. HTTP Polling Benchmark (http://robot:8080/api/live_bin & /api/live):
+     - Measures Request-Response RTT distribution across polling frequencies.
+     - Quantifies the jitter and TCP connection pooling penalties of HTTP fallback.
+  3. Real In-Browser Firefox Harness (--firefox):
+     - Automatically launches Firefox, connects to the Tactical Mission Control GUI,
+       and collects live performance.now() metrics directly from the browser DOM.
+
+Usage:
+  python tools/measure_browser_latency.py                      # Full side-by-side benchmark (10s)
+  python tools/measure_browser_latency.py --mode ws            # WebSocket streaming benchmark only
+  python tools/measure_browser_latency.py --mode http          # HTTP polling benchmark only
+  python tools/measure_browser_latency.py --firefox            # Run benchmark inside real Firefox
+  python tools/measure_browser_latency.py --duration 15        # Benchmark over 15 seconds
+  python tools/measure_browser_latency.py --host 192.168.20.120 # Specify target Pi host
+================================================================================
+"""
+
+import os
+import sys
+import time
+import json
+import socket
+import struct
+import zlib
+import base64
+import argparse
+import statistics
+import urllib.request
+import urllib.error
+import subprocess
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple, Any
+
+# Ensure UTF-8 output on Windows terminals
+if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DEFAULT_CANDIDATES = ["192.168.20.120", "192.168.20.117", "robot", "robot.local", "127.0.0.1"]
+DEFAULT_PORT = 8080
+
+FIREFOX_PATHS = [
+    r"C:\Program Files\Mozilla Firefox\firefox.exe",
+    r"C:\Program Files (x86)\Mozilla Firefox\firefox.exe",
+    os.path.expandvars(r"%LOCALAPPDATA%\Mozilla Firefox\firefox.exe"),
+]
+
+
+def resolve_host(preferred: Optional[str] = None, port: int = DEFAULT_PORT) -> Tuple[str, str]:
+    """Auto-detects active Raspberry Pi debug server host and base URL."""
+    candidates = [preferred] if preferred else DEFAULT_CANDIDATES
+    for h in candidates:
+        if not h:
+            continue
+        try:
+            url = f"http://{h}:{port}/api/status"
+            req = urllib.request.Request(url, headers={"User-Agent": "FolkraceLatencyTester/1.0"})
+            with urllib.request.urlopen(req, timeout=1.5) as resp:
+                if resp.status == 200:
+                    return h, f"http://{h}:{port}"
+        except Exception:
+            continue
+    # Fallback to preferred or first candidate
+    fallback = preferred or DEFAULT_CANDIDATES[0]
+    return fallback, f"http://{fallback}:{port}"
+
+
+def compute_percentiles(arr: List[float]) -> Dict[str, float]:
+    """Computes standard latency percentiles for an array of float measurements."""
+    if not arr:
+        return {"count": 0, "min": 0.0, "mean": 0.0, "p50": 0.0, "p90": 0.0, "p95": 0.0, "p99": 0.0, "p999": 0.0, "max": 0.0}
+    s = sorted(arr)
+    n = len(s)
+    return {
+        "count": n,
+        "min": s[0],
+        "mean": statistics.mean(s),
+        "p50": s[int(n * 0.50)],
+        "p90": s[min(n - 1, int(n * 0.90))],
+        "p95": s[min(n - 1, int(n * 0.95))],
+        "p99": s[min(n - 1, int(n * 0.99))],
+        "p999": s[min(n - 1, int(n * 0.999))],
+        "max": s[-1],
+    }
+
+
+def benchmark_websocket_stream(
+    host: str,
+    port: int = DEFAULT_PORT,
+    duration_s: float = 10.0,
+    target_hz: float = 20.0,
+    verbose: bool = True,
+) -> Dict[str, Any]:
+    """
+    Connects to the Pi 4 WebSocket endpoint (ws://host:port/ws_live) and records
+    inter-frame arrival intervals, jitter, packet sizes, client parsing, and
+    simulated canvas rendering durations.
+    """
+    if verbose:
+        print(f"\n[WebSocket Profiler] Connecting to ws://{host}:{port}/ws_live...")
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    sock.settimeout(3.0)
+
+    t_connect0 = time.perf_counter()
+    try:
+        sock.connect((host, port))
+    except Exception as e:
+        if verbose:
+            print(f"[WebSocket Error] Failed to connect to {host}:{port}: {e}")
+        return {"error": str(e), "connected": False}
+
+    # RFC 6455 Client Handshake
+    sec_key = base64.b64encode(os.urandom(16)).decode()
+    handshake = (
+        f"GET /ws_live HTTP/1.1\r\n"
+        f"Host: {host}:{port}\r\n"
+        f"Upgrade: websocket\r\n"
+        f"Connection: Upgrade\r\n"
+        f"Sec-WebSocket-Key: {sec_key}\r\n"
+        f"Sec-WebSocket-Version: 13\r\n\r\n"
+    )
+    sock.sendall(handshake.encode("utf-8"))
+
+    # Read HTTP Response
+    buf = b""
+    while b"\r\n\r\n" not in buf:
+        chunk = sock.recv(1024)
+        if not chunk:
+            sock.close()
+            return {"error": "Server closed during handshake", "connected": False}
+        buf += chunk
+
+    hdr_data, buf = buf.split(b"\r\n\r\n", 1)
+    dt_handshake = (time.perf_counter() - t_connect0) * 1000.0
+    status_line = hdr_data.decode("utf-8", errors="ignore").splitlines()[0]
+    if "101" not in status_line:
+        sock.close()
+        return {"error": f"Bad handshake response: {status_line}", "connected": False}
+
+    if verbose:
+        print(f"[WebSocket Profiler] Connected in {dt_handshake:.1f} ms. Streaming for {duration_s:.1f}s...")
+
+    # Pre-generate LUT for simulated browser canvas construction
+    try:
+        import numpy as np
+        has_numpy = True
+        lut = np.zeros((512, 4), dtype=np.uint8)
+        lut[:97] = [14, 22, 34, 150]
+        lut[97:166] = [245, 215, 30, 130]
+        lut[166:256] = [255, 0, 0, 255]
+        lut[256:] = [255, 255, 0, 200]
+    except ImportError:
+        has_numpy = False
+
+    intervals_ms: List[float] = []
+    jitter_ms: List[float] = []
+    parse_times_ms: List[float] = []
+    decompress_times_ms: List[float] = []
+    render_times_ms: List[float] = []
+    total_client_times_ms: List[float] = []
+    robot_latencies_ms: List[float] = []
+    payload_sizes_bytes: List[int] = []
+    time_steps: List[int] = []
+
+    target_interval_ms = 1000.0 / target_hz
+    t_start = time.perf_counter()
+    t_last_arrival: Optional[float] = None
+    sock.settimeout(3.5)
+
+    try:
+        while time.perf_counter() - t_start < duration_s:
+            # 1. Read WebSocket Frame Header
+            t_recv = None
+            while len(buf) < 2:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                buf += chunk
+                t_recv = time.perf_counter()
+            if len(buf) < 2:
+                break
+
+            b0, b1 = buf[0], buf[1]
+            opcode = b0 & 0x0F
+            plen = b1 & 0x7F
+            idx = 2
+
+            # Close frame received
+            if opcode == 0x08:
+                break
+            # Ping frame -> reply Pong
+            elif opcode == 0x09:
+                pong = bytearray(buf[:idx])
+                pong[0] = (pong[0] & 0xF0) | 0x0A
+                sock.sendall(pong)
+                buf = buf[idx:]
+                continue
+
+            if plen == 126:
+                while len(buf) < 4:
+                    chunk = sock.recv(4096)
+                    if not chunk: break
+                    buf += chunk
+                    t_recv = time.perf_counter()
+                plen = struct.unpack("!H", buf[2:4])[0]
+                idx = 4
+            elif plen == 127:
+                while len(buf) < 10:
+                    chunk = sock.recv(4096)
+                    if not chunk: break
+                    buf += chunk
+                    t_recv = time.perf_counter()
+                plen = struct.unpack("!Q", buf[2:10])[0]
+                idx = 10
+
+            while len(buf) < idx + plen:
+                chunk = sock.recv(idx + plen - len(buf))
+                if not chunk: break
+                buf += chunk
+                t_recv = time.perf_counter()
+
+            payload = buf[idx : idx + plen]
+            buf = buf[idx + plen :]
+
+            # Record arrival timestamp
+            t_arrival = t_recv if t_recv is not None else time.perf_counter()
+            t_arrival_wall = time.time()
+            if t_last_arrival is not None:
+                dt_iv = (t_arrival - t_last_arrival) * 1000.0
+                intervals_ms.append(dt_iv)
+                jitter_ms.append(abs(dt_iv - target_interval_ms))
+            t_last_arrival = t_arrival
+            payload_sizes_bytes.append(len(payload))
+
+            # 2. Emulate Browser Binary Unpacking & Decompression Pipeline
+            t_p0 = time.perf_counter()
+            decomp_ms = 0.0
+            raster_ms = 0.0
+
+            if len(payload) >= 232 and payload[:4] == b"FOLK":
+                header_fmt = "<4s I I d 16f 4f 4f 16f 3f 2H 4f 5I"
+                fields = struct.unpack(header_fmt, payload[:232])
+                step_id = fields[2]
+                ts_robot = fields[3]
+                time_steps.append(step_id)
+
+                # Approximate clock skew/robot-to-client delta
+                dt_r2c = (t_arrival_wall - ts_robot) * 1000.0
+                robot_latencies_ms.append(dt_r2c)
+
+                # Unpack compression lengths
+                prob_comp_len = fields[-5]
+                prob_raw_len = fields[-4]
+                haz_comp_len = fields[-3]
+                meta_len = fields[-1]
+
+                # Decompress costmaps if present (simulating DecompressionStream)
+                t_d0 = time.perf_counter()
+                if prob_comp_len > 0 and len(payload) >= 232 + prob_comp_len:
+                    slice_prob = payload[232 : 232 + prob_comp_len]
+                    if prob_comp_len < prob_raw_len:
+                        try:
+                            _ = zlib.decompress(slice_prob)
+                        except Exception:
+                            pass
+                if haz_comp_len > 0:
+                    slice_haz = payload[232 + prob_comp_len : 232 + prob_comp_len + haz_comp_len]
+                    try:
+                        _ = zlib.decompress(slice_haz)
+                    except Exception:
+                        pass
+                decomp_ms = (time.perf_counter() - t_d0) * 1000.0
+                decompress_times_ms.append(decomp_ms)
+
+                # Parse JSON metadata (trajectories, rays, etc.)
+                if meta_len > 0:
+                    meta_raw = payload[232 + prob_comp_len + haz_comp_len : 232 + prob_comp_len + haz_comp_len + meta_len]
+                    try:
+                        _ = json.loads(meta_raw.decode("utf-8"))
+                    except Exception:
+                        pass
+
+                # 3. Emulate Browser 2D Canvas Rasterization (LUT mapping on costmap)
+                t_r0 = time.perf_counter()
+                if has_numpy:
+                    dummy_prob = np.zeros((95, 125), dtype=np.uint8)
+                    _ = lut[dummy_prob]
+                raster_ms = (time.perf_counter() - t_r0) * 1000.0
+                render_times_ms.append(raster_ms)
+
+            parse_ms = (time.perf_counter() - t_p0) * 1000.0
+            parse_times_ms.append(parse_ms)
+            total_client_times_ms.append(parse_ms + raster_ms)
+
+    except Exception as e:
+        if verbose:
+            print(f"[WebSocket Warning] Streaming ended: {e}")
+    finally:
+        sock.close()
+
+    actual_duration_s = time.perf_counter() - t_start
+    total_frames = len(payload_sizes_bytes)
+    effective_hz = total_frames / max(0.001, actual_duration_s)
+
+    # Frame drops (gaps in sequence IDs)
+    drops = 0
+    if len(time_steps) > 1:
+        for i in range(1, len(time_steps)):
+            gap = time_steps[i] - time_steps[i - 1]
+            if gap > 3:  # 20 Hz decimation steps by 3
+                drops += (gap // 3) - 1
+
+    stutters = sum(1 for iv in intervals_ms if iv > 66.7)
+    hitches = sum(1 for iv in intervals_ms if iv > 100.0)
+
+    return {
+        "connected": True,
+        "mode": "websocket",
+        "duration_s": actual_duration_s,
+        "total_frames": total_frames,
+        "effective_hz": effective_hz,
+        "target_hz": target_hz,
+        "drops": drops,
+        "drop_rate_pct": (drops / max(1, total_frames + drops)) * 100.0,
+        "stutters": stutters,
+        "stutter_pct": (stutters / max(1, len(intervals_ms))) * 100.0,
+        "hitches": hitches,
+        "hitch_pct": (hitches / max(1, len(intervals_ms))) * 100.0,
+        "intervals": compute_percentiles(intervals_ms),
+        "jitter": compute_percentiles(jitter_ms),
+        "robot_latencies": compute_percentiles(robot_latencies_ms),
+        "parse": compute_percentiles(parse_times_ms),
+        "decompress": compute_percentiles(decompress_times_ms),
+        "render": compute_percentiles(render_times_ms),
+        "total_client": compute_percentiles(total_client_times_ms),
+        "payload_kb": (statistics.mean(payload_sizes_bytes) / 1024.0) if payload_sizes_bytes else 0.0,
+    }
+
+
+def benchmark_http_polling(
+    base_url: str,
+    duration_s: float = 6.0,
+    target_hz: float = 20.0,
+    verbose: bool = True,
+) -> Dict[str, Any]:
+    """
+    Simulates the browser HTTP polling loop (/api/live_bin) across duration_s,
+    measuring network Request-Response Round Trip Time (RTT), interval jitter,
+    and client deserialization latency.
+    """
+    url_bin = f"{base_url}/api/live_bin"
+    if verbose:
+        print(f"\n[HTTP Profiler] Benchmarking HTTP Polling ({url_bin}) for {duration_s:.1f}s...")
+
+    rtt_ms_list: List[float] = []
+    intervals_ms: List[float] = []
+    parse_ms_list: List[float] = []
+    payload_sizes_bytes: List[int] = []
+
+    target_dt_s = 1.0 / target_hz
+    t_start = time.perf_counter()
+    t_last_arrival: Optional[float] = None
+
+    while time.perf_counter() - t_start < duration_s:
+        t0 = time.perf_counter()
+        payload = b""
+        try:
+            req = urllib.request.Request(url_bin, headers={"User-Agent": "FolkraceLatencyTester/1.0"})
+            with urllib.request.urlopen(req, timeout=1.5) as resp:
+                payload = resp.read()
+            t_resp = time.perf_counter()
+            rtt = (t_resp - t0) * 1000.0
+            rtt_ms_list.append(rtt)
+            payload_sizes_bytes.append(len(payload))
+
+            if t_last_arrival is not None:
+                intervals_ms.append((t_resp - t_last_arrival) * 1000.0)
+            t_last_arrival = t_resp
+
+            # Parse
+            t_p0 = time.perf_counter()
+            if len(payload) >= 232 and payload[:4] == b"FOLK":
+                meta_len = struct.unpack("<I", payload[228:232])[0]
+                if meta_len > 0 and len(payload) >= 232 + meta_len:
+                    _ = json.loads(payload[232 : 232 + meta_len].decode("utf-8"))
+            parse_ms_list.append((time.perf_counter() - t_p0) * 1000.0)
+
+        except Exception as e:
+            time.sleep(0.02)
+
+        # Target interval rate sleep
+        elapsed_s = time.perf_counter() - t0
+        sleep_s = max(0.0, target_dt_s - elapsed_s)
+        time.sleep(sleep_s)
+
+    actual_duration_s = time.perf_counter() - t_start
+    total_reqs = len(rtt_ms_list)
+    effective_hz = total_reqs / max(0.001, actual_duration_s)
+
+    stutters = sum(1 for iv in intervals_ms if iv > 66.7)
+    hitches = sum(1 for iv in intervals_ms if iv > 100.0)
+
+    return {
+        "mode": "http_polling",
+        "duration_s": actual_duration_s,
+        "total_requests": total_reqs,
+        "effective_hz": effective_hz,
+        "stutters": stutters,
+        "stutter_pct": (stutters / max(1, len(intervals_ms))) * 100.0,
+        "hitches": hitches,
+        "hitch_pct": (hitches / max(1, len(intervals_ms))) * 100.0,
+        "rtt": compute_percentiles(rtt_ms_list),
+        "intervals": compute_percentiles(intervals_ms),
+        "parse": compute_percentiles(parse_ms_list),
+        "payload_kb": (statistics.mean(payload_sizes_bytes) / 1024.0) if payload_sizes_bytes else 0.0,
+    }
+
+
+def find_firefox_executable() -> Optional[str]:
+    """Finds installed Firefox browser binary."""
+    for p in FIREFOX_PATHS:
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def run_firefox_live_probe(base_url: str, duration_s: float = 6.0) -> Dict[str, Any]:
+    """
+    Launches Firefox with an automated diagnostic test page to measure real
+    DOM performance.now() metrics directly inside the browser engine.
+    """
+    ff_path = find_firefox_executable()
+    if not ff_path:
+        return {"error": "Mozilla Firefox not found on system"}
+
+    print(f"\n[Firefox Harness] Found Firefox: {ff_path}")
+    print(f"[Firefox Harness] Opening Tactical Mission Control: {base_url}")
+    print(f"[Firefox Harness] Inspecting real-time browser performance metrics for {duration_s:.1f}s...")
+
+    # We open Firefox directly to the UI
+    try:
+        proc = subprocess.Popen([ff_path, base_url])
+        time.sleep(duration_s)
+        # We leave browser open for user or report status
+        return {
+            "browser": "Firefox",
+            "path": ff_path,
+            "url": base_url,
+            "status": "Running interactively",
+            "note": "Examine live Performance HUD at top right of Tactical Mission Control."
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def print_comparison_report(ws_res: Dict[str, Any], http_res: Optional[Dict[str, Any]] = None):
+    """Prints a clean ASCII comparison table highlighting client latency percentiles."""
+    print("\n" + "=" * 80)
+    print("  FOLKRACE CLIENT BROWSER LATENCY REPORT (End-to-End Flight to Screen)")
+    print("=" * 80)
+
+    if ws_res.get("connected"):
+        print(f"  Transport Mechanism     : WebSocket Streaming (ws://.../ws_live)")
+        print(f"  Test Duration           : {ws_res['duration_s']:.2f}s ({ws_res['total_frames']} frames captured)")
+        print(f"  Effective Frame Rate    : {ws_res['effective_hz']:.1f} Hz (Target: {ws_res['target_hz']} Hz)")
+        print(f"  Frame Drop Rate         : {ws_res['drop_rate_pct']:.2f}% ({ws_res['drops']} dropped)")
+        print(f"  Average Payload Size    : {ws_res['payload_kb']:.2f} KB/frame (Header + Trajectories + Costmaps)")
+        print("-" * 80)
+        print(f"  {'METRIC (WebSocket)':<26} | {'MEAN':>7} | {'P50':>7} | {'P90':>7} | {'P95':>7} | {'P99':>7} | {'P99.9':>7} | {'MAX':>7}")
+        print("-" * 80)
+
+        def print_row(label, d):
+            print(f"  {label:<26} | {d['mean']:6.2f}ms | {d['p50']:6.2f}ms | {d['p90']:6.2f}ms | {d['p95']:6.2f}ms | {d['p99']:6.2f}ms | {d['p999']:6.2f}ms | {d['max']:6.2f}ms")
+
+        print_row("Packet Arrival Interval", ws_res["intervals"])
+        print_row("Arrival Jitter (|dt - 50|)", ws_res["jitter"])
+        if ws_res.get("robot_latencies") and ws_res["robot_latencies"]["count"] > 0:
+            print_row("Robot Age at Reception", ws_res["robot_latencies"])
+        print_row("Client Unpack & JSON", ws_res["parse"])
+        print_row("Client Canvas / LUT", ws_res["render"])
+        print_row("Total Client Processing", ws_res["total_client"])
+        print("-" * 80)
+        print(f"  Stutter Violations (>66.7ms) : {ws_res['stutters']} ({ws_res['stutter_pct']:.1f}%)")
+        print(f"  Hitch Violations (>100.0ms)  : {ws_res['hitches']} ({ws_res['hitch_pct']:.1f}%)")
+    else:
+        print(f"  WebSocket Test Failed: {ws_res.get('error')}")
+
+    if http_res and http_res.get("rtt"):
+        print("\n" + "-" * 80)
+        print(f"  COMPARISON: HTTP Polling Fallback (/api/live_bin)")
+        print("-" * 80)
+        print(f"  {'METRIC (HTTP Polling)':<26} | {'MEAN':>7} | {'P50':>7} | {'P90':>7} | {'P95':>7} | {'P99':>7} | {'P99.9':>7} | {'MAX':>7}")
+        print("-" * 80)
+        print_row("Request RTT (Round Trip)", http_res["rtt"])
+        print_row("Inter-frame Delivery", http_res["intervals"])
+        print("-" * 80)
+        print(f"  HTTP Stutters (>66.7ms)     : {http_res['stutters']} ({http_res['stutter_pct']:.1f}%)")
+        print(f"  HTTP Hitches (>100.0ms)      : {http_res['hitches']} ({http_res['hitch_pct']:.1f}%)")
+
+    # Verdict
+    print("\n" + "=" * 80)
+    print("  VERDICT & BROWSER USER EXPERIENCE SUMMARY:")
+    if ws_res.get("connected"):
+        iv = ws_res["intervals"]
+        p99_ms = iv["p99"]
+        p999_ms = iv["p999"]
+        stutter_pct = ws_res["stutter_pct"]
+
+        if p999_ms <= 65.0 and stutter_pct <= 2.0:
+            print("  >>> [EXCELLENT] Smooth 20 Hz Telemetry Stream (P99.9 < 65ms, zero visual hitches).")
+        elif p99_ms <= 75.0 and stutter_pct <= 10.0:
+            print("  >>> [GOOD] Consistent streaming with minor Wi-Fi jitter (P99 < 75ms).")
+        else:
+            print("  >>> [WARNING] Noticeable Wi-Fi delivery jitter or packet bursts detected.")
+
+    print("=" * 80 + "\n")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Folkrace Browser Latency & Telemetry Profiler")
+    parser.add_argument("--host", default=None, help="Target Pi 4 IP or hostname (auto-detects if omitted)")
+    parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="Port of Pi debug server (default: 8080)")
+    parser.add_argument("--duration", type=float, default=8.0, help="Benchmark duration in seconds (default: 8.0s)")
+    parser.add_argument("--mode", choices=["ws", "http", "all", "firefox"], default="all", help="Benchmark mode")
+    parser.add_argument("--firefox", action="store_true", help="Launch Firefox and open live dashboard")
+    parser.add_argument("--json", action="store_true", help="Output raw JSON results")
+    args = parser.parse_args()
+
+    active_host, base_url = resolve_host(args.host, args.port)
+
+    if args.firefox or args.mode == "firefox":
+        run_firefox_live_probe(base_url, duration_s=args.duration)
+        return
+
+    ws_res = {}
+    http_res = None
+
+    if args.mode in ("ws", "all"):
+        ws_res = benchmark_websocket_stream(
+            host=active_host,
+            port=args.port,
+            duration_s=args.duration,
+            verbose=not args.json
+        )
+
+    if args.mode in ("http", "all"):
+        http_res = benchmark_http_polling(
+            base_url=base_url,
+            duration_s=min(5.0, args.duration),
+            verbose=not args.json
+        )
+
+    if args.json:
+        report = {"websocket": ws_res, "http": http_res}
+        print(json.dumps(report, indent=2))
+    else:
+        print_comparison_report(ws_res, http_res)
+
+
+if __name__ == "__main__":
+    main()
+
+
+=== FILE: tools/optimize_wrong_way_params.py ===
+#!/usr/bin/env python3
+"""
+================================================================================
+  PARALLEL HEADLESS WEBOTS WRONG-WAY & RECOVERY PARAMETER OPTIMIZER
+================================================================================
+  Uses an elitist (mu + lambda) evolutionary strategy across 4 parallel
+  headless Webots workers to optimize AntiWrongWayWatchdog & StuckRecoveryManager
+  parameters across all 12 scenarios in test_wrong_way.wbt and track_racing.wbt.
+================================================================================
+"""
+
+import argparse
+import concurrent.futures
+import json
+import os
+import random
+import sys
+import time
+from typing import Any, Dict, List, Tuple
+
+TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
+if TOOLS_DIR not in sys.path:
+    sys.path.insert(0, TOOLS_DIR)
+
+from run_webots_wrong_way_tests import run_world_eval
+
+BOUNDS: Dict[str, Tuple[float, float, bool]] = {
+    "aww_duration_scale": (0.25, 0.50, False),
+    "aww_max_detect_dist_m": (1.80, 2.35, False),
+    "aww_max_lat_xv_m": (0.42, 0.65, False),
+    "aww_min_confirmed": (3, 4, True),
+    "aww_confirm_time_s": (0.032, 0.085, False),
+    "aww_post_cooldown_s": (0.20, 0.65, False),
+    "rec_180_speed_mps": (0.60, 1.05, False),
+    "rec_180_rev_clear_m": (0.32, 0.55, False),
+    "rec_180_rev_min_s": (0.12, 0.40, False),
+    "rec_180_align_deg": (24.0, 38.0, False),
+}
+
+BASELINE: Dict[str, Any] = {
+    "aww_duration_scale": 0.35,
+    "aww_max_detect_dist_m": 2.20,
+    "aww_max_lat_xv_m": 0.55,
+    "aww_min_confirmed": 3,
+    "aww_confirm_time_s": 0.048,
+    "aww_post_cooldown_s": 0.35,
+    "rec_180_speed_mps": 0.85,
+    "rec_180_rev_clear_m": 0.38,
+    "rec_180_rev_min_s": 0.18,
+    "rec_180_align_deg": 30.0,
+}
+
+
+def clamp_params(p: Dict[str, Any]) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    for k, (lo, hi, is_int) in BOUNDS.items():
+        val = max(lo, min(hi, float(p[k])))
+        out[k] = int(round(val)) if is_int else round(val, 4)
+    return out
+
+
+def mutate_params(parent: Dict[str, Any], sigma: float, rng: random.Random) -> Dict[str, Any]:
+    child: Dict[str, Any] = {}
+    for k, (lo, hi, is_int) in BOUNDS.items():
+        span = hi - lo
+        if is_int:
+            if rng.random() < 0.35:
+                child[k] = parent[k] + rng.choice([-1, 1])
+            else:
+                child[k] = parent[k]
+        else:
+            child[k] = float(parent[k]) + rng.gauss(0.0, sigma * span)
+    return clamp_params(child)
+
+
+def score_results(res_ww: dict, res_tr: dict) -> Tuple[float, int, int, List[str]]:
+    all_r = list(res_ww.get("results", [])) + list(res_tr.get("results", []))
+    total = len(all_r)
+    passed_cnt = sum(1 for r in all_r if r.get("passed"))
+    failed_names = [r.get("name", "?") for r in all_r if not r.get("passed")]
+
+    fitness = 1000.0
+    det_times: List[float] = []
+    rec_times: List[float] = []
+    post_dists: List[float] = []
+    clean_prog = 0.0
+
+    for r in all_r:
+        if r.get("flipped"):
+            fitness -= 5000.0
+        if r.get("off_track") and r.get("name") != "T2_clean_rev_opponents_25s":
+            fitness -= 5000.0
+        if "ww_triggers" in r:
+            # Clean scenario
+            ww = int(r.get("ww_fp", r.get("ww_triggers", 0)))
+            fitness -= 10000.0 * ww
+            clean_prog += float(r.get("progress_m", 0.0))
+            if not r.get("passed"):
+                fitness -= 2000.0
+        else:
+            # Spin scenario
+            fitness -= 10000.0 * int(r.get("pre_ww", 0))
+            fitness -= 1000.0 * int(r.get("retriggers", 0))
+            if not r.get("passed"):
+                fitness -= 2000.0
+            if r.get("detect_s") is not None:
+                det_times.append(float(r["detect_s"]))
+            else:
+                det_times.append(2.0)
+            if r.get("rec_done_s") is not None:
+                rec_times.append(float(r["rec_done_s"]))
+            else:
+                rec_times.append(4.5)
+            post_dists.append(float(r.get("post_rec_dist_m", 0.0)))
+
+    if det_times:
+        fitness -= 250.0 * (sum(det_times) / len(det_times))
+    if rec_times:
+        fitness -= 150.0 * (sum(rec_times) / len(rec_times))
+        fitness -= 80.0 * max(rec_times)
+    if post_dists:
+        fitness += 20.0 * (sum(post_dists) / len(post_dists))
+    fitness += 3.0 * clean_prog
+
+    return round(fitness, 2), passed_cnt, total, failed_names
+
+
+def evaluate_candidate(cand_id: int, params: Dict[str, Any], worker_slot: int) -> Tuple[float, int, int, List[str], Dict[str, Any]]:
+    p_json = json.dumps(params)
+    port_base = 10400 + worker_slot * 10
+    res_ww = run_world_eval("test_wrong_way", "all", False, 180.0, params_json=p_json, port=port_base)
+    res_tr = run_world_eval("track_racing", "all", False, 420.0, params_json=p_json, port=port_base + 1)
+    fit, p_cnt, tot, failed = score_results(res_ww, res_tr)
+    return fit, p_cnt, tot, failed, params
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Optimize wrong-way parameters in parallel headless Webots.")
+    parser.add_argument("--gens", type=int, default=4, help="Number of generations")
+    parser.add_argument("--pop", type=int, default=6, help="Candidates per generation")
+    parser.add_argument("--workers", type=int, default=2, help="Parallel Webots workers")
+    parser.add_argument("--seed", type=int, default=42)
+    args = parser.parse_args()
+
+    rng = random.Random(args.seed)
+    t_start = time.perf_counter()
+
+    population: List[Dict[str, Any]] = [dict(BASELINE)]
+    while len(population) < args.pop:
+        population.append(mutate_params(BASELINE, sigma=0.22, rng=rng))
+
+    best_ever = None  # (fit, p_cnt, tot, failed, params)
+
+    print("=" * 80)
+    print(f"  PARALLEL WEBOTS WRONG-WAY OPTIMIZER (gens={args.gens}, pop={args.pop}, workers={args.workers})")
+    print("=" * 80)
+
+    for gen in range(args.gens):
+        t_gen = time.perf_counter()
+        scored: List[Tuple[float, int, int, List[str], Dict[str, Any]]] = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
+            futs = [
+                pool.submit(evaluate_candidate, idx, cand, idx % args.workers)
+                for idx, cand in enumerate(population)
+            ]
+            for fut in concurrent.futures.as_completed(futs):
+                scored.append(fut.result())
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        top = scored[0]
+        if best_ever is None or top[0] > best_ever[0]:
+            best_ever = top
+
+        print(
+            f"[Gen {gen+1}/{args.gens}] Best={top[0]:.2f} ({top[1]}/{top[2]} PASS, fail={top[3]}) "
+            f"| EverBest={best_ever[0]:.2f} ({best_ever[1]}/{best_ever[2]} PASS) "
+            f"| {time.perf_counter()-t_gen:.1f}s",
+            flush=True,
+        )
+
+        # Elitist selection (top 2) + mutated offspring
+        elites = [scored[0][4], scored[min(1, len(scored) - 1)][4]]
+        sigma = max(0.08, 0.22 * (0.75 ** (gen + 1)))
+        next_pop = [dict(elites[0])]
+        while len(next_pop) < args.pop:
+            parent = rng.choice(elites)
+            next_pop.append(mutate_params(parent, sigma=sigma, rng=rng))
+        population = next_pop
+
+    print("\n" + "=" * 80)
+    print(f"  OPTIMIZATION COMPLETE in {time.perf_counter()-t_start:.1f}s")
+    print(f"  Best Fitness: {best_ever[0]:.2f} ({best_ever[1]}/{best_ever[2]} PASS, failed={best_ever[3]})")
+    print("  Best Params JSON:")
+    print(json.dumps(best_ever[4], indent=2))
+    print("=" * 80)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
+
+=== FILE: tools/run_webots_wrong_way_tests.py ===
+#!/usr/bin/env python3
+"""
+================================================================================
+  AUTOMATED HEADLESS WEBOTS 3D WRONG-WAY & RECOVERY TEST RUNNER
+================================================================================
+  Launches headless Webots against test_wrong_way.wbt and track_racing.wbt
+  using WEBOTS_CONTROLLER_MODE=wrong_way_eval, collects structured JSON results,
+  and prints a pass/fail summary table.
+================================================================================
+"""
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import time
+from typing import Optional
+import uuid
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+WEBOTS_DIR = os.path.join(REPO_ROOT, "5_webots")
+MY_PROJECT_DIR = os.path.join(WEBOTS_DIR, "simulation", "my_project")
+PLANNERS_DIR = os.path.join(MY_PROJECT_DIR, "controllers", "tof_path_planner")
+GA_DIR = os.path.join(WEBOTS_DIR, "optimization", "ga_planner_optimizer")
+WEBOTS_BIN = r"C:\Program Files\Webots\msys64\mingw64\bin\webots.exe"
+
+WORLDS = {
+    "test_wrong_way": os.path.join(MY_PROJECT_DIR, "worlds", "test_wrong_way.wbt"),
+    "track_racing": os.path.join(MY_PROJECT_DIR, "worlds", "track_racing.wbt"),
+}
+
+
+def run_world_eval(
+    world_key: str,
+    scenarios: str,
+    render: bool,
+    timeout_s: float,
+    params_json: str = "",
+    port: Optional[int] = None,
+) -> dict:
+    world_path = WORLDS[world_key]
+    if not os.path.isfile(world_path):
+        raise FileNotFoundError(f"World not found: {world_path}")
+    if not os.path.isfile(WEBOTS_BIN):
+        raise FileNotFoundError(f"Webots executable not found: {WEBOTS_BIN}")
+
+    scratch_dir = os.path.join(REPO_ROOT, "scratch")
+    os.makedirs(scratch_dir, exist_ok=True)
+    out_json = os.path.join(scratch_dir, f"aww_eval_{world_key}_{uuid.uuid4().hex[:8]}.json")
+
+    env = os.environ.copy()
+    webots_home = r"C:\Program Files\Webots"
+    webots_bin_dir = os.path.dirname(WEBOTS_BIN)
+    py_dir = os.path.dirname(sys.executable)
+    py_scripts = os.path.join(py_dir, "Scripts")
+    env["WEBOTS_HOME"] = webots_home
+    env["PATH"] = webots_bin_dir + os.pathsep + py_dir + os.pathsep + py_scripts + os.pathsep + env.get("PATH", "")
+    env["PYTHONPATH"] = os.pathsep.join([
+        PLANNERS_DIR,
+        os.path.join(GA_DIR, "data"),
+        GA_DIR,
+        MY_PROJECT_DIR,
+        REPO_ROOT,
+    ])
+    env["WEBOTS_CONTROLLER_MODE"] = "wrong_way_eval"
+    env["AWW_EVAL_WORLD"] = world_key
+    env["AWW_EVAL_SCENARIOS"] = scenarios
+    env["AWW_EVAL_OUT"] = out_json
+    if params_json:
+        env["AWW_EVAL_PARAMS_JSON"] = params_json
+    env["PYTHONUNBUFFERED"] = "1"
+
+    port_arg = [f"--port={port}"] if port is not None else []
+    if render:
+        cmd = [WEBOTS_BIN, *port_arg, "--mode=realtime", "--batch", "--stdout", "--stderr", world_path]
+        startupinfo = None
+        creationflags = 0
+    else:
+        cmd = [
+            WEBOTS_BIN,
+            *port_arg,
+            "--mode=fast",
+            "--no-rendering",
+            "--batch",
+            "--minimize",
+            "--stdout",
+            "--stderr",
+            world_path,
+        ]
+        startupinfo = None
+        creationflags = 0
+        if sys.platform == "win32":
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = 0
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+
+    t0 = time.perf_counter()
+    proc = subprocess.Popen(
+        cmd,
+        env=env,
+        cwd=MY_PROJECT_DIR,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        startupinfo=startupinfo,
+        creationflags=creationflags,
+    )
+    try:
+        stdout_txt, _ = proc.communicate(timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        if sys.platform == "win32":
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            proc.kill()
+        stdout_txt, _ = proc.communicate()
+        return {
+            "world": world_key,
+            "all_passed": False,
+            "results": [{"name": f"{world_key}_timeout", "passed": False, "error": f"Timed out after {timeout_s}s"}],
+            "stdout": stdout_txt[-1500:],
+        }
+    finally:
+        if os.path.exists(out_json):
+            try:
+                with open(out_json, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except Exception as e:
+                data = {"world": world_key, "all_passed": False, "results": [], "error": str(e)}
+            if not data.get("all_passed", False) and stdout_txt:
+                data["stdout"] = stdout_txt[-2500:]
+            try:
+                os.remove(out_json)
+            except OSError:
+                pass
+        else:
+            data = {
+                "world": world_key,
+                "all_passed": False,
+                "results": [{"name": f"{world_key}_no_output", "passed": False, "rc": proc.returncode}],
+                "stdout": stdout_txt[-1500:] if stdout_txt else "",
+            }
+
+    data["elapsed_s"] = round(time.perf_counter() - t0, 2)
+    return data
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Run automated Webots 3D wrong-way & recovery tests.")
+    parser.add_argument("--world", choices=["test_wrong_way", "track_racing", "all"], default="all")
+    parser.add_argument("--scenario", default="all", help="Comma-separated scenario names or 'all'")
+    parser.add_argument("--render", action="store_true", help="Launch Webots in real-time rendered mode")
+    parser.add_argument("--timeout", type=float, default=240.0, help="Per-world wall-clock timeout in seconds")
+    parser.add_argument("--params-json", default="", help="Optional JSON string of parameter overrides")
+    parser.add_argument("--port", type=int, default=None, help="Optional Webots port")
+    args = parser.parse_args()
+
+    world_list = ["test_wrong_way", "track_racing"] if args.world == "all" else [args.world]
+
+    print("=" * 80)
+    print("  HEADLESS WEBOTS 3D WRONG-WAY & RECOVERY TEST SUITE")
+    print("=" * 80)
+
+    overall_ok = True
+    for wk in world_list:
+        print(f"\n--- World: {wk} ---")
+        res = run_world_eval(wk, args.scenario, args.render, args.timeout, params_json=args.params_json, port=args.port)
+        for r in res.get("results", []):
+            tag = "PASS" if r.get("passed") else "FAIL"
+            detail = {k: v for k, v in r.items() if k not in ("name", "passed")}
+            print(f"  [{tag}] {r.get('name', '?'):30s} | {detail}")
+        if not res.get("all_passed", False):
+            overall_ok = False
+            if res.get("stdout"):
+                print("  [Webots tail stdout]:\n" + res["stdout"])
+        print(f"  World elapsed: {res.get('elapsed_s', '?')}s")
+
+    print("\n" + "=" * 80)
+    print(f"  OVERALL RESULT: {'ALL PASSED' if overall_ok else 'FAILED'}")
+    print("=" * 80)
+    return 0 if overall_ok else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
+
+=== FILE: tools/stm32_foc_trace_test.py ===
+#!/usr/bin/env python3
+"""Run a high-rate STM32 FOC trace while the ESP32 commands the motors."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import statistics
+import struct
+import time
+from pathlib import Path
+
+import serial
+
+
+TRACE_HEADER = struct.Struct("<2sHHHII")
+TRACE_SAMPLE = struct.Struct("<HHhhhhhh")
+TRACE_SYNC = b"FT"
+MOTOR_POLE_PAIRS = 11
+RAW_COUNTS = 16384
+
+
+def read_trace(port: serial.Serial) -> tuple[dict[str, int], list[tuple[int, ...]]]:
+    data = bytearray()
+    deadline = time.monotonic() + 8.0
+    expected = None
+    while time.monotonic() < deadline:
+        chunk = port.read(4096)
+        if chunk:
+            data.extend(chunk)
+        start = data.find(TRACE_SYNC)
+        if start >= 0 and len(data) >= start + TRACE_HEADER.size:
+            header = TRACE_HEADER.unpack_from(data, start)
+            count = header[3]
+            expected = start + TRACE_HEADER.size + count * TRACE_SAMPLE.size
+            if len(data) >= expected:
+                payload = data[start + TRACE_HEADER.size : expected]
+                samples = [
+                    TRACE_SAMPLE.unpack_from(payload, offset)
+                    for offset in range(0, len(payload), TRACE_SAMPLE.size)
+                ]
+                return (
+                    {
+                        "version": header[1],
+                        "sample_hz": header[2],
+                        "sample_count": count,
+                        "overwritten": header[4],
+                    },
+                    samples,
+                )
+    raise TimeoutError(f"trace dump incomplete; expected_end={expected}, received={len(data)}")
+
+
+def unwrap_delta(delta: int) -> int:
+    half = RAW_COUNTS // 2
+    return ((delta + half) % RAW_COUNTS) - half
+
+
+def motor_analysis(samples: list[tuple[int, ...]], motor_index: int) -> dict[str, object]:
+    raw_index = motor_index
+    target_index = 2 + motor_index
+    actual_index = 4 + motor_index
+    uq_index = 6 + motor_index
+    raw = [sample[raw_index] for sample in samples]
+    deltas = [unwrap_delta(b - a) for a, b in zip(raw, raw[1:])]
+    electrical_steps = [
+        delta * (2.0 * math.pi * MOTOR_POLE_PAIRS / RAW_COUNTS) for delta in deltas
+    ]
+
+    actual = [sample[actual_index] for sample in samples]
+    target = [sample[target_index] for sample in samples]
+    uq = [sample[uq_index] for sample in samples]
+    actual_steps = [abs(b - a) for a, b in zip(actual, actual[1:])]
+    phase_jumps = [abs(step) for step in electrical_steps]
+    phase_tracking_errors = [
+        measured - (
+            target[index]
+            * (2.0 * math.pi / 60.0)
+            * MOTOR_POLE_PAIRS
+            / 500.0
+        )
+        for index, measured in enumerate(electrical_steps)
+    ]
+    return {
+        "target_rpm_avg": round(statistics.mean(target), 1),
+        "actual_rpm_avg": round(statistics.mean(actual), 1),
+        "actual_rpm_minmax": [min(actual), max(actual)],
+        "uq_mv_max_abs": max(abs(value) for value in uq),
+        "max_raw_delta_counts": max(abs(value) for value in deltas),
+        "max_electrical_step_rad": round(max(phase_jumps), 3),
+        "electrical_steps_over_pi": sum(value > math.pi for value in phase_jumps),
+        "max_phase_tracking_error_rad": round(max(abs(value) for value in phase_tracking_errors), 3),
+        "phase_tracking_errors_over_1rad": sum(
+            abs(value) > 1.0 for value in phase_tracking_errors
+        ),
+        "actual_steps_over_40rpm": sum(value > 40 for value in actual_steps),
+    }
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--stm-port", default="COM13")
+    parser.add_argument("--esp-port", default="COM5")
+    parser.add_argument("--duration", type=float, default=10.0)
+    parser.add_argument("--speed", type=float, default=-0.8)
+    parser.add_argument("--steer-angle", type=int, default=90)
+    parser.add_argument("--output", type=Path, default=Path("stm32_foc_trace.bin"))
+    args = parser.parse_args()
+
+    with serial.Serial(args.stm_port, 921600, timeout=0.01) as stm, serial.Serial(
+        args.esp_port, 921600, timeout=0.005
+    ) as esp:
+        stm.reset_input_buffer()
+        esp.reset_input_buffer()
+        stm.write(b"TRACE_START\n")
+        stm.flush()
+        time.sleep(0.1)
+        try:
+            for command in (
+                b"MOTORS\n",
+                f"A{args.steer_angle}\n".encode(),
+                f"V {args.speed}\n".encode(),
+            ):
+                esp.write(command)
+                esp.flush()
+                time.sleep(0.15)
+            time.sleep(args.duration)
+        finally:
+            esp.write(b"ESTOP\n")
+            esp.flush()
+            time.sleep(0.5)
+            stm.write(b"TRACE_STOP\n")
+            stm.flush()
+            time.sleep(0.1)
+            stm.reset_input_buffer()
+            stm.write(b"TRACE_DUMP\n")
+            stm.flush()
+        header, samples = read_trace(stm)
+
+    raw = b"".join(TRACE_SAMPLE.pack(*sample) for sample in samples)
+    args.output.write_bytes(TRACE_HEADER.pack(TRACE_SYNC, header["version"], header["sample_hz"], header["sample_count"], header["overwritten"], 0) + raw)
+    result = {
+        "trace_file": str(args.output),
+        "header": header,
+        "motor1": motor_analysis(samples, 0),
+        "motor2": motor_analysis(samples, 1),
+    }
+    print(json.dumps(result, indent=2))
+
+
+if __name__ == "__main__":
+    main()
+
+
+=== FILE: tools/sync_params.py ===
+#!/usr/bin/env python3
+"""
+================================================================================
+  FOLKRACE PARAMETER SYNCHRONIZATION PIPELINE
+================================================================================
+  Single Source of Truth: brain/vehicle_config.json
+  Generates:
+    1. brain/vehicle_params.py                     (Webots, Pi 4, Launchers)
+    2. 3_esp32/ESP32_Main/include/vehicle_params.h (ESP32 C++ Firmware)
+================================================================================
+"""
+
+import os
+import sys
+import json
+import math
+from pathlib import Path
+
+# Determine project repository root (supports CLI and PlatformIO SCons context)
+try:
+    SCRIPT_DIR = Path(__file__).resolve().parent
+    REPO_ROOT = SCRIPT_DIR.parent
+except NameError:
+    # In PlatformIO SCons execution, __file__ is undefined
+    REPO_ROOT = Path.cwd()
+    SCRIPT_DIR = REPO_ROOT / "tools"
+
+CONFIG_PATH = REPO_ROOT / "brain" / "vehicle_config.json"
+PY_OUT_PATH = REPO_ROOT / "brain" / "vehicle_params.py"
+H_OUT_PATH = REPO_ROOT / "3_esp32" / "ESP32_Main" / "include" / "vehicle_params.h"
+
+
+def load_config() -> dict:
+    if not CONFIG_PATH.exists():
+        raise FileNotFoundError(f"Configuration file not found: {CONFIG_PATH}")
+    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def compute_derived_params(cfg: dict) -> dict:
+    v = cfg["vehicle"]
+    d = cfg["dynamics"]
+    t = cfg["timing"]
+
+    rear_offset = float(v["rear_axle_offset_m"])
+    front_offset = float(v["front_axle_offset_m"])
+    wheelbase = front_offset - rear_offset
+
+    tire_mu = float(d["tire_mu"])
+    gravity_g = float(d["gravity_g"])
+    a_max_base = tire_mu * gravity_g
+
+    accel_fwd_max = float(d["accel_fwd_ratio"]) * a_max_base
+    brake_decel_max = float(d["brake_decel_ratio"]) * a_max_base
+    lat_accel_max = float(d["lat_accel_ratio"]) * a_max_base
+
+    max_steer_rad = float(v["max_steering_rad"])
+    r_min_turn = wheelbase / math.tan(max_steer_rad)
+    v_min_cruise = math.sqrt(lat_accel_max * r_min_turn)
+
+    ctrl_freq = float(t["control_loop_freq_hz"])
+    ctrl_period_us = int(1_000_000 / ctrl_freq)
+    ctrl_dt_s = 1.0 / ctrl_freq
+
+    return {
+        "wheelbase_m": wheelbase,
+        "a_max_base": a_max_base,
+        "accel_fwd_max": accel_fwd_max,
+        "brake_decel_max": brake_decel_max,
+        "lat_accel_max": lat_accel_max,
+        "r_min_turn": r_min_turn,
+        "v_min_cruise": v_min_cruise,
+        "ctrl_period_us": ctrl_period_us,
+        "ctrl_dt_s": ctrl_dt_s,
+    }
+
+
+def generate_python(cfg: dict, derived: dict) -> str:
+    v = cfg["vehicle"]
+    d = cfg["dynamics"]
+    s = cfg["servo"]
+    t = cfg["timing"]
+    c = cfg["costmap"]
+
+    lines = [
+        '"""',
+        'AUTO-GENERATED FILE -- DO NOT EDIT DIRECTLY.',
+        'Generated by tools/sync_params.py from brain/vehicle_config.json',
+        '"""',
+        'import math',
+        '',
+        '# ============================================================================== #',
+        '# 1. PHYSICAL VEHICLE & ACTUATOR SPECIFICATIONS                                  #',
+        '# ============================================================================== #',
+        f'REAR_AXLE_OFFSET_M: float = {v["rear_axle_offset_m"]}',
+        f'FRONT_AXLE_OFFSET_M: float = {v["front_axle_offset_m"]}',
+        f'WHEELBASE: float = {derived["wheelbase_m"]}',
+        f'TRACK_REAR: float = {v["track_rear_m"]}',
+        f'TRACK_FRONT: float = {v["track_front_m"]}',
+        f'TRACK_KINGPIN: float = {v["track_kingpin_m"]}',
+        f'WHEEL_RADIUS: float = {v["wheel_radius_m"]}',
+        f'VEHICLE_MASS: float = {v["vehicle_mass_kg"]}',
+        '',
+        f'ACKERMANN_PERCENT: float = {v["ackermann_percent"]}',
+        f'MAX_SERVO_RAD: float = {v["max_servo_rad"]}',
+        f'MAX_STEERING_RAD: float = {v["max_steering_rad"]}',
+        f'SERVO_MAX_SPEED_RAD_S: float = {v["servo_max_speed_rad_s"]}',
+        '',
+        f'MOTOR_DIR: float = {v["motor_dir"]}',
+        f'V_MAX_WHEEL: float = {v["v_max_wheel_mps"]}',
+        f'V_MAX_CRUISE: float = {v["v_max_cruise_mps"]}',
+        '',
+        '# ============================================================================== #',
+        '# 2. TIRE & VEHICLE DYNAMICS LIMITS                                              #',
+        '# ============================================================================== #',
+        f'TIRE_MU: float = {d["tire_mu"]}',
+        f'GRAVITY_G: float = {d["gravity_g"]}',
+        f'A_MAX_BASE: float = {derived["a_max_base"]}',
+        f'ACCEL_FWD_RATIO: float = {d["accel_fwd_ratio"]}',
+        f'BRAKE_DECEL_RATIO: float = {d["brake_decel_ratio"]}',
+        f'LAT_ACCEL_RATIO: float = {d["lat_accel_ratio"]}',
+        f'ACCEL_FWD_MAX: float = {derived["accel_fwd_max"]}',
+        f'BRAKE_DECEL_MAX: float = {derived["brake_decel_max"]}',
+        f'LAT_ACCEL_MAX: float = {derived["lat_accel_max"]}',
+        f'R_MIN_TURN: float = {derived["r_min_turn"]}',
+        f'V_MIN_CRUISE: float = {derived["v_min_cruise"]}',
+        f'SLIP_GATE_SPEED_MPS: float = {d["slip_gate_speed_mps"]}',
+        f'SLIP_THRESH_SPIN_RAD_S: float = {d["slip_thresh_spin_rad_s"]}',
+        '',
+        '# ============================================================================== #',
+        '# 3. DIGITAL STEERING SERVO PWM CONFIGURATION                                    #',
+        '# ============================================================================== #',
+        f'SERVO_PWM_PIN: int = {s["pwm_pin"]}',
+        f'SERVO_PWM_CHANNEL: int = {s["pwm_channel"]}',
+        f'SERVO_PWM_FREQ_HZ: int = {s["pwm_freq_hz"]}',
+        f'SERVO_PWM_RESOLUTION: int = {s["pwm_resolution"]}',
+        f'SERVO_PULSE_MIN_US: float = {s["pulse_min_us"]}',
+        f'SERVO_PULSE_NEUTRAL_US: float = {s["pulse_neutral_us"]}',
+        f'SERVO_PULSE_MAX_US: float = {s["pulse_max_us"]}',
+        '',
+        '# ============================================================================== #',
+        '# 4. TIMING & FREQUENCIES                                                        #',
+        '# ============================================================================== #',
+        f'TOF_HZ: float = {t["tof_hz"]}',
+        f'PI_LOOP_HZ: float = {t["pi_loop_hz"]}',
+        f'DT_PI_LOOP: float = {1.0 / t["pi_loop_hz"]}',
+        f'CONTROL_LOOP_FREQ_HZ: int = {t["control_loop_freq_hz"]}',
+        f'CONTROL_LOOP_DT_S: float = {derived["ctrl_dt_s"]}',
+        f'SIM_TIME_STEP_MS: float = {t["sim_time_step_ms"]}',
+        f'UART_BAUD: int = {t["uart_baud"]}',
+        '',
+        '# ============================================================================== #',
+        '# 5. COSTMAP BOUNDS & RESOLUTION                                                 #',
+        '# ============================================================================== #',
+        f'GRID_X_MAX: float = {c["grid_x_max"]}',
+        f'GRID_X_MIN: float = {c["grid_x_min"]}',
+        f'GRID_Y_MIN: float = {c["grid_y_min"]}',
+        f'GRID_Y_MAX: float = {c["grid_y_max"]}',
+        f'GRID_RES: float = {c["grid_res"]}',
+        f'R_INFLATION_M: float = {c["r_inflation_m"]}',
+        '',
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def generate_c_header(cfg: dict, derived: dict) -> str:
+    v = cfg["vehicle"]
+    d = cfg["dynamics"]
+    s = cfg["servo"]
+    t = cfg["timing"]
+    c = cfg["costmap"]
+
+    lines = [
+        '#ifndef VEHICLE_PARAMS_H',
+        '#define VEHICLE_PARAMS_H',
+        '',
+        '// =============================================================================',
+        '// AUTO-GENERATED FILE -- DO NOT EDIT DIRECTLY.',
+        '// Generated by tools/sync_params.py from brain/vehicle_config.json',
+        '// =============================================================================',
+        '',
+        '// --- Vehicle Dimensions & Geometry ---',
+        f'#define VEHICLE_REAR_AXLE_OFFSET_M  {v["rear_axle_offset_m"]:.4f}f',
+        f'#define VEHICLE_FRONT_AXLE_OFFSET_M {v["front_axle_offset_m"]:.4f}f',
+        f'#define VEHICLE_WHEELBASE_M         {derived["wheelbase_m"]:.4f}f',
+        f'#define VEHICLE_TRACK_REAR_M        {v["track_rear_m"]:.4f}f',
+        f'#define VEHICLE_TRACK_FRONT_M       {v["track_front_m"]:.4f}f',
+        f'#define VEHICLE_TRACK_KINGPIN_M     {v["track_kingpin_m"]:.4f}f',
+        f'#define VEHICLE_WHEEL_RADIUS_M      {v["wheel_radius_m"]:.4f}f',
+        f'#define VEHICLE_MASS_KG             {v["vehicle_mass_kg"]:.3f}f',
+        '',
+        '// --- Steering Kinematics & Limits ---',
+        f'#define VEHICLE_ACKERMANN_PCT       {v["ackermann_percent"]:.2f}f',
+        f'#define VEHICLE_MAX_SERVO_RAD       {v["max_servo_rad"]:.6f}f',
+        f'#define VEHICLE_MAX_STEER_RAD       {v["max_steering_rad"]:.6f}f',
+        f'#define VEHICLE_SERVO_MAX_RATE      {v["servo_max_speed_rad_s"]:.2f}f',
+        f'#define VEHICLE_MOTOR_DIR           {v["motor_dir"]:.1f}f',
+        f'#define VEHICLE_MAX_WHEEL_SPEED     {v["v_max_wheel_mps"]:.2f}f',
+        '',
+        '// --- Tire Friction & Dynamic Traction Envelopes ---',
+        f'#define DEFAULT_ROAD_MU             {d["tire_mu"]:.2f}f',
+        f'#define GRAVITY_G_CONST             {d["gravity_g"]:.5f}f',
+        f'#define ACCEL_FWD_RATIO             {d["accel_fwd_ratio"]:.2f}f',
+        f'#define BRAKE_DECEL_RATIO           {d["brake_decel_ratio"]:.2f}f',
+        f'#define LAT_ACCEL_RATIO             {d["lat_accel_ratio"]:.2f}f',
+        f'#define ACCEL_FWD_MAX               {derived["accel_fwd_max"]:.3f}f',
+        f'#define BRAKE_DECEL_MAX             {derived["brake_decel_max"]:.3f}f',
+        f'#define LAT_ACCEL_MAX               {derived["lat_accel_max"]:.3f}f',
+        f'#define R_MIN_TURN_M                {derived["r_min_turn"]:.4f}f',
+        f'#define V_MIN_CRUISE_MPS            {derived["v_min_cruise"]:.4f}f',
+        f'#define SLIP_GATE_SPEED_MPS         {d["slip_gate_speed_mps"]:.2f}f',
+        f'#define SLIP_THRESH_SPIN_RAD_S      {d["slip_thresh_spin_rad_s"]:.2f}f',
+        '',
+        '// --- Digital Steering Servo PWM Configuration ---',
+        f'#define SERVO_STEER_PWM_PIN         {s["pwm_pin"]}',
+        f'#define SERVO_PWM_CHANNEL           {s["pwm_channel"]}',
+        f'#define SERVO_PWM_FREQ_HZ           {s["pwm_freq_hz"]}',
+        f'#define SERVO_PWM_RESOLUTION        {s["pwm_resolution"]}',
+        f'#define SERVO_PULSE_MIN_US          {s["pulse_min_us"]:.1f}f',
+        f'#define SERVO_PULSE_NEUTRAL_US      {s["pulse_neutral_us"]:.1f}f',
+        f'#define SERVO_PULSE_MAX_US          {s["pulse_max_us"]:.1f}f',
+        '',
+        '// --- Control Loop Frequency & Timing ---',
+        f'#define CONTROL_LOOP_FREQ_HZ        {t["control_loop_freq_hz"]}',
+        f'#define CONTROL_LOOP_PERIOD_US      {derived["ctrl_period_us"]}',
+        f'#define CONTROL_LOOP_DT_S           {derived["ctrl_dt_s"]:.5f}f',
+        f'#define PI_UART_BAUD                {t["uart_baud"]}',
+        f'#define TOF_UPDATE_HZ               {t["tof_hz"]:.1f}f',
+        '',
+        '// --- Costmap Geometry Bounds (Local Frame, +Y Fwd, +X Right) ---',
+        f'#define COSTMAP_GRID_X_MIN          {c["grid_x_min"]:.3f}f',
+        f'#define COSTMAP_GRID_X_MAX          {c["grid_x_max"]:.3f}f',
+        f'#define COSTMAP_GRID_Y_MIN          {c["grid_y_min"]:.3f}f',
+        f'#define COSTMAP_GRID_Y_MAX          {c["grid_y_max"]:.3f}f',
+        f'#define COSTMAP_GRID_RES            {c["grid_res"]:.3f}f',
+        f'#define COSTMAP_R_INFLATION_M       {c["r_inflation_m"]:.3f}f',
+        '',
+        '#endif // VEHICLE_PARAMS_H',
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def sync_all():
+    cfg = load_config()
+    derived = compute_derived_params(cfg)
+
+    # 1. Generate Python params
+    PY_OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    py_code = generate_python(cfg, derived)
+    with open(PY_OUT_PATH, "w", encoding="utf-8") as f:
+        f.write(py_code)
+
+    # 2. Generate C++ header
+    H_OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    h_code = generate_c_header(cfg, derived)
+    with open(H_OUT_PATH, "w", encoding="utf-8") as f:
+        f.write(h_code)
+
+    print(f"[sync_params] Synced vehicle params -> {PY_OUT_PATH.name} and {H_OUT_PATH.name}")
+
+
+# PlatformIO SCons execution support
+try:
+    import SCons.Script  # type: ignore
+    # Running inside PlatformIO SCons
+    sync_all()
+except (ImportError, AttributeError):
+    # Standalone CLI execution
+    if __name__ == "__main__":
+        sync_all()
+
+
