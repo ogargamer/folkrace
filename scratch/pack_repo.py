@@ -8,10 +8,10 @@ Usage:
 
 import argparse
 import pathlib
-import shutil
+import re
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-OUT_DIR = ROOT / "scratch" / "bundles"
+OUT_DIR = ROOT
 MAX_BYTES = 360_000
 
 EXTS = {".py", ".cpp", ".c", ".h", ".hpp", ".md", ".json", ".ini", ".lua", ".sh", ".proto"}
@@ -110,9 +110,10 @@ def main() -> None:
     if max_bytes <= 0:
         parser.error("--max-kb must be a positive integer")
 
-    if OUT_DIR.exists():
-        shutil.rmtree(OUT_DIR)
     OUT_DIR.mkdir(parents=True, exist_ok=True)
+    for old_bundle in OUT_DIR.glob("folkrace_*of*_*.txt"):
+        if old_bundle.is_file() and re.fullmatch(r"folkrace_\d+of\d+_.+\.txt", old_bundle.name):
+            old_bundle.unlink()
 
     files = collect_files(include_guis=args.include_guis)
     chunks: list[list[tuple[str, str]]] = []
@@ -141,7 +142,7 @@ def main() -> None:
         chunks.append(current)
 
     total = len(chunks)
-    print(f"Generated {total} bundle file(s) in {OUT_DIR.relative_to(ROOT)}/:")
+    print(f"Generated {total} bundle file(s) in the repository root:")
     for idx, chunk in enumerate(chunks, 1):
         name = bundle_name(chunk, str(idx), str(total))
         content = render_bundle(name, chunk)
