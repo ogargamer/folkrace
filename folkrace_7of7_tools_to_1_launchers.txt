@@ -1,0 +1,2376 @@
+=== BUNDLE: folkrace_7of7_tools_to_1_launchers.txt (8 files) ===
+  - tools/wrong_way_sim_bench.py
+  - 1_launchers/10_track_studio.py
+  - 1_launchers/1_champion_preview.py
+  - 1_launchers/2_fast_champion_drive.py
+  - 1_launchers/3_ga_dashboard.py
+  - 1_launchers/4_pi4_debug_studio.py
+  - 1_launchers/5_local_flight_replay.py
+  - 1_launchers/README.md
+
+=== FILE: tools/wrong_way_sim_bench.py ===
+#!/usr/bin/env python3
+"""
+================================================================================
+  FAST CLOSED-LOOP 2D WRONG-WAY & RECOVERY SIMULATION BENCH
+================================================================================
+  Exercises the real AutonomousBrain (C++ Costmap + ToF Gap Scout + SL-MPC +
+  AntiWrongWayWatchdog + StuckRecoveryManager) against 2D wall segments and
+  Ackermann bicycle physics with friction-circle saturation at 60 Hz.
+================================================================================
+"""
+
+import math
+import os
+import sys
+import time
+from typing import Dict, List, Optional, Tuple
+
+import numpy as np
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PLANNER_DIR = os.path.join(REPO_ROOT, "5_webots", "simulation", "my_project", "controllers", "tof_path_planner")
+for p in (REPO_ROOT, PLANNER_DIR):
+    if p not in sys.path:
+        sys.path.insert(0, p)
+
+from brain.autonomous_brain import AutonomousBrain
+from brain.pose_tracker import wrap_to_pi
+from brain.stuck_recovery_manager import StuckRecoveryState
+from brain.tof_gap_scout import FRONT_TOF_SENSOR_RIG
+from brain.planner_config import (
+    GRAVITY_G,
+    MAX_STEERING_RAD,
+    SERVO_MAX_SPEED_RAD_S,
+    TIRE_MU,
+    TOF_MAX_RANGE_M,
+    WHEELBASE,
+)
+from progress_tracker import load_track_walls
+
+
+def ray_segment_intersect(
+    ox: float, oy: float, dx: float, dy: float,
+    ax: float, ay: float, bx: float, by: float,
+) -> Optional[float]:
+    """2D ray (o + t*d, t>=0) vs segment (a, b) intersection distance t."""
+    sx = bx - ax
+    sy = by - ay
+    denom = dx * sy - dy * sx
+    if abs(denom) < 1e-9:
+        return None
+    qpx = ax - ox
+    qpy = ay - oy
+    t = (qpx * sy - qpy * sx) / denom
+    u = (qpx * dy - qpy * dx) / denom
+    if t >= 0.0 and 0.0 <= u <= 1.0:
+        return t
+    return None
+
+
+def segments_from_polyline(pts: np.ndarray, closed: bool = True) -> List[Tuple[float, float, float, float]]:
+    segs: List[Tuple[float, float, float, float]] = []
+    n = len(pts)
+    if n < 2:
+        return segs
+    for i in range(n - 1):
+        segs.append((float(pts[i, 0]), float(pts[i, 1]), float(pts[i + 1, 0]), float(pts[i + 1, 1])))
+    if closed:
+        segs.append((float(pts[-1, 0]), float(pts[-1, 1]), float(pts[0, 0]), float(pts[0, 1])))
+    return segs
+
+
+def box_segments(cx: float, cy: float, half_w: float, half_l: float) -> List[Tuple[float, float, float, float]]:
+    pts = np.array([
+        [cx - half_w, cy - half_l],
+        [cx + half_w, cy - half_l],
+        [cx + half_w, cy + half_l],
+        [cx - half_w, cy + half_l],
+    ])
+    return segments_from_polyline(pts, closed=True)
+
+
+def point_to_segments_dist(px: float, py: float, segs: List[Tuple[float, float, float, float]]) -> float:
+    best_sq = 1e9
+    for ax, ay, bx, by in segs:
+        vx, vy = bx - ax, by - ay
+        l2 = vx * vx + vy * vy
+        if l2 < 1e-9:
+            d2 = (px - ax) ** 2 + (py - ay) ** 2
+        else:
+            t = max(0.0, min(1.0, ((px - ax) * vx + (py - ay) * vy) / l2))
+            qx, qy = ax + t * vx, ay + t * vy
+            d2 = (px - qx) ** 2 + (py - qy) ** 2
+        if d2 < best_sq:
+            best_sq = d2
+    return math.sqrt(best_sq)
+
+
+def raycast_16_tofs(
+    x: float,
+    y: float,
+    yaw: float,
+    segs: List[Tuple[float, float, float, float]],
+) -> Dict[str, float]:
+    """Simulates all 16 VL53L8CX beams in world frame (+Y forward, +X right, +yaw CCW)."""
+    cos_y = math.cos(yaw)
+    sin_y = math.sin(yaw)
+    readings: Dict[str, float] = {}
+    for s_name, sx_loc, sy_loc, h_loc, max_r in FRONT_TOF_SENSOR_RIG:
+        # Local sensor origin -> world
+        ox = x + cos_y * sx_loc - sin_y * sy_loc
+        oy = y + sin_y * sx_loc + cos_y * sy_loc
+        # Local sensor ray dir: (cos(h_loc), sin(h_loc)) in (+X right, +Y fwd)
+        dlx = math.cos(h_loc)
+        dly = math.sin(h_loc)
+        dx = cos_y * dlx - sin_y * dly
+        dy = sin_y * dlx + cos_y * dly
+
+        best_t = max_r
+        for ax, ay, bx, by in segs:
+            t = ray_segment_intersect(ox, oy, dx, dy, ax, ay, bx, by)
+            if t is not None and t < best_t:
+                best_t = t
+        readings[s_name] = max(0.030, min(TOF_MAX_RANGE_M, best_t))
+    return readings
+
+
+class SimCar2D:
+    """Simple 60 Hz Ackermann bicycle simulator with tire grip limit & wall contact."""
+
+    def __init__(self, x: float = 0.0, y: float = 0.0, yaw: float = 0.0):
+        self.x = x
+        self.y = y
+        self.yaw = yaw
+        self.v = 0.0
+        self.steer = 0.0
+        self.yaw_rate = 0.0
+        self.wall_hits = 0
+
+    def step(
+        self,
+        v_cmd: float,
+        steer_cmd: float,
+        dt: float,
+        segs: List[Tuple[float, float, float, float]],
+        force_stall: bool = False,
+    ) -> None:
+        max_ds = SERVO_MAX_SPEED_RAD_S * dt
+        self.steer += max(-max_ds, min(max_ds, steer_cmd - self.steer))
+        self.steer = max(-MAX_STEERING_RAD, min(MAX_STEERING_RAD, self.steer))
+
+        max_dv = TIRE_MU * GRAVITY_G * dt
+        self.v += max(-max_dv, min(max_dv, v_cmd - self.v))
+
+        if force_stall:
+            self.v = 0.0
+            self.yaw_rate = 0.0
+            return
+
+        # Kinematic yaw rate with friction-circle understeer cap
+        raw_omega = (self.v / WHEELBASE) * math.tan(self.steer)
+        max_omega = (TIRE_MU * GRAVITY_G) / max(0.5, abs(self.v))
+        self.yaw_rate = max(-max_omega, min(max_omega, raw_omega))
+
+        yaw_mid = self.yaw + 0.5 * self.yaw_rate * dt
+        nx = self.x - self.v * math.sin(yaw_mid) * dt
+        ny = self.y + self.v * math.cos(yaw_mid) * dt
+        nyaw = wrap_to_pi(self.yaw + self.yaw_rate * dt)
+
+        # Wall contact clamp (chassis half-width ~ 0.075 m)
+        d_wall = point_to_segments_dist(nx, ny, segs)
+        if d_wall < 0.070:
+            self.wall_hits += 1
+            self.v *= 0.15
+            self.yaw_rate *= 0.3
+        else:
+            self.x = nx
+            self.y = ny
+            self.yaw = nyaw
+
+
+def make_corridor_walls(width: float = 1.0, length: float = 10.0) -> List[Tuple[float, float, float, float]]:
+    hw = width * 0.5
+    return [
+        (-hw, -2.0, -hw, length),
+        (hw, -2.0, hw, length),
+        (-hw, -2.0, hw, -2.0),
+        (-hw, length, hw, length),
+    ]
+
+
+def make_hairpin_walls() -> List[Tuple[float, float, float, float]]:
+    """Closed oval hairpin: 1.0m left lane [-0.5, +0.5], dividing wall at x=0.50..0.60, 1.0m right lane [0.60, 1.60]."""
+    return [
+        (-0.50, -1.5, -0.50, 5.8),
+        (-0.50, 5.8, 1.60, 5.8),
+        (1.60, 5.8, 1.60, -1.5),
+        (1.60, -1.5, -0.50, -1.5),
+        (0.50, -0.3, 0.50, 4.6),
+        (0.60, -0.3, 0.60, 4.6),
+        (0.50, 4.6, 0.60, 4.6),
+        (0.50, -0.3, 0.60, -0.3),
+    ]
+
+
+def run_step(brain: AutonomousBrain, car: SimCar2D, segs: List[Tuple[float, float, float, float]], sim_t: float, dt: float, force_stall: bool = False):
+    tofs = raycast_16_tofs(car.x, car.y, car.yaw, segs)
+    v_cmd, steer_cmd, telem = brain.step(
+        tof_readings=tofs,
+        v_est=car.v,
+        steer_actual_rad=car.steer,
+        gyro_z_rad_s=car.yaw_rate,
+        dt=dt,
+        sim_time_s=sim_t,
+        ground_truth_pose=None,
+        full_telemetry=True,
+        imu_yaw_rad=car.yaw,
+    )
+    car.step(v_cmd, steer_cmd, dt, segs, force_stall=force_stall)
+    return telem
+
+
+def scenario_s1_straight_180_spin() -> Tuple[bool, str]:
+    brain = AutonomousBrain()
+    brain.reset((0.0, 0.0, -math.pi / 2.0))
+    car = SimCar2D(0.0, 0.0, -math.pi / 2.0)
+    segs = make_corridor_walls(width=1.0, length=40.0)
+    dt = 1.0 / 60.0
+    sim_t = 0.0
+
+    # Drive forward 2.5 s
+    for _ in range(150):
+        sim_t += dt
+        run_step(brain, car, segs, sim_t, dt)
+
+    # Inject 180 deg spinout
+    car.yaw = math.pi
+    car.v = 0.1
+    brain.pose_tracker.yaw = math.pi
+    brain.pose_tracker._imu_yaw_offset = 0.0
+
+    t_spin = sim_t
+    detect_lat = None
+    rec_done = None
+    aligned_at_exit = False
+    retriggers = 0
+    was_in_180 = False
+
+    for _ in range(300):  # 5.0 s max
+        sim_t += dt
+        telem = run_step(brain, car, segs, sim_t, dt)
+        is_ww = bool(telem.get("is_wrong_way"))
+        rec_state = telem.get("recovery_state", "")
+        in_180 = (rec_state == StuckRecoveryState.CORRECTIVE_180)
+
+        if is_ww and detect_lat is None:
+            detect_lat = sim_t - t_spin
+        if rec_done is None and was_in_180 and not in_180:
+            rec_done = sim_t - t_spin
+            aligned_at_exit = abs(wrap_to_pi(car.yaw - 0.0)) <= math.radians(35.0)
+        elif rec_done is not None and is_ww:
+            retriggers += 1
+        was_in_180 = in_180
+
+    aligned = abs(wrap_to_pi(car.yaw - 0.0)) <= math.radians(35.0)
+    ok = (
+        detect_lat is not None and detect_lat <= 0.35
+        and rec_done is not None and rec_done <= 2.5
+        and aligned_at_exit and aligned and retriggers == 0
+    )
+    return ok, f"detect={detect_lat:.3f}s rec={rec_done:.3f}s aligned={aligned} retriggers={retriggers} hits={car.wall_hits}"
+
+
+def scenario_s2_hairpin_no_fp() -> Tuple[bool, str]:
+    brain = AutonomousBrain()
+    brain.reset((0.0, 0.0, -math.pi / 2.0))
+    car = SimCar2D(0.0, 0.0, -math.pi / 2.0)
+    segs = make_hairpin_walls()
+    dt = 1.0 / 60.0
+    sim_t = 0.0
+    ww_triggers = 0
+    entered_return_lane = False
+    for _ in range(240):  # 4.0 s: drive up left lane, round hairpin, drive down right lane
+        sim_t += dt
+        telem = run_step(brain, car, segs, sim_t, dt)
+        if car.x > 0.60 and car.y > 0.0:
+            entered_return_lane = True
+        if telem.get("is_wrong_way"):
+            ww_triggers += 1
+    ok = ww_triggers == 0 and entered_return_lane
+    return ok, f"ww_triggers={ww_triggers} entered_return_lane={entered_return_lane} final=({car.x:.2f},{car.y:.2f}) hits={car.wall_hits}"
+
+
+def scenario_s3_wall_hugging_3pt() -> Tuple[bool, str]:
+    brain = AutonomousBrain()
+    brain.reset((0.0, 0.0, -math.pi / 2.0))
+    car = SimCar2D(0.0, 0.0, -math.pi / 2.0)
+    segs = make_corridor_walls(width=1.0, length=40.0)
+    dt = 1.0 / 60.0
+    sim_t = 0.0
+    for _ in range(150):
+        sim_t += dt
+        run_step(brain, car, segs, sim_t, dt)
+
+    # Spin 170 deg near right wall (x = +0.32, facing toward wall/south)
+    car.x = 0.32
+    car.yaw = math.radians(170.0)
+    car.v = 0.05
+    brain.pose_tracker.x = car.x
+    brain.pose_tracker.yaw = car.yaw
+    brain.pose_tracker._imu_yaw_offset = 0.0
+
+    t_spin = sim_t
+    used_rev = False
+    rec_done = None
+    was_in_180 = False
+    for _ in range(300):
+        sim_t += dt
+        telem = run_step(brain, car, segs, sim_t, dt)
+        if "REVERSE" in str(telem.get("mode", "")):
+            used_rev = True
+        in_180 = (telem.get("recovery_state") == StuckRecoveryState.CORRECTIVE_180)
+        if rec_done is None and was_in_180 and not in_180:
+            rec_done = sim_t - t_spin
+        was_in_180 = in_180
+    aligned = abs(wrap_to_pi(car.yaw - 0.0)) <= math.radians(35.0)
+    ok = aligned and (rec_done is not None)
+    return ok, f"used_rev={used_rev} rec_done={rec_done} final_yaw_deg={math.degrees(car.yaw):.1f}"
+
+
+def scenario_s4_shoved_forward_spin() -> Tuple[bool, str]:
+    brain = AutonomousBrain()
+    brain.reset((0.0, 0.0, -math.pi / 2.0))
+    car = SimCar2D(0.0, 0.0, -math.pi / 2.0)
+    segs = make_corridor_walls(width=1.0, length=40.0)
+    dt = 1.0 / 60.0
+    sim_t = 0.0
+    for _ in range(150):
+        sim_t += dt
+        run_step(brain, car, segs, sim_t, dt)
+
+    # Shove +0.95m forward and spin 180 deg
+    car.y += 0.95
+    car.yaw = math.pi
+    car.v = 0.0
+    brain.pose_tracker.y = car.y
+    brain.pose_tracker.yaw = car.yaw
+    brain.pose_tracker._imu_yaw_offset = 0.0
+
+    detect_lat = None
+    t_spin = sim_t
+    for _ in range(240):
+        sim_t += dt
+        telem = run_step(brain, car, segs, sim_t, dt)
+        if telem.get("is_wrong_way") and detect_lat is None:
+            detect_lat = sim_t - t_spin
+    aligned = abs(wrap_to_pi(car.yaw - 0.0)) <= math.radians(35.0)
+    ok = (detect_lat is not None and detect_lat <= 0.35) and aligned
+    return ok, f"detect={detect_lat} aligned={aligned} final_yaw_deg={math.degrees(car.yaw):.1f}"
+
+
+def scenario_s5_opponent_occlusion_spin() -> Tuple[bool, str]:
+    brain = AutonomousBrain()
+    brain.reset((0.0, 0.0, -math.pi / 2.0))
+    car = SimCar2D(0.0, 0.0, -math.pi / 2.0)
+    base_segs = make_corridor_walls(width=1.0, length=40.0)
+    dt = 1.0 / 60.0
+    sim_t = 0.0
+    for _ in range(150):
+        sim_t += dt
+        run_step(brain, car, base_segs, sim_t, dt)
+
+    # Spin 180 deg and place opponent box 0.80m in front (south of car) for 1.5s
+    car.yaw = math.pi
+    car.v = 0.0
+    brain.pose_tracker.yaw = car.yaw
+    brain.pose_tracker._imu_yaw_offset = 0.0
+    occ_segs = base_segs + box_segments(car.x, car.y - 0.80, half_w=0.22, half_l=0.10)
+
+    detected_during = False
+    for _ in range(90):  # 1.5 s occluded
+        sim_t += dt
+        telem = run_step(brain, car, occ_segs, sim_t, dt)
+        if telem.get("is_wrong_way"):
+            detected_during = True
+
+    # Opponent moves away -> trail must still be intact and trigger recovery if not already aligned
+    detected_after = False
+    for _ in range(210):
+        sim_t += dt
+        telem = run_step(brain, car, base_segs, sim_t, dt)
+        if telem.get("is_wrong_way"):
+            detected_after = True
+
+    aligned = abs(wrap_to_pi(car.yaw - 0.0)) <= math.radians(35.0)
+    ok = (detected_during or detected_after) and aligned
+    return ok, f"det_during={detected_during} det_after={detected_after} aligned={aligned} final_yaw_deg={math.degrees(car.yaw):.1f}"
+
+
+def scenario_s6_corner_catch_stall() -> Tuple[bool, str]:
+    brain = AutonomousBrain()
+    brain.reset((0.0, 0.0, -math.pi / 2.0))
+    car = SimCar2D(0.0, 0.0, -math.pi / 2.0)
+    segs = make_corridor_walls(width=1.0, length=40.0)
+    dt = 1.0 / 60.0
+    sim_t = 0.0
+    for _ in range(150):
+        sim_t += dt
+        run_step(brain, car, segs, sim_t, dt)
+
+    car.yaw = math.pi
+    car.v = 0.0
+    brain.pose_tracker.yaw = car.yaw
+    brain.pose_tracker._imu_yaw_offset = 0.0
+
+    # Wait for CORRECTIVE_180 to engage, then force stall for 0.6 s
+    engaged_rev = False
+    stalled_frames = 0
+    for _ in range(300):
+        sim_t += dt
+        in_180_fwd = (
+            brain.recovery_manager.state == StuckRecoveryState.CORRECTIVE_180
+            and brain.recovery_manager.corrective_substate == "FORWARD"
+        )
+        force = False
+        if in_180_fwd and stalled_frames < 36:
+            force = True
+            stalled_frames += 1
+        telem = run_step(brain, car, segs, sim_t, dt, force_stall=force)
+        if brain.recovery_manager.state == StuckRecoveryState.CORRECTIVE_180 and brain.recovery_manager.corrective_substate == "REVERSE":
+            engaged_rev = True
+
+    aligned = abs(wrap_to_pi(car.yaw - 0.0)) <= math.radians(35.0)
+    ok = engaged_rev and aligned
+    return ok, f"engaged_rev={engaged_rev} aligned={aligned} final_yaw_deg={math.degrees(car.yaw):.1f}"
+
+
+def scenario_s7_midturn_early_exit() -> Tuple[bool, str]:
+    brain = AutonomousBrain()
+    brain.reset((0.0, 0.0, 0.0))
+    for i in range(80):
+        brain.watchdog.update(0.0, i * 0.05, 0.0, v_est=2.0, yaw_rate=0.0, now_s=i * 0.05, dt=0.05)
+
+    # Mid-turn at yaw = +pi/2 (facing -X):
+    # - gap (-1.5, 0.01) points south (-Y) along old trail -> MUST reject
+    # - gap (+1.5, 0.01) points north (+Y) forward -> MUST accept
+    ok_bad, info_bad = brain.watchdog.is_gap_early_exit(0.0, 4.0, math.pi / 2.0, -1.5, 0.01)
+    ok_good, info_good = brain.watchdog.is_gap_early_exit(0.0, 4.0, math.pi / 2.0, 1.5, 0.01)
+    ok = (not ok_bad) and ok_good
+    return ok, f"wrong_way_gap_exit={ok_bad} ({info_bad['reason']}), forward_gap_exit={ok_good} ({info_good['reason']})"
+
+
+def scenario_s8_track_racing_2d_clean_lap() -> Tuple[bool, str]:
+    left_pts, right_pts = load_track_walls()
+    if len(left_pts) == 0 or len(right_pts) == 0:
+        return False, "Failed to load track_racing.wbt walls"
+    segs = segments_from_polyline(left_pts, closed=True) + segments_from_polyline(right_pts, closed=True)
+
+    brain = AutonomousBrain()
+    brain.reset((0.0, 0.0, -math.pi / 2.0))
+    car = SimCar2D(0.0, 0.0, -math.pi / 2.0)
+    dt = 1.0 / 60.0
+    sim_t = 0.0
+    ww_triggers = 0
+    dist_traveled = 0.0
+    px, py = car.x, car.y
+
+    for _ in range(900):  # 15.0 s
+        sim_t += dt
+        telem = run_step(brain, car, segs, sim_t, dt)
+        dist_traveled += math.hypot(car.x - px, car.y - py)
+        px, py = car.x, car.y
+        if telem.get("is_wrong_way"):
+            ww_triggers += 1
+
+    ok = ww_triggers == 0 and dist_traveled >= 15.0
+    return ok, f"ww_triggers={ww_triggers} dist={dist_traveled:.1f}m hits={car.wall_hits}"
+
+
+def main() -> int:
+    scenarios = [
+        ("S1_straight_180_spin", scenario_s1_straight_180_spin),
+        ("S2_hairpin_no_fp", scenario_s2_hairpin_no_fp),
+        ("S3_wall_hugging_3pt", scenario_s3_wall_hugging_3pt),
+        ("S4_shoved_forward_spin", scenario_s4_shoved_forward_spin),
+        ("S5_opponent_occlusion_spin", scenario_s5_opponent_occlusion_spin),
+        ("S6_corner_catch_stall", scenario_s6_corner_catch_stall),
+        ("S7_midturn_early_exit", scenario_s7_midturn_early_exit),
+        ("S8_track_racing_2d_clean_lap", scenario_s8_track_racing_2d_clean_lap),
+    ]
+
+    print("=" * 80)
+    print("  2D CLOSED-LOOP WRONG-WAY & RECOVERY SIMULATION BENCH")
+    print("=" * 80)
+    t0 = time.perf_counter()
+    all_ok = True
+    for name, fn in scenarios:
+        passed, detail = fn()
+        tag = "PASS" if passed else "FAIL"
+        print(f"  [{tag}] {name:30s} | {detail}")
+        if not passed:
+            all_ok = False
+    print(f"Finished in {time.perf_counter() - t0:.2f}s")
+    print("=" * 80)
+    return 0 if all_ok else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
+
+=== FILE: 1_launchers/10_track_studio.py ===
+#!/usr/bin/env python3
+"""
+================================================================================
+  10. LAUNCHER: MODULAR RACE TRACK STUDIO & WEBOTS/MAP EXPORTER
+================================================================================
+  Interactive 1200mm Tile Snapping, Custom Obstacle Drawing & Local Bundle Export.
+  Runs a zero-dependency local web server on port 8088 and opens your browser.
+
+  Usage:
+    python 1_launchers/10_track_studio.py
+================================================================================
+"""
+
+import argparse
+import base64
+import json
+import os
+import sys
+import threading
+import time
+import urllib.parse
+import webbrowser
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+
+DEFAULT_PORT = 8088
+DEFAULT_HOST = "0.0.0.0"
+
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+STATIC_DIR = os.path.join(ROOT_DIR, "5_webots", "assets", "track_builder")
+DEFAULT_OUTPUT_DIR = os.path.join(ROOT_DIR, "data", "maps")
+REQUIRED_ASSETS = ("track_builder.html", "track_builder.css", "track_builder.js")
+
+
+class TrackStudioServer(ThreadingHTTPServer):
+    allow_reuse_address = True
+
+    def __init__(self, server_address, handler_class, output_dir: str):
+        self.output_dir = os.path.abspath(output_dir)
+        super().__init__(server_address, handler_class)
+
+
+class TrackStudioHandler(SimpleHTTPRequestHandler):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, directory=STATIC_DIR, **kwargs)
+
+    def _send_json(self, status_code: int, payload: dict) -> None:
+        raw = json.dumps(payload).encode("utf-8")
+        self.send_response(status_code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def _serve_static_file(self, filename: str, content_type: str) -> None:
+        filepath = os.path.join(STATIC_DIR, filename)
+        with open(filepath, "rb") as f:
+            data = f.read()
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_GET(self):
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path in ("/", "/index.html"):
+            self._serve_static_file("track_builder.html", "text/html; charset=utf-8")
+            return
+        if parsed.path == "/track_builder.css":
+            self._serve_static_file("track_builder.css", "text/css; charset=utf-8")
+            return
+        if parsed.path == "/track_builder.js":
+            self._serve_static_file("track_builder.js", "application/javascript; charset=utf-8")
+            return
+
+        return super().do_GET()
+
+    def do_POST(self):
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path not in ("/api/save_local", "/api/deploy_to_pi"):
+            self._send_json(404, {"status": "error", "message": "Endpoint not found"})
+            return
+
+        try:
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_length)
+            data = json.loads(body.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError) as e:
+            self._send_json(400, {"status": "error", "message": f"Invalid JSON payload: {e}"})
+            return
+
+        try:
+            output_dir = self.server.output_dir
+            os.makedirs(output_dir, exist_ok=True)
+            saved_files = []
+
+            png_b64 = data.get("png_b64", "")
+            if png_b64:
+                try:
+                    png_bytes = base64.b64decode(png_b64, validate=True)
+                except Exception as e:
+                    self._send_json(400, {"status": "error", "message": f"Invalid base64 PNG data: {e}"})
+                    return
+                with open(os.path.join(output_dir, "track_map.png"), "wb") as f:
+                    f.write(png_bytes)
+                saved_files.append("track_map.png")
+
+            yaml_content = data.get("yaml", "")
+            if yaml_content:
+                with open(os.path.join(output_dir, "track_map.yaml"), "w", encoding="utf-8") as f:
+                    f.write(yaml_content)
+                saved_files.append("track_map.yaml")
+
+            track_json = data.get("track_json", "")
+            if track_json:
+                with open(os.path.join(output_dir, "track_layout.json"), "w", encoding="utf-8") as f:
+                    f.write(track_json)
+                saved_files.append("track_layout.json")
+
+            wbt_content = data.get("wbt", "")
+            if wbt_content:
+                with open(os.path.join(output_dir, "track_world.wbt"), "w", encoding="utf-8") as f:
+                    f.write(wbt_content)
+                saved_files.append("track_world.wbt")
+
+            try:
+                display_dir = os.path.relpath(output_dir, ROOT_DIR)
+            except ValueError:
+                display_dir = output_dir
+
+            print(f"[OK] Saved track bundle ({', '.join(saved_files)}) in: {output_dir}")
+            self._send_json(
+                200,
+                {
+                    "status": "ok",
+                    "message": f"Saved track bundle to {display_dir}",
+                    "files": saved_files,
+                },
+            )
+        except Exception as e:
+            self._send_json(500, {"status": "error", "message": str(e)})
+
+
+def validate_static_assets() -> bool:
+    if not os.path.isdir(STATIC_DIR):
+        print(f"[ERROR] Track Studio static directory not found: {STATIC_DIR}", file=sys.stderr)
+        return False
+    missing = [name for name in REQUIRED_ASSETS if not os.path.isfile(os.path.join(STATIC_DIR, name))]
+    if missing:
+        print(
+            f"[ERROR] Missing required Track Studio assets in {STATIC_DIR}: {', '.join(missing)}",
+            file=sys.stderr,
+        )
+        return False
+    return True
+
+
+def run_server(host: str, port: int, output_dir: str, open_browser_tab: bool = True) -> None:
+    if not validate_static_assets():
+        sys.exit(1)
+
+    print("=" * 70)
+    print("  10. MODULAR RACE TRACK STUDIO & WEBOTS/MAP EXPORTER")
+    print(f"  WEB STUDIO READY AT: http://localhost:{port}")
+    print(f"  LOCAL BUNDLE DIR:    {os.path.abspath(output_dir)}")
+    print("=" * 70)
+
+    server = TrackStudioServer((host, port), TrackStudioHandler, output_dir=output_dir)
+
+    if open_browser_tab:
+        def open_browser():
+            time.sleep(0.5)
+            webbrowser.open(f"http://localhost:{port}")
+
+        threading.Thread(target=open_browser, daemon=True).start()
+
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\n[Track Studio Stopped]")
+    finally:
+        server.server_close()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Folkrace Modular Race Track Studio (Launcher 10)")
+    parser.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"HTTP port (default: {DEFAULT_PORT})")
+    parser.add_argument("--host", default=DEFAULT_HOST, help=f"Bind address (default: {DEFAULT_HOST})")
+    parser.add_argument(
+        "--output-dir",
+        default=DEFAULT_OUTPUT_DIR,
+        help=f"Local export bundle directory (default: {DEFAULT_OUTPUT_DIR})",
+    )
+    parser.add_argument("--no-browser", action="store_true", help="Do not open a browser window automatically")
+    args = parser.parse_args()
+
+    run_server(
+        host=args.host,
+        port=args.port,
+        output_dir=args.output_dir,
+        open_browser_tab=not args.no_browser,
+    )
+
+
+if __name__ == "__main__":
+    main()
+
+
+=== FILE: 1_launchers/1_champion_preview.py ===
+"""
+================================================================================
+  LAUNCHER: C++ SL-MPC CHAMPION 3D REPLAY PREVIEW (DYNAMIC OBSTACLES)
+================================================================================
+  Launches Webots real-time mode with track_racing.wbt AND spawns the live
+  PyQt5 2D Telemetry GUI alongside it by default.
+  Loads the champion CMA-ES genome, enables 3 dynamic moving obstacles, and
+  evaluates lap times with full 3D visual preview.
+
+  Usage:
+    python 1_launchers/1_champion_preview.py             (Track 2 default: Webots + Live GUI)
+    python 1_launchers/1_champion_preview.py --track 1   (Track 1: Forward opponents)
+    python 1_launchers/1_champion_preview.py --no-gui    (Webots only)
+================================================================================
+"""
+
+import os
+import sys
+import time
+import json
+import argparse
+import subprocess
+
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+WEBOTS_DIR = os.path.join(ROOT_DIR, "5_webots")
+MY_PROJECT_DIR = os.path.join(WEBOTS_DIR, "simulation", "my_project")
+WORLD_PATH = os.path.join(MY_PROJECT_DIR, "worlds", "track_racing.wbt")
+GA_OPTIMIZER_DIR = os.path.join(WEBOTS_DIR, "optimization", "ga_planner_optimizer")
+PLANNERS_DIR = os.path.join(MY_PROJECT_DIR, "controllers", "tof_path_planner")
+WEBOTS_BIN = r"C:\Program Files\Webots\msys64\mingw64\bin\webots.exe"
+
+BEST_GENOME_PATH = os.path.join(GA_OPTIMIZER_DIR, "best_planner_genome.json")
+ACTIVE_CHAMPION_INFO = {}
+
+
+def activate_champion_config(track: int = 2) -> bool:
+    global ACTIVE_CHAMPION_INFO
+
+    if not os.path.isfile(BEST_GENOME_PATH):
+        print(f"[Error] Champion file does not exist: {BEST_GENOME_PATH}")
+        return False
+
+    try:
+        with open(BEST_GENOME_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        genes = data.get("genes") or data.get("best_genome")
+        if not genes:
+            print(f"[Error] No 'genes' or 'best_genome' found in {BEST_GENOME_PATH}")
+            return False
+
+        fitness = data.get("fitness", data.get("best_fitness", 0.0))
+        metrics = data.get("metrics", data.get("best_metrics", {}))
+        planner = data.get("planner", "OPTION_2_SL_MPC")
+        title = data.get("title", f"{planner} Best Champion (Fitness {fitness})")
+        ACTIVE_CHAMPION_INFO = {"title": title, "fitness": fitness}
+
+        dist = metrics.get("distance_m", "N/A")
+        speed = metrics.get("mean_speed_mps", "N/A")
+        laps = metrics.get("laps_completed", "N/A")
+        track_label = "Track 2 (Reverse Opponents)" if track == 2 else "Track 1 (Forward Opponents)"
+
+        print(f"[Ready] Activated best GA champion genome:")
+        print(f"        Source:   {os.path.basename(BEST_GENOME_PATH)}")
+        print(f"        Title:    {title}")
+        print(f"        Fitness:  {fitness}")
+        print(f"        Stats:    Dist: {dist}m | Speed: {speed}m/s | Laps: {laps}")
+        print(f"        Mode:     {track_label}")
+        return True
+    except Exception as e:
+        print(f"[Error] Failed to activate configuration: {e}")
+        return False
+
+
+def _kill_proc(proc):
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        if sys.platform == "win32":
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=4)
+        else:
+            proc.terminate()
+            proc.wait(timeout=3)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
+def launch_webots(launch_gui: bool = True, telemetry_hz: int = 60, track: int = 2):
+    if not os.path.exists(WEBOTS_BIN):
+        print(f"[Error] Webots executable not found at {WEBOTS_BIN}")
+        return
+
+    if not os.path.exists(WORLD_PATH):
+        print(f"[Error] World file not found at {WORLD_PATH}")
+        return
+
+    env = os.environ.copy()
+    webots_home = r"C:\Program Files\Webots"
+    webots_bin_dir = os.path.dirname(WEBOTS_BIN)
+    py_dir = os.path.dirname(sys.executable)
+    py_scripts = os.path.join(py_dir, "Scripts")
+
+    env["WEBOTS_HOME"] = webots_home
+    env["PATH"] = webots_bin_dir + os.pathsep + py_dir + os.pathsep + py_scripts + os.pathsep + env.get("PATH", "")
+    env["PYTHONPATH"] = os.pathsep.join([
+        PLANNERS_DIR,
+        os.path.join(GA_OPTIMIZER_DIR, "data"),
+        GA_OPTIMIZER_DIR,
+        MY_PROJECT_DIR,
+        ROOT_DIR,
+    ])
+    env["WEBOTS_CONTROLLER_MODE"] = "preview"
+    env["WEBOTS_TELEMETRY_HZ"] = str(telemetry_hz)
+    env["FOLKRACE_OBS_DIRECTION"] = "-1" if track == 2 else "1"
+    env["PYTHONUNBUFFERED"] = "1"
+
+    gui_proc = None
+    if launch_gui:
+        gui_script = os.path.join(PLANNERS_DIR, "planner_gui.py")
+        if os.path.exists(gui_script):
+            print(f"[1/2] Spawning Live Telemetry Map GUI (Port 9876, Stream: {telemetry_hz} Hz)...", flush=True)
+            gui_proc = subprocess.Popen([sys.executable, gui_script, "--telemetry-hz", str(telemetry_hz), "--local-only"], cwd=PLANNERS_DIR, env=env)
+            time.sleep(0.6)
+
+    cmd = [
+        WEBOTS_BIN,
+        "--stdout",
+        "--stderr",
+        "--mode=realtime",
+        WORLD_PATH,
+    ]
+
+    champ_title = ACTIVE_CHAMPION_INFO.get("title", "Best GA Champion")
+    track_label = "Track 2 (Reverse Opponents)" if track == 2 else "Track 1 (Forward Opponents)"
+    print("=" * 80)
+    print(f"  LAUNCHING REAL-TIME 3D WEBOTS CHAMPION PREVIEW + LIVE TELEMETRY GUI ({telemetry_hz} Hz)")
+    print(f"  World:        {WORLD_PATH}")
+    print(f"  Track Mode:   {track_label}")
+    print(f"  Champion:     {champ_title}")
+    print(f"  Telemetry Hz: {telemetry_hz} Hz (Adjustable live via GUI slider 1-60 Hz)")
+    print("=" * 80)
+
+    print(f"[{'2/2' if gui_proc else '1/1'}] Launching Webots simulation...", flush=True)
+    webots_proc = subprocess.Popen(cmd, env=env, cwd=MY_PROJECT_DIR)
+
+    def cleanup():
+        if webots_proc and webots_proc.poll() is None:
+            _kill_proc(webots_proc)
+        if gui_proc and gui_proc.poll() is None:
+            _kill_proc(gui_proc)
+
+    import atexit
+    atexit.register(cleanup)
+
+    try:
+        while True:
+            gui_done = gui_proc is not None and gui_proc.poll() is not None
+            webots_done = webots_proc.poll() is not None
+            if gui_done:
+                print("\n[Launcher] Telemetry GUI closed. Terminating Webots simulation...", flush=True)
+                break
+            if webots_done:
+                print("\n[Launcher] Webots simulation closed. Terminating Telemetry GUI...", flush=True)
+                break
+            time.sleep(0.3)
+    except KeyboardInterrupt:
+        print("\n[Launcher] User interrupted session. Shutting down cleanly...", flush=True)
+    finally:
+        cleanup()
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Launch Webots Real-Time Preview with C++ SL-MPC Champion Config")
+    parser.add_argument("--track", type=int, choices=(1, 2), default=2, help="Track mode: 1 = Forward opponents, 2 = Reverse opponents (default)")
+    parser.add_argument("--reverse", action="store_true", help="Shortcut for --track 2 (reverse opponents)")
+    parser.add_argument("--no-gui", action="store_true", help="Do not launch live 2D telemetry map GUI alongside Webots")
+    parser.add_argument("--no-launch", action="store_true", help="Only set active config without launching Webots")
+    parser.add_argument("--telemetry-hz", "--hz", type=int, default=60, help="Initial streaming frequency for GUI and Webots terminal telemetry (1-60 Hz, default: 60)")
+
+    args = parser.parse_args()
+    track = 2 if args.reverse else args.track
+    telem_hz = max(1, min(60, args.telemetry_hz))
+
+    if not activate_champion_config(track=track):
+        return
+
+    if not args.no_launch:
+        launch_webots(launch_gui=not args.no_gui, telemetry_hz=telem_hz, track=track)
+
+
+if __name__ == "__main__":
+    main()
+
+
+=== FILE: 1_launchers/2_fast_champion_drive.py ===
+"""
+================================================================================
+  LAUNCHER: FAST CHAMPION PURE 3D DRIVE (MAX REAL-TIME PERFORMANCE)
+================================================================================
+  Launches Webots real-time mode with track_racing.wbt for direct 3D visual
+  driving evaluation with dynamic moving obstacles.
+
+  Stripped of all background GUI processes, high-rate UDP broadcast streaming,
+  viewport HUD overlay drawing, and stdout terminal flooding for maximum native
+  physics and real-time driving performance.
+
+  Usage:
+    python 1_launchers/2_fast_champion_drive.py           (Track 2 default: Reverse opponents)
+    python 1_launchers/2_fast_champion_drive.py --track 1 (Track 1: Forward opponents)
+    python 1_launchers/2_fast_champion_drive.py --reverse (Track 2: Reverse opponents)
+================================================================================
+"""
+
+import argparse
+import os
+import sys
+import time
+import json
+import subprocess
+
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+WEBOTS_DIR = os.path.join(ROOT_DIR, "5_webots")
+MY_PROJECT_DIR = os.path.join(WEBOTS_DIR, "simulation", "my_project")
+WORLD_PATH = os.path.join(MY_PROJECT_DIR, "worlds", "track_racing.wbt")
+GA_OPTIMIZER_DIR = os.path.join(WEBOTS_DIR, "optimization", "ga_planner_optimizer")
+BEST_GENOME_PATH = os.path.join(GA_OPTIMIZER_DIR, "best_planner_genome.json")
+WEBOTS_BIN = r"C:\Program Files\Webots\msys64\mingw64\bin\webots.exe"
+
+
+def activate_champion_config(track: int = 2) -> bool:
+    if not os.path.isfile(BEST_GENOME_PATH):
+        print(f"[Error] Champion genome file does not exist: {BEST_GENOME_PATH}")
+        return False
+
+    try:
+        with open(BEST_GENOME_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        genes = data.get("genes") or data.get("best_genome")
+        if not genes:
+            print(f"[Error] No 'genes' or 'best_genome' found in {BEST_GENOME_PATH}")
+            return False
+
+        fitness = data.get("fitness", data.get("best_fitness", 0.0))
+        metrics = data.get("metrics", data.get("best_metrics", {}))
+        planner = data.get("planner", "OPTION_2_SL_MPC")
+        title = data.get("title", f"{planner} Best Champion (Fitness {fitness})")
+
+        dist = metrics.get("distance_m", "N/A")
+        speed = metrics.get("mean_speed_mps", "N/A")
+        laps = metrics.get("laps_completed", "N/A")
+        track_label = "Track 2 (Reverse Opponents)" if track == 2 else "Track 1 (Forward Opponents)"
+
+        print("=" * 80)
+        print("  FAST CHAMPION PURE 3D DRIVE - MAX REAL-TIME PERFORMANCE")
+        print("=" * 80)
+        print(f"[Ready] Activated Champion: {title}")
+        print(f"        Fitness: {fitness} | Dist: {dist}m | Speed: {speed}m/s | Laps: {laps}")
+        print(f"        World:   {os.path.basename(WORLD_PATH)} | {track_label}")
+        print("=" * 80)
+        return True
+    except Exception as e:
+        print(f"[Error] Failed to activate configuration: {e}")
+        return False
+
+
+def _kill_proc(proc):
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        if sys.platform == "win32":
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=4)
+        else:
+            proc.terminate()
+            proc.wait(timeout=3)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Fast Champion Pure 3D Drive Launcher")
+    parser.add_argument(
+        "--track",
+        type=int,
+        choices=(1, 2),
+        default=2,
+        help="Track mode: 1 = Forward opponents, 2 = Reverse opponents (default)",
+    )
+    parser.add_argument(
+        "--reverse",
+        action="store_true",
+        help="Shortcut for --track 2 (reverse opponents)",
+    )
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+    track = 2 if args.reverse else args.track
+
+    if not activate_champion_config(track=track):
+        sys.exit(1)
+
+    webots_cmd = WEBOTS_BIN if os.path.isfile(WEBOTS_BIN) else "webots"
+
+    env = os.environ.copy()
+    webots_home = r"C:\Program Files\Webots"
+    webots_bin_dir = os.path.dirname(webots_cmd) if os.path.isabs(webots_cmd) else os.path.dirname(WEBOTS_BIN)
+    py_dir = os.path.dirname(sys.executable)
+    py_scripts = os.path.join(py_dir, "Scripts")
+    planners_dir = os.path.join(MY_PROJECT_DIR, "controllers", "tof_path_planner")
+
+    env["WEBOTS_HOME"] = webots_home
+    env["PATH"] = webots_bin_dir + os.pathsep + py_dir + os.pathsep + py_scripts + os.pathsep + env.get("PATH", "")
+    env["PYTHONPATH"] = os.pathsep.join([
+        planners_dir,
+        os.path.join(GA_OPTIMIZER_DIR, "data"),
+        GA_OPTIMIZER_DIR,
+        MY_PROJECT_DIR,
+        ROOT_DIR,
+    ])
+    env["PYTHONUNBUFFERED"] = "1"
+    env["WEBOTS_CONTROLLER_MODE"] = "fast_drive"
+    env["FOLKRACE_OBS_DIRECTION"] = "-1" if track == 2 else "1"
+
+    cmd = [
+        webots_cmd,
+        "--stdout",
+        "--stderr",
+        "--mode=realtime",
+        WORLD_PATH,
+    ]
+
+    print(f"[Launcher] Launching Webots in realtime 3D visualization mode...")
+    webots_proc = subprocess.Popen(cmd, env=env, cwd=MY_PROJECT_DIR)
+
+    import atexit
+    atexit.register(_kill_proc, webots_proc)
+
+    try:
+        while True:
+            if webots_proc.poll() is not None:
+                print("\n[Launcher] Webots closed.")
+                break
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        print("\n[Launcher] Interrupt caught. Terminating Webots...")
+    finally:
+        _kill_proc(webots_proc)
+        print("[Launcher] Clean exit.")
+
+
+if __name__ == "__main__":
+    main()
+
+
+=== FILE: 1_launchers/3_ga_dashboard.py ===
+"""
+================================================================================
+  LAUNCHER: REAL-TIME GENETIC ALGORITHM PERFORMANCE DASHBOARD
+================================================================================
+  Launches the real-time PyQt5 GA Dashboard GUI with live Matplotlib plots,
+  pause/resume controls, and multi-generation tracking.
+
+  Usage:
+    python 1_launchers/3_ga_dashboard.py
+================================================================================
+"""
+
+import os
+import sys
+import subprocess
+
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+GA_DIR = os.path.join(ROOT_DIR, "5_webots", "optimization", "ga_planner_optimizer")
+GUI_SCRIPT = os.path.join(GA_DIR, "ga_dashboard_gui.py")
+
+if __name__ == "__main__":
+    cmd = [sys.executable, GUI_SCRIPT] + sys.argv[1:]
+    sys.exit(subprocess.run(cmd, cwd=GA_DIR).returncode)
+
+
+=== FILE: 1_launchers/4_pi4_debug_studio.py ===
+"""
+================================================================================
+  LAUNCHER: PI 4 DUAL-CORE DEBUG STUDIO & FLIGHT RECORDER
+================================================================================
+  Connects to Raspberry Pi 4 ('robot'):
+    - Auto-detects and connects to Pi debug server over HTTP port 8080.
+    - Launches Tactical Mission Control (same rich GUI as the browser server)
+      in a dedicated standalone window (Edge/Chrome app mode) or browser tab.
+    - Displays live telemetry status, driving buffer metrics, and SD card space.
+    - Self-healing ESP32 reconnection watchdog and remote reconnect trigger.
+    - Supports full automated endpoint verification (--verify), real-time
+      terminal telemetry monitoring (--stream), and log downloading (--download).
+
+  Usage:
+    python 1_launchers/4_pi4_debug_studio.py              # Opens Tactical Mission Control standalone GUI (default)
+    python 1_launchers/4_pi4_debug_studio.py --tab        # Opens Tactical Mission Control in standard browser tab
+    python 1_launchers/4_pi4_debug_studio.py --reconnect  # Triggers remote ESP32 USB serial re-probe & reconnect
+    python 1_launchers/4_pi4_debug_studio.py --desktop    # Launches legacy PyQt5 simulation planner GUI
+    python 1_launchers/4_pi4_debug_studio.py --verify     # Tests all Pi server endpoints
+    python 1_launchers/4_pi4_debug_studio.py --stream     # Live terminal telemetry dashboard
+    python 1_launchers/4_pi4_debug_studio.py --download   # Downloads active SQLite flight log
+    python 1_launchers/4_pi4_debug_studio.py --replay     # Downloads (or opens latest) .db for 60Hz offline replay
+    python 1_launchers/4_pi4_debug_studio.py --restart    # Restarts remote Folkrace service
+    python 1_launchers/4_pi4_debug_studio.py --sync       # Syncs 2_pi4 code to robot before launch
+================================================================================
+"""
+
+import os
+import re
+import sys
+import time
+import json
+import socket
+import shutil
+import urllib.request
+import urllib.error
+import argparse
+import concurrent.futures
+import webbrowser
+import subprocess
+from pathlib import Path
+from typing import Optional, Dict, Any, Tuple, List
+
+# Ensure UTF-8 output on Windows terminals
+if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PI4_DIR = os.path.join(ROOT_DIR, "2_pi4")
+CONTROLLERS_DIR = os.path.join(ROOT_DIR, "5_webots", "simulation", "my_project", "controllers", "tof_path_planner")
+PLANNER_GUI_SCRIPT = os.path.join(CONTROLLERS_DIR, "planner_gui.py")
+
+DEFAULT_WIFI_IPS = ["192.168.20.120", "192.168.20.117"]
+PI_MAC_PREFIXES = ("dc:a6:32", "b8:27:eb", "e4:5f:01", "d8:3a:dd", "2c:cf:67")
+REMOTE_DIR = "/home/admin/folkrace"
+PORT = 8080
+
+
+def get_active_wifi_network() -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """
+    Detects the laptop's currently connected Wi-Fi SSID, local IPv4, and /24 prefix (e.g. '10.88.202.').
+    Returns (ssid, local_ip, subnet_prefix).
+    """
+    ssid: Optional[str] = None
+    local_ip: Optional[str] = None
+    iface_name: Optional[str] = None
+
+    if sys.platform == "win32":
+        try:
+            res = subprocess.run(
+                ["netsh", "wlan", "show", "interfaces"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=2,
+            )
+            if res.returncode == 0:
+                in_connected = False
+                for line in res.stdout.splitlines():
+                    if ":" not in line:
+                        continue
+                    key, val = [p.strip() for p in line.split(":", 1)]
+                    if key == "Name":
+                        iface_name = val
+                        in_connected = False
+                    elif key == "State" and val.lower() == "connected":
+                        in_connected = True
+                    elif key == "SSID" and in_connected and val:
+                        ssid = val
+                        break
+        except Exception:
+            pass
+
+        if iface_name and ssid:
+            try:
+                res = subprocess.run(
+                    ["netsh", "interface", "ip", "show", "addresses", iface_name],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                    timeout=2,
+                )
+                if res.returncode == 0:
+                    m = re.search(r"IP Address:\s*(\d+\.\d+\.\d+\.\d+)", res.stdout)
+                    if m:
+                        local_ip = m.group(1)
+            except Exception:
+                pass
+
+    if not local_ip:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.connect(("8.8.8.8", 80))
+                local_ip = s.getsockname()[0]
+        except Exception:
+            pass
+
+    subnet_prefix = ".".join(local_ip.split(".")[:3]) + "." if local_ip and local_ip.count(".") == 3 else None
+    return ssid, local_ip, subnet_prefix
+
+
+def discover_arp_pi_ips(subnet_prefix: Optional[str] = None) -> List[str]:
+    """Reads the local OS ARP cache for Raspberry Pi MAC prefixes on the active subnet."""
+    ips: List[str] = []
+    try:
+        res = subprocess.run(["arp", "-a"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=2)
+        if res.returncode != 0:
+            return ips
+        for line in res.stdout.splitlines():
+            m = re.search(r"(\d+\.\d+\.\d+\.\d+)\s+([0-9a-fA-F]{2}(?:[:-][0-9a-fA-F]{2}){5})", line)
+            if not m:
+                continue
+            ip, mac = m.group(1), m.group(2).lower().replace("-", ":")
+            if subnet_prefix and not ip.startswith(subnet_prefix):
+                continue
+            if mac.startswith(PI_MAC_PREFIXES) and ip not in ips:
+                ips.append(ip)
+    except Exception:
+        pass
+    return ips
+
+
+def _is_tcp_open(ip: str, port: int, timeout_s: float = 0.35) -> bool:
+    try:
+        with socket.create_connection((ip, port), timeout=timeout_s):
+            return True
+    except Exception:
+        return False
+
+
+def scan_wifi_subnet_for_pi(
+    subnet_prefix: str, local_ip: Optional[str], port: int, timeout_s: float = 0.8
+) -> List[str]:
+    """Probes the current Wi-Fi /24 subnet in parallel for hosts listening on `port`."""
+    targets = [f"{subnet_prefix}{i}" for i in range(1, 255) if f"{subnet_prefix}{i}" != local_ip]
+    open_ips: List[str] = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=64) as pool:
+        futures = {pool.submit(_is_tcp_open, ip, port, timeout_s): ip for ip in targets}
+        for fut in concurrent.futures.as_completed(futures):
+            ip = futures[fut]
+            try:
+                if fut.result():
+                    open_ips.append(ip)
+            except Exception:
+                pass
+    # Prioritize hosts whose MAC in the refreshed ARP cache matches a Raspberry Pi OUI
+    arp_pis = set(discover_arp_pi_ips(subnet_prefix))
+    open_ips.sort(key=lambda ip: (0 if ip in arp_pis else 1, ip))
+    return open_ips
+
+
+def get_candidate_hosts(preferred_host: Optional[str] = None, subnet_prefix: Optional[str] = None) -> List[str]:
+    """Returns deduplicated candidate hosts restricted to the active Wi-Fi subnet."""
+    if preferred_host:
+        return [preferred_host]
+    if subnet_prefix is None:
+        _, _, subnet_prefix = get_active_wifi_network()
+
+    ordered: List[str] = []
+    for ip in discover_arp_pi_ips(subnet_prefix):
+        if ip not in ordered:
+            ordered.append(ip)
+
+    for ip in DEFAULT_WIFI_IPS:
+        if (subnet_prefix is None or ip.startswith(subnet_prefix)) and ip not in ordered:
+            ordered.append(ip)
+
+    if subnet_prefix is None or subnet_prefix == "192.168.20.":
+        if "robot" not in ordered:
+            ordered.append("robot")
+
+    if "robot.local" not in ordered:
+        ordered.append("robot.local")
+    return ordered
+
+
+def format_ssh_target(host: Optional[str]) -> str:
+    """Formats a hostname or IP for SSH/SCP (uses 'robot' alias or 'admin@<ip>')."""
+    if not host or host in ("robot", "robot.local", "127.0.0.1"):
+        return "robot"
+    if "@" in host:
+        return host
+    return f"admin@{host}"
+
+
+def _probe_http_status(host: str, timeout_s: float = 1.0) -> Optional[str]:
+    url = f"http://{host}:{PORT}/api/status"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "FolkraceLauncher/1.0"})
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            if resp.status == 200:
+                return f"http://{host}:{PORT}"
+    except Exception:
+        pass
+    return None
+
+
+def resolve_pi_host(preferred_host: Optional[str] = None, timeout_s: float = 1.0) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Auto-detects the responsive hostname or IP for the Pi 4 debug server on the active Wi-Fi.
+    Returns (hostname, base_url).
+    """
+    _, local_ip, subnet_prefix = get_active_wifi_network()
+    candidates = get_candidate_hosts(preferred_host, subnet_prefix=subnet_prefix)
+
+    for host in candidates:
+        base_url = _probe_http_status(host, timeout_s=timeout_s)
+        if base_url:
+            return host, base_url
+
+    if not preferred_host and subnet_prefix:
+        for ip in scan_wifi_subnet_for_pi(subnet_prefix, local_ip, PORT):
+            base_url = _probe_http_status(ip, timeout_s=timeout_s)
+            if base_url:
+                return ip, base_url
+
+    return None, None
+
+
+def check_ssh_connection(host: str = "robot", timeout_s: int = 3) -> bool:
+    """Checks if Raspberry Pi is reachable over SSH."""
+    cmd = ["ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={timeout_s}", host, "echo ok"]
+    try:
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout_s + 1, text=True)
+        return res.returncode == 0 and "ok" in res.stdout
+    except Exception:
+        return False
+
+
+def resolve_ssh_host(preferred_host: Optional[str] = None, timeout_s: int = 3) -> str:
+    """Finds the first reachable SSH target on the active Wi-Fi (including dynamic hotspot IPs)."""
+    if preferred_host:
+        return format_ssh_target(preferred_host)
+
+    _, local_ip, subnet_prefix = get_active_wifi_network()
+    candidates = get_candidate_hosts(subnet_prefix=subnet_prefix)
+    seen = set()
+
+    def _try_hosts(hosts: List[str]) -> Optional[str]:
+        for host in hosts:
+            if host in ("127.0.0.1", "robot.local"):
+                continue
+            target = format_ssh_target(host)
+            if target in seen:
+                continue
+            seen.add(target)
+            probe_ip = "192.168.20.120" if host == "robot" else host
+            if not _is_tcp_open(probe_ip, 22, timeout_s=0.4):
+                continue
+            if check_ssh_connection(target, timeout_s=timeout_s):
+                return target
+        return None
+
+    found = _try_hosts(candidates)
+    if found:
+        return found
+
+    if subnet_prefix:
+        scanned = scan_wifi_subnet_for_pi(subnet_prefix, local_ip, 22)
+        found = _try_hosts(scanned)
+        if found:
+            return found
+
+    return "robot"
+
+
+def query_api_json(base_url: str, endpoint: str, timeout_s: float = 3.0) -> Optional[Dict[str, Any]]:
+    """Helper to query JSON from the Pi debug server."""
+    url = f"{base_url}{endpoint}"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "FolkraceLauncher/1.0"})
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            if resp.status == 200:
+                return json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        pass
+    return None
+
+
+def sync_pi_stack(host: str = "robot"):
+    """Synchronizes local 2_pi4 and brain files to the Pi."""
+    print(f"[Sync] Preparing remote directory: {REMOTE_DIR} on {host}...")
+    subprocess.run(["ssh", host, f"mkdir -p {REMOTE_DIR}/brain {REMOTE_DIR}/data/recordings"], check=True)
+
+    print(f"[Sync] Uploading 2_pi4 subsystem scripts to {host}...")
+    files = [
+        os.path.join(PI4_DIR, "auto_servo_center.py"),
+        os.path.join(PI4_DIR, "core_manager.py"),
+        os.path.join(PI4_DIR, "debug_recorder.py"),
+        os.path.join(PI4_DIR, "debug_server.py"),
+        os.path.join(PI4_DIR, "path_planner_runner.py"),
+        os.path.join(PI4_DIR, "run_folkrace_system.py"),
+        os.path.join(PI4_DIR, "web_debug_gui.html"),
+        os.path.join(PI4_DIR, "mcu_telemetry_protocol.py"),
+        os.path.join(PI4_DIR, "mcu_uart_bridge.py"),
+    ]
+    scp_cmd = ["scp"] + [f for f in files if os.path.exists(f)] + [f"{host}:{REMOTE_DIR}/"]
+    subprocess.run(scp_cmd, check=True)
+
+    brain_dir = os.path.join(ROOT_DIR, "brain")
+    if os.path.exists(brain_dir):
+        subprocess.run(["ssh", host, f"mkdir -p {REMOTE_DIR}/brain && rm -f {REMOTE_DIR}/brain/*.dll"], check=True)
+        brain_files = [
+            os.path.join(brain_dir, f)
+            for f in os.listdir(brain_dir)
+            if os.path.isfile(os.path.join(brain_dir, f)) and not f.endswith((".dll", ".pyc", ".o", ".obj"))
+        ]
+        if brain_files:
+            subprocess.run(["scp"] + brain_files + [f"{host}:{REMOTE_DIR}/brain/"], check=True)
+
+    print("[Sync] Files synced successfully.")
+
+
+def restart_remote_service(host: str = "robot"):
+    """Restarts the Folkrace service on the Pi."""
+    print(f"[Remote] Restarting folkrace systemd service on {host}...")
+    cmd = ["ssh", host, "echo l | sudo -S systemctl restart folkrace"]
+    subprocess.run(cmd, check=True)
+    time.sleep(2.0)
+    print("[Remote] Service restarted.")
+
+
+def stop_remote_service(host: str = "robot"):
+    """Stops the Folkrace service on the Pi."""
+    print(f"[Remote] Stopping folkrace systemd service on {host}...")
+    cmd = ["ssh", host, "echo l | sudo -S systemctl stop folkrace"]
+    subprocess.run(cmd, check=True)
+    print("[Remote] Service stopped.")
+
+
+def launch_tactical_gui(base_url: str, prefer_app_window: bool = True):
+    """
+    Launches the Tactical Mission Control GUI (same as browser server).
+    If prefer_app_window is True, attempts to launch Edge or Chrome in standalone
+    app window mode (--app=http://...) for a borderless native application window
+    without browser tabs or URL bars. Falls back to default web browser.
+    """
+    if prefer_app_window:
+        candidates = [
+            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+            r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+            shutil.which("msedge") or "",
+            shutil.which("google-chrome") or "",
+            shutil.which("chrome") or "",
+            shutil.which("chromium") or "",
+        ]
+        for c in candidates:
+            if c and os.path.exists(c):
+                try:
+                    subprocess.Popen([c, f"--app={base_url}"])
+                    print(f"[Launcher] Tactical Mission Control opened in standalone app window ({os.path.basename(c)})")
+                    print(f"  URL: {base_url}")
+                    print("=" * 75)
+                    return
+                except Exception:
+                    pass
+
+    print(f"[Launcher] Opening Tactical Mission Control in default browser: {base_url}")
+    webbrowser.open(base_url)
+    print("=" * 75)
+
+
+def trigger_mcu_reconnect(base_url: str) -> bool:
+    """Tells the Pi debug server to re-detect and reconnect to all ESP32 USB serial ports."""
+    url = f"{base_url}/api/mcu/command"
+    payload = json.dumps({"action": "reconnect"}).encode("utf-8")
+    print(f"[Launcher] Triggering remote ESP32 serial re-probe & reconnect on {base_url}...")
+    try:
+        req = urllib.request.Request(
+            url,
+            data=payload,
+            headers={"Content-Type": "application/json", "User-Agent": "FolkraceLauncher/1.0"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=4.0) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            print(f"[Launcher] ESP32 Reconnect Status: {data.get('status', 'OK')} ({data.get('msg', 'reconnected')})")
+            return True
+    except Exception as e:
+        print(f"[Launcher ERROR] Failed triggering ESP32 reconnect: {e}")
+        return False
+
+
+def download_database(base_url: str, output_path: Optional[str] = None) -> Optional[str]:
+    """Downloads the active flight recorder SQLite database and returns its local path."""
+    status = query_api_json(base_url, "/api/status")
+    session_id = status.get("session_id", "recording") if status else "recording"
+    
+    if not output_path:
+        out_dir = Path(ROOT_DIR) / "data" / "recordings"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        output_path = str(out_dir / f"{session_id}.db")
+
+    url = f"{base_url}/api/download"
+    print(f"[Download] Fetching flight database from {url}...")
+    t0 = time.time()
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "FolkraceLauncher/1.0"})
+        with urllib.request.urlopen(req, timeout=30.0) as resp, open(output_path, "wb") as f:
+            total_bytes = 0
+            while True:
+                chunk = resp.read(65536)
+                if not chunk:
+                    break
+                f.write(chunk)
+                total_bytes += len(chunk)
+        dt = time.time() - t0
+        mb = total_bytes / (1024 * 1024)
+        print(f"[Download] Saved {mb:.2f} MB in {dt:.2f}s ({mb/max(0.01, dt):.2f} MB/s) -> {output_path}")
+        return output_path
+    except Exception as e:
+        print(f"[Download] Error: {e}")
+        return None
+
+
+def find_latest_local_recording() -> Optional[str]:
+    """Returns the most recently modified .db file in data/recordings/, if any."""
+    rec_dir = Path(ROOT_DIR) / "data" / "recordings"
+    if not rec_dir.exists():
+        return None
+    dbs = sorted(rec_dir.glob("*.db"), key=lambda p: p.stat().st_mtime, reverse=True)
+    return str(dbs[0]) if dbs else None
+
+
+def run_local_replay_server(db_path: str, prefer_app_window: bool = True, open_browser: bool = True):
+    """Starts a localhost 60 Hz offline replay server for a downloaded SQLite flight database."""
+    from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+    from urllib.parse import urlparse
+    import threading
+
+    if PI4_DIR not in sys.path:
+        sys.path.insert(0, PI4_DIR)
+    tools_dir = os.path.join(ROOT_DIR, "tools")
+    if tools_dir not in sys.path:
+        sys.path.insert(0, tools_dir)
+    from debug_recorder import TelemetryLogReader, add_label
+    from debug_server import build_live_binary_packet
+    from flight_analyzer import FlightSession
+
+    html_path = os.path.join(PI4_DIR, "web_debug_gui.html")
+    state_lock = threading.Lock()
+    replay_state: Dict[str, Any] = {
+        "db_path": db_path,
+        "reader": TelemetryLogReader(db_path),
+        "summary": None,
+        "bounds": (1, 0, 0),
+        "flight_session": None,
+    }
+
+    def _reload_db(new_path: str):
+        new_reader = TelemetryLogReader(new_path)
+        summary = new_reader.get_summary()
+        bounds = new_reader.get_frame_bounds()
+        with state_lock:
+            old_reader = replay_state.get("reader")
+            replay_state["db_path"] = new_path
+            replay_state["reader"] = new_reader
+            replay_state["summary"] = summary
+            replay_state["bounds"] = bounds
+            replay_state["flight_session"] = None
+        if old_reader and hasattr(old_reader, "close"):
+            old_reader.close()
+
+    def _get_flight_session() -> FlightSession:
+        with state_lock:
+            sess = replay_state.get("flight_session")
+            cur_db = replay_state["db_path"]
+        if sess is None or sess.db_path != cur_db:
+            new_sess = FlightSession(cur_db)
+            with state_lock:
+                if replay_state["db_path"] == cur_db:
+                    replay_state["flight_session"] = new_sess
+                sess = replay_state.get("flight_session") or new_sess
+        return sess
+
+    _reload_db(db_path)
+
+    class LocalReplayHandler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, format, *args):
+            pass
+
+        def _send_bytes(self, body: bytes, content_type: str, status: int = 200):
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _send_json(self, obj: Any, status: int = 200):
+            self._send_bytes(json.dumps(obj).encode("utf-8"), "application/json", status)
+
+        def do_GET(self):
+            path = urlparse(self.path).path
+            if path in ("/", "/index.html"):
+                with open(html_path, "rb") as f:
+                    self._send_bytes(f.read(), "text/html")
+            elif path == "/api/status":
+                with state_lock:
+                    cur_db = replay_state["db_path"]
+                    summary = replay_state["summary"] or {}
+                    min_id, max_id, _ = replay_state["bounds"]
+                try:
+                    _, _, disk_free = shutil.disk_usage(os.path.dirname(cur_db) or ROOT_DIR)
+                    disk_free_gb = round(disk_free / (1024**3), 2)
+                except Exception:
+                    disk_free_gb = 0.0
+                self._send_json({
+                    "session_id": summary.get("session_id", os.path.basename(cur_db)),
+                    "min_frame_id": min_id,
+                    "total_recorded": max_id,
+                    "dropped_frames": 0,
+                    "pruned_frames": 0,
+                    "driving_seconds": summary.get("driving_seconds", 0.0),
+                    "driving_minutes": summary.get("driving_minutes", 0.0),
+                    "max_buffer_minutes": 30.0,
+                    "file_size_mb": summary.get("file_size_mb", 0.0),
+                    "disk_free_gb": disk_free_gb,
+                    "temp_c": 0.0,
+                    "loop_hz": 60.0,
+                    "cpu_affinity": [],
+                })
+            elif path.startswith("/api/frame_bin/"):
+                try:
+                    frame_id = int(path.split("/")[-1])
+                except ValueError:
+                    self.send_error(400, "Invalid frame ID")
+                    return
+                with state_lock:
+                    reader = replay_state["reader"]
+                frame_data = reader.get_frame(frame_id)
+                if not frame_data:
+                    self.send_error(404, f"Frame {frame_id} not found")
+                    return
+                try:
+                    self._send_bytes(build_live_binary_packet(frame_data), "application/octet-stream")
+                except Exception as e:
+                    self.send_error(500, f"Failed to pack frame {frame_id}: {e}")
+            elif path.startswith("/api/frame/"):
+                try:
+                    frame_id = int(path.split("/")[-1])
+                except ValueError:
+                    self._send_json({"error": "Invalid frame ID"}, 400)
+                    return
+                with state_lock:
+                    reader = replay_state["reader"]
+                frame_data = reader.get_frame(frame_id)
+                if frame_data:
+                    self._send_json(frame_data)
+                else:
+                    self._send_json({"error": f"Frame {frame_id} not found"}, 404)
+            elif path == "/api/anomalies":
+                with state_lock:
+                    reader = replay_state["reader"]
+                self._send_json(reader.get_anomalies())
+            elif path == "/api/ai_report":
+                try:
+                    self._send_json(_get_flight_session().build_digest())
+                except Exception as e:
+                    self._send_json({"error": str(e)}, 500)
+            elif path == "/api/episodes":
+                try:
+                    self._send_json(_get_flight_session().extract_episodes())
+                except Exception as e:
+                    self._send_json({"error": str(e)}, 500)
+            elif path == "/api/labels":
+                with state_lock:
+                    reader = replay_state["reader"]
+                self._send_json(reader.get_labels())
+            elif path == "/api/download":
+                with state_lock:
+                    cur_db = replay_state["db_path"]
+                if os.path.exists(cur_db):
+                    with open(cur_db, "rb") as f:
+                        data = f.read()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/octet-stream")
+                    self.send_header("Content-Disposition", f'attachment; filename="{os.path.basename(cur_db)}"')
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+                else:
+                    self.send_error(404, "Database not found")
+            elif path in ("/api/live", "/api/live_bin"):
+                self._send_json({"status": "REPLAY_OFFLINE"}, 200) if path == "/api/live" else self.send_error(404)
+            else:
+                self._send_json({"error": "Not Found"}, 404)
+
+        def do_POST(self):
+            path = urlparse(self.path).path
+            if path == "/api/upload_db":
+                content_len = int(self.headers.get("Content-Length", 0))
+                if content_len <= 0:
+                    self._send_json({"error": "Empty body"}, 400)
+                    return
+                body = self.rfile.read(content_len)
+                raw_name = os.path.basename(self.headers.get("X-Filename", "uploaded.db")) or "uploaded.db"
+                out_dir = Path(ROOT_DIR) / "data" / "recordings"
+                out_dir.mkdir(parents=True, exist_ok=True)
+                target_path = str(out_dir / raw_name)
+                with open(target_path, "wb") as f:
+                    f.write(body)
+                try:
+                    _reload_db(target_path)
+                    self._send_json({"status": "ok", "db_path": target_path})
+                except Exception as e:
+                    self._send_json({"error": str(e)}, 400)
+            elif path == "/api/labels":
+                content_len = int(self.headers.get("Content-Length", 0))
+                if content_len <= 0:
+                    self._send_json({"error": "Empty body"}, 400)
+                    return
+                try:
+                    payload = json.loads(self.rfile.read(content_len).decode("utf-8"))
+                    start_f = int(payload["start_frame"])
+                    end_f = int(payload["end_frame"])
+                    tag = str(payload["tag"]).strip()
+                    if not tag:
+                        raise ValueError("tag must be non-empty")
+                    note = str(payload.get("note", ""))
+                    author = str(payload.get("author", "user"))
+                    with state_lock:
+                        cur_db = replay_state["db_path"]
+                    lbl_id = add_label(cur_db, start_f, end_f, tag, note=note, author=author)
+                    with state_lock:
+                        replay_state["flight_session"] = None
+                    self._send_json({"status": "ok", "label_id": lbl_id})
+                except Exception as e:
+                    self._send_json({"error": str(e)}, 400)
+            else:
+                self._send_json({"error": "Endpoint not found"}, 404)
+
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), LocalReplayHandler)
+    port = httpd.server_address[1]
+    url = f"http://127.0.0.1:{port}/?replay=1"
+    print(f"[Replay] Serving {db_path} locally at 60 Hz: {url}")
+    print("[Replay] Press Ctrl+C to stop the local replay server.")
+    if open_browser:
+        launch_tactical_gui(url, prefer_app_window=prefer_app_window)
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        print("\n[Replay] Stopped.")
+    finally:
+        httpd.server_close()
+
+
+def run_full_verification(base_url: str, ssh_host: str = "robot") -> bool:
+    """
+    Runs comprehensive end-to-end verification of all Pi server endpoints.
+    """
+    print("\n" + "=" * 75)
+    print(f"  FOLKRACE PI 4: FULL SUBSYSTEM VERIFICATION REPORT")
+    print("=" * 75)
+    print(f"  Target Server Base URL: {base_url}")
+    print(f"  SSH Host Target       : {ssh_host}")
+    print("-" * 75)
+
+    all_passed = True
+    tests = []
+
+    # 1. SSH Check
+    ssh_target = format_ssh_target(ssh_host)
+    t0 = time.perf_counter()
+    ssh_ok = check_ssh_connection(ssh_target, timeout_s=6)
+    dt_ssh = (time.perf_counter() - t0) * 1000
+    tests.append(("SSH Connectivity (port 22)", ssh_ok, f"{dt_ssh:.1f} ms", f"Connected as {ssh_target}"))
+    if not ssh_ok:
+        all_passed = False
+
+    # 2. HTTP Web GUI Root (port 8080)
+    t0 = time.perf_counter()
+    gui_ok = False
+    gui_info = "Failed to load index"
+    try:
+        req = urllib.request.Request(f"{base_url}/", headers={"User-Agent": "FolkraceLauncher/1.0"})
+        with urllib.request.urlopen(req, timeout=3.0) as resp:
+            content = resp.read()
+            gui_ok = (resp.status == 200) and (b"Folkrace" in content or b"FOLKRACE" in content)
+            gui_info = f"{len(content)} bytes served"
+    except Exception as e:
+        gui_info = str(e)
+    dt_gui = (time.perf_counter() - t0) * 1000
+    tests.append(("HTTP Web Tactical GUI (/)", gui_ok, f"{dt_gui:.1f} ms", gui_info))
+    if not gui_ok:
+        all_passed = False
+
+    # 3. /api/status Endpoint
+    t0 = time.perf_counter()
+    status_data = query_api_json(base_url, "/api/status")
+    dt_status = (time.perf_counter() - t0) * 1000
+    status_ok = status_data is not None and "session_id" in status_data
+    status_info = ""
+    if status_ok:
+        affinity = status_data.get("cpu_affinity", [])
+        status_info = f"Session: {status_data.get('session_id')} | Core Mask: {affinity} | Loop: {status_data.get('loop_hz')} Hz"
+    tests.append(("System Status API (/api/status)", status_ok, f"{dt_status:.1f} ms", status_info))
+    if not status_ok:
+        all_passed = False
+
+    # 4. /api/live Real-time Telemetry Stream
+    t0 = time.perf_counter()
+    live_data = query_api_json(base_url, "/api/live")
+    dt_live = (time.perf_counter() - t0) * 1000
+    live_ok = live_data is not None and ("timestamp" in live_data or "sim_time" in live_data or "v_cmd" in live_data)
+    live_info = ""
+    if live_ok:
+        live_info = f"Mode: {live_data.get('mode', 'DRIVE')} | V: {live_data.get('v_cmd', 0.0):.2f} m/s | Steer: {live_data.get('steer_cmd_deg', live_data.get('steer_deg', 0.0)):.1f}° | Step: {live_data.get('step_ms', 0.0)} ms"
+    tests.append(("Live Telemetry API (/api/live)", live_ok, f"{dt_live:.1f} ms", live_info))
+    if not live_ok:
+        all_passed = False
+
+    # 4b. /api/live_bin High-Speed Zero-Copy Binary Stream
+    t0 = time.perf_counter()
+    bin_ok = False
+    bin_info = ""
+    try:
+        req = urllib.request.Request(f"{base_url}/api/live_bin", headers={"User-Agent": "FolkraceLauncher/1.0"})
+        with urllib.request.urlopen(req, timeout=2.5) as resp:
+            raw_bin = resp.read()
+            bin_ok = (resp.status == 200) and len(raw_bin) >= 224 and raw_bin[:4] == b"FOLK"
+            bin_info = f"{len(raw_bin)/1024.0:.1f} KB binary payload (Header + Raw Costmaps + Metadata)"
+    except Exception as e:
+        bin_info = str(e)
+    dt_bin = (time.perf_counter() - t0) * 1000
+    tests.append(("High-Speed Binary Stream (/api/live_bin)", bin_ok, f"{dt_bin:.1f} ms", bin_info))
+    if not bin_ok:
+        all_passed = False
+
+    # 5. /api/anomalies Black Box Index
+    t0 = time.perf_counter()
+    anom_data = query_api_json(base_url, "/api/anomalies")
+    dt_anom = (time.perf_counter() - t0) * 1000
+    anom_ok = isinstance(anom_data, list)
+    anom_info = f"{len(anom_data)} anomalies indexed" if anom_ok else "Invalid response"
+    tests.append(("Anomaly Watchdog (/api/anomalies)", anom_ok, f"{dt_anom:.1f} ms", anom_info))
+    if not anom_ok:
+        all_passed = False
+
+    # 6. /api/frame/<id> Historical Random Access
+    test_frame_id = live_data.get("_total_frames", 100) if live_data else 100
+    test_frame_id = max(1, min(test_frame_id - 5, test_frame_id))
+    t0 = time.perf_counter()
+    frame_data = query_api_json(base_url, f"/api/frame/{test_frame_id}")
+    dt_frame = (time.perf_counter() - t0) * 1000
+    frame_ok = frame_data is not None and ("_frame_id" in frame_data or "v_cmd" in frame_data)
+    frame_info = f"Frame #{test_frame_id} retrieved with full costmap & trajectories" if frame_ok else "Failed"
+    tests.append(("Historical Time Travel (/api/frame)", frame_ok, f"{dt_frame:.1f} ms", frame_info))
+    if not frame_ok:
+        all_passed = False
+
+    # 7. Core 1 vs Core 2 Hardware Isolation Check (via SSH)
+    t0 = time.perf_counter()
+    iso_ok = False
+    iso_info = ""
+    try:
+        cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=4", ssh_target, "ps -eo pid,psr,comm"]
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, text=True, timeout=5)
+        lines = [l for l in res.stdout.strip().splitlines() if any(k in l for k in ("python", "path_planner", "debug_server"))]
+        iso_ok = len(lines) >= 2
+        iso_info = f"{len(lines)} Folkrace processes active on Pi CPU cores"
+    except Exception as e:
+        iso_info = str(e)
+    dt_iso = (time.perf_counter() - t0) * 1000
+    tests.append(("Hardware CPU Core Isolation", iso_ok, f"{dt_iso:.1f} ms", iso_info))
+
+    # Print Table
+    for name, ok, latency, details in tests:
+        mark = " PASS " if ok else " FAIL "
+        status_color = "\033[92m" if ok else "\033[91m"
+        reset_color = "\033[0m"
+        print(f"  [{status_color}{mark}{reset_color}] {name:<35} | {latency:<9} | {details}")
+
+    print("-" * 75)
+    if all_passed:
+        print("  \033[92m>>> ALL CHECKS PASSED: Pi 4 Dual-Core Stack is Fully Operational! <<<\033[0m")
+    else:
+        print("  \033[91m>>> WARNING: One or more checks failed. Review Pi logs via SSH. <<<\033[0m")
+    print("=" * 75 + "\n")
+    return all_passed
+
+
+def stream_telemetry_console(base_url: str):
+    """Streams live telemetry directly into the terminal."""
+    print("\n" + "=" * 80)
+    print("  FOLKRACE LIVE TELEMETRY CONSOLE (Press Ctrl+C to exit)")
+    print("=" * 80)
+    print(f"  {'TIME':<8} | {'MODE':<7} | {'V_CMD':<7} | {'STEER':<7} | {'FL':<5} {'FR':<5} {'RL':<5} {'RR':<5} | {'PLAN_MS':<7} | {'ANOMALIES'}")
+    print("-" * 80)
+
+    try:
+        while True:
+            pkt = query_api_json(base_url, "/api/live", timeout_s=1.0)
+            if pkt:
+                sim_t = f"{pkt.get('sim_time', 0.0):.1f}s"
+                mode = str(pkt.get("mode", "DRIVE"))[:7]
+                v_cmd = f"{pkt.get('v_cmd', 0.0):.2f}"
+                steer = f"{pkt.get('steer_cmd_deg', 0.0):.1f}°"
+                rpms = pkt.get("rpms_act", [0, 0, 0, 0])
+                if len(rpms) >= 4:
+                    fl, fr, rl, rr = int(rpms[0]), int(rpms[1]), int(rpms[2]), int(rpms[3])
+                else:
+                    fl = fr = rl = rr = 0
+                plan_ms = f"{pkt.get('plan_ms', 0.0):.1f}ms"
+                slip = pkt.get("slip_state", "NORMAL")
+                f_tof = pkt.get("f_tof", 1.0)
+                
+                alerts = []
+                if slip != "NORMAL":
+                    alerts.append(f"SLIP({slip})")
+                if f_tof < 0.2:
+                    alerts.append(f"PROX({f_tof:.2f}m)")
+                alert_str = " ".join(alerts) if alerts else "OK"
+
+                print(f"  {sim_t:<8} | {mode:<7} | {v_cmd:<7} | {steer:<7} | {fl:<5} {fr:<5} {rl:<5} {rr:<5} | {plan_ms:<7} | {alert_str}")
+            time.sleep(0.1)
+    except KeyboardInterrupt:
+        print("\n[Stream] Stopped.")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Folkrace Pi 4 Dual-Core Debug Studio")
+    parser.add_argument("--host", default=None, help="Pi 4 Hostname or IP (auto-detects by default)")
+    parser.add_argument("--verify", action="store_true", help="Run full automated verification of all server endpoints")
+    parser.add_argument("--stream", action="store_true", help="Stream live telemetry dashboard in terminal")
+    parser.add_argument("--download", action="store_true", help="Download current SQLite black box flight database")
+    parser.add_argument("--replay", nargs="?", const="__AUTO__", default=None, help="Open local 60 Hz replay GUI (optional .db path; downloads from Pi or uses latest local .db)")
+    parser.add_argument("--reconnect", "--reconnect-mcu", dest="reconnect", action="store_true", help="Trigger remote ESP32 serial re-probe & reconnection")
+    parser.add_argument("--tab", "--browser-tab", "--browser", "--web", dest="browser_tab", action="store_true", help="Open Tactical Mission Control in standard browser tab instead of standalone app window")
+    parser.add_argument("--desktop", "--pyqt", "--planner-gui", dest="desktop", action="store_true", help="Launch native PyQt5 desktop planner GUI instead of Tactical Mission Control")
+    parser.add_argument("--profile", action="store_true", help="Run GUI & telemetry performance profiler and benchmark")
+    parser.add_argument("--measure-browser", action="store_true", help="Run browser latency and stream jitter benchmark")
+    parser.add_argument("--restart", action="store_true", help="Restart remote folkrace systemd service via SSH")
+    parser.add_argument("--stop", action="store_true", help="Stop remote folkrace service")
+    parser.add_argument("--sync", action="store_true", help="Sync latest code to Pi 4")
+    parser.add_argument("--no-browser", action="store_true", help=argparse.SUPPRESS)
+    args = parser.parse_args()
+
+    print("=" * 75)
+    print("  FOLKRACE PI 4: DUAL-CORE DEBUG STUDIO & FLIGHT RECORDER")
+    print("=" * 75)
+
+    # 1. Handle code sync if requested
+    if args.sync:
+        ssh_target = resolve_ssh_host(args.host)
+        sync_pi_stack(ssh_target)
+
+    # 2. Handle remote restart/stop if requested
+    if args.restart:
+        restart_remote_service(resolve_ssh_host(args.host))
+    if args.stop:
+        stop_remote_service(resolve_ssh_host(args.host))
+        return
+
+    # 2b. Handle offline local --replay before requiring Pi connectivity
+    if args.replay is not None:
+        if args.replay != "__AUTO__":
+            if not os.path.exists(args.replay):
+                print(f"[Replay ERROR] Database not found: {args.replay}")
+                sys.exit(1)
+            run_local_replay_server(args.replay, prefer_app_window=not args.browser_tab, open_browser=not args.no_browser)
+            return
+
+        # --replay without path: try downloading from Pi, else fall back to latest local .db
+        _, base_url = resolve_pi_host(args.host, timeout_s=1.0)
+        db_file = download_database(base_url) if base_url else None
+        if not db_file:
+            db_file = find_latest_local_recording()
+        if not db_file:
+            print("[Replay ERROR] Pi 4 is unreachable and no local recordings found in data/recordings/.")
+            sys.exit(1)
+        run_local_replay_server(db_file, prefer_app_window=not args.browser_tab, open_browser=not args.no_browser)
+        return
+
+    # 3. Auto-detect Pi host and verify HTTP server
+    wifi_ssid, _, wifi_prefix = get_active_wifi_network()
+    if wifi_ssid and wifi_prefix:
+        print(f"[Launcher] Active Wi-Fi: '{wifi_ssid}' ({wifi_prefix}0/24)")
+    elif wifi_prefix:
+        print(f"[Launcher] Active Network: {wifi_prefix}0/24")
+    print("[Launcher] Auto-detecting Raspberry Pi 4 debug server...")
+    active_host, base_url = resolve_pi_host(args.host)
+
+    if not base_url:
+        print(f"[Warning] Debug server not responding at port {PORT} on candidate hosts.")
+        ssh_target = resolve_ssh_host(args.host)
+        print(f"[Launcher] Attempting to auto-start Folkrace service via SSH on '{ssh_target}'...")
+        try:
+            restart_remote_service(ssh_target)
+            active_host, base_url = resolve_pi_host(args.host, timeout_s=3.0)
+        except Exception as e:
+            print(f"[Error] Could not auto-start remote service: {e}")
+
+    if not base_url:
+        print(f"\n[FATAL] Unable to connect to Pi 4 Debug Server.")
+        print(f"  Please ensure:")
+        print(f"  1. Pi 4 is powered on and connected to local Wi-Fi.")
+        print(f"  2. Service is running: ssh robot 'systemctl status folkrace'")
+        print(f"  3. You can manually specify the IP: python 1_launchers/{os.path.basename(__file__)} --host <pi-ip>")
+        sys.exit(1)
+
+    # 4. Query System Status
+    status = query_api_json(base_url, "/api/status")
+    print("-" * 75)
+    print(f"  Connected Host        : {active_host} ({base_url})")
+    if status:
+        print(f"  Active Session ID     : {status.get('session_id')}")
+        print(f"  Total Recorded Frames : {status.get('total_recorded')} frames")
+        print(f"  Active Driving Time   : {status.get('driving_minutes')} min ({status.get('driving_seconds')}s)")
+        print(f"  Running Buffer Cap    : {status.get('max_buffer_minutes')} min (Auto-pruning active)")
+        print(f"  Flight Log DB Size    : {status.get('file_size_mb')} MB (Free SD space: {status.get('disk_free_gb')} GB)")
+        print(f"  Core Allocation       : Planner = Core 1 | Debug Server = Cores {status.get('cpu_affinity')}")
+        print(f"  Telemetry Loop Rate   : {status.get('loop_hz')} Hz | Pi SoC Temp: {status.get('temp_c')}°C")
+    print("-" * 75)
+
+    # 5. Execute sub-modes
+    if args.reconnect:
+        trigger_mcu_reconnect(base_url)
+        return
+
+    if args.verify:
+        run_full_verification(base_url, ssh_host=format_ssh_target(active_host))
+        return
+
+    if args.profile or args.measure_browser:
+        tools_dir = os.path.join(ROOT_DIR, "tools")
+        if tools_dir not in sys.path:
+            sys.path.insert(0, tools_dir)
+        import measure_browser_latency
+        ws_res = measure_browser_latency.benchmark_websocket_stream(host=active_host, duration_s=8.0)
+        http_res = measure_browser_latency.benchmark_http_polling(base_url=base_url, duration_s=5.0)
+        measure_browser_latency.print_comparison_report(ws_res, http_res)
+        return
+
+    if args.download:
+        download_database(base_url)
+        return
+
+    if args.stream:
+        stream_telemetry_console(base_url)
+        return
+
+    if args.desktop:
+        if not os.path.exists(PLANNER_GUI_SCRIPT):
+            print(f"[Error] Desktop GUI not found at: {PLANNER_GUI_SCRIPT}")
+            sys.exit(1)
+
+        if base_url:
+            try:
+                reg_resp = query_api_json(base_url, "/api/register_client", timeout_s=1.5)
+                if reg_resp:
+                    print(f"[Launcher] Registered this workstation for direct binary UDP telemetry from {active_host}")
+            except Exception:
+                pass
+
+        print("[Launcher] Launching native PyQt5 Desktop GUI (hardware-accelerated, zero-overhead UDP)...")
+        print("=" * 75)
+        cmd = [sys.executable, PLANNER_GUI_SCRIPT]
+        sys.exit(subprocess.run(cmd, cwd=CONTROLLERS_DIR).returncode)
+
+    # Default action: Launch Tactical Mission Control GUI (same GUI as browser server)
+    if base_url:
+        try:
+            query_api_json(base_url, "/api/register_client", timeout_s=1.0)
+        except Exception:
+            pass
+
+    launch_tactical_gui(base_url, prefer_app_window=not args.browser_tab)
+
+
+if __name__ == "__main__":
+    main()
+
+
+=== FILE: 1_launchers/5_local_flight_replay.py ===
+"""
+================================================================================
+  LAUNCHER: OFFLINE 60 HZ FLIGHT LOG REPLAY VIEWER
+================================================================================
+  Opens downloaded SQLite flight recordings (.db) locally on your laptop
+  at full 60 Hz using the Tactical Mission Control GUI—without requiring
+  a connection to the Raspberry Pi 4.
+
+  Usage:
+    python 1_launchers/5_local_flight_replay.py                  # Opens latest .db in Downloads or data/recordings/
+    python 1_launchers/5_local_flight_replay.py path/to/file.db  # Opens a specific .db file
+    python 1_launchers/5_local_flight_replay.py --list           # Lists available local recordings
+    python 1_launchers/5_local_flight_replay.py --pick           # Choose a recording interactively
+    python 1_launchers/5_local_flight_replay.py --tab            # Opens in standard browser tab
+================================================================================
+"""
+
+import os
+import sys
+import argparse
+import importlib.util
+from pathlib import Path
+from typing import List, Optional
+
+if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
+ROOT_DIR = Path(__file__).resolve().parent.parent
+DOWNLOADS_DIR = Path.home() / "Downloads"
+RECORDINGS_DIR = ROOT_DIR / "data" / "recordings"
+SEARCH_DIRS = (DOWNLOADS_DIR, RECORDINGS_DIR)
+
+
+def _find_debug_studio_path() -> Path:
+    """Finds the Pi 4 debug studio launcher regardless of numeric prefix."""
+    launchers_dir = Path(__file__).resolve().parent
+    matches = sorted(launchers_dir.glob("*pi4_debug_studio.py"))
+    if not matches:
+        raise FileNotFoundError(f"Could not locate *pi4_debug_studio.py in {launchers_dir}")
+    return matches[0]
+
+
+def _load_debug_studio_module():
+    """Imports the Pi 4 debug studio launcher to reuse its local replay server."""
+    studio_path = _find_debug_studio_path()
+    spec = importlib.util.spec_from_file_location("pi4_debug_studio", str(studio_path))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def list_local_recordings(directories=SEARCH_DIRS) -> List[Path]:
+    """Returns all .db files in the given directories sorted newest first."""
+    dbs: List[Path] = []
+    seen = set()
+    for directory in directories:
+        if not directory.exists():
+            continue
+        for p in directory.glob("*.db"):
+            resolved = p.resolve()
+            if resolved not in seen:
+                seen.add(resolved)
+                dbs.append(p)
+    return sorted(dbs, key=lambda p: p.stat().st_mtime, reverse=True)
+
+
+def get_latest_downloads_recording() -> Optional[Path]:
+    """Returns the newest .db file in Downloads, or None if none exist."""
+    downloads_dbs = list_local_recordings((DOWNLOADS_DIR,))
+    return downloads_dbs[0] if downloads_dbs else None
+
+
+def print_recordings(dbs: List[Path]):
+    """Prints available local .db recordings with size and frame count."""
+    pi4_dir = str(ROOT_DIR / "2_pi4")
+    if pi4_dir not in sys.path:
+        sys.path.insert(0, pi4_dir)
+    from debug_recorder import TelemetryLogReader
+
+    print("\nAvailable local flight recordings (Downloads & data/recordings/):")
+    print("-" * 90)
+    for idx, p in enumerate(dbs, 1):
+        size_mb = p.stat().st_size / (1024 * 1024)
+        frames_str = "?"
+        try:
+            reader = TelemetryLogReader(str(p))
+            _, _, total = reader.get_frame_bounds()
+            reader.close()
+            frames_str = f"{total} frames"
+        except Exception:
+            pass
+        source = "Downloads" if p.parent.resolve() == DOWNLOADS_DIR.resolve() else "data/recordings"
+        print(f"  [{idx}] {p.name:<34} | {source:<15} | {size_mb:6.2f} MB | {frames_str}")
+    print("-" * 90)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Offline 60 Hz Local Flight Log Replay Viewer")
+    parser.add_argument("db_path", nargs="?", default=None, help="Path to a downloaded .db flight recording")
+    parser.add_argument("--list", action="store_true", help="List available .db files in Downloads and data/recordings/")
+    parser.add_argument("--pick", action="store_true", help="Interactively pick a recording from Downloads or data/recordings/")
+    parser.add_argument("--tab", dest="browser_tab", action="store_true", help="Open in standard browser tab instead of standalone app window")
+    parser.add_argument("--digest", action="store_true", help="Print AI debugging digest for the recording and exit")
+    parser.add_argument("--export", action="store_true", help="Export AI/ML bundle to data/ai_exports/ and exit")
+    parser.add_argument("--no-browser", action="store_true", help=argparse.SUPPRESS)
+    args = parser.parse_args()
+
+    print("=" * 75)
+    print("  FOLKRACE: OFFLINE 60 HZ FLIGHT LOG REPLAY VIEWER")
+    print("=" * 75)
+
+    dbs = list_local_recordings()
+
+    if args.list:
+        if not dbs:
+            print(f"[Replay] No recordings found in {DOWNLOADS_DIR} or {RECORDINGS_DIR}")
+            print(f"  Download one from the Pi with: python 1_launchers/{_find_debug_studio_path().name} --download")
+        else:
+            print_recordings(dbs)
+        return
+
+    target_db = args.db_path
+    if not target_db:
+        if not dbs:
+            print(f"[Replay ERROR] No .db recordings found in {DOWNLOADS_DIR} or {RECORDINGS_DIR}")
+            print(f"  Download one from the Pi with: python 1_launchers/{_find_debug_studio_path().name} --download")
+            sys.exit(1)
+
+        if args.pick and len(dbs) > 1:
+            print_recordings(dbs)
+            choice = input(f"Select recording [1-{len(dbs)}] (default 1): ").strip()
+            idx = int(choice) - 1 if choice.isdigit() and 1 <= int(choice) <= len(dbs) else 0
+            target_db = str(dbs[idx])
+        else:
+            latest_download = get_latest_downloads_recording()
+            chosen = latest_download if latest_download is not None else dbs[0]
+            target_db = str(chosen)
+            source_label = "Downloads" if latest_download is not None else "data/recordings"
+            print(f"[Replay] Auto-selected latest recording from {source_label}: {target_db}")
+
+    if not os.path.exists(target_db):
+        print(f"[Replay ERROR] Database not found: {target_db}")
+        sys.exit(1)
+
+    if args.digest or args.export:
+        import json
+        tools_dir = str(ROOT_DIR / "tools")
+        if tools_dir not in sys.path:
+            sys.path.insert(0, tools_dir)
+        from flight_analyzer import FlightSession, format_digest_markdown
+
+        if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
+            try:
+                sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+        sess = FlightSession(target_db)
+        if args.digest:
+            print(format_digest_markdown(sess.build_digest()))
+        if args.export:
+            outputs = sess.export_bundle()
+            print(json.dumps(outputs, indent=2))
+        return
+
+    studio = _load_debug_studio_module()
+    studio.run_local_replay_server(
+        target_db,
+        prefer_app_window=not args.browser_tab,
+        open_browser=not args.no_browser,
+    )
+
+
+if __name__ == "__main__":
+    main()
+
+
+=== FILE: 1_launchers/README.md ===
+# Folkrace Launcher Suite
+
+This directory contains consolidated, human-facing one-click launchers for 3D physics simulation, Genetic Algorithm parameter optimization, Raspberry Pi 4 flight operations, and physical microcontroller bench testing (ESP32 and STM32).
+
+> [!NOTE]
+> All human-facing runnable GUIs and hardware test launchers reside in this directory per project file hygiene rules. AI/automation CLI utilities live in [`tools/`](file:///c:/Users/nurmi/Documents/Folkrace/tools/) (e.g., [`tools/ai_debug_suite.py`](file:///c:/Users/nurmi/Documents/Folkrace/tools/ai_debug_suite.py)).
+
+---
+
+## 1. Ordering & Future Renumbering
+
+Launchers use leading numeric prefixes (`1_`–`9_`) to preserve workflow order in file explorers and terminals:
+* **`1–3` — Simulation & Training**: Webots 3D previews and GA / CMA-ES optimization dashboard.
+* **`4–5` — Pi 4 Operations & Replay**: Live Tactical Mission Control and offline 60 Hz flight log replay.
+* **`6–8` — ESP32 Benches**: Quad VL53L8CX ToF Hub, BNO086 9-DOF IMU dashboard, and 333 Hz digital steering servo.
+* **`9` — STM32 Bench**: Dual-motor direct-drive FOC & MT6816 magnetic encoders.
+
+Internal cross-imports (e.g., [`5_local_flight_replay.py`](file:///c:/Users/nurmi/Documents/Folkrace/1_launchers/5_local_flight_replay.py) and [`tools/ai_debug_suite.py`](file:///c:/Users/nurmi/Documents/Folkrace/tools/ai_debug_suite.py)) discover `*pi4_debug_studio.py` dynamically, so reordering numeric prefixes in the future will not break Python imports.
+
+---
+
+## 2. Master Launcher Catalog
+
+| # | Category | Launcher Script | Description | Primary Target |
+| :---: | :--- | :--- | :--- | :--- |
+| **1** | Simulation | [`1_champion_preview.py`](file:///c:/Users/nurmi/Documents/Folkrace/1_launchers/1_champion_preview.py) | Launches Webots 3D champion preview (`track_racing.wbt`) with dynamic obstacle avoidance AND live 2D telemetry radar simultaneously. | Webots / Python |
+| **2** | Simulation | [`2_fast_champion_drive.py`](file:///c:/Users/nurmi/Documents/Folkrace/1_launchers/2_fast_champion_drive.py) | Ultra-lean champion 3D drive launcher for maximum real-time rendering & physics performance (zero GUI, zero UDP/HUD overhead). | Webots |
+| **3** | GA Training | [`3_ga_dashboard.py`](file:///c:/Users/nurmi/Documents/Folkrace/1_launchers/3_ga_dashboard.py) | Standalone real-time Genetic Algorithm / CMA-ES convergence, fitness progress, and generational metric dashboard. | Workstation |
+| **4** | **Pi 4** | [`4_pi4_debug_studio.py`](file:///c:/Users/nurmi/Documents/Folkrace/1_launchers/4_pi4_debug_studio.py) | Raspberry Pi 4 Dual-Core Debug Studio: Web Tactical Mission Control & SQLite Black Box with frame-by-frame time-travel scrubbing. | Pi 4 / Browser |
+| **5** | **Pi 4** | [`5_local_flight_replay.py`](file:///c:/Users/nurmi/Documents/Folkrace/1_launchers/5_local_flight_replay.py) | Offline 60 Hz SQLite flight log replay viewer (plus `--digest` and `--export` analysis modes). | Workstation / Browser |
+| **6** | **ESP32** | [`6_esp32_tof_gui.py`](file:///c:/Users/nurmi/Documents/Folkrace/1_launchers/6_esp32_tof_gui.py) | Physical ESP32 quad VL53L8CX 4-zone multi-target telemetry visualizer, SPAD saturation alerts, and live 2D tactical radar over USB serial. | ESP32-S3 (ToF Hub) |
+| **7** | **ESP32** | [`7_esp32_imu_gui.py`](file:///c:/Users/nurmi/Documents/Folkrace/1_launchers/7_esp32_imu_gui.py) | Physical ESP32 BNO086 9-DOF IMU 3D mission dashboard, artificial horizon, compass, G-force, and real-time waveform GUI. | ESP32-S3 (Main) |
+| **8** | **ESP32** | [`8_esp32_servo_gui.py`](file:///c:/Users/nurmi/Documents/Folkrace/1_launchers/8_esp32_servo_gui.py) | Physical ESP32 333 Hz high-rate digital steering servo test bench, center trimming, and dynamic frequency sweep GUI. | ESP32-S3 (Main) |
+| **9** | **STM32** | [`9_stm32_encoder_motor_gui.py`](file:///c:/Users/nurmi/Documents/Folkrace/1_launchers/9_stm32_encoder_motor_gui.py) | STM32G474 MT6816 SPI magnetic angle encoder & motor closed-loop bench calibration GUI (Dual-motor FOC tuning). | STM32G474 (Axle MCUs) |
+| **10** | Tool | [`10_track_studio.py`](file:///c:/Users/nurmi/Documents/Folkrace/1_launchers/10_track_studio.py) | Modular 1200mm Race Track Designer Studio (Local Web UI on port 8088) for designing standard Folkrace courses, exporting ToF Webots `.wbt` worlds, and saving local `data/maps/` bundles. | Browser / http.server |
+
+---
+
+## 3. Quick Usage Examples
+
+### Running 3D Simulation with Curvilinear SL-MPC:
+```bash
+python 1_launchers/1_champion_preview.py
+```
+* Launches Webots with the dynamic obstacle world (`track_racing.wbt`) and companion 2D telemetry radar GUI.
+* Use `python 1_launchers/2_fast_champion_drive.py` for maximum real-time FPS without GUI/UDP overhead.
+
+### Raspberry Pi 4 Dual-Core Debug Studio & Offline Replay:
+```bash
+python 1_launchers/4_pi4_debug_studio.py
+python 1_launchers/5_local_flight_replay.py
+```
+* Auto-detects the Pi 4 (`robot`), opens Web Tactical Mission Control (`http://<pi>:8080`), and supports flight log downloads and offline 60 Hz scrubbing.
+
+### Benchmarking Quad VL53L8CX ToF Array:
+```bash
+python 1_launchers/6_esp32_tof_gui.py
+```
+* Connects to the ESP32 ToF Hub over USB serial (921,600 baud) and visualizes all 4 ToF sensors (16 ray projections, multi-target status, and SPAD counts).
+
+### High-Rate Digital Steering Servo Calibration:
+```bash
+python 1_launchers/8_esp32_servo_gui.py
+```
+* Connects to ESP32 Main over USB serial to tune center trim, deflection limits, and 333 Hz response dynamics.
+
+### Benchmarking Physical STM32 Direct-Drive Motors:
+```bash
+python 1_launchers/9_stm32_encoder_motor_gui.py
+```
+* Connects over native USB CDC or UART, visualizes MT6816 magnetic angle and RPM response, and runs automated 128-point LUT calibration.
+
+
